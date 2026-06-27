@@ -102,12 +102,33 @@ export function buildReceiptHtml(r: Receipt, s: SettingsMap): string {
 
 export function printReceipt(r: Receipt, s: SettingsMap) {
   const html = buildReceiptHtml(r, s);
-  const w = window.open("", "_blank", "width=820,height=1000");
-  if (!w) { alert("Pop-ups blocked. Allow pop-ups for this app."); return; }
-  w.document.open();
-  w.document.write(html);
-  w.document.close();
-  w.onload = () => { setTimeout(() => { w.focus(); w.print(); }, 200); };
+  // Use a hidden iframe inside the main window — Tauri's webview blocks window.open.
+  const existing = document.getElementById("__print_frame");
+  if (existing) existing.remove();
+  const iframe = document.createElement("iframe");
+  iframe.id = "__print_frame";
+  iframe.style.position = "fixed";
+  iframe.style.right = "0";
+  iframe.style.bottom = "0";
+  iframe.style.width = "0";
+  iframe.style.height = "0";
+  iframe.style.border = "0";
+  document.body.appendChild(iframe);
+  const doc = iframe.contentDocument || iframe.contentWindow?.document;
+  if (!doc) { alert("Print failed: could not open iframe."); return; }
+  doc.open();
+  doc.write(html);
+  doc.close();
+  const fire = () => {
+    try {
+      iframe.contentWindow?.focus();
+      iframe.contentWindow?.print();
+    } catch (e) {
+      alert("Print failed: " + e);
+    }
+  };
+  // Wait a tick for images (logo/signature) to lay out, then print.
+  setTimeout(fire, 350);
 }
 
 // Render the receipt HTML offscreen, generate a PDF Blob, and write it to
