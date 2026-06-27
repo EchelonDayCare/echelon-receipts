@@ -3,6 +3,7 @@ import { open } from "@tauri-apps/plugin-dialog";
 import { invoke } from "@tauri-apps/api/core";
 import { getSettings, setSetting } from "../lib/db";
 import { sendTestEmail, SMTP_PRESETS } from "../lib/email";
+import { DEFAULT_LOGO_DATA_URL, DEFAULT_SIGNATURE_DATA_URL } from "../lib/defaults";
 import type { SettingsMap } from "../types";
 
 const FIELDS: { key: string; label: string; hint?: string }[] = [
@@ -103,7 +104,7 @@ export default function Settings() {
             <label>Logo</label>
             {s.logo_data_url
               ? <img src={s.logo_data_url} style={{ width: 80, height: 80, borderRadius: "50%", objectFit: "cover", border: "1px solid var(--border)" }} />
-              : <div style={{ width: 80, height: 80, borderRadius: "50%", background: "#bae6fd" }} />}
+              : <img src={DEFAULT_LOGO_DATA_URL} title="Bundled default logo (in use)" style={{ width: 80, height: 80, borderRadius: "50%", objectFit: "cover", border: "1px solid var(--border)", opacity: 0.9 }} />}
             <div style={{ display: "flex", gap: 6, marginTop: 6 }}>
               <button className="btn secondary" onClick={() => pickImage("logo_data_url")}>Choose…</button>
               {s.logo_data_url && <button className="btn ghost" onClick={() => setS({ ...s, logo_data_url: "" })}>Clear</button>}
@@ -113,7 +114,7 @@ export default function Settings() {
             <label>Signature (Received by)</label>
             {s.signature_data_url
               ? <img src={s.signature_data_url} style={{ height: 50, border: "1px solid var(--border)", background: "#fff", padding: 4 }} />
-              : <div style={{ height: 50, width: 200, border: "1px dashed var(--border)" }} />}
+              : <img src={DEFAULT_SIGNATURE_DATA_URL} title="Bundled default signature (in use)" style={{ height: 50, border: "1px solid var(--border)", background: "#fff", padding: 4, opacity: 0.9 }} />}
             <div style={{ display: "flex", gap: 6, marginTop: 6 }}>
               <button className="btn secondary" onClick={() => pickImage("signature_data_url")}>Choose…</button>
               {s.signature_data_url && <button className="btn ghost" onClick={() => setS({ ...s, signature_data_url: "" })}>Clear</button>}

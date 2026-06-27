@@ -1,6 +1,7 @@
 import type { Receipt, SettingsMap } from "../types";
 import html2pdf from "html2pdf.js";
 import { mkdir, writeFile, exists } from "@tauri-apps/plugin-fs";
+import { DEFAULT_LOGO_DATA_URL, DEFAULT_SIGNATURE_DATA_URL } from "./defaults";
 
 function fmtDate(iso: string): string {
   // dd/mm/yyyy to match the existing receipt
@@ -15,8 +16,8 @@ function safeName(s: string): string {
 }
 
 export function buildReceiptHtml(r: Receipt, s: SettingsMap): string {
-  const logo = s.logo_data_url || "";
-  const sig = s.signature_data_url || "";
+  const logo = s.logo_data_url || DEFAULT_LOGO_DATA_URL;
+  const sig = s.signature_data_url || DEFAULT_SIGNATURE_DATA_URL;
   return `<!doctype html><html><head><meta charset="utf-8"><title>Receipt ${r.receipt_no}</title>
 <style>
   @page { size: Letter; margin: 0.5in; }
