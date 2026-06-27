@@ -1,0 +1,24 @@
+[package]
+name = "echelon-receipts"
+version = "0.1.0"
+description = "Echelon Daycare receipt generator"
+authors = ["Echelon Daycare Society"]
+edition = "2021"
+
+[lib]
+name = "echelon_receipts_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-opener = "2"
+tauri-plugin-sql = { version = "2", features = ["sqlite"] }
+tauri-plugin-dialog = "2"
+tauri-plugin-fs = "2"
+tauri-plugin-shell = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
