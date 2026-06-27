@@ -1,5 +1,7 @@
 use tauri_plugin_sql::{Migration, MigrationKind};
 
+mod email;
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let migrations = vec![
@@ -15,6 +17,12 @@ pub fn run() {
             sql: include_str!("../migrations/002_pdf_folder.sql"),
             kind: MigrationKind::Up,
         },
+        Migration {
+            version: 3,
+            description: "add_email_settings_and_audit",
+            sql: include_str!("../migrations/003_email.sql"),
+            kind: MigrationKind::Up,
+        },
     ];
 
     tauri::Builder::default()
@@ -27,6 +35,12 @@ pub fn run() {
                 .add_migrations("sqlite:echelon.db", migrations)
                 .build(),
         )
+        .invoke_handler(tauri::generate_handler![
+            email::send_email,
+            email::keychain_set,
+            email::keychain_get,
+            email::keychain_delete,
+        ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

@@ -23,6 +23,8 @@ export interface Receipt {
   comments: string | null;
   voided: number;
   created_at: string;
+  emailed_at: string | null;
+  emailed_to: string | null;
 }
 
 export type SettingsMap = Record<string, string>;

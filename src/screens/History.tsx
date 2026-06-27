@@ -1,7 +1,8 @@
 import { useEffect, useMemo, useState } from "react";
-import { getSettings, listReceipts, voidReceipt } from "../lib/db";
-import type { Receipt, SettingsMap } from "../types";
+import { getSettings, listReceipts, voidReceipt, markEmailed, listStudents } from "../lib/db";
+import type { Receipt, SettingsMap, Student } from "../types";
 import { printReceipt, saveReceiptPdf } from "../lib/receipt";
+import { sendReceiptEmail, parseRecipients } from "../lib/email";
 
 const MONTHS = ["All","Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
 
@@ -11,6 +12,7 @@ export default function History() {
   const [year, setYear] = useState<number | "">("");
   const [month, setMonth] = useState<number | "">("");
   const [settings, setSettings] = useState<SettingsMap>({});
+  const [studentEmails, setStudentEmails] = useState<Map<number, string>>(new Map());
 
   async function refresh() {
     setRows(await listReceipts({
@@ -19,6 +21,10 @@ export default function History() {
       month: month === "" ? undefined : month,
     }));
     setSettings(await getSettings());
+    const all = await listStudents(undefined, false);
+    const m = new Map<number, string>();
+    all.forEach((s: Student) => { if (s.email) m.set(s.id, s.email); });
+    setStudentEmails(m);
   }
   useEffect(() => { refresh(); /* eslint-disable-next-line */ }, [search, year, month]);
 
@@ -60,11 +66,18 @@ export default function History() {
             </tr>
           </thead>
           <tbody>
-            {rows.map((r) => (
+            {rows.map((r) => {
+              const recipients = parseRecipients(studentEmails.get(r.student_id));
+              return (
               <tr key={r.id} className={r.voided ? "voided" : ""}>
                 <td>{r.receipt_no}</td>
                 <td>{r.date}</td>
-                <td>{r.student_name_snapshot}</td>
+                <td>
+                  {r.student_name_snapshot}
+                  {r.emailed_at && (
+                    <span title={`Emailed ${r.emailed_at} to ${r.emailed_to}`} style={{ marginLeft: 6 }}>✉️</span>
+                  )}
+                </td>
                 <td>{r.description}</td>
                 <td style={{ textAlign: "right" }}>${r.amount.toFixed(2)}</td>
                 <td>{r.comments || ""}{r.pending_amount > 0 ? ` (Pending $${r.pending_amount.toFixed(2)})` : ""}</td>
@@ -76,6 +89,20 @@ export default function History() {
                       alert(p ? "Saved PDF:\n" + p : "Set a PDF folder in Settings first.");
                     } catch (e) { alert("Save failed: " + e); }
                   }}>Save PDF</button>
+                  <button className="btn ghost"
+                    disabled={recipients.length === 0}
+                    title={recipients.length === 0 ? "No email on file for this student" : ""}
+                    onClick={async () => {
+                      if (!confirm(`Email receipt #${r.receipt_no} to:\n  ${recipients.join("\n  ")}`)) return;
+                      try {
+                        await sendReceiptEmail({ receipt: r, recipients, settings });
+                        await markEmailed(r.id, recipients);
+                        alert(`✉️ Sent to ${recipients.join(", ")}`);
+                        refresh();
+                      } catch (e: any) { alert("Email failed:\n" + (e?.message || e)); }
+                    }}>
+                    Email
+                  </button>
                   {!r.voided && (
                     <button className="btn ghost" style={{ color: "var(--danger)" }}
                       onClick={async () => { if (confirm(`Void receipt #${r.receipt_no}?`)) { await voidReceipt(r.id); refresh(); } }}>
@@ -84,7 +111,8 @@ export default function History() {
                   )}
                 </td>
               </tr>
-            ))}
+              );
+            })}
           </tbody>
         </table>
       )}

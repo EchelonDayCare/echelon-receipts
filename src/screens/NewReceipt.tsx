@@ -4,6 +4,8 @@ import {
 } from "../lib/db";
 import type { Student } from "../types";
 import { printReceipt, saveReceiptPdf } from "../lib/receipt";
+import { sendReceiptEmail, parseRecipients } from "../lib/email";
+import { markEmailed, listReceipts } from "../lib/db";
 
 const MONTHS = ["January","February","March","April","May","June","July","August","September","October","November","December"];
 
@@ -42,7 +44,7 @@ export default function NewReceipt() {
 
   const student = useMemo(() => students.find((s) => s.id === studentId) || null, [students, studentId]);
 
-  async function onSave(thenPrint: boolean) {
+  async function onSave(action: "print" | "email" | "save") {
     if (!student) { alert("Pick a student first."); return; }
     if (!description.trim()) { alert("Description is required."); return; }
     const amt = parseFloat(amount); if (!(amt >= 0)) { alert("Invalid amount."); return; }
@@ -62,14 +64,38 @@ export default function NewReceipt() {
       mother_name_snapshot: student.mother_name,
       description, amount: amt, pending_amount: pen, comments: comments || null,
       voided: 0, created_at: new Date().toISOString(),
+      emailed_at: null, emailed_to: null,
     };
     let savedPath: string | null = null;
     try { savedPath = await saveReceiptPdf(r, settings); }
     catch (e) { console.error(e); alert("Receipt saved, but PDF auto-save failed:\n" + e); }
-    if (thenPrint) printReceipt(r, settings);
+
+    let emailMsg = "";
+    if (action === "email") {
+      const recipients = parseRecipients(student.email);
+      if (recipients.length === 0) {
+        emailMsg = "\n⚠️ No email on file for this student — not sent.";
+      } else {
+        const ok = confirm(`Email receipt to:\n  ${recipients.join("\n  ")}\n\nProceed?`);
+        if (ok) {
+          try {
+            await sendReceiptEmail({ receipt: r, recipients, settings });
+            // Find the row we just inserted to mark it as emailed
+            const last = await listReceipts({});
+            const justSaved = last.find((x) => x.receipt_no === receiptNo);
+            if (justSaved) await markEmailed(justSaved.id, recipients);
+            emailMsg = `\n✉️ Sent to ${recipients.join(", ")}`;
+          } catch (e: any) {
+            emailMsg = "\n❌ Email failed: " + (e?.message || e);
+          }
+        } else { emailMsg = "\n(Email cancelled.)"; }
+      }
+    }
+
+    if (action === "print") printReceipt(r, settings);
     setReceiptNo((n) => n + 1);
     setComments(""); setPending("0");
-    alert(`Receipt #${receiptNo} saved.${savedPath ? "\nPDF: " + savedPath : "\n(Set a PDF folder in Settings to auto-save PDFs.)"}`);
+    alert(`Receipt #${receiptNo} saved.${savedPath ? "\nPDF: " + savedPath : ""}${emailMsg}`);
   }
 
   return (
@@ -150,8 +176,13 @@ export default function NewReceipt() {
         </div>
 
         <div style={{ display: "flex", gap: 10, marginTop: 8 }}>
-          <button className="btn" onClick={() => onSave(true)}>Save &amp; Print</button>
-          <button className="btn secondary" onClick={() => onSave(false)}>Save Only</button>
+          <button className="btn" onClick={() => onSave("print")}>Save &amp; Print</button>
+          <button className="btn" onClick={() => onSave("email")}
+            disabled={!student || parseRecipients(student?.email).length === 0}
+            title={!student ? "Pick a student" : parseRecipients(student.email).length === 0 ? "No email on file for this student" : ""}>
+            Save &amp; Email
+          </button>
+          <button className="btn secondary" onClick={() => onSave("save")}>Save Only</button>
         </div>
       </div>
     </div>

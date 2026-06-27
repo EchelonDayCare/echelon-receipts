@@ -63,7 +63,7 @@ export async function deleteStudent(id: number) {
 }
 
 // ---------- Receipts ----------
-export async function createReceipt(r: Omit<Receipt, "id" | "created_at" | "voided">) {
+export async function createReceipt(r: Omit<Receipt, "id" | "created_at" | "voided" | "emailed_at" | "emailed_to">) {
   await (await db()).execute(
     `INSERT INTO receipts(receipt_no,date,student_id,student_name_snapshot,
       father_name_snapshot,mother_name_snapshot,description,amount,pending_amount,comments)
@@ -103,6 +103,13 @@ export async function getReceipt(id: number): Promise<Receipt | null> {
 }
 export async function voidReceipt(id: number) {
   await (await db()).execute("UPDATE receipts SET voided=1 WHERE id=?", [id]);
+}
+
+export async function markEmailed(id: number, recipients: string[]) {
+  await (await db()).execute(
+    "UPDATE receipts SET emailed_at=datetime('now'), emailed_to=? WHERE id=?",
+    [recipients.join(", "), id]
+  );
 }
 
 // ---------- Reports ----------
