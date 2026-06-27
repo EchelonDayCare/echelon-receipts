@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { open } from "@tauri-apps/plugin-dialog";
 import { getSettings, setSetting } from "../lib/db";
 import type { SettingsMap } from "../types";
 
@@ -70,6 +71,24 @@ export default function Settings() {
               {s.signature_data_url && <button className="btn ghost" onClick={() => setS({ ...s, signature_data_url: "" })}>Clear</button>}
             </div>
           </div>
+        </div>
+
+        <div className="field">
+          <label>PDF Archive Folder</label>
+          <div style={{ display: "flex", gap: 8 }}>
+            <input style={{ flex: 1 }}
+              value={s.pdf_folder || ""}
+              onChange={(e) => setS({ ...s, pdf_folder: e.target.value })}
+              placeholder="(none — disable auto-save)" />
+            <button className="btn secondary" onClick={async () => {
+              const picked = await open({ directory: true, multiple: false });
+              if (picked && !Array.isArray(picked)) setS({ ...s, pdf_folder: picked });
+            }}>Choose…</button>
+            {s.pdf_folder && <button className="btn ghost" onClick={() => setS({ ...s, pdf_folder: "" })}>Clear</button>}
+          </div>
+          <small style={{ color: "var(--muted)" }}>
+            PDFs auto-save to <code>&lt;folder&gt;/YYYY/MM/&lt;receipt#&gt;_&lt;date&gt;_&lt;Student&gt;.pdf</code>
+          </small>
         </div>
 
         <button className="btn" onClick={save} disabled={saving}>{saving ? "Saving…" : "Save Settings"}</button>

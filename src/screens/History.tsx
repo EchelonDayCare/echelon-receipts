@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { getSettings, listReceipts, voidReceipt } from "../lib/db";
 import type { Receipt, SettingsMap } from "../types";
-import { printReceipt } from "../lib/receipt";
+import { printReceipt, saveReceiptPdf } from "../lib/receipt";
 
 const MONTHS = ["All","Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
 
@@ -70,6 +70,12 @@ export default function History() {
                 <td>{r.comments || ""}{r.pending_amount > 0 ? ` (Pending $${r.pending_amount.toFixed(2)})` : ""}</td>
                 <td style={{ textAlign: "right" }}>
                   <button className="btn ghost" onClick={() => printReceipt(r, settings)}>Print</button>
+                  <button className="btn ghost" onClick={async () => {
+                    try {
+                      const p = await saveReceiptPdf(r, settings);
+                      alert(p ? "Saved PDF:\n" + p : "Set a PDF folder in Settings first.");
+                    } catch (e) { alert("Save failed: " + e); }
+                  }}>Save PDF</button>
                   {!r.voided && (
                     <button className="btn ghost" style={{ color: "var(--danger)" }}
                       onClick={async () => { if (confirm(`Void receipt #${r.receipt_no}?`)) { await voidReceipt(r.id); refresh(); } }}>

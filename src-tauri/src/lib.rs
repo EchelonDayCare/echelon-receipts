@@ -9,6 +9,12 @@ pub fn run() {
             sql: include_str!("../migrations/001_initial.sql"),
             kind: MigrationKind::Up,
         },
+        Migration {
+            version: 2,
+            description: "add_pdf_folder_setting",
+            sql: include_str!("../migrations/002_pdf_folder.sql"),
+            kind: MigrationKind::Up,
+        },
     ];
 
     tauri::Builder::default()

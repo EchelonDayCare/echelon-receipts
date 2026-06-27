@@ -45,4 +45,5 @@ INSERT OR IGNORE INTO settings (key, value) VALUES
     ('default_fee', '485'),
     ('next_receipt_no', '1001'),
     ('logo_data_url', ''),
-    ('signature_data_url', '');
+    ('signature_data_url', ''),
+    ('pdf_folder', '');

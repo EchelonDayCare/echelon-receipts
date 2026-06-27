@@ -1,9 +1,9 @@
 import { useEffect, useMemo, useState } from "react";
 import {
-  listStudents, listYears, nextReceiptNo, createReceipt, getSettings, getReceipt,
+  listStudents, listYears, nextReceiptNo, createReceipt, getSettings,
 } from "../lib/db";
 import type { Student } from "../types";
-import { printReceipt } from "../lib/receipt";
+import { printReceipt, saveReceiptPdf } from "../lib/receipt";
 
 const MONTHS = ["January","February","March","April","May","June","July","August","September","October","November","December"];
 
@@ -54,22 +54,22 @@ export default function NewReceipt() {
       mother_name_snapshot: student.mother_name,
       description, amount: amt, pending_amount: pen, comments: comments || null,
     });
-    if (thenPrint) {
-      const settings = await getSettings();
-      const saved = await getReceipt(0); // we don't have id, so just rebuild
-      const r = {
-        id: 0, receipt_no: receiptNo, date, student_id: student.id,
-        student_name_snapshot: student.name,
-        father_name_snapshot: student.father_name,
-        mother_name_snapshot: student.mother_name,
-        description, amount: amt, pending_amount: pen, comments: comments || null,
-        voided: 0, created_at: new Date().toISOString(),
-      };
-      printReceipt(saved ?? r, settings);
-    }
+    const settings = await getSettings();
+    const r = {
+      id: 0, receipt_no: receiptNo, date, student_id: student.id,
+      student_name_snapshot: student.name,
+      father_name_snapshot: student.father_name,
+      mother_name_snapshot: student.mother_name,
+      description, amount: amt, pending_amount: pen, comments: comments || null,
+      voided: 0, created_at: new Date().toISOString(),
+    };
+    let savedPath: string | null = null;
+    try { savedPath = await saveReceiptPdf(r, settings); }
+    catch (e) { console.error(e); alert("Receipt saved, but PDF auto-save failed:\n" + e); }
+    if (thenPrint) printReceipt(r, settings);
     setReceiptNo((n) => n + 1);
     setComments(""); setPending("0");
-    alert("Receipt saved.");
+    alert(`Receipt #${receiptNo} saved.${savedPath ? "\nPDF: " + savedPath : "\n(Set a PDF folder in Settings to auto-save PDFs.)"}`);
   }
 
   return (

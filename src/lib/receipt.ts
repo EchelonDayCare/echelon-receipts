@@ -1,4 +1,6 @@
 import type { Receipt, SettingsMap } from "../types";
+import html2pdf from "html2pdf.js";
+import { mkdir, writeFile, exists } from "@tauri-apps/plugin-fs";
 
 function fmtDate(iso: string): string {
   // dd/mm/yyyy to match the existing receipt
@@ -7,6 +9,9 @@ function fmtDate(iso: string): string {
 }
 function fmtAmount(n: number): string {
   return n.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+}
+function safeName(s: string): string {
+  return s.replace(/[\\/:*?"<>|']+/g, "").replace(/\s+/g, "_").slice(0, 60);
 }
 
 export function buildReceiptHtml(r: Receipt, s: SettingsMap): string {
@@ -103,4 +108,48 @@ export function printReceipt(r: Receipt, s: SettingsMap) {
   w.document.write(html);
   w.document.close();
   w.onload = () => { setTimeout(() => { w.focus(); w.print(); }, 200); };
+}
+
+// Render the receipt HTML offscreen, generate a PDF Blob, and write it to
+// <pdfFolder>/<YYYY>/<MM>/<receiptNo>_<YYYY-MM-DD>_<Student>.pdf
+// Returns the absolute file path, or null if pdfFolder isn't configured.
+export async function saveReceiptPdf(r: Receipt, s: SettingsMap): Promise<string | null> {
+  const folder = (s.pdf_folder || "").trim();
+  if (!folder) return null;
+
+  const html = buildReceiptHtml(r, s);
+  const host = document.createElement("div");
+  host.style.position = "fixed";
+  host.style.left = "-10000px";
+  host.style.top = "0";
+  host.innerHTML = html;
+  document.body.appendChild(host);
+  // html2pdf operates on the .sheet element to get accurate sizing
+  const target = host.querySelector(".sheet") as HTMLElement || host;
+
+  let bytes: Uint8Array;
+  try {
+    const blob: Blob = await html2pdf()
+      .from(target)
+      .set({
+        margin: 0.4,
+        filename: "receipt.pdf",
+        image: { type: "jpeg", quality: 0.95 },
+        html2canvas: { scale: 2, useCORS: true, backgroundColor: "#ffffff" },
+        jsPDF: { unit: "in", format: "letter", orientation: "portrait" },
+      })
+      .outputPdf("blob");
+    bytes = new Uint8Array(await blob.arrayBuffer());
+  } finally {
+    document.body.removeChild(host);
+  }
+
+  const [yy, mm] = r.date.split("-");
+  const subdir = `${folder.replace(/[\\/]+$/, "")}/${yy}/${mm}`;
+  if (!(await exists(subdir))) await mkdir(subdir, { recursive: true });
+
+  const fname = `${r.receipt_no}_${r.date}_${safeName(r.student_name_snapshot)}.pdf`;
+  const fullPath = `${subdir}/${fname}`;
+  await writeFile(fullPath, bytes);
+  return fullPath;
 }
