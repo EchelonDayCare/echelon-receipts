@@ -20,6 +20,8 @@ pub struct SendEmailArgs {
     pub body_text: String,
     pub attachment_b64: String,
     pub attachment_filename: String,
+    #[serde(default)]
+    pub attachment_mime: Option<String>,
 }
 
 #[tauri::command]
@@ -42,8 +44,11 @@ pub async fn send_email(args: SendEmailArgs) -> Result<(), String> {
         let bytes = base64::engine::general_purpose::STANDARD
             .decode(args.attachment_b64.as_bytes())
             .map_err(|e| format!("attachment decode: {e}"))?;
+        let mime = args.attachment_mime.as_deref().unwrap_or("application/pdf");
+        let content_type = ContentType::parse(mime)
+            .unwrap_or_else(|_| ContentType::parse("application/octet-stream").unwrap());
         let attachment = Attachment::new(args.attachment_filename)
-            .body(bytes, ContentType::parse("application/pdf").unwrap());
+            .body(bytes, content_type);
 
         let email = builder
             .multipart(

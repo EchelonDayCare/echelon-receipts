@@ -122,7 +122,15 @@ async function ensureSchema(d: Database): Promise<void> {
   await addCol("receipts", "voided_at", "TEXT");
 
   // Backup bookkeeping (not a real migration — stored in settings)
-  for (const [k, v] of [["last_backup_at", ""], ["last_backup_path", ""]] as const) await setting(k, v);
+  for (const [k, v] of [
+    ["last_backup_at", ""],
+    ["last_backup_path", ""],
+    ["last_cloud_backup_at", ""],
+    ["last_cloud_backup_month", ""],
+    ["last_cloud_backup_recipient", ""],
+    ["backup_recipient_email", ""],
+    ["backup_cloud_enabled", "1"],
+  ] as const) await setting(k, v);
 }
 
 // ---------- Person identity ----------

@@ -5,6 +5,7 @@ import { copyFile, mkdir, exists } from "@tauri-apps/plugin-fs";
 import { appDataDir, join } from "@tauri-apps/api/path";
 import { getSettings, setSetting } from "../lib/db";
 import { sendTestEmail, SMTP_PRESETS } from "../lib/email";
+import { sendCloudBackup } from "../lib/cloudBackup";
 import { DEFAULT_LOGO_DATA_URL, DEFAULT_SIGNATURE_DATA_URL } from "../lib/defaults";
 import type { SettingsMap } from "../types";
 import HealthCheck from "../components/HealthCheck";
@@ -97,6 +98,26 @@ export default function Settings() {
       alert(`✅ Backup saved to:\n${dst}`);
     } catch (e: any) {
       alert("❌ Backup failed:\n" + (e?.message || e));
+    }
+  }
+
+  async function cloudBackupNow() {
+    try {
+      // Persist current edits first so the backup uses the current recipient/SMTP values.
+      for (const [k, v] of Object.entries(s)) await setSetting(k, v ?? "");
+      const now = new Date();
+      const key = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`;
+      const res = await sendCloudBackup(key);
+      if (!res.ok) throw new Error(res.error || "unknown error");
+      setS((cur) => ({
+        ...cur,
+        last_cloud_backup_at: new Date().toISOString(),
+        last_cloud_backup_month: key,
+        last_cloud_backup_recipient: res.recipient,
+      }));
+      alert(`✅ Backup emailed to ${res.recipient}\n(${(res.bytes / 1024).toFixed(1)} KB)`);
+    } catch (e: any) {
+      alert("❌ Cloud backup failed:\n" + (e?.message || e));
     }
   }
 
@@ -322,14 +343,53 @@ export default function Settings() {
         </div>
 
         <hr style={{ border: 0, borderTop: "1px solid var(--border)", margin: "20px 0" }} />
-        <h3 style={{ margin: "0 0 4px" }}>Backup</h3>
+        <h3 style={{ margin: "0 0 4px" }}>Cloud backup (recommended)</h3>
         <p className="subtitle" style={{ marginBottom: 14 }}>
-          Make a safety copy of your database. Stored inside <code>Backups/</code> under your PDF folder
+          On the first app launch of each month, a copy of your database is automatically
+          emailed to the address below. Your Gmail (or other email) keeps every monthly
+          backup forever — no extra accounts, no extra software.
+        </p>
+        <div className="field">
+          <label>
+            <input type="checkbox" checked={s.backup_cloud_enabled !== "0"}
+              onChange={(e) => setS({ ...s, backup_cloud_enabled: e.target.checked ? "1" : "0" })}
+              style={{ marginRight: 6, verticalAlign: "middle" }} />
+            Enable automatic monthly cloud backup
+          </label>
+        </div>
+        <div className="field">
+          <label>Send backups to</label>
+          <input
+            type="email"
+            placeholder={s.sender_email || s.contact_email || "you@example.com"}
+            value={s.backup_recipient_email || ""}
+            onChange={(e) => setS({ ...s, backup_recipient_email: e.target.value })}
+          />
+          <small style={{ color: "var(--muted)" }}>
+            Leave blank to use your sender email ({s.sender_email || s.contact_email || "not set"}).
+            Tip: use the same Gmail address you log in with — backups land in your inbox.
+          </small>
+        </div>
+        <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
+          <button className="btn" onClick={cloudBackupNow}>Back up to email now</button>
+          {s.last_cloud_backup_at && (
+            <small style={{ color: "var(--muted)" }}>
+              Last cloud backup: <strong>{s.last_cloud_backup_at.slice(0, 19).replace("T", " ")}</strong>
+              {s.last_cloud_backup_month && <> (tagged {s.last_cloud_backup_month})</>}
+              {s.last_cloud_backup_recipient && <> → {s.last_cloud_backup_recipient}</>}
+            </small>
+          )}
+        </div>
+
+        <hr style={{ border: 0, borderTop: "1px solid var(--border)", margin: "20px 0" }} />
+        <h3 style={{ margin: "0 0 4px" }}>Local backup</h3>
+        <p className="subtitle" style={{ marginBottom: 14 }}>
+          A second safety copy on this computer. Stored in <code>Backups/</code> under your PDF folder
           (or the app data folder if no PDF folder is chosen).
-          {s.last_backup_at && <> Last backup: <strong>{s.last_backup_at.slice(0, 19).replace("T", " ")}</strong>.</>}
+          {s.last_backup_at && <> Last local backup: <strong>{s.last_backup_at.slice(0, 19).replace("T", " ")}</strong>.</>}
         </p>
         <div style={{ display: "flex", gap: 10 }}>
-          <button className="btn secondary" onClick={backupNow}>Back up now</button>
+          <button className="btn secondary" onClick={backupNow}>Back up to this computer</button>
           {s.last_backup_path && (
             <small style={{ color: "var(--muted)", alignSelf: "center" }}>→ {s.last_backup_path}</small>
           )}

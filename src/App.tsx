@@ -1,4 +1,5 @@
 import { HashRouter, NavLink, Route, Routes, Navigate } from "react-router-dom";
+import { useEffect } from "react";
 import Today from "./screens/Today";
 import ThisMonth from "./screens/ThisMonth";
 import NewReceipt from "./screens/NewReceipt";
@@ -7,9 +8,20 @@ import Students from "./screens/Students";
 import Reports from "./screens/Reports";
 import AnnualReceipts from "./screens/AnnualReceipts";
 import Settings from "./screens/Settings";
+import { runCloudBackupIfDue } from "./lib/cloudBackup";
 import "./App.css";
 
 export default function App() {
+  useEffect(() => {
+    // Fire-and-forget monthly backup check on app start.
+    runCloudBackupIfDue().then((res) => {
+      if (res?.ok) {
+        console.log(`[backup] Monthly backup emailed for ${res.monthKey} (${(res.bytes / 1024).toFixed(1)} KB)`);
+      } else if (res?.error) {
+        console.warn(`[backup] Skipped: ${res.error}`);
+      }
+    });
+  }, []);
   return (
     <HashRouter>
       <div className="app">

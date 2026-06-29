@@ -75,9 +75,9 @@ export default function Today() {
   } else if (month === 1 || month === 2) {
     upcoming.push({ when: "This month", what: `It's time to send annual tax receipts for ${year - 1}.`, cta: { label: "Send annual receipts", to: "/annual" } });
   }
-  // Backup reminder (we don't have a real backup timestamp yet — show informational)
-  if (!settings.last_backup_at) {
-    upcoming.push({ when: "Anytime", what: "Recommended: back up your database. Auto-backup will be added in the next update." });
+  // Backup reminder — cloud is preferred; fall back to local timestamp.
+  if (!settings.last_cloud_backup_at && !settings.last_backup_at) {
+    upcoming.push({ when: "Anytime", what: "Set up cloud backup: emails your database to your Gmail every month.", cta: { label: "Open Settings", to: "/settings" } });
   }
 
   return (

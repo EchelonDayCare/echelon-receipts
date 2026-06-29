@@ -98,16 +98,19 @@ export default function HealthCheck({ settings }: Props) {
       out.push({ key: "sub", label: "BC subsidies", state: "ok", detail: "Disabled — receipts use a flat amount." });
     }
 
-    // 6. Backup
-    const last = settings.last_backup_at;
+    // 6. Backup (prefer cloud, fall back to local)
+    const lastCloud = settings.last_cloud_backup_at;
+    const lastLocal = settings.last_backup_at;
+    const last = lastCloud || lastLocal;
+    const source = lastCloud ? "cloud" : "local";
     if (!last) {
-      out.push({ key: "backup", label: "Database backup", state: "warn", detail: "No backup recorded yet. Use 'Back up now' below." });
+      out.push({ key: "backup", label: "Database backup", state: "warn", detail: "No backup yet. Cloud backup runs automatically on the first launch of each month — or click 'Back up to email now' below." });
     } else {
       const days = Math.floor((Date.now() - Date.parse(last)) / (1000 * 60 * 60 * 24));
       out.push({
         key: "backup", label: "Database backup",
-        state: days > 30 ? "warn" : "ok",
-        detail: `Last backup ${days === 0 ? "today" : days + " day(s) ago"} (${last.slice(0,10)})`,
+        state: days > 35 ? "warn" : "ok",
+        detail: `Last ${source} backup ${days === 0 ? "today" : days + " day(s) ago"} (${last.slice(0,10)})`,
       });
     }
 
