@@ -1,4 +1,4 @@
-import * as XLSX from "xlsx";
+import { loadXLSX } from "./lazy";
 
 export interface ImportedStudent {
   name: string;
@@ -30,6 +30,7 @@ function pick(row: Record<string, any>, keys: string[]): string | null {
 }
 
 export async function parseRosterFile(file: ArrayBuffer): Promise<ImportedStudent[]> {
+  const XLSX = await loadXLSX();
   const wb = XLSX.read(file, { type: "array" });
   const sheet = wb.Sheets[wb.SheetNames[0]];
   const rows = XLSX.utils.sheet_to_json<Record<string, any>>(sheet, { defval: "" });

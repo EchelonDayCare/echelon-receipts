@@ -2,7 +2,7 @@ import { mkdir, writeFile, writeTextFile, exists } from "@tauri-apps/plugin-fs";
 import type { Receipt, SettingsMap, AnnualReceipt } from "../types";
 import { db, listReceipts } from "./db";
 import { buildReceiptHtml, saveReceiptPdf } from "./receipt";
-import html2pdf from "html2pdf.js";
+import { loadHtml2Pdf } from "./lazy";
 
 function csvEscape(v: any): string {
   if (v === null || v === undefined) return "";
@@ -21,6 +21,7 @@ async function renderPdf(html: string): Promise<Uint8Array> {
   document.body.appendChild(host);
   const target = (host.querySelector(".sheet") as HTMLElement) || host;
   try {
+    const html2pdf = await loadHtml2Pdf();
     const blob: Blob = await html2pdf().from(target).set({
       margin: 0.4, image: { type: "jpeg", quality: 0.95 },
       html2canvas: { scale: 2, useCORS: true, backgroundColor: "#ffffff" },

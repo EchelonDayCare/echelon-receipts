@@ -1,7 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import type { Receipt, SettingsMap } from "../types";
 import { buildReceiptHtml } from "./receipt";
-import html2pdf from "html2pdf.js";
+import { loadHtml2Pdf } from "./lazy";
 
 export const SMTP_PRESETS: Record<string, { host: string; port: number }> = {
   "Hotmail / Outlook": { host: "smtp-mail.outlook.com", port: 587 },
@@ -47,6 +47,7 @@ async function renderReceiptPdfBytes(r: Receipt, s: SettingsMap): Promise<Uint8A
   document.body.appendChild(host);
   const target = (host.querySelector(".sheet") as HTMLElement) || host;
   try {
+    const html2pdf = await loadHtml2Pdf();
     const blob: Blob = await html2pdf()
       .from(target)
       .set({

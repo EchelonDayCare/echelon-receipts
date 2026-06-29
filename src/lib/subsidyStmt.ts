@@ -3,9 +3,9 @@
 // paid. Required for BC licensing audits and answers the common parent question
 // "why does my receipt say $X when full-time daycare costs more?"
 import type { Receipt, SettingsMap } from "../types";
-import html2pdf from "html2pdf.js";
 import { mkdir, writeFile, exists } from "@tauri-apps/plugin-fs";
 import { DEFAULT_LOGO_DATA_URL } from "./defaults";
+import { loadHtml2Pdf } from "./lazy";
 
 const MONTHS = ["January","February","March","April","May","June","July","August","September","October","November","December"];
 
@@ -99,6 +99,7 @@ async function renderPdfBytes(html: string): Promise<Uint8Array> {
   document.body.appendChild(host);
   const target = host.querySelector(".sheet") as HTMLElement || host;
   try {
+    const html2pdf = await loadHtml2Pdf();
     const blob: Blob = await html2pdf()
       .from(target)
       .set({

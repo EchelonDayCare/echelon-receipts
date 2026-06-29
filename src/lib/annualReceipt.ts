@@ -1,8 +1,8 @@
 import type { SettingsMap } from "../types";
 import type { AnnualGroup } from "./db";
-import html2pdf from "html2pdf.js";
 import { mkdir, writeFile, exists } from "@tauri-apps/plugin-fs";
 import { DEFAULT_LOGO_DATA_URL, DEFAULT_SIGNATURE_DATA_URL } from "./defaults";
+import { loadHtml2Pdf } from "./lazy";
 
 function fmtDate(iso: string): string {
   const [y, m, d] = iso.split("-");
@@ -132,6 +132,7 @@ async function renderAnnualPdfBytes(html: string): Promise<Uint8Array> {
   document.body.appendChild(host);
   const target = (host.querySelector(".sheet") as HTMLElement) || host;
   try {
+    const html2pdf = await loadHtml2Pdf();
     const blob: Blob = await html2pdf()
       .from(target)
       .set({

@@ -1,7 +1,7 @@
 import type { Receipt, SettingsMap } from "../types";
-import html2pdf from "html2pdf.js";
 import { mkdir, writeFile, exists } from "@tauri-apps/plugin-fs";
 import { DEFAULT_LOGO_DATA_URL, DEFAULT_SIGNATURE_DATA_URL } from "./defaults";
+import { loadHtml2Pdf } from "./lazy";
 
 function fmtDate(iso: string): string {
   // dd/mm/yyyy to match the existing receipt
@@ -170,6 +170,7 @@ export async function saveReceiptPdf(r: Receipt, s: SettingsMap): Promise<string
 
   let bytes: Uint8Array;
   try {
+    const html2pdf = await loadHtml2Pdf();
     const blob: Blob = await html2pdf()
       .from(target)
       .set({
