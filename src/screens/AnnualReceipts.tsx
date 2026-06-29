@@ -14,6 +14,7 @@ import {
 } from "../lib/annualReceipt";
 import { parseRecipients, sendAnnualReceiptEmail } from "../lib/email";
 import { exportYearArchive } from "../lib/yearArchive";
+import { yieldToUI } from "../lib/lazy";
 import type { SettingsMap, AnnualReceipt } from "../types";
 
 type Step = 1 | 2 | 3 | 4;
@@ -43,6 +44,7 @@ export default function AnnualReceipts() {
   const [rows, setRows] = useState<DraftRow[]>([]);
   const [loading, setLoading] = useState(false);
   const [history, setHistory] = useState<{ group: AnnualGroup; list: AnnualReceipt[] } | null>(null);
+  const [batchProgress, setBatchProgress] = useState<{ done: number; total: number; current: string } | null>(null);
 
   async function refresh() {
     setLoading(true);
@@ -172,10 +174,19 @@ export default function AnnualReceipts() {
     });
     if (!indexes.length) { alert("Nothing eligible to send."); return; }
     if (!confirm(`Send ${indexes.length} annual receipt${indexes.length === 1 ? "" : "s"} now?`)) return;
+    setBatchProgress({ done: 0, total: indexes.length, current: rows[indexes[0]]?.group.student_name || "" });
+    await yieldToUI();
+    let done = 0;
     for (const i of indexes) {
+      setBatchProgress({ done, total: indexes.length, current: rows[i].group.student_name });
+      await yieldToUI();
       await sendOne(i);
+      done++;
+      await yieldToUI();
     }
+    setBatchProgress({ done, total: indexes.length, current: "" });
     await refresh();
+    setTimeout(() => setBatchProgress(null), 2500);
   }
 
   async function openPdfFor(r: DraftRow) {
@@ -468,6 +479,20 @@ export default function AnnualReceipts() {
             <div style={{ display: "flex", justifyContent: "flex-end", marginTop: 12 }}>
               <button className="btn secondary" onClick={() => setHistory(null)}>Close</button>
             </div>
+          </div>
+        </div>
+      )}
+
+      {/* Batch progress toast */}
+      {batchProgress && (
+        <div className="toast">
+          <div>
+            {batchProgress.done < batchProgress.total
+              ? <>📨 Sending {batchProgress.done + 1} of {batchProgress.total}{batchProgress.current ? " — " + batchProgress.current : ""}…</>
+              : <>✅ Sent {batchProgress.total} annual receipt(s).</>}
+          </div>
+          <div className="progress" aria-label="batch progress">
+            <div className="progress-fill" style={{ width: `${batchProgress.total === 0 ? 100 : (batchProgress.done / batchProgress.total) * 100}%` }} />
           </div>
         </div>
       )}

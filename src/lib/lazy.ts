@@ -14,3 +14,10 @@ export function loadXLSX(): Promise<typeof import("xlsx")> {
   }
   return xlsxPromise;
 }
+
+// Yields to the browser so React can flush a re-paint between heavy operations.
+// Without this, a tight `for (await ...)` loop blocks the UI thread and progress
+// updates only appear after the whole batch finishes.
+export function yieldToUI(): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, 0));
+}

@@ -7,6 +7,7 @@ import {
 import type { Student, Receipt, SettingsMap } from "../types";
 import { saveReceiptPdf } from "../lib/receipt";
 import { sendReceiptEmail, parseRecipients } from "../lib/email";
+import { yieldToUI } from "../lib/lazy";
 
 const MONTHS = [
   "January","February","March","April","May","June",
@@ -149,10 +150,13 @@ export default function ThisMonth() {
 
   async function doBatchSend() {
     setShowReview(false);
-    setBatchProgress({ done: 0, total: readyToSend.length, current: "" });
+    setBatchProgress({ done: 0, total: readyToSend.length, current: readyToSend[0]?.student.name || "" });
+    await yieldToUI();
     let done = 0;
-    for (const row of readyToSend) {
+    for (let i = 0; i < readyToSend.length; i++) {
+      const row = readyToSend[i];
       setBatchProgress({ done, total: readyToSend.length, current: row.student.name });
+      await yieldToUI();
       try {
         await sendReceiptEmail({ receipt: row.receipt!, recipients: row.parentEmails, settings });
         await markEmailed(row.receipt!.id, row.parentEmails);
@@ -160,6 +164,7 @@ export default function ThisMonth() {
         setRows(cur => cur.map(x => x.student.id === row.student.id ? { ...x, lastResult: { kind: "err", text: e?.message || String(e) } } : x));
       }
       done++;
+      await yieldToUI();
     }
     setBatchProgress({ done, total: readyToSend.length, current: "" });
     await refresh();
@@ -292,9 +297,14 @@ export default function ThisMonth() {
       {/* Progress toast */}
       {batchProgress && (
         <div className="toast">
-          {batchProgress.done < batchProgress.total
-            ? <>📨 Sending {batchProgress.done + 1} of {batchProgress.total}{batchProgress.current ? " — " + batchProgress.current : ""}…</>
-            : <>✅ Sent {batchProgress.total} receipt(s).</>}
+          <div>
+            {batchProgress.done < batchProgress.total
+              ? <>📨 Sending {batchProgress.done + 1} of {batchProgress.total}{batchProgress.current ? " — " + batchProgress.current : ""}…</>
+              : <>✅ Sent {batchProgress.total} receipt(s).</>}
+          </div>
+          <div className="progress" aria-label="batch progress">
+            <div className="progress-fill" style={{ width: `${batchProgress.total === 0 ? 100 : (batchProgress.done / batchProgress.total) * 100}%` }} />
+          </div>
         </div>
       )}
     </div>
