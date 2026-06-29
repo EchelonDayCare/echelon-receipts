@@ -1,5 +1,6 @@
 import { HashRouter, NavLink, Route, Routes, Navigate } from "react-router-dom";
 import Today from "./screens/Today";
+import ThisMonth from "./screens/ThisMonth";
 import NewReceipt from "./screens/NewReceipt";
 import History from "./screens/History";
 import Students from "./screens/Students";
@@ -22,6 +23,7 @@ export default function App() {
           </div>
           <nav>
             <NavLink to="/today" className={({ isActive }) => "nav-item" + (isActive ? " active" : "")}>Today</NavLink>
+            <NavLink to="/month" className={({ isActive }) => "nav-item" + (isActive ? " active" : "")}>This Month</NavLink>
             <NavLink to="/new" className={({ isActive }) => "nav-item" + (isActive ? " active" : "")}>New Receipt</NavLink>
             <NavLink to="/history" className={({ isActive }) => "nav-item" + (isActive ? " active" : "")}>Receipt History</NavLink>
             <NavLink to="/students" className={({ isActive }) => "nav-item" + (isActive ? " active" : "")}>Students</NavLink>
@@ -35,6 +37,7 @@ export default function App() {
           <Routes>
             <Route path="/" element={<Navigate to="/today" replace />} />
             <Route path="/today" element={<Today />} />
+            <Route path="/month" element={<ThisMonth />} />
             <Route path="/new" element={<NewReceipt />} />
             <Route path="/history" element={<History />} />
             <Route path="/students" element={<Students />} />
