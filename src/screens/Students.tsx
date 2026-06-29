@@ -11,6 +11,7 @@ export default function Students() {
   const [year, setYear] = useState<number>(now);
   const [students, setStudents] = useState<Student[]>([]);
   const [editing, setEditing] = useState<Partial<Student> | null>(null);
+  const [pendingImport, setPendingImport] = useState<{ path: string; year: number } | null>(null);
 
   async function refresh() {
     const ys = await listYears();
@@ -27,23 +28,36 @@ export default function Students() {
       filters: [{ name: "Excel/CSV", extensions: ["xlsx", "xls", "csv"] }],
     });
     if (!path || Array.isArray(path)) return;
-    const targetYearStr = prompt("Roster year for this file?", String(now));
-    if (!targetYearStr) return;
-    const targetYear = parseInt(targetYearStr, 10);
-    if (!targetYear) { alert("Invalid year"); return; }
-    const bytes = await readFile(path);
-    const imported = await parseRosterFile(bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer);
-    if (!imported.length) { alert("No rows found. Expected columns: Student Name, Father's Name, Mother's Name, Email ID"); return; }
-    const existing = new Set((await listStudents(targetYear, false)).map((s) => s.name.toLowerCase().trim()));
-    let added = 0, skipped = 0;
-    for (const s of imported) {
-      if (existing.has(s.name.toLowerCase().trim())) { skipped++; continue; }
-      await upsertStudent({ ...s, year: targetYear });
-      added++;
+    // Try to auto-detect year from filename (e.g. "Echelon_Roster_2026.xlsx")
+    const m = (path as string).match(/(20\d{2})/);
+    const guessedYear = m ? parseInt(m[1], 10) : now;
+    setPendingImport({ path: path as string, year: guessedYear });
+  }
+
+  async function runImport() {
+    if (!pendingImport) return;
+    const { path, year: targetYear } = pendingImport;
+    setPendingImport(null);
+    try {
+      const bytes = await readFile(path);
+      const imported = await parseRosterFile(bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer);
+      if (!imported.length) {
+        alert("No rows found. Expected columns: Student Name, Father's Name, Mother's Name, Email ID");
+        return;
+      }
+      const existing = new Set((await listStudents(targetYear, false)).map((s) => s.name.toLowerCase().trim()));
+      let added = 0, skipped = 0;
+      for (const s of imported) {
+        if (existing.has(s.name.toLowerCase().trim())) { skipped++; continue; }
+        await upsertStudent({ ...s, year: targetYear });
+        added++;
+      }
+      alert(`Imported: ${added} added, ${skipped} skipped (duplicates).`);
+      setYear(targetYear);
+      refresh();
+    } catch (err) {
+      alert("Import failed: " + (err instanceof Error ? err.message : String(err)));
     }
-    alert(`Imported: ${added} added, ${skipped} skipped (duplicates).`);
-    setYear(targetYear);
-    refresh();
   }
 
   return (
@@ -94,8 +108,16 @@ export default function Students() {
       )}
 
       {editing && (
-        <div className="card" style={{ marginTop: 20 }}>
-          <h3 style={{ marginTop: 0 }}>{editing.id ? "Edit Student" : "Add Student"}</h3>
+        <div
+          onClick={(e) => { if (e.target === e.currentTarget) setEditing(null); }}
+          style={{
+            position: "fixed", inset: 0, background: "rgba(0,0,0,0.45)",
+            display: "flex", alignItems: "flex-start", justifyContent: "center",
+            paddingTop: 80, zIndex: 1000,
+          }}
+        >
+          <div className="card" style={{ width: "min(640px, 92vw)", maxHeight: "85vh", overflow: "auto", margin: 0 }}>
+            <h3 style={{ marginTop: 0 }}>{editing.id ? "Edit Student" : "Add Student"}</h3>
           <div className="row">
             <div className="field">
               <label>Student Name</label>
@@ -133,6 +155,37 @@ export default function Students() {
               setEditing(null); refresh();
             }}>Save</button>
             <button className="btn secondary" onClick={() => setEditing(null)}>Cancel</button>
+          </div>
+          </div>
+        </div>
+      )}
+      {pendingImport && (
+        <div
+          onClick={(e) => { if (e.target === e.currentTarget) setPendingImport(null); }}
+          style={{
+            position: "fixed", inset: 0, background: "rgba(0,0,0,0.45)",
+            display: "flex", alignItems: "flex-start", justifyContent: "center",
+            paddingTop: 120, zIndex: 1000,
+          }}
+        >
+          <div className="card" style={{ width: "min(420px, 92vw)", margin: 0 }}>
+            <h3 style={{ marginTop: 0 }}>Import Roster</h3>
+            <p style={{ color: "var(--muted)", fontSize: 13, marginTop: -4 }}>
+              File: <code>{pendingImport.path.split(/[/\\]/).pop()}</code>
+            </p>
+            <div className="field">
+              <label>Roster Year</label>
+              <input
+                type="number"
+                value={pendingImport.year}
+                onChange={(e) => setPendingImport({ ...pendingImport, year: parseInt(e.target.value, 10) || now })}
+                autoFocus
+              />
+            </div>
+            <div style={{ display: "flex", gap: 10, marginTop: 12 }}>
+              <button className="btn" onClick={runImport}>Import</button>
+              <button className="btn secondary" onClick={() => setPendingImport(null)}>Cancel</button>
+            </div>
           </div>
         </div>
       )}
