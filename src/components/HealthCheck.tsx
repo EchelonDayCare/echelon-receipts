@@ -1,5 +1,4 @@
 import { useEffect, useState } from "react";
-import { invoke } from "@tauri-apps/api/core";
 import { exists } from "@tauri-apps/plugin-fs";
 import type { SettingsMap } from "../types";
 import { listStudents } from "../lib/db";
@@ -52,11 +51,7 @@ export default function HealthCheck({ settings }: Props) {
       out.push({ key: "smtp", label: "Email (SMTP)", state: "error",
         detail: "Sender email or SMTP host is missing — receipts can be saved but not emailed." });
     } else {
-      let storedPwd = false;
-      try {
-        const p = await invoke<string | null>("keychain_get", { key: "smtp_password" });
-        storedPwd = !!p;
-      } catch {}
+      let storedPwd = settings.smtp_password_set === "1";
       if (!storedPwd) {
         out.push({ key: "smtp", label: "Email (SMTP)", state: "warn",
           detail: `Host configured (${settings.smtp_host}) but no app password stored. Use 'Send Test Email' below to verify.` });

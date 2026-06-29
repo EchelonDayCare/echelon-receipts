@@ -108,14 +108,13 @@ export async function runCloudBackupIfDue(): Promise<CloudBackupResult | null> {
     if (s.backup_cloud_enabled === "0") return null; // explicitly off
     if (!recipientFor(s)) return null; // not configured yet — silent
     if (!s.smtp_host || !s.smtp_user) return null;
-    const password = await invoke<string | null>("keychain_get", { key: "smtp_password" });
-    if (!password) return null;
+    if (s.smtp_password_set !== "1") return null; // no password stored — don't prompt keychain
 
     const now = new Date();
     const thisMonth = monthKey(now);
     const targetMonth = prevMonthKey(now); // back up the month that just ended
     const last = s.last_cloud_backup_month || "";
-    // Already backed up this calendar month? skip.
+    // Already backed up this calendar month? skip — avoids keychain prompt on every launch.
     if (last && last >= targetMonth) return null;
     // Brand new install (no last value) — back up the previous month once.
     // (Avoids spamming a backup on day 1 of installation in the same month with no data.)

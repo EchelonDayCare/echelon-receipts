@@ -41,11 +41,9 @@ export default function Settings() {
 
   useEffect(() => {
     (async () => {
-      setS(await getSettings());
-      try {
-        const p = await invoke<string | null>("keychain_get", { key: "smtp_password" });
-        setHasStoredPassword(!!p);
-      } catch { /* keychain may not be available in dev — ignore */ }
+      const loaded = await getSettings();
+      setS(loaded);
+      setHasStoredPassword(loaded.smtp_password_set === "1");
     })();
   }, []);
 
@@ -55,6 +53,7 @@ export default function Settings() {
       for (const [k, v] of Object.entries(s)) await setSetting(k, v ?? "");
       if (smtpPassword.trim()) {
         await invoke("keychain_set", { key: "smtp_password", value: smtpPassword.trim() });
+        await setSetting("smtp_password_set", "1");
         setHasStoredPassword(true);
         setSmtpPassword("");
       }
@@ -69,6 +68,7 @@ export default function Settings() {
   async function clearStoredPassword() {
     if (!confirm("Remove the stored SMTP password from the OS keychain?")) return;
     await invoke("keychain_delete", { key: "smtp_password" });
+    await setSetting("smtp_password_set", "");
     setHasStoredPassword(false);
     alert("Password removed.");
   }
@@ -80,6 +80,7 @@ export default function Settings() {
       for (const [k, v] of Object.entries(s)) await setSetting(k, v ?? "");
       if (smtpPassword.trim()) {
         await invoke("keychain_set", { key: "smtp_password", value: smtpPassword.trim() });
+        await setSetting("smtp_password_set", "1");
         setHasStoredPassword(true); setSmtpPassword("");
       }
       await sendTestEmail(await getSettings());
