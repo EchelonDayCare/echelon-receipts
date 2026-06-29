@@ -1,5 +1,5 @@
 import Database from "@tauri-apps/plugin-sql";
-import type { Student, Receipt, SettingsMap, AnnualReceipt } from "../types";
+import type { Student, Receipt, SettingsMap, AnnualReceipt, AccbEntry, FeeBreakdown } from "../types";
 
 let _db: Database | null = null;
 let _schemaChecked = false;
@@ -86,6 +86,36 @@ async function ensureSchema(d: Database): Promise<void> {
     )`);
     await d.execute("CREATE INDEX IF NOT EXISTS idx_annual_person_year ON annual_receipts(person_id, calendar_year)");
   }
+
+  // Migration 005 — CCFRI + ACCB
+  for (const [k, v] of [
+    ["subsidies_enabled", "0"],
+    ["gross_monthly_fee", ""],
+    ["ccfri_monthly_reduction", ""],
+    ["subsidy_stmt_subject", "Monthly Fee Breakdown - {{student}} - {{month_label}} {{year}}"],
+    ["subsidy_stmt_body",
+      "Hi,\n\nPlease find attached the monthly fee breakdown for {{student}} for {{month_label}} {{year}}.\n\nThis shows how the BC government subsidies (CCFRI and any Affordable Child Care Benefit) reduced your gross monthly fee to the amount you actually paid. The amount you paid is what appears on your Annual Tax Receipt for the CRA.\n\nIf you have any questions, please reply to this email.\n\nThank you,\nEchelon Daycare Society\n{{contact_email}} | {{contact_phone}}"],
+  ] as const) await setting(k, v);
+  await addCol("students", "gross_override", "REAL");
+  await addCol("receipts", "gross_amount", "REAL");
+  await addCol("receipts", "ccfri_amount", "REAL");
+  await addCol("receipts", "accb_amount", "REAL");
+  if (!(await tableExists("accb_entries"))) {
+    console.warn("[ensureSchema] creating accb_entries");
+    await d.execute(`CREATE TABLE accb_entries (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      student_id INTEGER NOT NULL,
+      year INTEGER NOT NULL,
+      month INTEGER NOT NULL,
+      amount REAL NOT NULL,
+      notes TEXT,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      UNIQUE(student_id, year, month),
+      FOREIGN KEY (student_id) REFERENCES students(id)
+    )`);
+    await d.execute("CREATE INDEX IF NOT EXISTS idx_accb_student ON accb_entries(student_id)");
+    await d.execute("CREATE INDEX IF NOT EXISTS idx_accb_period ON accb_entries(year, month)");
+  }
 }
 
 // ---------- Person identity ----------
@@ -149,15 +179,16 @@ export async function listYears(): Promise<number[]> {
 }
 export async function upsertStudent(s: Partial<Student> & { name: string; year: number }) {
   const pid = s.person_id || personIdFor(s.name, s.father_name, s.mother_name);
+  const grossOv = s.gross_override === undefined ? null : s.gross_override;
   if (s.id) {
     await (await db()).execute(
-      "UPDATE students SET name=?, father_name=?, mother_name=?, email=?, year=?, active=?, person_id=? WHERE id=?",
-      [s.name, s.father_name ?? null, s.mother_name ?? null, s.email ?? null, s.year, s.active ?? 1, pid, s.id]
+      "UPDATE students SET name=?, father_name=?, mother_name=?, email=?, year=?, active=?, person_id=?, gross_override=? WHERE id=?",
+      [s.name, s.father_name ?? null, s.mother_name ?? null, s.email ?? null, s.year, s.active ?? 1, pid, grossOv, s.id]
     );
   } else {
     await (await db()).execute(
-      "INSERT INTO students(name,father_name,mother_name,email,year,active,person_id) VALUES(?,?,?,?,?,1,?)",
-      [s.name, s.father_name ?? null, s.mother_name ?? null, s.email ?? null, s.year, pid]
+      "INSERT INTO students(name,father_name,mother_name,email,year,active,person_id,gross_override) VALUES(?,?,?,?,?,1,?,?)",
+      [s.name, s.father_name ?? null, s.mother_name ?? null, s.email ?? null, s.year, pid, grossOv]
     );
   }
 }
@@ -180,16 +211,108 @@ export async function backfillPersonIds(): Promise<number> {
 export async function createReceipt(r: Omit<Receipt, "id" | "created_at" | "voided" | "emailed_at" | "emailed_to">) {
   await (await db()).execute(
     `INSERT INTO receipts(receipt_no,date,student_id,student_name_snapshot,
-      father_name_snapshot,mother_name_snapshot,description,amount,pending_amount,comments,is_refund)
-     VALUES(?,?,?,?,?,?,?,?,?,?,?)`,
+      father_name_snapshot,mother_name_snapshot,description,amount,pending_amount,comments,is_refund,
+      gross_amount,ccfri_amount,accb_amount)
+     VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
     [
       r.receipt_no, r.date, r.student_id, r.student_name_snapshot,
       r.father_name_snapshot, r.mother_name_snapshot,
       r.description, r.amount, r.pending_amount, r.comments,
       r.is_refund ? 1 : 0,
+      r.gross_amount ?? null, r.ccfri_amount ?? null, r.accb_amount ?? null,
     ]
   );
   await bumpReceiptNo(r.receipt_no);
+}
+
+// ---------- BC Subsidies (CCFRI + ACCB) ----------
+export function subsidiesEnabled(s: SettingsMap): boolean {
+  return s.subsidies_enabled === "1";
+}
+export function computeFeeBreakdown(
+  student: Pick<Student, "id" | "gross_override"> | null,
+  settings: SettingsMap,
+  accbAmount: number = 0
+): FeeBreakdown {
+  const enabled = subsidiesEnabled(settings);
+  const baseGross = parseFloat(settings.gross_monthly_fee || "0") || 0;
+  const gross = student?.gross_override != null ? Number(student.gross_override) : baseGross;
+  const ccfri = enabled ? (parseFloat(settings.ccfri_monthly_reduction || "0") || 0) : 0;
+  const accb  = enabled ? Math.max(0, accbAmount) : 0;
+  const cappedCcfri = Math.min(ccfri, gross);
+  const afterCcfri  = Math.max(0, gross - cappedCcfri);
+  const cappedAccb  = Math.min(accb, afterCcfri);
+  const parent_pays = Math.max(0, afterCcfri - cappedAccb);
+  return { gross, ccfri: cappedCcfri, accb: cappedAccb, parent_pays, enabled };
+}
+
+export async function getAccbForMonth(studentId: number, year: number, month: number): Promise<number> {
+  const rows = await (await db()).select<{ amount: number }[]>(
+    "SELECT amount FROM accb_entries WHERE student_id=? AND year=? AND month=?",
+    [studentId, year, month]
+  );
+  return rows[0]?.amount ?? 0;
+}
+export async function listAccbForStudent(studentId: number): Promise<AccbEntry[]> {
+  return await (await db()).select<AccbEntry[]>(
+    "SELECT * FROM accb_entries WHERE student_id=? ORDER BY year DESC, month DESC",
+    [studentId]
+  );
+}
+export async function upsertAccb(studentId: number, year: number, month: number, amount: number, notes: string | null) {
+  if (!amount || amount <= 0) {
+    await (await db()).execute(
+      "DELETE FROM accb_entries WHERE student_id=? AND year=? AND month=?",
+      [studentId, year, month]
+    );
+    return;
+  }
+  await (await db()).execute(
+    `INSERT INTO accb_entries(student_id,year,month,amount,notes)
+     VALUES(?,?,?,?,?)
+     ON CONFLICT(student_id,year,month)
+     DO UPDATE SET amount=excluded.amount, notes=excluded.notes`,
+    [studentId, year, month, amount, notes]
+  );
+}
+export async function deleteAccb(id: number) {
+  await (await db()).execute("DELETE FROM accb_entries WHERE id=?", [id]);
+}
+
+// Subsidy reconciliation: totals collected per calendar month.
+export interface SubsidyMonthRow {
+  year: number;
+  month: number;
+  receipt_count: number;
+  gross_total: number;
+  ccfri_total: number;
+  accb_total: number;
+  parent_paid_total: number;
+}
+export async function subsidyReconciliation(year?: number): Promise<SubsidyMonthRow[]> {
+  const args: any[] = [];
+  let where = "WHERE voided=0";
+  if (year) { where += " AND substr(date,1,4)=?"; args.push(String(year)); }
+  const rows = await (await db()).select<any[]>(
+    `SELECT substr(date,1,4) AS y, substr(date,6,2) AS m,
+            COUNT(*) AS receipt_count,
+            COALESCE(SUM(gross_amount),0) AS gross_total,
+            COALESCE(SUM(ccfri_amount),0) AS ccfri_total,
+            COALESCE(SUM(accb_amount),0)  AS accb_total,
+            COALESCE(SUM(CASE WHEN is_refund=1 THEN -amount ELSE amount END),0) AS parent_paid_total
+     FROM receipts ${where}
+     GROUP BY y, m ORDER BY y DESC, m DESC`,
+    args
+  );
+  return rows.map((r) => ({
+    year: parseInt(r.y, 10),
+    month: parseInt(r.m, 10),
+    receipt_count: r.receipt_count,
+    gross_total: r.gross_total,
+    ccfri_total: r.ccfri_total,
+    accb_total: r.accb_total,
+    parent_paid_total: r.parent_paid_total,
+  }));
 }
 export async function listReceipts(opts: {
   search?: string; year?: number; month?: number; studentId?: number;

@@ -1,9 +1,10 @@
 import { useEffect, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import { readFile } from "@tauri-apps/plugin-fs";
-import { listStudents, listYears, upsertStudent, deleteStudent } from "../lib/db";
+import { listStudents, listYears, upsertStudent, deleteStudent, getSettings,
+  listAccbForStudent, upsertAccb, deleteAccb } from "../lib/db";
 import { parseRosterFile } from "../lib/excelImport";
-import type { Student } from "../types";
+import type { Student, AccbEntry, SettingsMap } from "../types";
 
 export default function Students() {
   const now = new Date().getFullYear();
@@ -12,6 +13,11 @@ export default function Students() {
   const [students, setStudents] = useState<Student[]>([]);
   const [editing, setEditing] = useState<Partial<Student> | null>(null);
   const [pendingImport, setPendingImport] = useState<{ path: string; year: number } | null>(null);
+  const [settings, setSettings] = useState<SettingsMap>({});
+  const [accbFor, setAccbFor] = useState<{ student: Student; entries: AccbEntry[] } | null>(null);
+  const [accbDraft, setAccbDraft] = useState<{ year: number; month: number; amount: string; notes: string }>(
+    { year: new Date().getFullYear(), month: new Date().getMonth() + 1, amount: "", notes: "" }
+  );
 
   async function refresh() {
     const ys = await listYears();
@@ -19,8 +25,27 @@ export default function Students() {
     setYears(all);
     if (!all.includes(year)) setYear(all[0]);
     setStudents(await listStudents(year, false));
+    setSettings(await getSettings());
   }
   useEffect(() => { refresh(); /* eslint-disable-next-line */ }, [year]);
+
+  async function openAccb(s: Student) {
+    const entries = await listAccbForStudent(s.id);
+    setAccbFor({ student: s, entries });
+    setAccbDraft({ year: new Date().getFullYear(), month: new Date().getMonth() + 1, amount: "", notes: "" });
+  }
+  async function refreshAccb() {
+    if (!accbFor) return;
+    setAccbFor({ ...accbFor, entries: await listAccbForStudent(accbFor.student.id) });
+  }
+  async function saveAccbRow() {
+    if (!accbFor) return;
+    const amt = parseFloat(accbDraft.amount);
+    if (!amt || amt <= 0) { alert("Enter a positive amount."); return; }
+    await upsertAccb(accbFor.student.id, accbDraft.year, accbDraft.month, amt, accbDraft.notes || null);
+    setAccbDraft({ ...accbDraft, amount: "", notes: "" });
+    refreshAccb();
+  }
 
   async function onImport() {
     const path = await open({
@@ -94,6 +119,9 @@ export default function Students() {
                 <td>{s.active ? <span className="badge ok">Active</span> : <span className="badge warn">Inactive</span>}</td>
                 <td style={{ textAlign: "right" }}>
                   <button className="btn ghost" onClick={() => setEditing(s)}>Edit</button>
+                  {settings.subsidies_enabled === "1" && (
+                    <button className="btn ghost" onClick={() => openAccb(s)}>ACCB…</button>
+                  )}
                   {s.active === 1 && (
                     <button className="btn ghost" style={{ color: "var(--danger)" }}
                       onClick={async () => { if (confirm(`Mark ${s.name} inactive?`)) { await deleteStudent(s.id); refresh(); } }}>
@@ -142,6 +170,19 @@ export default function Students() {
             <label>Email</label>
             <input value={editing.email || ""} onChange={(e) => setEditing({ ...editing, email: e.target.value })} />
           </div>
+          {settings.subsidies_enabled === "1" && (
+            <div className="field">
+              <label>Gross Monthly Fee Override ($) <small style={{ color: "var(--muted)" }}>— blank uses daycare default ({settings.gross_monthly_fee || "not set"})</small></label>
+              <input
+                type="number" step="0.01"
+                value={editing.gross_override == null ? "" : String(editing.gross_override)}
+                onChange={(e) => {
+                  const v = e.target.value.trim();
+                  setEditing({ ...editing, gross_override: v === "" ? null : parseFloat(v) });
+                }}
+                placeholder="(use default)" />
+            </div>
+          )}
           <div style={{ display: "flex", gap: 10 }}>
             <button className="btn" onClick={async () => {
               if (!editing.name?.trim()) { alert("Name required."); return; }
@@ -151,6 +192,7 @@ export default function Students() {
                 mother_name: editing.mother_name || null,
                 email: editing.email || null,
                 year: editing.year || year, active: editing.active ?? 1,
+                gross_override: editing.gross_override ?? null,
               });
               setEditing(null); refresh();
             }}>Save</button>
@@ -185,6 +227,83 @@ export default function Students() {
             <div style={{ display: "flex", gap: 10, marginTop: 12 }}>
               <button className="btn" onClick={runImport}>Import</button>
               <button className="btn secondary" onClick={() => setPendingImport(null)}>Cancel</button>
+            </div>
+          </div>
+        </div>
+      )}
+      {accbFor && (
+        <div
+          onClick={(e) => { if (e.target === e.currentTarget) setAccbFor(null); }}
+          style={{
+            position: "fixed", inset: 0, background: "rgba(0,0,0,0.45)",
+            display: "flex", alignItems: "flex-start", justifyContent: "center",
+            paddingTop: 60, zIndex: 1000,
+          }}
+        >
+          <div className="card" style={{ width: "min(680px, 94vw)", maxHeight: "85vh", overflow: "auto", margin: 0 }}>
+            <h3 style={{ marginTop: 0 }}>ACCB Ledger — {accbFor.student.name}</h3>
+            <p style={{ color: "var(--muted)", fontSize: 13, marginTop: -4 }}>
+              Affordable Child Care Benefit amount the BC government paid to Echelon on this family&apos;s behalf, per month.
+              Used to deduct from the gross fee when computing what the parent paid out-of-pocket on the monthly receipt.
+            </p>
+
+            <div className="row">
+              <div className="field" style={{ maxWidth: 110 }}>
+                <label>Year</label>
+                <input type="number" value={accbDraft.year}
+                  onChange={(e) => setAccbDraft({ ...accbDraft, year: parseInt(e.target.value, 10) || now })} />
+              </div>
+              <div className="field" style={{ maxWidth: 110 }}>
+                <label>Month</label>
+                <select value={accbDraft.month} onChange={(e) => setAccbDraft({ ...accbDraft, month: parseInt(e.target.value, 10) })}>
+                  {[1,2,3,4,5,6,7,8,9,10,11,12].map((m) => <option key={m} value={m}>{m}</option>)}
+                </select>
+              </div>
+              <div className="field" style={{ maxWidth: 140 }}>
+                <label>Amount ($)</label>
+                <input type="number" step="0.01" value={accbDraft.amount}
+                  onChange={(e) => setAccbDraft({ ...accbDraft, amount: e.target.value })} />
+              </div>
+              <div className="field">
+                <label>Notes</label>
+                <input value={accbDraft.notes}
+                  onChange={(e) => setAccbDraft({ ...accbDraft, notes: e.target.value })} />
+              </div>
+            </div>
+            <div style={{ display: "flex", gap: 10, marginBottom: 14 }}>
+              <button className="btn" onClick={saveAccbRow}>Add / Update</button>
+              <span style={{ color: "var(--muted)", fontSize: 12, alignSelf: "center" }}>
+                Tip: setting amount to 0 deletes that month&apos;s entry.
+              </span>
+            </div>
+
+            {accbFor.entries.length === 0 ? (
+              <div className="empty">No ACCB entries yet.</div>
+            ) : (
+              <table className="data">
+                <thead>
+                  <tr><th>Year</th><th>Month</th><th>Amount</th><th>Notes</th><th></th></tr>
+                </thead>
+                <tbody>
+                  {accbFor.entries.map((e) => (
+                    <tr key={e.id}>
+                      <td>{e.year}</td>
+                      <td>{e.month}</td>
+                      <td>${e.amount.toFixed(2)}</td>
+                      <td>{e.notes || "—"}</td>
+                      <td style={{ textAlign: "right" }}>
+                        <button className="btn ghost" style={{ color: "var(--danger)" }}
+                          onClick={async () => { if (confirm("Delete this ACCB entry?")) { await deleteAccb(e.id); refreshAccb(); } }}>
+                          Delete
+                        </button>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            )}
+            <div style={{ display: "flex", gap: 10, marginTop: 14 }}>
+              <button className="btn secondary" onClick={() => setAccbFor(null)}>Close</button>
             </div>
           </div>
         </div>

@@ -29,6 +29,12 @@ pub fn run() {
             sql: include_str!("../migrations/004_annual_receipts.sql"),
             kind: MigrationKind::Up,
         },
+        Migration {
+            version: 5,
+            description: "add_subsidies_ccfri_accb",
+            sql: include_str!("../migrations/005_subsidies.sql"),
+            kind: MigrationKind::Up,
+        },
     ];
 
     tauri::Builder::default()

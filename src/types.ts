@@ -8,6 +8,7 @@ export interface Student {
   active: number;
   created_at: string;
   person_id: string | null;
+  gross_override: number | null;
 }
 
 export interface Receipt {
@@ -27,6 +28,27 @@ export interface Receipt {
   emailed_at: string | null;
   emailed_to: string | null;
   is_refund: number;
+  gross_amount: number | null;
+  ccfri_amount: number | null;
+  accb_amount: number | null;
+}
+
+export interface AccbEntry {
+  id: number;
+  student_id: number;
+  year: number;
+  month: number;
+  amount: number;
+  notes: string | null;
+  created_at: string;
+}
+
+export interface FeeBreakdown {
+  gross: number;
+  ccfri: number;
+  accb: number;
+  parent_pays: number;
+  enabled: boolean;
 }
 
 export interface AnnualReceipt {

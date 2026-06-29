@@ -1,8 +1,15 @@
 import { useEffect, useMemo, useState } from "react";
+import { openPath } from "@tauri-apps/plugin-opener";
+import { writeFile, exists, mkdir } from "@tauri-apps/plugin-fs";
+import { tempDir, join } from "@tauri-apps/api/path";
 import { getSettings, listReceipts, voidReceipt, markEmailed, listStudents } from "../lib/db";
 import type { Receipt, SettingsMap, Student } from "../types";
 import { printReceipt, saveReceiptPdf } from "../lib/receipt";
-import { sendReceiptEmail, parseRecipients } from "../lib/email";
+import { sendReceiptEmail, parseRecipients, sendSubsidyStatementEmail } from "../lib/email";
+import {
+  renderSubsidyStatementPdf, saveSubsidyStatementPdf,
+  renderSubsidyEmailTemplate, monthLabelFromDate,
+} from "../lib/subsidyStmt";
 
 const MONTHS = ["All","Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
 
@@ -89,6 +96,45 @@ export default function History() {
                       alert(p ? "Saved PDF:\n" + p : "Set a PDF folder in Settings first.");
                     } catch (e) { alert("Save failed: " + e); }
                   }}>Save PDF</button>
+                  {settings.subsidies_enabled === "1" && r.gross_amount != null && r.gross_amount > 0 && (
+                    <>
+                      <button className="btn ghost" onClick={async () => {
+                        try {
+                          let target = await saveSubsidyStatementPdf(r, settings);
+                          if (!target) {
+                            const bytes = await renderSubsidyStatementPdf(r, settings);
+                            const dir = await join(await tempDir(), "echelon-receipts");
+                            if (!(await exists(dir))) await mkdir(dir, { recursive: true });
+                            target = await join(dir, `SUB_${r.receipt_no}_${r.date}.pdf`);
+                            await writeFile(target, bytes);
+                          }
+                          await openPath(target);
+                        } catch (e: any) { alert("Statement failed: " + (e?.message || e)); }
+                      }}>Subsidy PDF</button>
+                      <button className="btn ghost"
+                        disabled={recipients.length === 0}
+                        title={recipients.length === 0 ? "No email on file for this student" : "Email the monthly subsidy breakdown"}
+                        onClick={async () => {
+                          if (!confirm(`Email subsidy statement for receipt #${r.receipt_no} to:\n  ${recipients.join("\n  ")}`)) return;
+                          try {
+                            const bytes = await renderSubsidyStatementPdf(r, settings);
+                            const { year: y, label } = monthLabelFromDate(r.date);
+                            const subjTpl = settings.subsidy_stmt_subject || "Monthly Fee Breakdown - {{student}} - {{month_label}} {{year}}";
+                            const bodyTpl = settings.subsidy_stmt_body || "Please find attached the monthly fee breakdown.";
+                            await sendSubsidyStatementEmail({
+                              pdfBytes: bytes,
+                              filename: `Subsidy_${r.receipt_no}_${r.student_name_snapshot.replace(/[^\w]+/g, "_")}.pdf`,
+                              subject: renderSubsidyEmailTemplate(subjTpl, r, settings),
+                              body: renderSubsidyEmailTemplate(bodyTpl, r, settings),
+                              recipients, settings,
+                            });
+                            alert(`✉️ Subsidy statement (${label} ${y}) sent to ${recipients.join(", ")}`);
+                          } catch (e: any) { alert("Email failed:\n" + (e?.message || e)); }
+                        }}>
+                        Email Subsidy
+                      </button>
+                    </>
+                  )}
                   <button className="btn ghost"
                     disabled={recipients.length === 0}
                     title={recipients.length === 0 ? "No email on file for this student" : ""}

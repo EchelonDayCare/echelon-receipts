@@ -1,8 +1,9 @@
 import { useEffect, useMemo, useState } from "react";
 import {
   listStudents, listYears, nextReceiptNo, createReceipt, getSettings,
+  computeFeeBreakdown, getAccbForMonth, subsidiesEnabled,
 } from "../lib/db";
-import type { Student } from "../types";
+import type { Student, SettingsMap, FeeBreakdown } from "../types";
 import { printReceipt, saveReceiptPdf } from "../lib/receipt";
 import { sendReceiptEmail, parseRecipients } from "../lib/email";
 import { markEmailed, listReceipts } from "../lib/db";
@@ -25,6 +26,9 @@ export default function NewReceipt() {
   const [description, setDescription] = useState<string>("");
   const [descTouched, setDescTouched] = useState(false);
   const [isRefund, setIsRefund] = useState<boolean>(false);
+  const [settings, setSettings] = useState<SettingsMap>({});
+  const [accbThisMonth, setAccbThisMonth] = useState<number>(0);
+  const [amountTouched, setAmountTouched] = useState(false);
 
   async function refresh() {
     const ys = await listYears();
@@ -34,6 +38,7 @@ export default function NewReceipt() {
     const ss = await listStudents(useYear);
     setStudents(ss);
     const s = await getSettings();
+    setSettings(s);
     setAmount(s.default_fee || "485");
     setReceiptNo(await nextReceiptNo());
   }
@@ -45,11 +50,35 @@ export default function NewReceipt() {
 
   const student = useMemo(() => students.find((s) => s.id === studentId) || null, [students, studentId]);
 
+  // ACCB lookup whenever student / fee month / fee year changes
+  useEffect(() => {
+    (async () => {
+      if (!student) { setAccbThisMonth(0); return; }
+      const monthIdx = MONTHS.indexOf(month) + 1;
+      const v = await getAccbForMonth(student.id, feeYear, monthIdx);
+      setAccbThisMonth(v);
+    })();
+  }, [student, month, feeYear]);
+
+  const breakdown: FeeBreakdown | null = useMemo(() => {
+    if (!subsidiesEnabled(settings)) return null;
+    if (!student) return null;
+    return computeFeeBreakdown(student, settings, accbThisMonth);
+  }, [student, settings, accbThisMonth]);
+
+  // Auto-fill amount with parent_pays unless the user has typed something
+  useEffect(() => {
+    if (breakdown && !amountTouched && !isRefund) {
+      setAmount(breakdown.parent_pays.toFixed(2));
+    }
+  }, [breakdown, isRefund]); // eslint-disable-line
+
   async function onSave(action: "print" | "email" | "save") {
     if (!student) { alert("Pick a student first."); return; }
     if (!description.trim()) { alert("Description is required."); return; }
     const amt = parseFloat(amount); if (!(amt >= 0)) { alert("Invalid amount."); return; }
     const pen = parseFloat(pending || "0") || 0;
+    const bk = (breakdown && !isRefund) ? breakdown : null;
     await createReceipt({
       receipt_no: receiptNo, date, student_id: student.id,
       student_name_snapshot: student.name,
@@ -57,8 +86,11 @@ export default function NewReceipt() {
       mother_name_snapshot: student.mother_name,
       description, amount: amt, pending_amount: pen, comments: comments || null,
       is_refund: isRefund ? 1 : 0,
+      gross_amount: bk ? bk.gross : null,
+      ccfri_amount: bk ? bk.ccfri : null,
+      accb_amount:  bk ? bk.accb : null,
     });
-    const settings = await getSettings();
+    const settingsLatest = await getSettings();
     const r = {
       id: 0, receipt_no: receiptNo, date, student_id: student.id,
       student_name_snapshot: student.name,
@@ -68,9 +100,12 @@ export default function NewReceipt() {
       voided: 0, created_at: new Date().toISOString(),
       emailed_at: null, emailed_to: null,
       is_refund: isRefund ? 1 : 0,
+      gross_amount: bk ? bk.gross : null,
+      ccfri_amount: bk ? bk.ccfri : null,
+      accb_amount:  bk ? bk.accb : null,
     };
     let savedPath: string | null = null;
-    try { savedPath = await saveReceiptPdf(r, settings); }
+    try { savedPath = await saveReceiptPdf(r, settingsLatest); }
     catch (e) { console.error(e); alert("Receipt saved, but PDF auto-save failed:\n" + e); }
 
     let emailMsg = "";
@@ -82,8 +117,7 @@ export default function NewReceipt() {
         const ok = confirm(`Email receipt to:\n  ${recipients.join("\n  ")}\n\nProceed?`);
         if (ok) {
           try {
-            await sendReceiptEmail({ receipt: r, recipients, settings });
-            // Find the row we just inserted to mark it as emailed
+            await sendReceiptEmail({ receipt: r, recipients, settings: settingsLatest });
             const last = await listReceipts({});
             const justSaved = last.find((x) => x.receipt_no === receiptNo);
             if (justSaved) await markEmailed(justSaved.id, recipients);
@@ -95,9 +129,9 @@ export default function NewReceipt() {
       }
     }
 
-    if (action === "print") printReceipt(r, settings);
+    if (action === "print") printReceipt(r, settingsLatest);
     setReceiptNo((n) => n + 1);
-    setComments(""); setPending(""); setIsRefund(false);
+    setComments(""); setPending(""); setIsRefund(false); setAmountTouched(false);
     alert(`Receipt #${receiptNo} saved.${savedPath ? "\nPDF: " + savedPath : ""}${emailMsg}`);
   }
 
@@ -162,10 +196,36 @@ export default function NewReceipt() {
           <input value={description} onChange={(e) => { setDescription(e.target.value); setDescTouched(true); }} />
         </div>
 
+        {breakdown && breakdown.gross > 0 && !isRefund && (
+          <div className="card" style={{ background: "#eff6ff", border: "1px solid #bfdbfe", padding: 12, marginBottom: 14 }}>
+            <div style={{ fontWeight: 600, marginBottom: 6, color: "#1e40af" }}>Fee Breakdown (auto-calculated)</div>
+            <table style={{ width: "100%", fontSize: 13 }}>
+              <tbody>
+                <tr><td>Gross monthly fee</td><td style={{ textAlign: "right" }}>${breakdown.gross.toFixed(2)}</td></tr>
+                {breakdown.ccfri > 0 && (
+                  <tr><td>BC CCFRI reduction</td><td style={{ textAlign: "right", color: "#15803d" }}>−${breakdown.ccfri.toFixed(2)}</td></tr>
+                )}
+                {breakdown.accb > 0 && (
+                  <tr><td>ACCB subsidy ({month} {feeYear})</td><td style={{ textAlign: "right", color: "#15803d" }}>−${breakdown.accb.toFixed(2)}</td></tr>
+                )}
+                <tr style={{ borderTop: "1px solid #bfdbfe", fontWeight: 700 }}>
+                  <td style={{ paddingTop: 4 }}>Parent pays out-of-pocket</td>
+                  <td style={{ textAlign: "right", paddingTop: 4 }}>${breakdown.parent_pays.toFixed(2)}</td>
+                </tr>
+              </tbody>
+            </table>
+            {breakdown.accb === 0 && student && (
+              <div style={{ fontSize: 11, color: "#64748b", marginTop: 6 }}>
+                No ACCB on file for {month} {feeYear}. Add it on the Students page → ACCB… if this family qualifies.
+              </div>
+            )}
+          </div>
+        )}
+
         <div className="row">
           <div className="field">
             <label>Amount Received ($)</label>
-            <input value={amount} onChange={(e) => setAmount(e.target.value)} />
+            <input value={amount} onChange={(e) => { setAmount(e.target.value); setAmountTouched(true); }} />
           </div>
           <div className="field">
             <label>Pending Fees ($)</label>

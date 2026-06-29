@@ -144,6 +144,18 @@ export async function sendReceiptEmail(opts: {
   });
 }
 
+export async function sendSubsidyStatementEmail(opts: {
+  pdfBytes: Uint8Array;
+  filename: string;
+  subject: string;
+  body: string;
+  recipients: string[];
+  settings: SettingsMap;
+}): Promise<void> {
+  // Same wire format as the annual receipt email — single attachment.
+  return sendAnnualReceiptEmail(opts);
+}
+
 export async function sendTestEmail(s: SettingsMap): Promise<void> {
   const password = await invoke<string | null>("keychain_get", { key: "smtp_password" });
   if (!password) throw new Error("Save the SMTP password first.");

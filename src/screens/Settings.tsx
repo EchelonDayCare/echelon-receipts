@@ -144,6 +144,64 @@ export default function Settings() {
         </div>
 
         <hr style={{ border: 0, borderTop: "1px solid var(--border)", margin: "20px 0" }} />
+        <h3 style={{ margin: "0 0 4px" }}>BC Subsidies (CCFRI &amp; ACCB)</h3>
+        <p className="subtitle" style={{ marginBottom: 14 }}>
+          Track the BC Child Care Fee Reduction Initiative and Affordable Child Care Benefit on every receipt
+          so parents only claim what they actually paid out-of-pocket on their tax return.
+          {" "}Toggle off to revert to a flat-amount workflow — data is preserved.
+        </p>
+
+        <div className="field">
+          <label>
+            <input type="checkbox" checked={s.subsidies_enabled === "1"}
+              onChange={(e) => setS({ ...s, subsidies_enabled: e.target.checked ? "1" : "0" })}
+              style={{ marginRight: 6, verticalAlign: "middle" }} />
+            Enable BC subsidy breakdown on receipts
+          </label>
+        </div>
+
+        {s.subsidies_enabled === "1" && (
+          <>
+            <div className="row">
+              <div className="field">
+                <label>Gross Monthly Fee ($)</label>
+                <input value={s.gross_monthly_fee || ""}
+                  onChange={(e) => setS({ ...s, gross_monthly_fee: e.target.value })}
+                  placeholder="e.g. 1035" />
+                <small style={{ color: "var(--muted)" }}>
+                  The published full-time monthly fee before any subsidy. Used as the default for every student
+                  (individual overrides are available on the Students page).
+                </small>
+              </div>
+              <div className="field">
+                <label>CCFRI Monthly Reduction ($)</label>
+                <input value={s.ccfri_monthly_reduction || ""}
+                  onChange={(e) => setS({ ...s, ccfri_monthly_reduction: e.target.value })}
+                  placeholder="e.g. 550" />
+                <small style={{ color: "var(--muted)" }}>
+                  BC&apos;s reduction for &quot;Group Care 30-mo to school age&quot; full-time. Check current
+                  rates at <a href="https://www2.gov.bc.ca/gov/content/family-social-supports/caring-for-young-children/childcarebc-programs/fee-reduction-initiative" target="_blank" rel="noreferrer">gov.bc.ca CCFRI</a>.
+                </small>
+              </div>
+            </div>
+
+            <div className="field">
+              <label>Subsidy Statement — Email Subject</label>
+              <input value={s.subsidy_stmt_subject || ""}
+                onChange={(e) => setS({ ...s, subsidy_stmt_subject: e.target.value })} />
+            </div>
+            <div className="field">
+              <label>Subsidy Statement — Email Body</label>
+              <textarea rows={7} value={s.subsidy_stmt_body || ""}
+                onChange={(e) => setS({ ...s, subsidy_stmt_body: e.target.value })} />
+              <small style={{ color: "var(--muted)" }}>
+                Tokens: {"{{student}} {{month_label}} {{year}} {{gross}} {{ccfri}} {{accb}} {{parent_paid}} {{daycare_name}} {{contact_email}} {{contact_phone}}"}
+              </small>
+            </div>
+          </>
+        )}
+
+        <hr style={{ border: 0, borderTop: "1px solid var(--border)", margin: "20px 0" }} />
         <h3 style={{ margin: "0 0 4px" }}>Email (SMTP)</h3>
         <p className="subtitle" style={{ marginBottom: 14 }}>
           Configure once so you can email receipts to parents in one click. Password is stored in the OS keychain (encrypted), never in the database.

@@ -18,6 +18,19 @@ function safeName(s: string): string {
 export function buildReceiptHtml(r: Receipt, s: SettingsMap): string {
   const logo = s.logo_data_url || DEFAULT_LOGO_DATA_URL;
   const sig = s.signature_data_url || DEFAULT_SIGNATURE_DATA_URL;
+  const hasBreakdown =
+    r.gross_amount != null && r.gross_amount > 0 &&
+    ((r.ccfri_amount ?? 0) > 0 || (r.accb_amount ?? 0) > 0);
+  const breakdownRows = hasBreakdown ? `
+  <table class="bk">
+    <tbody>
+      <tr><td>Gross monthly fee</td><td class="r">$${fmtAmount(r.gross_amount!)}</td></tr>
+      ${(r.ccfri_amount ?? 0) > 0 ? `<tr><td>BC CCFRI reduction</td><td class="r minus">−$${fmtAmount(r.ccfri_amount!)}</td></tr>` : ""}
+      ${(r.accb_amount  ?? 0) > 0 ? `<tr><td>ACCB subsidy</td><td class="r minus">−$${fmtAmount(r.accb_amount!)}</td></tr>`  : ""}
+      <tr class="bktot"><td>Amount paid by parent</td><td class="r">$${fmtAmount(r.amount)}</td></tr>
+    </tbody>
+  </table>` : "";
+
   return `<!doctype html><html><head><meta charset="utf-8"><title>Receipt ${r.receipt_no}</title>
 <style>
   @page { size: Letter; margin: 0.5in; }
@@ -38,6 +51,11 @@ export function buildReceiptHtml(r: Receipt, s: SettingsMap): string {
   table.items td.amount { text-align: center; font-weight: 700; font-size: 16px; width: 28%; }
   table.items td.desc { width: 52%; }
   table.items td.name { width: 20%; text-align: center; font-weight: 600; }
+  table.bk { width: 60%; margin: 10px 0 0 auto; border-collapse: collapse; font-size: 12px; }
+  table.bk td { padding: 3px 8px; }
+  table.bk td.r { text-align: right; }
+  table.bk td.minus { color: #15803d; }
+  table.bk tr.bktot td { border-top: 1px solid #999; font-weight: 700; padding-top: 5px; }
   .comments { margin: 18px 0 6px; font-size: 14px; }
   .comments .lbl { display: inline-block; min-width: 100px; }
   .pending { font-style: italic; }
@@ -81,6 +99,7 @@ export function buildReceiptHtml(r: Receipt, s: SettingsMap): string {
       </tr>
     </tbody>
   </table>
+  ${breakdownRows}
 
   <div class="comments">
     <span class="lbl">Comments:</span>
