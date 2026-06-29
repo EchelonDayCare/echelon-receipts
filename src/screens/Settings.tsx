@@ -1,10 +1,13 @@
 import { useEffect, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import { invoke } from "@tauri-apps/api/core";
+import { copyFile, mkdir, exists } from "@tauri-apps/plugin-fs";
+import { appDataDir, join } from "@tauri-apps/api/path";
 import { getSettings, setSetting } from "../lib/db";
 import { sendTestEmail, SMTP_PRESETS } from "../lib/email";
 import { DEFAULT_LOGO_DATA_URL, DEFAULT_SIGNATURE_DATA_URL } from "../lib/defaults";
 import type { SettingsMap } from "../types";
+import HealthCheck from "../components/HealthCheck";
 
 const FIELDS: { key: string; label: string; hint?: string }[] = [
   { key: "daycare_name", label: "Daycare Name" },
@@ -77,6 +80,26 @@ export default function Settings() {
     }
   }
 
+  async function backupNow() {
+    try {
+      const folder = s.pdf_folder?.trim()
+        ? await join(s.pdf_folder, "Backups")
+        : await join(await appDataDir(), "Backups");
+      if (!(await exists(folder))) await mkdir(folder, { recursive: true });
+      const src = await join(await appDataDir(), "echelon.db");
+      const stamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
+      const dst = await join(folder, `echelon-${stamp}.db`);
+      await copyFile(src, dst);
+      const now = new Date().toISOString();
+      await setSetting("last_backup_at", now);
+      await setSetting("last_backup_path", dst);
+      setS((cur) => ({ ...cur, last_backup_at: now, last_backup_path: dst }));
+      alert(`✅ Backup saved to:\n${dst}`);
+    } catch (e: any) {
+      alert("❌ Backup failed:\n" + (e?.message || e));
+    }
+  }
+
   function pickImage(key: "logo_data_url" | "signature_data_url") {
     const inp = document.createElement("input");
     inp.type = "file"; inp.accept = "image/*";
@@ -93,6 +116,8 @@ export default function Settings() {
     <div>
       <h1>Settings</h1>
       <p className="subtitle">These values appear on every printed receipt.</p>
+
+      <HealthCheck settings={s} />
 
       <div className="card">
         {FIELDS.map((f) => (
@@ -234,7 +259,7 @@ export default function Settings() {
               onChange={(e) => setS({ ...s, sender_name: e.target.value })} />
           </div>
           <div className="field">
-            <label>SMTP Username (usually same as sender)</label>
+            <label>Email login (usually same as sender)</label>
             <input value={s.smtp_user || ""} placeholder="leave blank to use Sender Email"
               onChange={(e) => setS({ ...s, smtp_user: e.target.value })} />
           </div>
@@ -242,11 +267,12 @@ export default function Settings() {
 
         <div className="row">
           <div className="field">
-            <label>SMTP Host</label>
+            <label>Email server (host)</label>
             <input value={s.smtp_host || ""} onChange={(e) => setS({ ...s, smtp_host: e.target.value })} />
+            <small style={{ color: "var(--muted)" }}>Gmail: smtp.gmail.com · Outlook: smtp-mail.outlook.com</small>
           </div>
           <div className="field">
-            <label>SMTP Port</label>
+            <label>Port (usually 587)</label>
             <input value={s.smtp_port || "587"} onChange={(e) => setS({ ...s, smtp_port: e.target.value })} />
           </div>
         </div>
@@ -293,6 +319,20 @@ export default function Settings() {
           <button className="btn secondary" onClick={runTest} disabled={testing}>
             {testing ? "Sending…" : "Send Test Email to Myself"}
           </button>
+        </div>
+
+        <hr style={{ border: 0, borderTop: "1px solid var(--border)", margin: "20px 0" }} />
+        <h3 style={{ margin: "0 0 4px" }}>Backup</h3>
+        <p className="subtitle" style={{ marginBottom: 14 }}>
+          Make a safety copy of your database. Stored inside <code>Backups/</code> under your PDF folder
+          (or the app data folder if no PDF folder is chosen).
+          {s.last_backup_at && <> Last backup: <strong>{s.last_backup_at.slice(0, 19).replace("T", " ")}</strong>.</>}
+        </p>
+        <div style={{ display: "flex", gap: 10 }}>
+          <button className="btn secondary" onClick={backupNow}>Back up now</button>
+          {s.last_backup_path && (
+            <small style={{ color: "var(--muted)", alignSelf: "center" }}>→ {s.last_backup_path}</small>
+          )}
         </div>
 
         <hr style={{ border: 0, borderTop: "1px solid var(--border)", margin: "20px 0" }} />

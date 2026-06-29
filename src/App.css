@@ -145,3 +145,20 @@ table.data tr.voided td { color: #9ca3af; text-decoration: line-through; }
 .rowmenu-item:disabled { opacity: .45; cursor: not-allowed; }
 .rowmenu-item.danger { color: var(--danger); }
 .rowmenu-item.danger:hover { background: #fef2f2; }
+
+/* ---------- Health check card (Settings) ---------- */
+.card.health { padding: 16px 20px; margin-bottom: 18px; }
+.health-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 16px; flex-wrap: wrap; }
+.health-title { font-size: 16px; font-weight: 600; display: flex; align-items: center; gap: 8px; margin-bottom: 4px; }
+.health-list { list-style: none; padding: 0; margin: 14px 0 0; display: grid; grid-template-columns: repeat(2, 1fr); gap: 8px; }
+.health-item { display: flex; gap: 10px; align-items: flex-start; padding: 10px 12px; border-radius: 8px; border: 1px solid var(--border); background: #fff; }
+.health-item.ok    { background: #ecfdf5; border-color: #a7f3d0; }
+.health-item.warn  { background: #fffbeb; border-color: #fde68a; }
+.health-item.error { background: #fef2f2; border-color: #fecaca; }
+.health-dot { display: inline-flex; align-items: center; justify-content: center; width: 22px; height: 22px; border-radius: 50%; font-weight: 700; font-size: 12px; flex-shrink: 0; }
+.health-item.ok .health-dot    { background: #10b981; color: #fff; }
+.health-item.warn .health-dot  { background: #f59e0b; color: #fff; }
+.health-item.error .health-dot { background: #ef4444; color: #fff; }
+.health-lbl { font-size: 13px; font-weight: 600; color: var(--text); }
+.health-det { font-size: 12px; color: var(--muted); margin-top: 2px; }
+@media (max-width: 800px) { .health-list { grid-template-columns: 1fr; } }
