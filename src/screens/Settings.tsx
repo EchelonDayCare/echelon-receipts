@@ -10,17 +10,27 @@ import { DEFAULT_LOGO_DATA_URL, DEFAULT_SIGNATURE_DATA_URL } from "../lib/defaul
 import type { SettingsMap } from "../types";
 import HealthCheck from "../components/HealthCheck";
 
-const FIELDS: { key: string; label: string; hint?: string }[] = [
-  { key: "daycare_name", label: "Daycare Name" },
-  { key: "daycare_address", label: "Address" },
-  { key: "contact_email", label: "Contact Email" },
-  { key: "contact_phone", label: "Contact Phone" },
-  { key: "default_fee", label: "Default Fee ($)" },
-  { key: "next_receipt_no", label: "Next Receipt #" },
-  { key: "business_number", label: "Business Number (BN)", hint: "Appears on CRA annual receipts. e.g. 12345 6789 RC0001" },
-  { key: "director_name", label: "Signing Name", hint: "Person signing receipts" },
-  { key: "director_title", label: "Signing Title", hint: "e.g. Managing Director" },
-];
+function Field({ s, setS, k, label, hint, placeholder }: {
+  s: Record<string,string>; setS: (u: Record<string,string>) => void;
+  k: string; label: string; hint?: string; placeholder?: string;
+}) {
+  return (
+    <div className="field">
+      <label>{label}</label>
+      <input value={s[k] || ""} placeholder={placeholder} onChange={(e) => setS({ ...s, [k]: e.target.value })} />
+      {hint && <small style={{ color: "var(--muted)" }}>{hint}</small>}
+    </div>
+  );
+}
+
+function SectionHead({ title, sub }: { title: string; sub?: string }) {
+  return (
+    <div style={{ marginTop: 4, marginBottom: 10 }}>
+      <h3 style={{ margin: 0, fontSize: 14, color: "var(--muted)", textTransform: "uppercase", letterSpacing: ".06em" }}>{title}</h3>
+      {sub && <p className="subtitle" style={{ margin: "2px 0 0", fontSize: 12 }}>{sub}</p>}
+    </div>
+  );
+}
 
 export default function Settings() {
   const [s, setS] = useState<SettingsMap>({});
@@ -141,14 +151,38 @@ export default function Settings() {
       <HealthCheck settings={s} />
 
       <div className="card">
-        {FIELDS.map((f) => (
-          <div key={f.key} className="field">
-            <label>{f.label}</label>
-            <input value={s[f.key] || ""} onChange={(e) => setS({ ...s, [f.key]: e.target.value })} />
-          </div>
-        ))}
+        <SectionHead title="Business identity" sub="Shown at the top of every receipt." />
+        <Field s={s} setS={setS} k="daycare_name" label="Daycare Name" />
+        <Field s={s} setS={setS} k="daycare_address" label="Address" />
 
+        <hr style={{ border: 0, borderTop: "1px solid var(--border)", margin: "16px 0" }} />
+        <SectionHead title="Contact" sub="Used for the receipt footer and parent replies." />
         <div className="row">
+          <Field s={s} setS={setS} k="contact_email" label="Contact Email" placeholder="you@daycare.com" />
+          <Field s={s} setS={setS} k="contact_phone" label="Contact Phone" placeholder="604-000-0000" />
+        </div>
+
+        <hr style={{ border: 0, borderTop: "1px solid var(--border)", margin: "16px 0" }} />
+        <SectionHead title="Receipt defaults" sub="Starting values when creating a new receipt." />
+        <div className="row">
+          <Field s={s} setS={setS} k="default_fee" label="Default Fee ($)" placeholder="485" />
+          <Field s={s} setS={setS} k="next_receipt_no" label="Next Receipt #" placeholder="1001" />
+        </div>
+        <Field s={s} setS={setS} k="business_number"
+          label="Business Number (BN)"
+          placeholder="12345 6789 RC0001"
+          hint="Required on CRA annual tax receipts." />
+
+        <hr style={{ border: 0, borderTop: "1px solid var(--border)", margin: "16px 0" }} />
+        <SectionHead title="Signing block" sub="Printed in the signature area at the bottom of each receipt." />
+        <div className="row">
+          <Field s={s} setS={setS} k="director_name" label="Signing Name" placeholder="Jane Doe" hint="Person signing receipts." />
+          <Field s={s} setS={setS} k="director_title" label="Signing Title" placeholder="Managing Director" />
+        </div>
+
+        <hr style={{ border: 0, borderTop: "1px solid var(--border)", margin: "16px 0" }} />
+        <SectionHead title="Branding" sub="The logo prints in the header; the signature prints next to the signing name." />
+        <div className="row" style={{ marginTop: 8 }}>
           <div className="field">
             <label>Logo</label>
             {s.logo_data_url
@@ -171,6 +205,8 @@ export default function Settings() {
           </div>
         </div>
 
+        <hr style={{ border: 0, borderTop: "1px solid var(--border)", margin: "16px 0" }} />
+        <SectionHead title="PDF archive" sub="Where saved/sent receipt PDFs are filed on this computer." />
         <div className="field">
           <label>PDF Archive Folder</label>
           <div style={{ display: "flex", gap: 8 }}>
