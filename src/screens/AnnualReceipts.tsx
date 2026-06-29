@@ -1,12 +1,15 @@
 import { useEffect, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
+import { openPath } from "@tauri-apps/plugin-opener";
+import { writeFile, exists, mkdir } from "@tauri-apps/plugin-fs";
+import { tempDir, join } from "@tauri-apps/api/path";
 import {
   annualGroupsForYear, getSettings, nextAnnualReceiptNumber,
   recordAnnualReceipt, markAnnualReceiptEmailed, listAnnualReceiptsForPersonYear,
   type AnnualGroup,
 } from "../lib/db";
 import {
-  buildAnnualReceiptHtml, renderAnnualReceiptPdf, saveAnnualReceiptPdf,
+  renderAnnualReceiptPdf, saveAnnualReceiptPdf,
   renderAnnualEmailTemplate,
 } from "../lib/annualReceipt";
 import { parseRecipients, sendAnnualReceiptEmail } from "../lib/email";
@@ -49,12 +52,20 @@ export default function AnnualReceipts() {
         ? `This receipt supersedes ${supersede.ar_number} issued ${supersede.issued_at.slice(0,10)}.`
         : null;
       await recordAnnualReceipt({ group: g, year, arNumber, recipientLabel, supersede, notes: supersededNote });
-      const path = await saveAnnualReceiptPdf({ group: g, year, arNumber, recipientLabel, settings, supersededNote });
-      // Also open print preview for immediate review
-      const html = buildAnnualReceiptHtml({ group: g, year, arNumber, recipientLabel, settings, supersededNote });
-      openInIframe(html);
+      const savedPath = await saveAnnualReceiptPdf({ group: g, year, arNumber, recipientLabel, settings, supersededNote });
+      // Open the actual PDF (not browser print preview, which adds URL/title headers we can't suppress).
+      let openTarget = savedPath;
+      if (!openTarget) {
+        const bytes = await renderAnnualReceiptPdf({ group: g, year, arNumber, recipientLabel, settings, supersededNote });
+        const dir = await join(await tempDir(), "echelon-receipts");
+        if (!(await exists(dir))) await mkdir(dir, { recursive: true });
+        openTarget = await join(dir, `${arNumber}_${g.student_name.replace(/[^\w]+/g, "_")}.pdf`);
+        await writeFile(openTarget, bytes);
+      }
+      try { await openPath(openTarget); } catch (e) { console.warn("openPath failed", e); }
       await refresh();
-      alert(path ? `Saved: ${path}` : `Issued ${arNumber}. (Set PDF folder in Settings to also archive to disk.)`);
+      if (savedPath) alert(`Saved: ${savedPath}`);
+      else alert(`Issued ${arNumber}. Tip: set a PDF folder in Settings to archive automatically.`);
     } catch (e: any) {
       alert("Failed: " + (e?.message || e));
     } finally { setBusy(null); }
@@ -110,19 +121,6 @@ export default function AnnualReceipts() {
     } catch (e: any) {
       alert("Export failed: " + (e?.message || e));
     } finally { setBusy(null); }
-  }
-
-  function openInIframe(html: string) {
-    const existing = document.getElementById("__print_frame");
-    if (existing) existing.remove();
-    const iframe = document.createElement("iframe");
-    iframe.id = "__print_frame";
-    iframe.style.cssText = "position:fixed;right:0;bottom:0;width:0;height:0;border:0";
-    document.body.appendChild(iframe);
-    const doc = iframe.contentDocument || iframe.contentWindow?.document;
-    if (!doc) return;
-    doc.open(); doc.write(html); doc.close();
-    setTimeout(() => { try { iframe.contentWindow?.focus(); iframe.contentWindow?.print(); } catch {} }, 350);
   }
 
   const grandTotal = groups.reduce((a, g) => a + g.total, 0);
