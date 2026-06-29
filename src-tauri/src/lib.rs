@@ -35,6 +35,12 @@ pub fn run() {
             sql: include_str!("../migrations/005_subsidies.sql"),
             kind: MigrationKind::Up,
         },
+        Migration {
+            version: 6,
+            description: "add_void_audit_columns",
+            sql: include_str!("../migrations/006_void_audit.sql"),
+            kind: MigrationKind::Up,
+        },
     ];
 
     tauri::Builder::default()

@@ -10,8 +10,17 @@ import {
   renderSubsidyStatementPdf, saveSubsidyStatementPdf,
   renderSubsidyEmailTemplate, monthLabelFromDate,
 } from "../lib/subsidyStmt";
+import RowMenu from "../components/RowMenu";
 
 const MONTHS = ["All","Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
+
+type StatusKey = "sent" | "saved" | "voided" | "refund";
+function statusFor(r: Receipt): { key: StatusKey; label: string } {
+  if (r.voided) return { key: "voided", label: "Voided" };
+  if (r.is_refund) return { key: "refund", label: "Refund" };
+  if (r.emailed_at) return { key: "sent", label: "Sent" };
+  return { key: "saved", label: "Saved" };
+}
 
 export default function History() {
   const [rows, setRows] = useState<Receipt[]>([]);
@@ -69,12 +78,88 @@ export default function History() {
             <tr>
               <th>#</th><th>Date</th><th>Student</th><th>Description</th>
               <th style={{ textAlign: "right" }}>Amount</th>
-              <th>Comments</th><th></th>
+              <th>Status</th><th></th>
             </tr>
           </thead>
           <tbody>
             {rows.map((r) => {
               const recipients = parseRecipients(studentEmails.get(r.student_id));
+              const st = statusFor(r);
+              const subsidyAvailable = settings.subsidies_enabled === "1" && r.gross_amount != null && r.gross_amount > 0;
+
+              const doOpenPdf = async () => {
+                try {
+                  let p = await saveReceiptPdf(r, settings);
+                  if (!p) {
+                    // fallback temp file (use print as it generates html)
+                    await printReceipt(r, settings);
+                    return;
+                  }
+                  await openPath(p);
+                } catch (e: any) { alert("Open failed: " + (e?.message || e)); }
+              };
+
+              const doSavePdf = async () => {
+                try {
+                  const p = await saveReceiptPdf(r, settings);
+                  alert(p ? "Saved PDF:\n" + p : "Set a PDF folder in Settings first.");
+                } catch (e) { alert("Save failed: " + e); }
+              };
+
+              const doSubsidyPdf = async () => {
+                try {
+                  let target = await saveSubsidyStatementPdf(r, settings);
+                  if (!target) {
+                    const bytes = await renderSubsidyStatementPdf(r, settings);
+                    const dir = await join(await tempDir(), "echelon-receipts");
+                    if (!(await exists(dir))) await mkdir(dir, { recursive: true });
+                    target = await join(dir, `SUB_${r.receipt_no}_${r.date}.pdf`);
+                    await writeFile(target, bytes);
+                  }
+                  await openPath(target);
+                } catch (e: any) { alert("Statement failed: " + (e?.message || e)); }
+              };
+
+              const doEmailSubsidy = async () => {
+                if (!confirm(`Email subsidy statement for receipt #${r.receipt_no} to:\n  ${recipients.join("\n  ")}`)) return;
+                try {
+                  const bytes = await renderSubsidyStatementPdf(r, settings);
+                  const { year: y, label } = monthLabelFromDate(r.date);
+                  const subjTpl = settings.subsidy_stmt_subject || "Monthly Fee Breakdown - {{student}} - {{month_label}} {{year}}";
+                  const bodyTpl = settings.subsidy_stmt_body || "Please find attached the monthly fee breakdown.";
+                  await sendSubsidyStatementEmail({
+                    pdfBytes: bytes,
+                    filename: `Subsidy_${r.receipt_no}_${r.student_name_snapshot.replace(/[^\w]+/g, "_")}.pdf`,
+                    subject: renderSubsidyEmailTemplate(subjTpl, r, settings),
+                    body: renderSubsidyEmailTemplate(bodyTpl, r, settings),
+                    recipients, settings,
+                  });
+                  alert(`✉️ Subsidy statement (${label} ${y}) sent to ${recipients.join(", ")}`);
+                } catch (e: any) { alert("Email failed:\n" + (e?.message || e)); }
+              };
+
+              const doEmail = async () => {
+                if (!confirm(`Email receipt #${r.receipt_no} to:\n  ${recipients.join("\n  ")}`)) return;
+                try {
+                  await sendReceiptEmail({ receipt: r, recipients, settings });
+                  await markEmailed(r.id, recipients);
+                  alert(`✉️ Sent to ${recipients.join(", ")}`);
+                  refresh();
+                } catch (e: any) { alert("Email failed:\n" + (e?.message || e)); }
+              };
+
+              const doVoid = async () => {
+                const reason = prompt(
+                  `Void receipt #${r.receipt_no}?\n\nThis marks the receipt as cancelled. The record stays in your history for audit but parents will see it is voided.\n\nReason (required):`,
+                  ""
+                );
+                if (reason == null) return; // cancelled
+                const trimmed = reason.trim();
+                if (!trimmed) { alert("A reason is required to void a receipt."); return; }
+                await voidReceipt(r.id, trimmed);
+                refresh();
+              };
+
               return (
               <tr key={r.id} className={r.voided ? "voided" : ""}>
                 <td>{r.receipt_no}</td>
@@ -87,74 +172,31 @@ export default function History() {
                 </td>
                 <td>{r.description}</td>
                 <td style={{ textAlign: "right" }}>${r.amount.toFixed(2)}</td>
-                <td>{r.comments || ""}{r.pending_amount > 0 ? ` (Pending $${r.pending_amount.toFixed(2)})` : ""}</td>
-                <td style={{ textAlign: "right" }}>
-                  <button className="btn ghost" onClick={() => printReceipt(r, settings)}>Print</button>
-                  <button className="btn ghost" onClick={async () => {
-                    try {
-                      const p = await saveReceiptPdf(r, settings);
-                      alert(p ? "Saved PDF:\n" + p : "Set a PDF folder in Settings first.");
-                    } catch (e) { alert("Save failed: " + e); }
-                  }}>Save PDF</button>
-                  {settings.subsidies_enabled === "1" && r.gross_amount != null && r.gross_amount > 0 && (
-                    <>
-                      <button className="btn ghost" onClick={async () => {
-                        try {
-                          let target = await saveSubsidyStatementPdf(r, settings);
-                          if (!target) {
-                            const bytes = await renderSubsidyStatementPdf(r, settings);
-                            const dir = await join(await tempDir(), "echelon-receipts");
-                            if (!(await exists(dir))) await mkdir(dir, { recursive: true });
-                            target = await join(dir, `SUB_${r.receipt_no}_${r.date}.pdf`);
-                            await writeFile(target, bytes);
-                          }
-                          await openPath(target);
-                        } catch (e: any) { alert("Statement failed: " + (e?.message || e)); }
-                      }}>Subsidy PDF</button>
-                      <button className="btn ghost"
-                        disabled={recipients.length === 0}
-                        title={recipients.length === 0 ? "No email on file for this student" : "Email the monthly subsidy breakdown"}
-                        onClick={async () => {
-                          if (!confirm(`Email subsidy statement for receipt #${r.receipt_no} to:\n  ${recipients.join("\n  ")}`)) return;
-                          try {
-                            const bytes = await renderSubsidyStatementPdf(r, settings);
-                            const { year: y, label } = monthLabelFromDate(r.date);
-                            const subjTpl = settings.subsidy_stmt_subject || "Monthly Fee Breakdown - {{student}} - {{month_label}} {{year}}";
-                            const bodyTpl = settings.subsidy_stmt_body || "Please find attached the monthly fee breakdown.";
-                            await sendSubsidyStatementEmail({
-                              pdfBytes: bytes,
-                              filename: `Subsidy_${r.receipt_no}_${r.student_name_snapshot.replace(/[^\w]+/g, "_")}.pdf`,
-                              subject: renderSubsidyEmailTemplate(subjTpl, r, settings),
-                              body: renderSubsidyEmailTemplate(bodyTpl, r, settings),
-                              recipients, settings,
-                            });
-                            alert(`✉️ Subsidy statement (${label} ${y}) sent to ${recipients.join(", ")}`);
-                          } catch (e: any) { alert("Email failed:\n" + (e?.message || e)); }
-                        }}>
-                        Email Subsidy
-                      </button>
-                    </>
+                <td>
+                  <span className={`status-badge ${st.key}`} title={r.voided && r.void_reason ? `Voided: ${r.void_reason}` : ""}>{st.label}</span>
+                  {r.pending_amount > 0 && !r.voided && (
+                    <span className="status-badge saved" style={{ marginLeft: 4 }} title={`Pending $${r.pending_amount.toFixed(2)}`}>Partial</span>
                   )}
+                </td>
+                <td style={{ textAlign: "right", whiteSpace: "nowrap" }}>
+                  <button className="btn ghost" onClick={doOpenPdf}>Open PDF</button>
                   <button className="btn ghost"
-                    disabled={recipients.length === 0}
-                    title={recipients.length === 0 ? "No email on file for this student" : ""}
-                    onClick={async () => {
-                      if (!confirm(`Email receipt #${r.receipt_no} to:\n  ${recipients.join("\n  ")}`)) return;
-                      try {
-                        await sendReceiptEmail({ receipt: r, recipients, settings });
-                        await markEmailed(r.id, recipients);
-                        alert(`✉️ Sent to ${recipients.join(", ")}`);
-                        refresh();
-                      } catch (e: any) { alert("Email failed:\n" + (e?.message || e)); }
-                    }}>
+                    disabled={recipients.length === 0 || !!r.voided}
+                    title={r.voided ? "Receipt is voided" : recipients.length === 0 ? "No email on file for this student" : ""}
+                    onClick={doEmail}>
                     Email
                   </button>
-                  {!r.voided && (
-                    <button className="btn ghost" style={{ color: "var(--danger)" }}
-                      onClick={async () => { if (confirm(`Void receipt #${r.receipt_no}?`)) { await voidReceipt(r.id); refresh(); } }}>
-                      Void
-                    </button>
-                  )}
+                  <RowMenu items={[
+                    { label: "Print", onClick: () => printReceipt(r, settings) },
+                    { label: "Save PDF to folder", onClick: doSavePdf },
+                    ...(subsidyAvailable ? [
+                      { label: "Open Subsidy PDF", onClick: doSubsidyPdf },
+                      { label: "Email Subsidy", onClick: doEmailSubsidy, disabled: recipients.length === 0, title: recipients.length === 0 ? "No email on file" : undefined },
+                    ] : []),
+                    ...(!r.voided ? [
+                      { label: "Void receipt…", onClick: doVoid, danger: true }
+                    ] : []),
+                  ]} />
                 </td>
               </tr>
               );

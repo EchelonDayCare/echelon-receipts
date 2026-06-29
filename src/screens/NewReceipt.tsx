@@ -103,6 +103,8 @@ export default function NewReceipt() {
       gross_amount: bk ? bk.gross : null,
       ccfri_amount: bk ? bk.ccfri : null,
       accb_amount:  bk ? bk.accb : null,
+      void_reason: null,
+      voided_at: null,
     };
     let savedPath: string | null = null;
     try { savedPath = await saveReceiptPdf(r, settingsLatest); }

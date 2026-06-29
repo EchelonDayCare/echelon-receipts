@@ -116,6 +116,10 @@ async function ensureSchema(d: Database): Promise<void> {
     await d.execute("CREATE INDEX IF NOT EXISTS idx_accb_student ON accb_entries(student_id)");
     await d.execute("CREATE INDEX IF NOT EXISTS idx_accb_period ON accb_entries(year, month)");
   }
+
+  // Migration 006 — void audit
+  await addCol("receipts", "void_reason", "TEXT");
+  await addCol("receipts", "voided_at", "TEXT");
 }
 
 // ---------- Person identity ----------
@@ -208,7 +212,7 @@ export async function backfillPersonIds(): Promise<number> {
 }
 
 // ---------- Receipts ----------
-export async function createReceipt(r: Omit<Receipt, "id" | "created_at" | "voided" | "emailed_at" | "emailed_to">) {
+export async function createReceipt(r: Omit<Receipt, "id" | "created_at" | "voided" | "emailed_at" | "emailed_to" | "void_reason" | "voided_at">) {
   await (await db()).execute(
     `INSERT INTO receipts(receipt_no,date,student_id,student_name_snapshot,
       father_name_snapshot,mother_name_snapshot,description,amount,pending_amount,comments,is_refund,
@@ -339,8 +343,11 @@ export async function getReceipt(id: number): Promise<Receipt | null> {
   const rows = await (await db()).select<Receipt[]>("SELECT * FROM receipts WHERE id=?", [id]);
   return rows[0] ?? null;
 }
-export async function voidReceipt(id: number) {
-  await (await db()).execute("UPDATE receipts SET voided=1 WHERE id=?", [id]);
+export async function voidReceipt(id: number, reason?: string) {
+  await (await db()).execute(
+    "UPDATE receipts SET voided=1, void_reason=?, voided_at=datetime('now') WHERE id=?",
+    [reason ?? null, id]
+  );
 }
 export async function markEmailed(id: number, recipients: string[]) {
   await (await db()).execute(

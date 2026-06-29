@@ -31,6 +31,8 @@ export interface Receipt {
   gross_amount: number | null;
   ccfri_amount: number | null;
   accb_amount: number | null;
+  void_reason: string | null;
+  voided_at: string | null;
 }
 
 export interface AccbEntry {

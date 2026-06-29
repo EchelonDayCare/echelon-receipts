@@ -118,3 +118,30 @@ table.data tr.voided td { color: #9ca3af; text-decoration: line-through; }
 .today-stat .lbl { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: .06em; font-weight: 600; }
 .today-stat .val { font-size: 26px; font-weight: 700; margin-top: 4px; }
 .today-stat .of { color: var(--muted); font-size: 16px; font-weight: 500; }
+
+/* ---------- Status badges (history) ---------- */
+.status-badge { display: inline-block; padding: 3px 9px; border-radius: 999px; font-size: 11px; font-weight: 600; letter-spacing: .02em; }
+.status-badge.sent    { background: #d1fae5; color: #065f46; }
+.status-badge.saved   { background: #e0e7ff; color: #3730a3; }
+.status-badge.voided  { background: #f3f4f6; color: #6b7280; text-decoration: line-through; }
+.status-badge.refund  { background: #ffedd5; color: #9a3412; }
+
+/* ---------- Row overflow menu ---------- */
+.rowmenu { position: relative; display: inline-block; }
+.rowmenu-trigger { font-size: 18px; line-height: 1; padding: 4px 10px; }
+.rowmenu-pop {
+  position: absolute; right: 0; top: 100%; margin-top: 4px;
+  background: #fff; border: 1px solid var(--border); border-radius: 10px;
+  box-shadow: 0 6px 20px rgba(15,23,42,0.10);
+  min-width: 200px; z-index: 50; padding: 4px;
+}
+.rowmenu-item {
+  display: block; width: 100%; text-align: left;
+  background: transparent; border: 0; cursor: pointer;
+  padding: 9px 12px; font: inherit; font-size: 13px;
+  color: var(--text); border-radius: 6px;
+}
+.rowmenu-item:hover { background: #f1f5f9; }
+.rowmenu-item:disabled { opacity: .45; cursor: not-allowed; }
+.rowmenu-item.danger { color: var(--danger); }
+.rowmenu-item.danger:hover { background: #fef2f2; }
