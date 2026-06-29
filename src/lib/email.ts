@@ -71,6 +71,41 @@ function bytesToBase64(bytes: Uint8Array): string {
   return btoa(s);
 }
 
+export async function sendAnnualReceiptEmail(opts: {
+  pdfBytes: Uint8Array;
+  filename: string;
+  subject: string;
+  body: string;
+  recipients: string[];
+  settings: SettingsMap;
+}): Promise<void> {
+  const { pdfBytes, filename, subject, body, recipients, settings: s } = opts;
+  if (recipients.length === 0) throw new Error("No recipient email addresses.");
+  const password = await invoke<string | null>("keychain_get", { key: "smtp_password" });
+  if (!password) throw new Error("SMTP password not set. Open Settings → Email and save it first.");
+
+  const sender = (s.sender_email || s.contact_email || "").trim();
+  if (!sender) throw new Error("Sender email not set. Open Settings → Email.");
+  const host = (s.smtp_host || "").trim();
+  const port = parseInt(s.smtp_port || "587", 10);
+  if (!host || !port) throw new Error("SMTP host/port not set. Open Settings → Email.");
+
+  await invoke("send_email", {
+    args: {
+      smtp_host: host, smtp_port: port,
+      smtp_user: (s.smtp_user || sender).trim(),
+      smtp_password: password,
+      from_name: s.sender_name || s.daycare_name || "Echelon Daycare",
+      from_email: sender,
+      to: recipients, cc: [],
+      bcc: s.bcc_self === "1" ? [sender] : [],
+      subject, body_text: body,
+      attachment_b64: bytesToBase64(pdfBytes),
+      attachment_filename: filename,
+    },
+  });
+}
+
 export async function sendReceiptEmail(opts: {
   receipt: Receipt;
   recipients: string[];

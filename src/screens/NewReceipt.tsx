@@ -24,6 +24,7 @@ export default function NewReceipt() {
   const [comments, setComments] = useState<string>("");
   const [description, setDescription] = useState<string>("");
   const [descTouched, setDescTouched] = useState(false);
+  const [isRefund, setIsRefund] = useState<boolean>(false);
 
   async function refresh() {
     const ys = await listYears();
@@ -55,6 +56,7 @@ export default function NewReceipt() {
       father_name_snapshot: student.father_name,
       mother_name_snapshot: student.mother_name,
       description, amount: amt, pending_amount: pen, comments: comments || null,
+      is_refund: isRefund ? 1 : 0,
     });
     const settings = await getSettings();
     const r = {
@@ -65,6 +67,7 @@ export default function NewReceipt() {
       description, amount: amt, pending_amount: pen, comments: comments || null,
       voided: 0, created_at: new Date().toISOString(),
       emailed_at: null, emailed_to: null,
+      is_refund: isRefund ? 1 : 0,
     };
     let savedPath: string | null = null;
     try { savedPath = await saveReceiptPdf(r, settings); }
@@ -94,7 +97,7 @@ export default function NewReceipt() {
 
     if (action === "print") printReceipt(r, settings);
     setReceiptNo((n) => n + 1);
-    setComments(""); setPending("0");
+    setComments(""); setPending(""); setIsRefund(false);
     alert(`Receipt #${receiptNo} saved.${savedPath ? "\nPDF: " + savedPath : ""}${emailMsg}`);
   }
 
@@ -168,6 +171,13 @@ export default function NewReceipt() {
             <label>Pending Fees ($)</label>
             <input value={pending} onChange={(e) => setPending(e.target.value)} />
           </div>
+        </div>
+
+        <div className="field">
+          <label style={{ display: "flex", alignItems: "center", gap: 8, cursor: "pointer" }}>
+            <input type="checkbox" checked={isRefund} onChange={(e) => setIsRefund(e.target.checked)} />
+            <span>Mark as <b>Refund</b> (amount is deducted from annual totals; receipt shows as negative)</span>
+          </label>
         </div>
 
         <div className="field">

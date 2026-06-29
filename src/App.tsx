@@ -3,6 +3,7 @@ import NewReceipt from "./screens/NewReceipt";
 import History from "./screens/History";
 import Students from "./screens/Students";
 import Reports from "./screens/Reports";
+import AnnualReceipts from "./screens/AnnualReceipts";
 import Settings from "./screens/Settings";
 import "./App.css";
 
@@ -23,6 +24,7 @@ export default function App() {
             <NavLink to="/history" className={({ isActive }) => "nav-item" + (isActive ? " active" : "")}>Receipt History</NavLink>
             <NavLink to="/students" className={({ isActive }) => "nav-item" + (isActive ? " active" : "")}>Students</NavLink>
             <NavLink to="/reports" className={({ isActive }) => "nav-item" + (isActive ? " active" : "")}>Reports</NavLink>
+            <NavLink to="/annual" className={({ isActive }) => "nav-item" + (isActive ? " active" : "")}>Annual Tax Receipts</NavLink>
             <NavLink to="/settings" className={({ isActive }) => "nav-item" + (isActive ? " active" : "")}>Settings</NavLink>
           </nav>
           <div className="sidebar-foot">v0.1.0</div>
@@ -34,6 +36,7 @@ export default function App() {
             <Route path="/history" element={<History />} />
             <Route path="/students" element={<Students />} />
             <Route path="/reports" element={<Reports />} />
+            <Route path="/annual" element={<AnnualReceipts />} />
             <Route path="/settings" element={<Settings />} />
           </Routes>
         </main>

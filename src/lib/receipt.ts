@@ -71,13 +71,13 @@ export function buildReceiptHtml(r: Receipt, s: SettingsMap): string {
 
   <table class="items">
     <thead>
-      <tr><th colspan="2">Description</th><th>Amount Received</th></tr>
+      <tr><th colspan="2">Description</th><th>${r.is_refund ? "Refund" : "Amount Received"}</th></tr>
     </thead>
     <tbody>
       <tr>
         <td class="name">${r.student_name_snapshot}</td>
-        <td class="desc">${r.description}</td>
-        <td class="amount">$${fmtAmount(r.amount)}</td>
+        <td class="desc">${r.description}${r.is_refund ? " <b>(REFUND)</b>" : ""}</td>
+        <td class="amount">${r.is_refund ? "-" : ""}$${fmtAmount(Math.abs(r.amount))}</td>
       </tr>
     </tbody>
   </table>

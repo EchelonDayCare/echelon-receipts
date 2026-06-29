@@ -13,6 +13,9 @@ const FIELDS: { key: string; label: string; hint?: string }[] = [
   { key: "contact_phone", label: "Contact Phone" },
   { key: "default_fee", label: "Default Fee ($)" },
   { key: "next_receipt_no", label: "Next Receipt #" },
+  { key: "business_number", label: "Business Number (BN)", hint: "Appears on CRA annual receipts. e.g. 12345 6789 RC0001" },
+  { key: "director_name", label: "Signing Name", hint: "Person signing receipts" },
+  { key: "director_title", label: "Signing Title", hint: "e.g. Managing Director" },
 ];
 
 export default function Settings() {

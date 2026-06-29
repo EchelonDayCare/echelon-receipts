@@ -23,6 +23,12 @@ pub fn run() {
             sql: include_str!("../migrations/003_email.sql"),
             kind: MigrationKind::Up,
         },
+        Migration {
+            version: 4,
+            description: "add_person_id_refunds_and_annual_receipts",
+            sql: include_str!("../migrations/004_annual_receipts.sql"),
+            kind: MigrationKind::Up,
+        },
     ];
 
     tauri::Builder::default()
