@@ -95,3 +95,26 @@ table.data tr.voided td { color: #9ca3af; text-decoration: line-through; }
   border: 1px dashed var(--border); border-radius: 10px; padding: 28px;
   text-align: center; color: var(--muted); background: #fff;
 }
+
+/* ---------- Today screen ---------- */
+.content-inner { max-width: 980px; }
+.today-actions { display: flex; gap: 10px; flex-wrap: wrap; margin: 8px 0 24px; }
+.btn.big { padding: 12px 22px; font-size: 15px; }
+.today-section { margin-bottom: 26px; }
+.today-section h2 { font-size: 15px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); margin: 0 0 10px; }
+.today-ok { background: #ecfdf5; border: 1px solid #a7f3d0; color: #065f46; padding: 14px 16px; border-radius: 10px; font-size: 14px; }
+.today-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
+.today-item { display: flex; align-items: center; gap: 12px; padding: 12px 14px; border-radius: 10px; background: var(--panel); border: 1px solid var(--border); }
+.today-item .today-text { flex: 1; font-size: 14px; }
+.today-item .today-dot { font-size: 18px; line-height: 1; }
+.today-item.error { background: #fef2f2; border-color: #fecaca; }
+.today-item.error .today-dot { color: var(--danger); }
+.today-item.warn  { background: #fffbeb; border-color: #fde68a; }
+.today-item.warn  .today-dot { color: #b45309; }
+.today-item.info  { background: #eff6ff; border-color: #bfdbfe; }
+.today-item .today-when { font-size: 11px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); background: #fff; padding: 3px 8px; border-radius: 999px; border: 1px solid var(--border); }
+.today-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; }
+.today-stat { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 14px 16px; }
+.today-stat .lbl { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: .06em; font-weight: 600; }
+.today-stat .val { font-size: 26px; font-weight: 700; margin-top: 4px; }
+.today-stat .of { color: var(--muted); font-size: 16px; font-weight: 500; }
