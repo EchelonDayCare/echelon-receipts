@@ -131,6 +131,28 @@ export default function Settings() {
     }
   }
 
+  async function restoreFromFile() {
+    try {
+      const picked = await open({
+        multiple: false,
+        directory: false,
+        filters: [{ name: "SQLite database", extensions: ["db", "sqlite", "sqlite3"] }],
+      });
+      if (!picked || Array.isArray(picked)) return;
+      const ok = confirm(
+        `⚠️  This will REPLACE your current database with:\n\n${picked}\n\n` +
+        `A safety copy of your current data will be saved to the Backups folder first. ` +
+        `The app will close and reopen automatically.\n\nProceed?`
+      );
+      if (!ok) return;
+      const pending = await invoke<string>("stage_restore", { srcPath: picked });
+      alert(`✅ Restore staged.\n${pending}\n\nThe app will now restart to apply the restore.`);
+      await invoke("restart_app");
+    } catch (e: any) {
+      alert("❌ Restore failed:\n" + (e?.message || e));
+    }
+  }
+
   function pickImage(key: "logo_data_url" | "signature_data_url") {
     const inp = document.createElement("input");
     inp.type = "file"; inp.accept = "image/*";
@@ -415,6 +437,17 @@ export default function Settings() {
               {s.last_cloud_backup_recipient && <> → {s.last_cloud_backup_recipient}</>}
             </small>
           )}
+        </div>
+
+        <hr style={{ border: 0, borderTop: "1px solid var(--border)", margin: "20px 0" }} />
+        <h3 style={{ margin: "0 0 4px" }}>Restore from a backup</h3>
+        <p className="subtitle" style={{ marginBottom: 14 }}>
+          Replace this computer's data with a backup <code>.db</code> file — for example, an attachment
+          downloaded from your cloud backup email, or a file from the local <code>Backups/</code> folder.
+          A safety copy of the current database is saved first, and the app restarts to apply the restore.
+        </p>
+        <div style={{ display: "flex", gap: 10 }}>
+          <button className="btn danger" onClick={restoreFromFile}>Restore from backup file…</button>
         </div>
 
         <hr style={{ border: 0, borderTop: "1px solid var(--border)", margin: "20px 0" }} />

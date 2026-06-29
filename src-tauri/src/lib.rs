@@ -1,6 +1,7 @@
 use tauri_plugin_sql::{Migration, MigrationKind};
 
 mod email;
+mod restore;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -48,6 +49,14 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_shell::init())
+        .setup(|app| {
+            // Apply any pending DB restore BEFORE the SQL plugin opens a connection.
+            // The frontend invokes Database.load(...) lazily, so this runs first.
+            if let Err(e) = restore::apply_pending_restore(&app.handle()) {
+                eprintln!("[restore] {e}");
+            }
+            Ok(())
+        })
         .plugin(
             tauri_plugin_sql::Builder::default()
                 .add_migrations("sqlite:echelon.db", migrations)
@@ -58,6 +67,8 @@ pub fn run() {
             email::keychain_set,
             email::keychain_get,
             email::keychain_delete,
+            restore::stage_restore,
+            restore::restart_app,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
