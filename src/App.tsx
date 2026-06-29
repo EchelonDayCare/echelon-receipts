@@ -1,5 +1,5 @@
 import { HashRouter, NavLink, Route, Routes, Navigate } from "react-router-dom";
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import Today from "./screens/Today";
 import ThisMonth from "./screens/ThisMonth";
 import NewReceipt from "./screens/NewReceipt";
@@ -9,10 +9,18 @@ import Reports from "./screens/Reports";
 import AnnualReceipts from "./screens/AnnualReceipts";
 import Settings from "./screens/Settings";
 import { runCloudBackupIfDue } from "./lib/cloudBackup";
+import { getSettings } from "./lib/db";
+import { DEFAULT_LOGO_DATA_URL } from "./lib/defaults";
 import "./App.css";
 
 export default function App() {
+  const [logo, setLogo] = useState<string>(DEFAULT_LOGO_DATA_URL);
+  const [name, setName] = useState<string>("Echelon");
   useEffect(() => {
+    getSettings().then((s) => {
+      if (s.logo_data_url) setLogo(s.logo_data_url);
+      if (s.daycare_name) setName(s.daycare_name.replace(/\s+Society$/i, "").trim() || s.daycare_name);
+    });
     // Fire-and-forget monthly backup check on app start.
     runCloudBackupIfDue().then((res) => {
       if (res?.ok) {
@@ -27,9 +35,11 @@ export default function App() {
       <div className="app">
         <aside className="sidebar">
           <div className="brand">
-            <div className="brand-logo">🧸</div>
+            <div className="brand-logo">
+              <img src={logo} alt="Logo" />
+            </div>
             <div>
-              <div className="brand-name">Echelon</div>
+              <div className="brand-name">{name}</div>
               <div className="brand-sub">Receipts</div>
             </div>
           </div>
