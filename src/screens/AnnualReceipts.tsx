@@ -1,10 +1,10 @@
 import { useEffect, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import { openPath } from "@tauri-apps/plugin-opener";
-import { writeFile, exists, mkdir } from "@tauri-apps/plugin-fs";
-import { tempDir, join } from "@tauri-apps/api/path";
+import { copyFile, exists, mkdir, writeFile } from "@tauri-apps/plugin-fs";
+import { appDataDir, join, tempDir } from "@tauri-apps/api/path";
 import {
-  annualGroupsForYear, getSettings, nextAnnualReceiptNumber,
+  annualGroupsForYear, getSettings, setSetting, nextAnnualReceiptNumber,
   recordAnnualReceipt, markAnnualReceiptEmailed, listAnnualReceiptsForPersonYear,
   type AnnualGroup,
 } from "../lib/db";
@@ -16,94 +16,180 @@ import { parseRecipients, sendAnnualReceiptEmail } from "../lib/email";
 import { exportYearArchive } from "../lib/yearArchive";
 import type { SettingsMap, AnnualReceipt } from "../types";
 
+type Step = 1 | 2 | 3 | 4;
+
+interface DraftRow {
+  group: AnnualGroup;
+  ar: AnnualReceipt | null;   // the current/latest annual receipt row (if any)
+  recipientEmails: string;    // editable in step 2
+  status: "idle" | "drafted" | "sending" | "sent" | "failed";
+  error?: string;
+}
+
+function defaultRecipientLabel(g: AnnualGroup): string {
+  const parts = [g.father_name, g.mother_name].filter((x): x is string => !!x?.trim());
+  return parts.length ? parts.join(" & ") : g.student_name;
+}
+
+function fmt(n: number): string {
+  return n.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+}
+
 export default function AnnualReceipts() {
   const now = new Date().getFullYear();
-  const [year, setYear] = useState<number>(now);
-  const [groups, setGroups] = useState<AnnualGroup[]>([]);
+  const [year, setYear] = useState<number>(now - (new Date().getMonth() < 2 ? 1 : 0)); // Jan/Feb default to previous year
+  const [step, setStep] = useState<Step>(1);
   const [settings, setSettings] = useState<SettingsMap>({});
+  const [rows, setRows] = useState<DraftRow[]>([]);
   const [loading, setLoading] = useState(false);
-  const [busy, setBusy] = useState<string | null>(null);
   const [history, setHistory] = useState<{ group: AnnualGroup; list: AnnualReceipt[] } | null>(null);
-  const [recipientOverride, setRecipientOverride] = useState<{ group: AnnualGroup; emails: string; supersede?: AnnualReceipt } | null>(null);
 
   async function refresh() {
     setLoading(true);
     try {
-      setSettings(await getSettings());
-      setGroups(await annualGroupsForYear(year));
+      const s = await getSettings();
+      setSettings(s);
+      const gs = await annualGroupsForYear(year);
+      setRows(prev => gs.map(g => {
+        const existing = prev.find(r => r.group.person_id === g.person_id);
+        return {
+          group: g,
+          ar: g.last_issued || null,
+          recipientEmails: existing?.recipientEmails ?? (g.email || ""),
+          status: g.last_issued?.emailed_at ? "sent" : (g.last_issued ? "drafted" : "idle"),
+        };
+      }));
     } finally { setLoading(false); }
   }
   useEffect(() => { refresh(); /* eslint-disable-next-line */ }, [year]);
 
-  function defaultRecipientLabel(g: AnnualGroup): string {
-    const parts = [g.father_name, g.mother_name].filter((x): x is string => !!x?.trim());
-    return parts.length ? parts.join(" & ") : g.student_name;
-  }
-  function defaultRecipientEmails(g: AnnualGroup): string {
-    return g.email || "";
-  }
+  const grandTotal = rows.reduce((a, r) => a + r.group.total, 0);
 
-  async function generatePdf(g: AnnualGroup, supersede?: AnnualReceipt) {
-    setBusy(`Generating PDF for ${g.student_name}…`);
+  // Step 1 issues for highlighting
+  function rowIssues(r: DraftRow): string[] {
+    const issues: string[] = [];
+    if (!r.recipientEmails || !r.recipientEmails.trim()) issues.push("No parent email");
+    if (r.group.total <= 0) issues.push("Total is $0");
+    if (!r.group.father_name && !r.group.mother_name) issues.push("No parent name on file");
+    return issues;
+  }
+  const flagged = rows.filter(r => rowIssues(r).length > 0);
+
+  // ----- Step 3: backup + generate drafts -----
+  async function backupNow(): Promise<string | null> {
     try {
-      const arNumber = await nextAnnualReceiptNumber(year);
-      const recipientLabel = defaultRecipientLabel(g);
-      const supersededNote = supersede
-        ? `This receipt supersedes ${supersede.ar_number} issued ${supersede.issued_at.slice(0,10)}.`
-        : null;
-      await recordAnnualReceipt({ group: g, year, arNumber, recipientLabel, supersede, notes: supersededNote });
-      const savedPath = await saveAnnualReceiptPdf({ group: g, year, arNumber, recipientLabel, settings, supersededNote });
-      // Open the actual PDF (not browser print preview, which adds URL/title headers we can't suppress).
-      let openTarget = savedPath;
-      if (!openTarget) {
-        const bytes = await renderAnnualReceiptPdf({ group: g, year, arNumber, recipientLabel, settings, supersededNote });
-        const dir = await join(await tempDir(), "echelon-receipts");
-        if (!(await exists(dir))) await mkdir(dir, { recursive: true });
-        openTarget = await join(dir, `${arNumber}_${g.student_name.replace(/[^\w]+/g, "_")}.pdf`);
-        await writeFile(openTarget, bytes);
-      }
-      try { await openPath(openTarget); } catch (e) { console.warn("openPath failed", e); }
-      await refresh();
-      if (savedPath) alert(`Saved: ${savedPath}`);
-      else alert(`Issued ${arNumber}. Tip: set a PDF folder in Settings to archive automatically.`);
+      const folder = settings.pdf_folder?.trim()
+        ? await join(settings.pdf_folder, "Backups")
+        : await join(await appDataDir(), "Backups");
+      if (!(await exists(folder))) await mkdir(folder, { recursive: true });
+      const src = await join(await appDataDir(), "echelon.db");
+      const stamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
+      const dst = await join(folder, `echelon-pre-annual-${year}-${stamp}.db`);
+      await copyFile(src, dst);
+      const isoNow = new Date().toISOString();
+      await setSetting("last_backup_at", isoNow);
+      await setSetting("last_backup_path", dst);
+      return dst;
     } catch (e: any) {
-      alert("Failed: " + (e?.message || e));
-    } finally { setBusy(null); }
+      console.error("Backup failed:", e);
+      return null;
+    }
   }
 
-  async function emailFlow(g: AnnualGroup, supersede?: AnnualReceipt) {
-    const emails = defaultRecipientEmails(g);
-    setRecipientOverride({ group: g, emails, supersede });
+  async function generateAllDrafts() {
+    setLoading(true);
+    const backupPath = await backupNow();
+    if (!backupPath) {
+      if (!confirm("⚠️ Auto-backup failed. Continue without a backup? (Not recommended)")) {
+        setLoading(false); return;
+      }
+    }
+    const targets = rows.filter(r => r.group.total > 0);
+    let i = 0;
+    for (const r of targets) {
+      i++;
+      try {
+        const arNumber = await nextAnnualReceiptNumber(year);
+        const recipientLabel = defaultRecipientLabel(r.group);
+        const supersede = r.ar || undefined;
+        const supersededNote = supersede ? `This receipt supersedes ${supersede.ar_number} issued ${supersede.issued_at.slice(0,10)}.` : null;
+        await recordAnnualReceipt({ group: r.group, year, arNumber, recipientLabel, supersede, notes: supersededNote });
+        await saveAnnualReceiptPdf({ group: r.group, year, arNumber, recipientLabel, settings, supersededNote });
+        setRows(cur => cur.map(x => x.group.person_id === r.group.person_id ? { ...x, status: "drafted" } : x));
+      } catch (e: any) {
+        setRows(cur => cur.map(x => x.group.person_id === r.group.person_id ? { ...x, status: "failed", error: e?.message || String(e) } : x));
+      }
+    }
+    await refresh();
+    setStep(4);
+    if (backupPath) {
+      alert(`✅ Drafts generated for ${i} student(s).\nBackup saved to:\n${backupPath}`);
+    }
+    setLoading(false);
   }
 
-  async function doEmail() {
-    if (!recipientOverride) return;
-    const { group: g, emails, supersede } = recipientOverride;
-    const recipients = parseRecipients(emails);
-    if (!recipients.length) { alert("Provide at least one email address."); return; }
-    setRecipientOverride(null);
-    setBusy(`Emailing ${g.student_name}…`);
+  // ----- Step 4: send -----
+  async function sendOne(idx: number) {
+    const r = rows[idx];
+    const recipients = parseRecipients(r.recipientEmails);
+    if (!recipients.length) { alert("No email address."); return; }
+    setRows(cur => cur.map((x, i) => i === idx ? { ...x, status: "sending", error: undefined } : x));
     try {
-      const arNumber = await nextAnnualReceiptNumber(year);
-      const recipientLabel = defaultRecipientLabel(g);
-      const supersededNote = supersede
-        ? `This receipt supersedes ${supersede.ar_number} issued ${supersede.issued_at.slice(0,10)}.`
-        : null;
-      const newId = await recordAnnualReceipt({ group: g, year, arNumber, recipientLabel, supersede, notes: supersededNote });
-      await saveAnnualReceiptPdf({ group: g, year, arNumber, recipientLabel, settings, supersededNote });
-      const pdfBytes = await renderAnnualReceiptPdf({ group: g, year, arNumber, recipientLabel, settings, supersededNote });
+      // Generate fresh draft AR if none yet
+      let arNumber: string;
+      let arId: number;
+      if (r.ar) {
+        arNumber = r.ar.ar_number;
+        arId = r.ar.id;
+      } else {
+        arNumber = await nextAnnualReceiptNumber(year);
+        const recipientLabel = defaultRecipientLabel(r.group);
+        arId = await recordAnnualReceipt({ group: r.group, year, arNumber, recipientLabel, notes: null });
+        await saveAnnualReceiptPdf({ group: r.group, year, arNumber, recipientLabel, settings, supersededNote: null });
+      }
+      const recipientLabel = defaultRecipientLabel(r.group);
+      const pdfBytes = await renderAnnualReceiptPdf({ group: r.group, year, arNumber, recipientLabel, settings, supersededNote: r.ar ? `Original AR ${r.ar.ar_number}` : null });
       const subjTpl = settings.annual_email_subject || "Annual Child Care Receipt {{year}} - {{student}}";
       const bodyTpl = settings.annual_email_body || "Please find your annual receipt attached.";
-      const subject = renderAnnualEmailTemplate(subjTpl, { group: g, year, arNumber, settings });
-      const body = renderAnnualEmailTemplate(bodyTpl, { group: g, year, arNumber, settings });
-      const fname = `${arNumber}_${g.student_name.replace(/[^\w]+/g, "_")}.pdf`;
+      const subject = renderAnnualEmailTemplate(subjTpl, { group: r.group, year, arNumber, settings });
+      const body = renderAnnualEmailTemplate(bodyTpl, { group: r.group, year, arNumber, settings });
+      const fname = `${arNumber}_${r.group.student_name.replace(/[^\w]+/g, "_")}.pdf`;
       await sendAnnualReceiptEmail({ pdfBytes, filename: fname, subject, body, recipients, settings });
-      await markAnnualReceiptEmailed(newId, recipients);
-      await refresh();
-      alert(`Sent ${arNumber} to ${recipients.join(", ")}`);
+      await markAnnualReceiptEmailed(arId, recipients);
+      setRows(cur => cur.map((x, i) => i === idx ? { ...x, status: "sent" } : x));
     } catch (e: any) {
-      alert("Email failed: " + (e?.message || e));
-    } finally { setBusy(null); }
+      setRows(cur => cur.map((x, i) => i === idx ? { ...x, status: "failed", error: e?.message || String(e) } : x));
+    }
+  }
+
+  async function sendAll(retryFailedOnly: boolean) {
+    const indexes: number[] = [];
+    rows.forEach((r, i) => {
+      const ok = retryFailedOnly ? r.status === "failed" : (r.status !== "sent");
+      const haveEmail = parseRecipients(r.recipientEmails).length > 0;
+      const haveTotal = r.group.total > 0;
+      if (ok && haveEmail && haveTotal) indexes.push(i);
+    });
+    if (!indexes.length) { alert("Nothing eligible to send."); return; }
+    if (!confirm(`Send ${indexes.length} annual receipt${indexes.length === 1 ? "" : "s"} now?`)) return;
+    for (const i of indexes) {
+      await sendOne(i);
+    }
+    await refresh();
+  }
+
+  async function openPdfFor(r: DraftRow) {
+    if (!r.ar) return;
+    try {
+      const recipientLabel = defaultRecipientLabel(r.group);
+      const note = r.ar ? null : null;
+      const bytes = await renderAnnualReceiptPdf({ group: r.group, year, arNumber: r.ar.ar_number, recipientLabel, settings, supersededNote: note });
+      const dir = await join(await tempDir(), "echelon-receipts");
+      if (!(await exists(dir))) await mkdir(dir, { recursive: true });
+      const p = await join(dir, `${r.ar.ar_number}_${r.group.student_name.replace(/[^\w]+/g, "_")}.pdf`);
+      await writeFile(p, bytes);
+      await openPath(p);
+    } catch (e: any) { alert("Open failed: " + (e?.message || e)); }
   }
 
   async function showHistory(g: AnnualGroup) {
@@ -114,89 +200,93 @@ export default function AnnualReceipts() {
   async function doExport() {
     const folder = await open({ directory: true, multiple: false });
     if (!folder || Array.isArray(folder)) return;
-    setBusy("Exporting full year archive…");
     try {
-      const out = await exportYearArchive({ year, settings, baseFolder: folder as string, onProgress: (m) => setBusy(m) });
+      const out = await exportYearArchive({ year, settings, baseFolder: folder as string, onProgress: () => {} });
       alert(`Archive written to:\n${out}`);
     } catch (e: any) {
       alert("Export failed: " + (e?.message || e));
-    } finally { setBusy(null); }
+    }
   }
 
-  const grandTotal = groups.reduce((a, g) => a + g.total, 0);
-  const fmt = (n: number) => n.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-
+  // ----- Render -----
   return (
     <div>
-      <h1>Annual Tax Receipts</h1>
+      <h1>Annual Tax Receipts — Send to Parents</h1>
       <p className="subtitle">
-        Calendar-year (Jan&ndash;Dec) totals per child for CRA Form T778. Crosses roster years so a child who joined in
-        September still gets one receipt per tax year. Voided receipts are excluded.
+        Calendar-year (Jan&ndash;Dec) totals per child for CRA Form T778. Crosses roster years.
+        Voided receipts are excluded.
       </p>
 
-      <div className="toolbar" style={{ marginBottom: 12 }}>
-        <label style={{ fontSize: 13, color: "var(--muted)" }}>Tax Year:</label>
-        <select value={year} onChange={(e) => setYear(parseInt(e.target.value, 10))}>
+      {/* Year + export */}
+      <div className="toolbar">
+        <label style={{ fontSize: 12, fontWeight: 600, color: "var(--muted)", textTransform: "uppercase", letterSpacing: ".06em" }}>Tax year</label>
+        <select value={year} onChange={(e) => { setYear(parseInt(e.target.value, 10)); setStep(1); }}>
           {Array.from({ length: 6 }, (_, i) => now + 1 - i).map((y) => <option key={y} value={y}>{y}</option>)}
         </select>
         <div className="grow" />
-        <button className="btn secondary" onClick={doExport} disabled={!!busy}>Export Year Archive…</button>
+        <button className="btn secondary" onClick={doExport}>Export Year Archive…</button>
+      </div>
+
+      {/* Stepper */}
+      <div className="stepper">
+        {[1,2,3,4].map(s => (
+          <div key={s} className={"step " + (step === s ? "active" : step > s ? "done" : "")}>
+            <span className="step-num">{step > s ? "✓" : s}</span>
+            <span className="step-label">{["Review","Fix issues","Generate drafts","Send"][s - 1]}</span>
+          </div>
+        ))}
       </div>
 
       {!settings.business_number && (
-        <div className="card" style={{ background: "#fff8e1", borderColor: "#e0c66a", marginBottom: 14 }}>
-          ⚠️ Your <b>Business Number</b> is not set. CRA receipts should include it.
-          Open <b>Settings → Business Information</b> to add it (you can still generate without — but parents may ask).
+        <div className="today-item warn" style={{ marginBottom: 14 }}>
+          <span className="today-dot">!</span>
+          <span className="today-text">Your Business Number (BN) is not set. CRA receipts should include it — set it in Settings.</span>
         </div>
       )}
 
-      {busy && <div className="card" style={{ marginBottom: 12 }}>{busy}</div>}
-      {loading ? <div className="empty">Loading…</div> :
-        groups.length === 0 ? (
-          <div className="empty">No receipts found for {year}.</div>
-        ) : (
-          <>
+      {loading && <div className="empty">Working…</div>}
+
+      {/* STEP 1 - Review */}
+      {!loading && step === 1 && (
+        <>
+          <div className="card" style={{ marginBottom: 14 }}>
+            <strong>Reviewing {rows.length} student{rows.length === 1 ? "" : "s"} for {year}.</strong>{" "}
+            Grand total: <strong>${fmt(grandTotal)}</strong>.
+            {flagged.length > 0
+              ? <> <span style={{ color: "var(--danger)" }}>{flagged.length} need attention</span> before sending.</>
+              : <> Everything looks good.</>}
+          </div>
+          {rows.length === 0 ? (
+            <div className="empty">No receipts found for {year}.</div>
+          ) : (
             <table className="data">
               <thead>
                 <tr>
                   <th>Student</th><th>Parents</th><th>Email on file</th>
                   <th style={{ textAlign: "right" }}># Receipts</th>
                   <th style={{ textAlign: "right" }}>Total</th>
-                  <th>Status</th>
-                  <th style={{ textAlign: "right" }}></th>
+                  <th>Issues</th>
+                  <th></th>
                 </tr>
               </thead>
               <tbody>
-                {groups.map((g) => {
-                  const li = g.last_issued;
+                {rows.map(r => {
+                  const issues = rowIssues(r);
                   return (
-                    <tr key={g.person_id}>
-                      <td>{g.student_name}</td>
+                    <tr key={r.group.person_id}>
+                      <td>{r.group.student_name}</td>
                       <td style={{ fontSize: 12 }}>
-                        {g.father_name || ""}{g.father_name && g.mother_name ? <br /> : ""}{g.mother_name || ""}
+                        {r.group.father_name || ""}{r.group.father_name && r.group.mother_name ? <br/> : ""}{r.group.mother_name || ""}
                       </td>
-                      <td style={{ fontSize: 12 }}>{g.email || "—"}</td>
-                      <td style={{ textAlign: "right" }}>{g.count}</td>
-                      <td style={{ textAlign: "right", fontWeight: 600 }}>${fmt(g.total)}</td>
+                      <td style={{ fontSize: 12 }}>{r.group.email || <em style={{ color: "var(--danger)" }}>— none —</em>}</td>
+                      <td style={{ textAlign: "right" }}>{r.group.count}</td>
+                      <td style={{ textAlign: "right", fontWeight: 600 }}>${fmt(r.group.total)}</td>
                       <td>
-                        {li ? (
-                          <span title={`${li.ar_number} on ${li.issued_at.slice(0,10)}${li.emailed_at ? " · emailed " + li.emailed_at.slice(0,10) : ""}`}>
-                            <span className="badge ok">✓ {li.ar_number}</span>
-                            {li.emailed_at && <span style={{ fontSize: 11, marginLeft: 6 }}>✉️</span>}
-                          </span>
-                        ) : <span className="badge warn">Not issued</span>}
+                        {issues.length === 0
+                          ? <span className="status-badge sent">OK</span>
+                          : issues.map((iss, i) => <span key={i} className="status-badge refund" style={{ marginRight: 4 }}>{iss}</span>)}
                       </td>
-                      <td style={{ textAlign: "right" }}>
-                        <button className="btn ghost" onClick={() => generatePdf(g, li || undefined)} disabled={!!busy}>
-                          {li ? "Re-issue PDF" : "Generate PDF"}
-                        </button>
-                        <button className="btn ghost" onClick={() => emailFlow(g, li || undefined)} disabled={!!busy || !g.email}>
-                          Email
-                        </button>
-                        <button className="btn ghost" onClick={() => showHistory(g)} disabled={!!busy}>
-                          History
-                        </button>
-                      </td>
+                      <td><button className="btn ghost" onClick={() => showHistory(r.group)}>History</button></td>
                     </tr>
                   );
                 })}
@@ -209,42 +299,155 @@ export default function AnnualReceipts() {
                 </tr>
               </tfoot>
             </table>
-          </>
-        )
-      }
-
-      {recipientOverride && (
-        <div onClick={(e) => { if (e.target === e.currentTarget) setRecipientOverride(null); }}
-          style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.45)", display: "flex",
-            alignItems: "flex-start", justifyContent: "center", paddingTop: 120, zIndex: 1000 }}>
-          <div className="card" style={{ width: "min(520px, 92vw)", margin: 0 }}>
-            <h3 style={{ marginTop: 0 }}>Email Annual Receipt</h3>
-            <p style={{ color: "var(--muted)", fontSize: 13 }}>
-              {recipientOverride.group.student_name} &mdash; {year} &mdash; ${fmt(recipientOverride.group.total)}
-              {recipientOverride.supersede && (
-                <><br /><b>This will supersede</b> {recipientOverride.supersede.ar_number}.</>
-              )}
-            </p>
-            <div className="field">
-              <label>Recipient email(s) (comma or semicolon separated)</label>
-              <input value={recipientOverride.emails}
-                onChange={(e) => setRecipientOverride({ ...recipientOverride, emails: e.target.value })}
-                autoFocus />
-            </div>
-            <div style={{ display: "flex", gap: 10, marginTop: 12 }}>
-              <button className="btn" onClick={doEmail}>Send</button>
-              <button className="btn secondary" onClick={() => setRecipientOverride(null)}>Cancel</button>
-            </div>
+          )}
+          <div className="wizard-foot">
+            <div></div>
+            <button className="btn" disabled={rows.length === 0}
+              onClick={() => setStep(flagged.length > 0 ? 2 : 3)}>
+              {flagged.length > 0 ? `Next: Fix ${flagged.length} issue(s)` : "Next: Generate drafts"} →
+            </button>
           </div>
-        </div>
+        </>
       )}
 
+      {/* STEP 2 - Fix issues */}
+      {!loading && step === 2 && (
+        <>
+          <div className="card" style={{ marginBottom: 14 }}>
+            Edit the recipient email below for any flagged row. (Permanent edits to parent names / contacts
+            happen on the <a href="#/students">Students</a> tab. Email entered here is only used for this batch.)
+          </div>
+          {flagged.length === 0 ? (
+            <div className="empty">No issues — you're good to proceed.</div>
+          ) : (
+            <table className="data">
+              <thead>
+                <tr>
+                  <th>Student</th>
+                  <th style={{ textAlign: "right" }}>Total</th>
+                  <th>Recipient email(s) for this batch</th>
+                  <th>Other issues</th>
+                </tr>
+              </thead>
+              <tbody>
+                {flagged.map((r, i) => {
+                  const idx = rows.findIndex(x => x.group.person_id === r.group.person_id);
+                  return (
+                    <tr key={r.group.person_id + i}>
+                      <td>{r.group.student_name}</td>
+                      <td style={{ textAlign: "right" }}>${fmt(r.group.total)}</td>
+                      <td>
+                        <input style={{ width: "100%" }}
+                          value={r.recipientEmails}
+                          placeholder="parent1@example.com, parent2@example.com"
+                          onChange={(e) => setRows(cur => cur.map((x, j) => j === idx ? { ...x, recipientEmails: e.target.value } : x))} />
+                      </td>
+                      <td style={{ fontSize: 12, color: "var(--muted)" }}>
+                        {rowIssues(r).filter(x => x !== "No parent email").join(" · ") || "—"}
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          )}
+          <div className="wizard-foot">
+            <button className="btn secondary" onClick={() => setStep(1)}>← Back</button>
+            <button className="btn" onClick={() => setStep(3)}>Next: Generate drafts →</button>
+          </div>
+        </>
+      )}
+
+      {/* STEP 3 - Generate drafts (with auto-backup) */}
+      {!loading && step === 3 && (
+        <>
+          <div className="card" style={{ marginBottom: 14 }}>
+            <strong>About to:</strong>
+            <ol style={{ margin: "8px 0 0 18px", fontSize: 14 }}>
+              <li>Back up your database automatically (saved to your PDF folder or app data).</li>
+              <li>Create / re-issue an annual receipt row for every student with a total &gt; $0.</li>
+              <li>Save each PDF to your PDF archive folder.</li>
+              <li>No emails are sent in this step.</li>
+            </ol>
+          </div>
+          <div className="wizard-foot">
+            <button className="btn secondary" onClick={() => setStep(flagged.length ? 2 : 1)}>← Back</button>
+            <button className="btn" onClick={generateAllDrafts}>Generate drafts now</button>
+          </div>
+        </>
+      )}
+
+      {/* STEP 4 - Send */}
+      {!loading && step === 4 && (
+        <>
+          <div className="card" style={{ marginBottom: 14, display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12 }}>
+            <div>
+              <strong>Ready to send.</strong>{" "}
+              {rows.filter(r => r.status === "sent").length} sent ·{" "}
+              {rows.filter(r => r.status === "drafted").length} drafted ·{" "}
+              {rows.filter(r => r.status === "failed").length} failed
+            </div>
+            <div style={{ display: "flex", gap: 8 }}>
+              {rows.some(r => r.status === "failed") && (
+                <button className="btn secondary" onClick={() => sendAll(true)}>Retry failed only</button>
+              )}
+              <button className="btn" onClick={() => sendAll(false)}>Send all unsent</button>
+            </div>
+          </div>
+
+          <table className="data">
+            <thead>
+              <tr>
+                <th>Student</th>
+                <th>Recipient</th>
+                <th style={{ textAlign: "right" }}>Total</th>
+                <th>Status</th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((r, i) => {
+                const recipients = parseRecipients(r.recipientEmails);
+                const badge =
+                  r.status === "sent"    ? { key: "sent",   label: "✓ Sent" } :
+                  r.status === "sending" ? { key: "saved",  label: "Sending…" } :
+                  r.status === "failed"  ? { key: "voided", label: "Failed" } :
+                  r.status === "drafted" ? { key: "saved",  label: "Draft ready" } :
+                                            { key: "saved",  label: "Pending" };
+                return (
+                  <tr key={r.group.person_id}>
+                    <td>{r.group.student_name}</td>
+                    <td style={{ fontSize: 12 }}>{recipients.length ? recipients.join(", ") : <em style={{ color: "var(--danger)" }}>— none —</em>}</td>
+                    <td style={{ textAlign: "right" }}>${fmt(r.group.total)}</td>
+                    <td>
+                      <span className={`status-badge ${badge.key}`} title={r.error || ""}>{badge.label}</span>
+                    </td>
+                    <td style={{ textAlign: "right", whiteSpace: "nowrap" }}>
+                      <button className="btn ghost" onClick={() => openPdfFor(r)} disabled={!r.ar}>Open PDF</button>
+                      <button className="btn ghost"
+                        disabled={recipients.length === 0 || r.status === "sending"}
+                        onClick={() => sendOne(i)}>
+                        {r.status === "sent" ? "Resend" : "Send"}
+                      </button>
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+
+          <div className="wizard-foot">
+            <button className="btn secondary" onClick={() => setStep(3)}>← Back</button>
+            <button className="btn secondary" onClick={() => setStep(1)}>Start a different year</button>
+          </div>
+        </>
+      )}
+
+      {/* History modal */}
       {history && (
-        <div onClick={(e) => { if (e.target === e.currentTarget) setHistory(null); }}
-          style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.45)", display: "flex",
-            alignItems: "flex-start", justifyContent: "center", paddingTop: 80, zIndex: 1000 }}>
-          <div className="card" style={{ width: "min(680px, 92vw)", maxHeight: "85vh", overflow: "auto", margin: 0 }}>
-            <h3 style={{ marginTop: 0 }}>History · {history.group.student_name} · {year}</h3>
+        <div className="modal-bg" onClick={() => setHistory(null)}>
+          <div className="modal" onClick={(e) => e.stopPropagation()}>
+            <h2 style={{ marginTop: 0 }}>History · {history.group.student_name} · {year}</h2>
             {history.list.length === 0 ? <div className="empty">No annual receipts issued yet.</div> : (
               <table className="data">
                 <thead><tr><th>AR Number</th><th>Issued</th><th>Recipient</th><th style={{ textAlign: "right" }}>Total</th><th>Emailed</th><th>Status</th></tr></thead>
@@ -256,7 +459,7 @@ export default function AnnualReceipts() {
                       <td>{a.recipient_label}</td>
                       <td style={{ textAlign: "right" }}>${fmt(a.total_amount)}</td>
                       <td>{a.emailed_at ? `✉️ ${a.emailed_at.slice(0,10)}` : "—"}</td>
-                      <td>{a.superseded_by ? <span className="badge warn">Superseded</span> : <span className="badge ok">Current</span>}</td>
+                      <td>{a.superseded_by ? <span className="status-badge voided">Superseded</span> : <span className="status-badge sent">Current</span>}</td>
                     </tr>
                   ))}
                 </tbody>
