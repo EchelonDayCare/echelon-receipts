@@ -37,7 +37,8 @@
     "shortDescription": "Daycare receipt generator",
     "longDescription": "Echelon Daycare Society receipt generator and parent roster manager.",
     "macOS": {
-      "minimumSystemVersion": "10.15"
+      "minimumSystemVersion": "10.15",
+      "signingIdentity": "-"
     }
   }
 }

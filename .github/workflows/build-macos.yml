@@ -5,6 +5,9 @@ on:
     branches: [main]
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
   build-macos:
     runs-on: macos-latest
@@ -35,14 +38,44 @@ jobs:
       - name: Build (Intel)
         run: npm run tauri -- build --target x86_64-apple-darwin
 
-      - name: Upload Apple Silicon DMG
+      - name: Rename DMGs with arch suffix
+        run: |
+          mkdir -p release-assets
+          cp src-tauri/target/aarch64-apple-darwin/release/bundle/dmg/*.dmg "release-assets/Echelon-Receipts-AppleSilicon.dmg"
+          cp src-tauri/target/x86_64-apple-darwin/release/bundle/dmg/*.dmg "release-assets/Echelon-Receipts-Intel.dmg"
+          ls -lh release-assets/
+
+      - name: Upload Apple Silicon DMG (artifact)
         uses: actions/upload-artifact@v4
         with:
           name: Echelon-Receipts-AppleSilicon
-          path: src-tauri/target/aarch64-apple-darwin/release/bundle/dmg/*.dmg
+          path: release-assets/Echelon-Receipts-AppleSilicon.dmg
 
-      - name: Upload Intel DMG
+      - name: Upload Intel DMG (artifact)
         uses: actions/upload-artifact@v4
         with:
           name: Echelon-Receipts-Intel
-          path: src-tauri/target/x86_64-apple-darwin/release/bundle/dmg/*.dmg
+          path: release-assets/Echelon-Receipts-Intel.dmg
+
+      - name: Publish / Update "latest" GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: latest
+          name: "Latest build"
+          body: |
+            Auto-built from commit ${{ github.sha }}.
+
+            **Download:**
+            - Apple Silicon (M1/M2/M3/M4): `Echelon-Receipts-AppleSilicon.dmg`
+            - Intel Mac: `Echelon-Receipts-Intel.dmg`
+
+            **Install:**
+            1. Download the matching DMG
+            2. Open it, drag **Echelon Receipts** into Applications
+            3. Double-click the app — it just opens (ad-hoc signed, no Terminal needed)
+          files: |
+            release-assets/Echelon-Receipts-AppleSilicon.dmg
+            release-assets/Echelon-Receipts-Intel.dmg
+          draft: false
+          prerelease: false
+          make_latest: "true"
