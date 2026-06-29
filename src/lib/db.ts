@@ -2,9 +2,90 @@ import Database from "@tauri-apps/plugin-sql";
 import type { Student, Receipt, SettingsMap, AnnualReceipt } from "../types";
 
 let _db: Database | null = null;
+let _schemaChecked = false;
 export async function db(): Promise<Database> {
   if (!_db) _db = await Database.load("sqlite:echelon.db");
+  if (!_schemaChecked) {
+    _schemaChecked = true;
+    try { await ensureSchema(_db); } catch (e) { console.error("[ensureSchema] failed:", e); }
+  }
   return _db;
+}
+
+// ---------- Schema safety net ----------
+// Tauri-plugin-sql migration tracker has been observed to silently skip pending
+// migrations on pre-existing DBs. This idempotently patches anything missing so
+// the app self-heals on startup. Add new expectations as schema evolves.
+async function ensureSchema(d: Database): Promise<void> {
+  const tableExists = async (name: string): Promise<boolean> => {
+    const r = await d.select<{ n: number }[]>(
+      "SELECT COUNT(*) AS n FROM sqlite_master WHERE type='table' AND name=?", [name]
+    );
+    return (r[0]?.n ?? 0) > 0;
+  };
+  const colExists = async (table: string, col: string): Promise<boolean> => {
+    if (!(await tableExists(table))) return false;
+    const rows = await d.select<{ name: string }[]>(`PRAGMA table_info(${table})`);
+    return rows.some((r) => r.name === col);
+  };
+  const addCol = async (table: string, col: string, decl: string) => {
+    if (!(await colExists(table, col))) {
+      console.warn(`[ensureSchema] adding ${table}.${col}`);
+      await d.execute(`ALTER TABLE ${table} ADD COLUMN ${col} ${decl}`);
+    }
+  };
+  const setting = async (key: string, value: string) => {
+    await d.execute("INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)", [key, value]);
+  };
+
+  // Migration 002 — pdf_folder
+  await setting("pdf_folder", "");
+
+  // Migration 003 — email audit + settings
+  await addCol("receipts", "emailed_at", "TEXT");
+  await addCol("receipts", "emailed_to", "TEXT");
+  for (const [k, v] of [
+    ["sender_email", ""], ["sender_name", "Echelon Daycare Society"],
+    ["smtp_host", "smtp-mail.outlook.com"], ["smtp_port", "587"],
+    ["smtp_user", ""], ["bcc_self", "1"],
+    ["email_subject", "Receipt #{{receipt_no}} - {{student}} - {{description}}"],
+    ["email_body", "Hi,\n\nPlease find attached the receipt for {{student}} ({{description}}).\n\nAmount: ${{amount}}{{pending_line}}\n\nThank you,\nEchelon Daycare Society\n{{contact_email}} | {{contact_phone}}"],
+  ] as const) await setting(k, v);
+
+  // Migration 004 — person_id, is_refund, annual_receipts
+  await addCol("students", "person_id", "TEXT");
+  await d.execute("CREATE INDEX IF NOT EXISTS idx_students_person ON students(person_id)");
+  await addCol("receipts", "is_refund", "INTEGER DEFAULT 0");
+  for (const [k, v] of [
+    ["business_number", ""], ["director_name", ""],
+    ["director_title", "Managing Director"], ["next_ar_no", "1"],
+    ["annual_email_subject", "Annual Child Care Receipt {{year}} - {{student}}"],
+    ["annual_email_body",
+      "Hi,\n\nPlease find attached the Annual Child Care Receipt for {{student}} covering {{year}} (January through December).\n\nTotal paid in {{year}}: ${{total}} across {{count}} payments.\n\nYou may use this receipt when claiming the Child Care Expenses Deduction (CRA Form T778, Line 21400) on your personal tax return.\n\nIf you notice any discrepancy, please reply to this email and we will reissue.\n\nThank you for trusting us with your child this year.\n\nEchelon Daycare Society\n{{contact_email}} | {{contact_phone}}"],
+  ] as const) await setting(k, v);
+  if (!(await tableExists("annual_receipts"))) {
+    console.warn("[ensureSchema] creating annual_receipts");
+    await d.execute(`CREATE TABLE annual_receipts (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      ar_number TEXT UNIQUE NOT NULL,
+      person_id TEXT NOT NULL,
+      student_name TEXT NOT NULL,
+      father_name TEXT,
+      mother_name TEXT,
+      calendar_year INTEGER NOT NULL,
+      recipient_label TEXT NOT NULL,
+      total_amount REAL NOT NULL,
+      receipt_count INTEGER NOT NULL,
+      receipt_ids_json TEXT NOT NULL,
+      payload_hash TEXT NOT NULL,
+      issued_at TEXT NOT NULL DEFAULT (datetime('now')),
+      emailed_at TEXT,
+      emailed_to TEXT,
+      superseded_by INTEGER REFERENCES annual_receipts(id),
+      notes TEXT
+    )`);
+    await d.execute("CREATE INDEX IF NOT EXISTS idx_annual_person_year ON annual_receipts(person_id, calendar_year)");
+  }
 }
 
 // ---------- Person identity ----------
