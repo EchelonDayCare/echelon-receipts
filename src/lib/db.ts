@@ -121,6 +121,14 @@ async function ensureSchema(d: Database): Promise<void> {
   await addCol("receipts", "void_reason", "TEXT");
   await addCol("receipts", "voided_at", "TEXT");
 
+  // Migration 007 — issuer snapshot (frozen daycare details per receipt)
+  await addCol("receipts", "issuer_snapshot_json", "TEXT");
+  await addCol("annual_receipts", "issuer_snapshot_json", "TEXT");
+  // Backfill: any pre-existing receipt without a snapshot gets the *current*
+  // settings stamped on it. Best-effort — better than letting the PDF re-render
+  // with future settings changes.
+  await backfillIssuerSnapshot();
+
   // Backup bookkeeping (not a real migration — stored in settings)
   for (const [k, v] of [
     ["last_backup_at", ""],
@@ -223,18 +231,73 @@ export async function backfillPersonIds(): Promise<number> {
 }
 
 // ---------- Receipts ----------
-export async function createReceipt(r: Omit<Receipt, "id" | "created_at" | "voided" | "emailed_at" | "emailed_to" | "void_reason" | "voided_at">) {
+
+// Issuer snapshot — the daycare details frozen at the moment a receipt is issued
+// so that re-rendering an old PDF years later doesn't pick up new settings.
+export interface IssuerSnapshot {
+  daycare_name: string;
+  daycare_address: string;
+  contact_email: string;
+  contact_phone: string;
+  business_number: string;
+  director_name: string;
+  director_title: string;
+  logo_data_url: string;
+  signature_data_url: string;
+  snapshot_version: 1;
+  snapshot_at: string;
+}
+export function buildIssuerSnapshot(s: SettingsMap): IssuerSnapshot {
+  return {
+    daycare_name: s.daycare_name || "",
+    daycare_address: s.daycare_address || "",
+    contact_email: s.contact_email || "",
+    contact_phone: s.contact_phone || "",
+    business_number: s.business_number || "",
+    director_name: s.director_name || "",
+    director_title: s.director_title || "",
+    logo_data_url: s.logo_data_url || "",
+    signature_data_url: s.signature_data_url || "",
+    snapshot_version: 1,
+    snapshot_at: new Date().toISOString(),
+  };
+}
+// Returns a SettingsMap-like view where issuer fields come from the snapshot
+// if present, otherwise from the live settings (legacy receipts).
+export function issuerViewFor(receipt: Pick<Receipt, "issuer_snapshot_json"> | { issuer_snapshot_json?: string | null }, settings: SettingsMap): SettingsMap {
+  if (!receipt.issuer_snapshot_json) return settings;
+  try {
+    const snap = JSON.parse(receipt.issuer_snapshot_json) as Partial<IssuerSnapshot>;
+    return { ...settings, ...snap } as SettingsMap;
+  } catch {
+    return settings;
+  }
+}
+
+async function backfillIssuerSnapshot(): Promise<void> {
+  const d = await db();
+  const settings = await getSettings();
+  const snap = JSON.stringify(buildIssuerSnapshot(settings));
+  // Only fill rows that have no snapshot yet.
+  await d.execute("UPDATE receipts SET issuer_snapshot_json=? WHERE issuer_snapshot_json IS NULL OR issuer_snapshot_json=''", [snap]);
+  await d.execute("UPDATE annual_receipts SET issuer_snapshot_json=? WHERE issuer_snapshot_json IS NULL OR issuer_snapshot_json=''", [snap]);
+}
+
+export async function createReceipt(r: Omit<Receipt, "id" | "created_at" | "voided" | "emailed_at" | "emailed_to" | "void_reason" | "voided_at" | "issuer_snapshot_json">) {
+  const settings = await getSettings();
+  const snap = JSON.stringify(buildIssuerSnapshot(settings));
   await (await db()).execute(
     `INSERT INTO receipts(receipt_no,date,student_id,student_name_snapshot,
       father_name_snapshot,mother_name_snapshot,description,amount,pending_amount,comments,is_refund,
-      gross_amount,ccfri_amount,accb_amount)
-     VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+      gross_amount,ccfri_amount,accb_amount,issuer_snapshot_json)
+     VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
     [
       r.receipt_no, r.date, r.student_id, r.student_name_snapshot,
       r.father_name_snapshot, r.mother_name_snapshot,
       r.description, r.amount, r.pending_amount, r.comments,
       r.is_refund ? 1 : 0,
       r.gross_amount ?? null, r.ccfri_amount ?? null, r.accb_amount ?? null,
+      snap,
     ]
   );
   await bumpReceiptNo(r.receipt_no);
@@ -462,17 +525,19 @@ export async function recordAnnualReceipt(opts: {
   const { group, year, arNumber, recipientLabel } = opts;
   const ids = group.receipts.map((r) => r.id);
   const hash = annualPayloadHash(group);
+  const settings = await getSettings();
+  const snap = JSON.stringify(buildIssuerSnapshot(settings));
   const res = await (await db()).execute(
     `INSERT INTO annual_receipts
       (ar_number, person_id, student_name, father_name, mother_name,
        calendar_year, recipient_label, total_amount, receipt_count,
-       receipt_ids_json, payload_hash, notes)
-     VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`,
+       receipt_ids_json, payload_hash, notes, issuer_snapshot_json)
+     VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`,
     [
       arNumber, group.person_id, group.student_name,
       group.father_name, group.mother_name,
       year, recipientLabel, group.total, group.count,
-      JSON.stringify(ids), hash, opts.notes ?? null,
+      JSON.stringify(ids), hash, opts.notes ?? null, snap,
     ]
   );
   const newId = res.lastInsertId as number;

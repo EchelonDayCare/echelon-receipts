@@ -33,6 +33,7 @@ export interface Receipt {
   accb_amount: number | null;
   void_reason: string | null;
   voided_at: string | null;
+  issuer_snapshot_json: string | null;
 }
 
 export interface AccbEntry {
@@ -71,6 +72,7 @@ export interface AnnualReceipt {
   emailed_to: string | null;
   superseded_by: number | null;
   notes: string | null;
+  issuer_snapshot_json?: string | null;
 }
 
 export type SettingsMap = Record<string, string>;

@@ -150,7 +150,11 @@ export default function AnnualReceipts() {
         await saveAnnualReceiptPdf({ group: r.group, year, arNumber, recipientLabel, settings, supersededNote: null });
       }
       const recipientLabel = defaultRecipientLabel(r.group);
-      const pdfBytes = await renderAnnualReceiptPdf({ group: r.group, year, arNumber, recipientLabel, settings, supersededNote: r.ar ? `Original AR ${r.ar.ar_number}` : null });
+      const pdfBytes = await renderAnnualReceiptPdf({
+        group: r.group, year, arNumber, recipientLabel, settings,
+        supersededNote: r.ar ? `Original AR ${r.ar.ar_number}` : null,
+        issuerSnapshotJson: r.ar?.issuer_snapshot_json ?? null,
+      });
       const subjTpl = settings.annual_email_subject || "Annual Child Care Receipt {{year}} - {{student}}";
       const bodyTpl = settings.annual_email_body || "Please find your annual receipt attached.";
       const subject = renderAnnualEmailTemplate(subjTpl, { group: r.group, year, arNumber, settings });
@@ -194,7 +198,11 @@ export default function AnnualReceipts() {
     try {
       const recipientLabel = defaultRecipientLabel(r.group);
       const note = r.ar ? null : null;
-      const bytes = await renderAnnualReceiptPdf({ group: r.group, year, arNumber: r.ar.ar_number, recipientLabel, settings, supersededNote: note });
+      const bytes = await renderAnnualReceiptPdf({
+        group: r.group, year, arNumber: r.ar.ar_number, recipientLabel, settings,
+        supersededNote: note,
+        issuerSnapshotJson: r.ar.issuer_snapshot_json ?? null,
+      });
       const dir = await join(await tempDir(), "echelon-receipts");
       if (!(await exists(dir))) await mkdir(dir, { recursive: true });
       const p = await join(dir, `${r.ar.ar_number}_${r.group.student_name.replace(/[^\w]+/g, "_")}.pdf`);

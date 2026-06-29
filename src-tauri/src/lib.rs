@@ -42,6 +42,12 @@ pub fn run() {
             sql: include_str!("../migrations/006_void_audit.sql"),
             kind: MigrationKind::Up,
         },
+        Migration {
+            version: 7,
+            description: "add_issuer_snapshot",
+            sql: include_str!("../migrations/007_issuer_snapshot.sql"),
+            kind: MigrationKind::Up,
+        },
     ];
 
     tauri::Builder::default()

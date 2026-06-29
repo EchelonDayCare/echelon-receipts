@@ -27,8 +27,14 @@ export function buildAnnualReceiptHtml(opts: {
   settings: SettingsMap;
   issuedOn?: string;
   supersededNote?: string | null;
+  issuerSnapshotJson?: string | null;
 }): string {
-  const { group, year, arNumber, recipientLabel, settings: s } = opts;
+  const { group, year, arNumber, recipientLabel } = opts;
+  // Merge snapshot over live settings so historical re-renders stay correct.
+  let s = opts.settings;
+  if (opts.issuerSnapshotJson) {
+    try { s = { ...opts.settings, ...JSON.parse(opts.issuerSnapshotJson) }; } catch { /* ignore */ }
+  }
   const issuedOn = opts.issuedOn || todayIso();
   const logo = s.logo_data_url || DEFAULT_LOGO_DATA_URL;
   const sig = s.signature_data_url || DEFAULT_SIGNATURE_DATA_URL;

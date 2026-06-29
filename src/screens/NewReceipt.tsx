@@ -105,6 +105,7 @@ export default function NewReceipt() {
       accb_amount:  bk ? bk.accb : null,
       void_reason: null,
       voided_at: null,
+      issuer_snapshot_json: null,
     };
     let savedPath: string | null = null;
     try { savedPath = await saveReceiptPdf(r, settingsLatest); }

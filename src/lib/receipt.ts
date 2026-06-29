@@ -2,6 +2,7 @@ import type { Receipt, SettingsMap } from "../types";
 import { mkdir, writeFile, exists } from "@tauri-apps/plugin-fs";
 import { DEFAULT_LOGO_DATA_URL, DEFAULT_SIGNATURE_DATA_URL } from "./defaults";
 import { loadHtml2Pdf } from "./lazy";
+import { issuerViewFor } from "./db";
 
 function fmtDate(iso: string): string {
   // dd/mm/yyyy to match the existing receipt
@@ -15,7 +16,10 @@ function safeName(s: string): string {
   return s.replace(/[\\/:*?"<>|']+/g, "").replace(/\s+/g, "_").slice(0, 60);
 }
 
-export function buildReceiptHtml(r: Receipt, s: SettingsMap): string {
+export function buildReceiptHtml(r: Receipt, settings: SettingsMap): string {
+  // Prefer the issuer snapshot taken at receipt-issue time so historical PDFs
+  // stay consistent even if the daycare's address / signer / BN changed later.
+  const s = issuerViewFor(r, settings);
   const logo = s.logo_data_url || DEFAULT_LOGO_DATA_URL;
   const sig = s.signature_data_url || DEFAULT_SIGNATURE_DATA_URL;
   const hasBreakdown =
