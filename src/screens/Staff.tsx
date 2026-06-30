@@ -307,12 +307,43 @@ export default function StaffScreen() {
               <p style={{ margin: "6px 0 0", color: "#b45309", fontSize: 13 }}>⚠ Add your Gemini API key in <strong>Settings → Optional features</strong> first.</p>
             )}
           </div>
-          <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-            <button className="btn big" onClick={uploadSheet} disabled={ocrBusy || activeStaff.length === 0 || settings.gemini_api_key_set !== "1"}>
-              {ocrBusy ? "Reading sheet…" : "Choose file…"}
+          <div style={{ display: "flex", flexDirection: "column", gap: 10, alignItems: "stretch" }}>
+            <button
+              onClick={importLatestFromDownloads}
+              disabled={ocrBusy || activeStaff.length === 0 || settings.gemini_api_key_set !== "1"}
+              title="Picks the newest image AirDropped or saved to ~/Downloads in the last 10 min"
+              style={{
+                position: "relative",
+                padding: "16px 22px",
+                fontSize: 16,
+                fontWeight: 700,
+                background: "linear-gradient(180deg, #16a34a 0%, #15803d 100%)",
+                color: "white",
+                border: "none",
+                borderRadius: 12,
+                cursor: ocrBusy ? "not-allowed" : "pointer",
+                boxShadow: "0 4px 14px rgba(22, 163, 74, 0.35)",
+                opacity: (ocrBusy || activeStaff.length === 0 || settings.gemini_api_key_set !== "1") ? 0.55 : 1,
+                minWidth: 260,
+              }}
+            >
+              <span style={{
+                position: "absolute", top: -8, right: -8,
+                background: "#f59e0b", color: "white", fontSize: 10,
+                padding: "2px 7px", borderRadius: 10, fontWeight: 800, letterSpacing: 0.5,
+              }}>NEW</span>
+              <div style={{ fontSize: 22, marginBottom: 2 }}>📥 Import from Downloads</div>
+              <div style={{ fontSize: 11, fontWeight: 400, opacity: 0.9 }}>
+                AirDrop from iPad → click here
+              </div>
             </button>
-            <button className="btn secondary" onClick={importLatestFromDownloads} disabled={ocrBusy || activeStaff.length === 0 || settings.gemini_api_key_set !== "1"} title="Picks the newest image AirDropped or saved to ~/Downloads in the last 30 min">
-              📥 Import latest from Downloads
+            <button
+              className="btn secondary"
+              onClick={uploadSheet}
+              disabled={ocrBusy || activeStaff.length === 0 || settings.gemini_api_key_set !== "1"}
+              style={{ fontSize: 13 }}
+            >
+              {ocrBusy ? "Reading sheet…" : "…or choose file manually"}
             </button>
           </div>
         </div>
