@@ -213,60 +213,44 @@ export default function StaffScreen() {
           <h1>Staff Hours</h1>
           <p className="subtitle">Upload a monthly sign-in sheet or enter hours by hand. Export to Excel for payroll.</p>
         </div>
-        <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
-          <select value={month} onChange={(e) => setMonth(parseInt(e.target.value))}>
+        <div style={{ display: "flex", gap: 8, alignItems: "center", background: "#fff", border: "1px solid var(--border)", borderRadius: 10, padding: "6px 8px" }}>
+          <label style={{ fontSize: 12, color: "var(--muted)", fontWeight: 600, textTransform: "uppercase", letterSpacing: ".04em", marginRight: 4 }}>Month</label>
+          <select value={month} onChange={(e) => setMonth(parseInt(e.target.value))} style={{ minWidth: 120 }}>
             {MONTHS.map((m, i) => <option key={i + 1} value={i + 1}>{m}</option>)}
           </select>
-          <select value={year} onChange={(e) => setYear(parseInt(e.target.value))}>
+          <select value={year} onChange={(e) => setYear(parseInt(e.target.value))} style={{ width: 90 }}>
             {Array.from({ length: 7 }, (_, i) => today.getFullYear() - 3 + i).map((y) =>
               <option key={y} value={y}>{y}</option>
             )}
           </select>
-          <button className="btn" onClick={exportExcel} disabled={rows.length === 0}>Export Excel</button>
+          <button className="btn" onClick={exportExcel} disabled={rows.length === 0} style={{ marginLeft: 6 }}>⬇ Export Excel</button>
         </div>
       </div>
 
-      {/* Staff list */}
-      <section className="card" style={{ marginBottom: 16 }}>
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
-          <h3 style={{ margin: 0 }}>Staff ({activeStaff.length} active)</h3>
-          <button className="btn secondary" onClick={newStaff}>+ Add staff</button>
-        </div>
-        <table className="table">
-          <thead><tr><th>Name</th><th>Role</th><th>Hourly rate</th><th>Status</th><th></th></tr></thead>
-          <tbody>
-            {staff.map((s) => (
-              <tr key={s.id}>
-                <td>{s.name}</td>
-                <td>{s.role || "—"}</td>
-                <td>{s.hourly_rate != null ? `$${s.hourly_rate.toFixed(2)}` : "—"}</td>
-                <td>{s.active ? <span className="pill">Active</span> : <span className="pill muted">Archived</span>}</td>
-                <td style={{ textAlign: "right" }}>
-                  <button className="btn link" onClick={() => setEditing(s)}>Edit</button>
-                  {s.active === 1 && <button className="btn link danger" onClick={() => archive(s.id)}>Archive</button>}
-                </td>
-              </tr>
-            ))}
-            {staff.length === 0 && <tr><td colSpan={5} style={{ textAlign: "center", color: "var(--muted)" }}>No staff yet — add one to begin.</td></tr>}
-          </tbody>
-        </table>
-      </section>
-
-      {/* OCR + manual entry */}
-      <section className="card" style={{ marginBottom: 16 }}>
-        <h3 style={{ marginTop: 0 }}>Record hours for {MONTHS[month - 1]} {year}</h3>
-        <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center", marginBottom: 12 }}>
-          <button className="btn" onClick={uploadSheet} disabled={ocrBusy || activeStaff.length === 0}>
-            {ocrBusy ? "Reading sheet…" : "📷 Upload sign-in sheet (AI)"}
+      {/* Upload CTA — primary action */}
+      <section className="card" style={{ marginBottom: 16, background: "linear-gradient(180deg, #eff6ff 0%, #ffffff 65%)", borderColor: "#bfdbfe" }}>
+        <div style={{ display: "flex", gap: 18, alignItems: "center", flexWrap: "wrap" }}>
+          <div style={{ width: 56, height: 56, borderRadius: 12, background: "#dbeafe", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 28, flexShrink: 0 }}>📷</div>
+          <div style={{ flex: 1, minWidth: 240 }}>
+            <h3 style={{ margin: "0 0 4px" }}>Upload {MONTHS[month - 1]} sign-in sheet</h3>
+            <p style={{ margin: 0, color: "var(--muted)", fontSize: 13 }}>
+              Snap a clear photo or scan of the monthly sheet. Gemini extracts in/out times for each teacher; you review and import.
+            </p>
+            {activeStaff.length === 0 && (
+              <p style={{ margin: "6px 0 0", color: "var(--danger)", fontSize: 13 }}>Add at least one staff member below before uploading.</p>
+            )}
+            {settings.gemini_api_key_set !== "1" && activeStaff.length > 0 && (
+              <p style={{ margin: "6px 0 0", color: "#b45309", fontSize: 13 }}>⚠ Add your Gemini API key in <strong>Settings → Optional features</strong> first.</p>
+            )}
+          </div>
+          <button className="btn big" onClick={uploadSheet} disabled={ocrBusy || activeStaff.length === 0 || settings.gemini_api_key_set !== "1"}>
+            {ocrBusy ? "Reading sheet…" : "Choose file…"}
           </button>
-          <small style={{ color: "var(--muted)" }}>
-            Pick a clear photo or scan of the monthly sheet. AI extracts the times into the table below for review.
-          </small>
         </div>
 
         {ocrResult && (
-          <div style={{ background: "var(--surface-2)", padding: 12, borderRadius: 8, marginBottom: 12 }}>
-            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
+          <div style={{ background: "#fff", border: "1px solid var(--border)", padding: 14, borderRadius: 10, marginTop: 14 }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10, gap: 10, flexWrap: "wrap" }}>
               <strong>AI read {ocrResult.rows.length} time entries</strong>
               <div style={{ display: "flex", gap: 8 }}>
                 <button className="btn secondary" onClick={() => setOcrResult(null)}>Discard</button>
@@ -274,15 +258,15 @@ export default function StaffScreen() {
               </div>
             </div>
             {ocrResult.unmatched.length > 0 && (
-              <p style={{ margin: "0 0 8px", color: "var(--warn, #b45309)" }}>
-                ⚠ {ocrResult.unmatched.length} names couldn't be matched to your staff list: <strong>{ocrResult.unmatched.join(", ")}</strong>.
-                Add them under <em>Staff</em> above (or correct the name) and try again — only matched rows will be imported.
+              <p style={{ margin: "0 0 8px", color: "#b45309", fontSize: 13 }}>
+                ⚠ {ocrResult.unmatched.length} name{ocrResult.unmatched.length === 1 ? "" : "s"} couldn't be matched: <strong>{ocrResult.unmatched.join(", ")}</strong>.
+                Add them under <em>Staff</em> below (or correct the spelling) and re-upload. Only matched rows will import.
               </p>
             )}
             <details>
-              <summary style={{ cursor: "pointer", color: "var(--muted)" }}>Preview {ocrResult.rows.length} extracted rows</summary>
-              <table className="table" style={{ marginTop: 8 }}>
-                <thead><tr><th>Staff (from sheet)</th><th>Matched to</th><th>Date</th><th>In</th><th>Out</th><th>Hours</th></tr></thead>
+              <summary style={{ cursor: "pointer", color: "var(--muted)", fontSize: 13 }}>Preview {ocrResult.rows.length} extracted rows</summary>
+              <table className="table" style={{ marginTop: 10 }}>
+                <thead><tr><th>From sheet</th><th>Matched to</th><th>Date</th><th>In</th><th>Out</th><th>Hours</th></tr></thead>
                 <tbody>
                   {ocrResult.rows.map((r, i) => {
                     const m = matchStaffByName(r.staff_name, activeStaff);
@@ -302,58 +286,112 @@ export default function StaffScreen() {
             </details>
           </div>
         )}
+      </section>
 
-        {/* Manual entry */}
-        <div style={{ display: "grid", gridTemplateColumns: "2fr 1fr 1fr 1fr auto", gap: 8, alignItems: "end" }}>
+      {/* Two-col: staff list + quick manual entry */}
+      <div style={{ display: "grid", gridTemplateColumns: "minmax(0, 1.2fr) minmax(0, 1fr)", gap: 16, marginBottom: 16 }}>
+        <section className="card">
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
+            <h3 style={{ margin: 0 }}>Staff <span style={{ color: "var(--muted)", fontWeight: 400, fontSize: 13 }}>({activeStaff.length} active)</span></h3>
+            <button className="btn secondary" onClick={newStaff}>+ Add staff</button>
+          </div>
+          {staff.length === 0 ? (
+            <p style={{ color: "var(--muted)", margin: "10px 0 0" }}>No staff yet — click <strong>+ Add staff</strong> to add your first teacher.</p>
+          ) : (
+            <table className="table">
+              <thead><tr><th>Name</th><th>Role</th><th>Rate</th><th>Status</th><th></th></tr></thead>
+              <tbody>
+                {staff.map((s) => (
+                  <tr key={s.id}>
+                    <td style={{ fontWeight: 500 }}>{s.name}</td>
+                    <td style={{ color: "var(--muted)" }}>{s.role || "—"}</td>
+                    <td>{s.hourly_rate != null ? `$${s.hourly_rate.toFixed(2)}` : "—"}</td>
+                    <td>{s.active ? <span className="pill">Active</span> : <span className="pill muted">Archived</span>}</td>
+                    <td style={{ textAlign: "right", whiteSpace: "nowrap" }}>
+                      <button className="btn link" onClick={() => setEditing(s)}>Edit</button>
+                      {s.active === 1 && <button className="btn link danger" onClick={() => archive(s.id)}>Archive</button>}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+        </section>
+
+        <section className="card">
+          <h3 style={{ margin: "0 0 12px" }}>Quick add hours</h3>
+          <p style={{ color: "var(--muted)", margin: "0 0 14px", fontSize: 13 }}>
+            For a single day — handy for new joiners or rows the AI missed.
+          </p>
           <div className="field">
             <label>Staff</label>
             <select value={manualDraft.staff_id} onChange={(e) => setManualDraft({ ...manualDraft, staff_id: e.target.value ? Number(e.target.value) : "" })}>
-              <option value="">—</option>
+              <option value="">— pick —</option>
               {activeStaff.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
             </select>
           </div>
-          <div className="field">
-            <label>Date</label>
-            <input type="date" value={manualDraft.work_date} onChange={(e) => setManualDraft({ ...manualDraft, work_date: e.target.value })} />
+          <div className="row">
+            <div className="field">
+              <label>Date</label>
+              <input type="date" value={manualDraft.work_date} onChange={(e) => setManualDraft({ ...manualDraft, work_date: e.target.value })} />
+            </div>
+            <div className="field" style={{ marginBottom: 0 }}>
+              <label>Hours preview</label>
+              <input value={hoursBetween(manualDraft.in_time, manualDraft.out_time).toFixed(2)} readOnly style={{ background: "#f8fafc" }} />
+            </div>
           </div>
-          <div className="field">
-            <label>In</label>
-            <input type="time" value={manualDraft.in_time} onChange={(e) => setManualDraft({ ...manualDraft, in_time: e.target.value })} />
+          <div className="row">
+            <div className="field">
+              <label>In</label>
+              <input type="time" value={manualDraft.in_time} onChange={(e) => setManualDraft({ ...manualDraft, in_time: e.target.value })} />
+            </div>
+            <div className="field">
+              <label>Out</label>
+              <input type="time" value={manualDraft.out_time} onChange={(e) => setManualDraft({ ...manualDraft, out_time: e.target.value })} />
+            </div>
           </div>
-          <div className="field">
-            <label>Out</label>
-            <input type="time" value={manualDraft.out_time} onChange={(e) => setManualDraft({ ...manualDraft, out_time: e.target.value })} />
-          </div>
-          <button className="btn secondary" onClick={addManualHour}>Add</button>
-        </div>
-      </section>
+          <button className="btn" onClick={addManualHour} disabled={!manualDraft.staff_id} style={{ width: "100%" }}>Add to {MONTHS[month - 1]} {year}</button>
+        </section>
+      </div>
 
-      {/* Entries table */}
-      <section className="card" style={{ marginBottom: 16 }}>
-        <h3 style={{ marginTop: 0 }}>Entries — {MONTHS[month - 1]} {year}</h3>
+      {/* Entries */}
+      <section className="card">
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 12, flexWrap: "wrap", gap: 8 }}>
+          <h3 style={{ margin: 0 }}>{MONTHS[month - 1]} {year} entries</h3>
+          {rows.length > 0 && (
+            <div style={{ fontSize: 14 }}>
+              <span style={{ color: "var(--muted)" }}>Month total: </span>
+              <strong>{grandHours.toFixed(2)} hrs{grandPay ? ` · $${grandPay.toFixed(2)}` : ""}</strong>
+            </div>
+          )}
+        </div>
         {rows.length === 0 ? (
-          <p style={{ color: "var(--muted)" }}>No entries yet for this month.</p>
+          <div style={{ textAlign: "center", padding: "30px 10px", color: "var(--muted)" }}>
+            <div style={{ fontSize: 32, marginBottom: 6 }}>🗓</div>
+            <p style={{ margin: 0 }}>No hours recorded for {MONTHS[month - 1]} {year} yet.</p>
+            <p style={{ margin: "4px 0 0", fontSize: 13 }}>Upload a sign-in sheet above, or use <em>Quick add hours</em>.</p>
+          </div>
         ) : (
           activeStaff.concat(staff.filter((s) => !s.active && rowsByStaff.has(s.id))).map((s) => {
             const list = rowsByStaff.get(s.id) || [];
             if (list.length === 0) return null;
             const total = list.reduce((a, b) => a + b.hours_decimal, 0);
             return (
-              <div key={s.id} style={{ marginBottom: 18 }}>
-                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline" }}>
-                  <h4 style={{ margin: "0 0 6px" }}>{s.name}</h4>
+              <div key={s.id} style={{ marginBottom: 20, padding: 14, background: "#fafbff", borderRadius: 10, border: "1px solid var(--border)" }}>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 8 }}>
+                  <h4 style={{ margin: 0, fontSize: 15 }}>{s.name} <span style={{ color: "var(--muted)", fontWeight: 400, fontSize: 13 }}>· {list.length} day{list.length === 1 ? "" : "s"}</span></h4>
                   <strong>{total.toFixed(2)} hrs{s.hourly_rate ? ` · $${(s.hourly_rate * total).toFixed(2)}` : ""}</strong>
                 </div>
                 <table className="table">
-                  <thead><tr><th>Date</th><th>In</th><th>Out</th><th>Hours</th><th>Source</th><th></th></tr></thead>
+                  <thead><tr><th style={{ width: 110 }}>Date</th><th style={{ width: 110 }}>In</th><th style={{ width: 110 }}>Out</th><th>Hours</th><th>Source</th><th></th></tr></thead>
                   <tbody>
                     {list.map((r) => (
                       <tr key={r.id}>
                         <td>{r.work_date}</td>
                         <td><input type="time" defaultValue={r.in_time || ""} onBlur={(e) => editHourInline(r, { in_time: e.target.value })} /></td>
                         <td><input type="time" defaultValue={r.out_time || ""} onBlur={(e) => editHourInline(r, { out_time: e.target.value })} /></td>
-                        <td>{r.hours_decimal.toFixed(2)}</td>
-                        <td><span className="pill muted">{r.source}</span></td>
+                        <td><strong>{r.hours_decimal.toFixed(2)}</strong></td>
+                        <td><span className="pill muted">{r.source === "ocr" ? "AI" : "manual"}</span></td>
                         <td style={{ textAlign: "right" }}><button className="btn link danger" onClick={() => removeHour(r.id)}>Delete</button></td>
                       </tr>
                     ))}
@@ -363,19 +401,13 @@ export default function StaffScreen() {
             );
           })
         )}
-        {rows.length > 0 && (
-          <div style={{ borderTop: "1px solid var(--border)", paddingTop: 10, display: "flex", justifyContent: "space-between" }}>
-            <strong>Month total</strong>
-            <strong>{grandHours.toFixed(2)} hrs{grandPay ? ` · $${grandPay.toFixed(2)}` : ""}</strong>
-          </div>
-        )}
       </section>
 
       {/* Edit modal */}
       {editing && (
         <div className="modal-backdrop" onClick={() => setEditing(null)}>
           <div className="modal" onClick={(e) => e.stopPropagation()}>
-            <h3 style={{ marginTop: 0 }}>{editing.id ? "Edit staff" : "Add staff"}</h3>
+            <h2 style={{ marginTop: 0, marginBottom: 14 }}>{editing.id ? "Edit staff" : "Add staff"}</h2>
             <div className="field">
               <label>Name</label>
               <input value={editing.name || ""} onChange={(e) => setEditing({ ...editing, name: e.target.value })} autoFocus />
@@ -395,12 +427,12 @@ export default function StaffScreen() {
             </div>
             {editing.id != null && (
               <div className="field">
-                <label style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                <label style={{ display: "flex", alignItems: "center", gap: 6, textTransform: "none", letterSpacing: 0, fontSize: 14, color: "var(--text)", fontWeight: 400 }}>
                   <input type="checkbox" checked={(editing.active ?? 1) === 1} onChange={(e) => setEditing({ ...editing, active: e.target.checked ? 1 : 0 })} /> Active
                 </label>
               </div>
             )}
-            <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 12 }}>
+            <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 16 }}>
               <button className="btn secondary" onClick={() => setEditing(null)}>Cancel</button>
               <button className="btn" onClick={saveStaff} disabled={!editing.name?.trim()}>Save</button>
             </div>
