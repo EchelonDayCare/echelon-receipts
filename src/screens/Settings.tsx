@@ -8,6 +8,7 @@ import { getSettings, setSetting, setSettings as setSettingsBulk } from "../lib/
 import { sendTestEmail, SMTP_PRESETS } from "../lib/email";
 import { sendCloudBackup } from "../lib/cloudBackup";
 import { DEFAULT_LOGO_DATA_URL, DEFAULT_SIGNATURE_DATA_URL } from "../lib/defaults";
+import { readErrorLog, errorLogPath, clearErrorLog } from "../lib/errorLog";
 import type { SettingsMap } from "../types";
 import HealthCheck from "../components/HealthCheck";
 
@@ -41,6 +42,9 @@ export default function Settings() {
   const [geminiKey, setGeminiKey] = useState<string>("");
   const [hasGeminiKey, setHasGeminiKey] = useState(false);
   const [testing, setTesting] = useState(false);
+  const [errorLogText, setErrorLogText] = useState<string>("");
+  const [errorLogPathStr, setErrorLogPathStr] = useState<string>("");
+  const [showErrorLog, setShowErrorLog] = useState(false);
 
   useEffect(() => {
     (async () => {
@@ -590,6 +594,32 @@ export default function Settings() {
           (and in your monthly cloud-backup email) — nothing is sent to a third-party server
           except optional Gemini OCR for staff sign-in sheets, if enabled.
         </p>
+        <div className="field" style={{ marginTop: 16 }}>
+          <label>Error log</label>
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+            <button className="btn" type="button" onClick={async () => {
+              const [t, p] = await Promise.all([readErrorLog(), errorLogPath()]);
+              setErrorLogText(t || "(empty)");
+              setErrorLogPathStr(p);
+              setShowErrorLog(true);
+            }}>View error log</button>
+            <button className="btn" type="button" onClick={async () => {
+              await clearErrorLog();
+              setErrorLogText("");
+              setShowErrorLog(false);
+            }}>Clear log</button>
+          </div>
+          {showErrorLog && (
+            <div style={{ marginTop: 8 }}>
+              <div style={{ fontSize: 11, color: "var(--muted)", marginBottom: 4 }}>{errorLogPathStr}</div>
+              <pre style={{
+                maxHeight: 240, overflow: "auto", background: "var(--bg2, #111)",
+                color: "var(--text)", padding: 8, borderRadius: 6, fontSize: 11,
+                whiteSpace: "pre-wrap", wordBreak: "break-word"
+              }}>{errorLogText}</pre>
+            </div>
+          )}
+        </div>
       </div>
     );
   }

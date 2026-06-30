@@ -126,8 +126,9 @@ export default function StaffScreen() {
     if (!picked || typeof picked !== "string") return;
     setOcrBusy(true);
     setOcrResult(null);
+    let apiKey: string | null = null;
     try {
-      const apiKey = await invoke<string | null>("keychain_get", { key: "gemini_api_key" });
+      apiKey = await invoke<string | null>("keychain_get", { key: "gemini_api_key" });
       if (!apiKey) throw new Error("Gemini API key not found in keychain — re-save it in Settings.");
       const bytes = await readFile(picked);
       const mime = fileToMime(picked);

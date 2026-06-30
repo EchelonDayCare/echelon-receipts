@@ -1,6 +1,7 @@
 use tauri_plugin_sql::{Migration, MigrationKind};
 
 mod email;
+mod errlog;
 mod gemini;
 mod restore;
 
@@ -69,6 +70,8 @@ pub fn run() {
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_shell::init())
         .setup(|app| {
+            // Install panic hook + error log file before anything else can crash.
+            errlog::init(&app.handle());
             // Apply any pending DB restore BEFORE the SQL plugin opens a connection.
             // The frontend invokes Database.load(...) lazily, so this runs first.
             if let Err(e) = restore::apply_pending_restore(&app.handle()) {
@@ -89,6 +92,10 @@ pub fn run() {
             restore::stage_restore,
             restore::restart_app,
             gemini::extract_timesheet,
+            errlog::append_error_log,
+            errlog::read_error_log,
+            errlog::error_log_path,
+            errlog::clear_error_log,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
