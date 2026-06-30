@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { useParams, useNavigate, NavLink } from "react-router-dom";
 import { open } from "@tauri-apps/plugin-dialog";
 import { invoke } from "@tauri-apps/api/core";
 import { copyFile, mkdir, exists } from "@tauri-apps/plugin-fs";
@@ -184,13 +185,27 @@ export default function Settings() {
     inp.click();
   }
 
-  return (
-    <div>
-      <h1>Settings</h1>
-      <p className="subtitle">These values appear on every printed receipt.</p>
+  const { tab: tabParam } = useParams<{ tab?: string }>();
+  const nav = useNavigate();
+  const activeTab = tabParam || "identity";
 
-      <HealthCheck settings={s} />
+  const TABS: { key: string; label: string }[] = [
+    { key: "identity", label: "Identity" },
+    { key: "email", label: "Receipts & Email" },
+    { key: "staff", label: "Staff" },
+    { key: "backups", label: "Backups" },
+    { key: "about", label: "About" },
+  ];
 
+  const SaveBar = (
+    <div style={{ marginTop: 20, display: "flex", gap: 10, alignItems: "center" }}>
+      <button className="btn" onClick={save} disabled={saving}>{saving ? "Saving…" : "Save Settings"}</button>
+      <small style={{ color: "var(--muted)" }}>Saved changes apply across all tabs.</small>
+    </div>
+  );
+
+  function renderIdentity() {
+    return (
       <div className="card">
         <SectionHead title="Business identity" sub="Shown at the top of every receipt." />
         <Field s={s} setS={setS} k="daycare_name" label="Daycare Name" />
@@ -202,17 +217,6 @@ export default function Settings() {
           <Field s={s} setS={setS} k="contact_email" label="Contact Email" placeholder="you@daycare.com" />
           <Field s={s} setS={setS} k="contact_phone" label="Contact Phone" placeholder="604-000-0000" />
         </div>
-
-        <hr style={{ border: 0, borderTop: "1px solid var(--border)", margin: "16px 0" }} />
-        <SectionHead title="Receipt defaults" sub="Starting values when creating a new receipt." />
-        <div className="row">
-          <Field s={s} setS={setS} k="default_fee" label="Default Fee ($)" placeholder="485" />
-          <Field s={s} setS={setS} k="next_receipt_no" label="Next Receipt #" placeholder="1001" />
-        </div>
-        <Field s={s} setS={setS} k="business_number"
-          label="Business Number (BN)"
-          placeholder="12345 6789 RC0001"
-          hint="Required on CRA annual tax receipts." />
 
         <hr style={{ border: 0, borderTop: "1px solid var(--border)", margin: "16px 0" }} />
         <SectionHead title="Signing block" sub="Printed in the signature area at the bottom of each receipt." />
@@ -245,6 +249,23 @@ export default function Settings() {
             </div>
           </div>
         </div>
+
+      </div>
+    );
+  }
+
+  function renderReceiptsEmail() {
+    return (
+      <div className="card">
+        <SectionHead title="Receipt defaults" sub="Starting values when creating a new receipt." />
+        <div className="row">
+          <Field s={s} setS={setS} k="default_fee" label="Default Fee ($)" placeholder="485" />
+          <Field s={s} setS={setS} k="next_receipt_no" label="Next Receipt #" placeholder="1001" />
+        </div>
+        <Field s={s} setS={setS} k="business_number"
+          label="Business Number (BN)"
+          placeholder="12345 6789 RC0001"
+          hint="Required on CRA annual tax receipts." />
 
         <hr style={{ border: 0, borderTop: "1px solid var(--border)", margin: "16px 0" }} />
         <SectionHead title="PDF archive" sub="Where saved/sent receipt PDFs are filed on this computer." />
@@ -418,8 +439,13 @@ export default function Settings() {
             {testing ? "Sending…" : "Send Test Email to Myself"}
           </button>
         </div>
+      </div>
+    );
+  }
 
-        <hr style={{ border: 0, borderTop: "1px solid var(--border)", margin: "20px 0" }} />
+  function renderBackups() {
+    return (
+      <div className="card">
         <h3 style={{ margin: "0 0 4px" }}>Cloud backup (recommended)</h3>
         <p className="subtitle" style={{ marginBottom: 14 }}>
           On the first app launch of each month, a copy of your database is automatically
@@ -482,8 +508,13 @@ export default function Settings() {
             <small style={{ color: "var(--muted)", alignSelf: "center" }}>→ {s.last_backup_path}</small>
           )}
         </div>
+      </div>
+    );
+  }
 
-        <hr style={{ border: 0, borderTop: "1px solid var(--border)", margin: "20px 0" }} />
+  function renderStaff() {
+    return (
+      <div className="card">
         <h3 style={{ margin: "0 0 4px" }}>Optional features</h3>
         <p className="subtitle" style={{ marginBottom: 14 }}>
           Turn on extra tools you'd like to use. They stay hidden when off.
@@ -523,10 +554,81 @@ export default function Settings() {
             <Field s={s} setS={setS} k="staff_default_hourly_rate" label="Default hourly rate (optional)" placeholder="e.g. 28.50" hint="Used only as a starting point when you add a new staff member." />
           </div>
         )}
-
-        <hr style={{ border: 0, borderTop: "1px solid var(--border)", margin: "20px 0" }} />
-        <button className="btn" onClick={save} disabled={saving}>{saving ? "Saving…" : "Save Settings"}</button>
       </div>
+    );
+  }
+
+  function renderAbout() {
+    return (
+      <div className="card">
+        <h3 style={{ margin: "0 0 4px" }}>About Echelon Receipts</h3>
+        <p className="subtitle" style={{ marginBottom: 16 }}>
+          A purpose-built receipts &amp; records app for Echelon Daycare.
+        </p>
+        <div className="field">
+          <label>Version</label>
+          <div>v0.1.0</div>
+        </div>
+        <div className="field">
+          <label>Database location</label>
+          <div style={{ fontSize: 12, fontFamily: "ui-monospace, SFMono-Regular, monospace", color: "var(--muted)" }}>
+            ~/Library/Application Support/org.echelondaycare.receipts/echelon.db (macOS)<br />
+            %APPDATA%\org.echelondaycare.receipts\echelon.db (Windows)
+          </div>
+        </div>
+        <div className="field">
+          <label>Links</label>
+          <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+            <a href="https://github.com/EchelonDayCare/echelon-receipts" target="_blank" rel="noreferrer">GitHub repository</a>
+            <a href="https://github.com/EchelonDayCare/echelon-receipts/releases" target="_blank" rel="noreferrer">Download the latest DMG</a>
+            <a href="https://www2.gov.bc.ca/gov/content/family-social-supports/caring-for-young-children" target="_blank" rel="noreferrer">BC Childcare programs</a>
+          </div>
+        </div>
+        <p className="subtitle" style={{ marginTop: 16, fontSize: 12 }}>
+          Built by Echelon Daycare with GitHub Copilot. Your data stays on this computer
+          (and in your monthly cloud-backup email) — nothing is sent to a third-party server
+          except optional Gemini OCR for staff sign-in sheets, if enabled.
+        </p>
+      </div>
+    );
+  }
+
+  return (
+    <div>
+      <h1 style={{ marginBottom: 4 }}>Configuration</h1>
+      <p className="subtitle" style={{ marginTop: 0 }}>Settings are grouped into tabs. Use Save Settings to apply changes from any tab.</p>
+
+      <HealthCheck settings={s} />
+
+      <nav className="settings-tabs" style={{ display: "flex", gap: 4, margin: "16px 0", borderBottom: "1px solid var(--border)" }}>
+        {TABS.map((t) => (
+          <NavLink
+            key={t.key}
+            to={`/config/${t.key}`}
+            className={() => "settings-tab" + (t.key === activeTab ? " active" : "")}
+            style={({ isActive }) => ({
+              padding: "8px 14px",
+              borderRadius: "8px 8px 0 0",
+              textDecoration: "none",
+              color: (t.key === activeTab || isActive) ? "var(--text)" : "var(--muted)",
+              borderBottom: (t.key === activeTab) ? "2px solid var(--accent)" : "2px solid transparent",
+              fontWeight: (t.key === activeTab) ? 600 : 400,
+              marginBottom: -1,
+            })}
+            onClick={(e) => { e.preventDefault(); nav(`/config/${t.key}`); }}
+          >
+            {t.label}
+          </NavLink>
+        ))}
+      </nav>
+
+      {activeTab === "identity" && renderIdentity()}
+      {activeTab === "email" && renderReceiptsEmail()}
+      {activeTab === "staff" && renderStaff()}
+      {activeTab === "backups" && renderBackups()}
+      {activeTab === "about" && renderAbout()}
+
+      {activeTab !== "about" && SaveBar}
     </div>
   );
 }

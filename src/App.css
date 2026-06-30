@@ -231,3 +231,72 @@ table.data tr.voided td { color: #9ca3af; text-decoration: line-through; }
 .stepper .step.done .step-num { background: var(--ok); color: #fff; }
 
 .wizard-foot { display: flex; justify-content: space-between; margin-top: 18px; gap: 10px; }
+
+/* --- Home landing page --- */
+.content-home {
+  max-width: 1080px;
+  margin: 0 auto;
+  padding: 56px 32px 32px;
+}
+.home-head {
+  display: flex; align-items: center; gap: 18px; margin-bottom: 36px;
+}
+.home-logo {
+  width: 72px; height: 72px; border-radius: 50%; object-fit: cover;
+  border: 1px solid var(--border); background: #fff;
+}
+.home-tiles {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 18px;
+  margin-bottom: 28px;
+}
+@media (max-width: 900px) {
+  .home-tiles { grid-template-columns: 1fr; }
+}
+.home-tile {
+  display: flex; flex-direction: column; align-items: flex-start; gap: 6px;
+  text-align: left;
+  padding: 28px 24px;
+  background: #fff;
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  cursor: pointer;
+  transition: transform .12s ease, box-shadow .12s ease, border-color .12s ease;
+  font: inherit;
+  color: inherit;
+}
+.home-tile:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 8px 24px rgba(15, 23, 42, .08);
+}
+.home-tile.students:hover { border-color: #2563eb; }
+.home-tile.staff:hover    { border-color: #9333ea; }
+.home-tile.config:hover   { border-color: #0f766e; }
+.home-tile-icon { font-size: 36px; line-height: 1; margin-bottom: 6px; }
+.home-tile h2 { margin: 0; font-size: 20px; }
+.home-tile p { margin: 0; color: var(--muted); font-size: 13px; }
+
+.home-alerts {
+  background: #fff;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  padding: 18px 20px;
+  margin-bottom: 24px;
+}
+.home-alert {
+  display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  padding: 10px 12px;
+  border-radius: 8px;
+  font-size: 14px;
+  margin-bottom: 6px;
+}
+.home-alert:last-child { margin-bottom: 0; }
+.home-alert.tone-danger { background: #fef2f2; color: #991b1b; }
+.home-alert.tone-warn   { background: #fffbeb; color: #92400e; }
+.home-alert.tone-info   { background: #eff6ff; color: #1e40af; }
+.home-alert .btn.link { white-space: nowrap; }
+
+.home-foot {
+  text-align: center; color: var(--muted); font-size: 12px; margin-top: 24px;
+}
