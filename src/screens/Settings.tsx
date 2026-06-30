@@ -12,13 +12,29 @@ import { readErrorLog, errorLogPath, clearErrorLog } from "../lib/errorLog";
 import type { SettingsMap } from "../types";
 import HealthCheck from "../components/HealthCheck";
 
-function Field({ s, setS, k, label, hint, placeholder }: {
+function HelpTip({ text }: { text: string }) {
+  return (
+    <span
+      title={text}
+      aria-label={text}
+      style={{
+        display: "inline-flex", alignItems: "center", justifyContent: "center",
+        width: 16, height: 16, marginLeft: 6, borderRadius: "50%",
+        background: "var(--border)", color: "var(--muted)",
+        fontSize: 10, fontWeight: 700, cursor: "help", verticalAlign: "middle",
+        userSelect: "none",
+      }}
+    >?</span>
+  );
+}
+
+function Field({ s, setS, k, label, hint, placeholder, tip }: {
   s: Record<string,string>; setS: (u: Record<string,string>) => void;
-  k: string; label: string; hint?: string; placeholder?: string;
+  k: string; label: string; hint?: string; placeholder?: string; tip?: string;
 }) {
   return (
     <div className="field">
-      <label>{label}</label>
+      <label>{label}{tip && <HelpTip text={tip} />}</label>
       <input value={s[k] || ""} placeholder={placeholder} onChange={(e) => setS({ ...s, [k]: e.target.value })} />
       {hint && <small style={{ color: "var(--muted)" }}>{hint}</small>}
     </div>
@@ -269,7 +285,8 @@ export default function Settings() {
         <Field s={s} setS={setS} k="business_number"
           label="Business Number (BN)"
           placeholder="12345 6789 RC0001"
-          hint="Required on CRA annual tax receipts." />
+          hint="Required on CRA annual tax receipts."
+          tip="Your 15-character CRA Business Number (BN) — looks like '123456789 RC0001'. Parents need this on the tax receipt to claim the daycare deduction." />
 
         <hr style={{ border: 0, borderTop: "1px solid var(--border)", margin: "16px 0" }} />
         <SectionHead title="PDF archive" sub="Where saved/sent receipt PDFs are filed on this computer." />
@@ -322,7 +339,7 @@ export default function Settings() {
                 </small>
               </div>
               <div className="field">
-                <label>CCFRI Monthly Reduction ($)</label>
+                <label>CCFRI Monthly Reduction ($)<HelpTip text="Child Care Fee Reduction Initiative — the BC government pays this directly to your daycare each month to lower parent fees. Check the current rate for your category (e.g. Group Care 30mo-to-school-age) at gov.bc.ca/CCFRI." /></label>
                 <input value={s.ccfri_monthly_reduction || ""}
                   onChange={(e) => setS({ ...s, ccfri_monthly_reduction: e.target.value })}
                   placeholder="e.g. 550" />
@@ -401,7 +418,7 @@ export default function Settings() {
         </div>
 
         <div className="field">
-          <label>App Password {hasStoredPassword && <span className="badge ok" style={{ marginLeft: 8 }}>Saved</span>}</label>
+          <label>App Password<HelpTip text="NOT your regular email password. An App Password is a one-time 16-character code your email provider gives you specifically for third-party apps. Required because Gmail/Outlook block direct password sign-in." /> {hasStoredPassword && <span className="badge ok" style={{ marginLeft: 8 }}>Saved</span>}</label>
           <div style={{ display: "flex", gap: 8 }}>
             <input type="password" style={{ flex: 1 }}
               value={smtpPassword}
@@ -540,7 +557,7 @@ export default function Settings() {
         {s.feature_staff_hours_enabled === "1" && (
           <div style={{ paddingLeft: 24, borderLeft: "2px solid var(--border)", marginBottom: 14 }}>
             <div className="field">
-              <label>Google Gemini API key</label>
+              <label>Google Gemini API key<HelpTip text="Optional. Only used to read scanned staff sign-in sheets via OCR. Free key at aistudio.google.com/app/apikey. Stored in the macOS keychain — never in the database or any backup email." /></label>
               <input
                 type="password"
                 placeholder={hasGeminiKey ? "•••••••• (stored in OS keychain) — enter a new key to replace" : "Paste your Gemini API key"}
@@ -556,7 +573,7 @@ export default function Settings() {
               </small>
             </div>
             <Field s={s} setS={setS} k="staff_default_hourly_rate" label="Default hourly rate (optional)" placeholder="e.g. 28.50" hint="Used only as a starting point when you add a new staff member." />
-            <Field s={s} setS={setS} k="staff_cred_alert_days" label="Credential warning window (days)" placeholder="60" hint="Home alerts trigger when a credential expires within this many days. Default 60." />
+            <Field s={s} setS={setS} k="staff_cred_alert_days" label="Credential warning window (days)" placeholder="60" hint="Home alerts trigger when a credential expires within this many days. Default 60." tip="How many days before expiry should the Home screen warn you? 60 days is enough time to book a First Aid renewal or order a new Criminal Record Check." />
           </div>
         )}
       </div>
