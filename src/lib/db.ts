@@ -17,10 +17,11 @@ export async function db(): Promise<Database> {
       await _db.execute("PRAGMA temp_store = MEMORY");
       await _db.execute("PRAGMA mmap_size = 268435456");
       await _db.execute("PRAGMA cache_size = -16000");
-      // Wait up to 5s for a competing writer to release the lock before throwing
-      // SQLITE_BUSY. Without this, concurrent saves (e.g. settings save while a
-      // background effect re-fetches) fail with "database is locked" (code: 5).
       await _db.execute("PRAGMA busy_timeout = 5000");
+      // Defensively clear any stale transaction left over from a prior crash
+      // or a pooled connection that didn't commit cleanly. Ignored if no tx
+      // is open (SQLite raises a benign error we suppress).
+      try { await _db.execute("ROLLBACK"); } catch { /* no active tx, fine */ }
     } catch (e) { console.warn("[db] pragma setup:", e); }
   }
   if (!_schemaChecked) {
@@ -262,36 +263,34 @@ export async function setSettings(entries: Record<string, string>) {
   const d = await db();
   const keys = Object.keys(entries);
   if (keys.length === 0) return;
-  // Retry the transaction a few times if SQLite reports BUSY/LOCKED. The
-  // busy_timeout PRAGMA already waits 5s, but in rare cases (long-running
-  // read in another connection) the writer can still bounce.
-  let lastErr: any = null;
-  for (let attempt = 0; attempt < 4; attempt++) {
-    try {
-      await d.execute("BEGIN IMMEDIATE");
+  // NOTE: We deliberately do NOT wrap this in BEGIN/COMMIT. tauri-plugin-sql
+  // pools connections, so a JS-side BEGIN may execute on a different physical
+  // connection than the subsequent INSERTs, leading to either "database is
+  // locked" (code 5) or "cannot start a transaction within a transaction"
+  // (code 1) when the pooled connection still holds a stale transaction.
+  // Each upsert is independently atomic; settings are small and partial writes
+  // are recoverable by clicking Save again. WAL + busy_timeout=5000 handles
+  // any concurrent reader.
+  for (const k of keys) {
+    let lastErr: any = null;
+    for (let attempt = 0; attempt < 4; attempt++) {
       try {
-        for (const k of keys) {
-          await d.execute(
-            "INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-            [k, entries[k] ?? ""]
-          );
-          if (_settingsCache) _settingsCache[k] = entries[k] ?? "";
-        }
-        await d.execute("COMMIT");
-        return;
-      } catch (innerErr) {
-        try { await d.execute("ROLLBACK"); } catch { /* ignore */ }
-        throw innerErr;
+        await d.execute(
+          "INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+          [k, entries[k] ?? ""]
+        );
+        if (_settingsCache) _settingsCache[k] = entries[k] ?? "";
+        lastErr = null;
+        break;
+      } catch (e: any) {
+        lastErr = e;
+        const msg = String(e?.message || e);
+        if (!/locked|busy|code: 5|code: 6/i.test(msg)) throw e;
+        await new Promise((r) => setTimeout(r, 100 + attempt * 200));
       }
-    } catch (e: any) {
-      lastErr = e;
-      const msg = String(e?.message || e);
-      if (!/locked|busy|code: 5|code: 6/i.test(msg)) throw e;
-      // Exponential-ish backoff: 100ms, 250ms, 500ms.
-      await new Promise((r) => setTimeout(r, 100 + attempt * 200));
     }
+    if (lastErr) throw lastErr;
   }
-  throw lastErr;
 }
 
 // Bulk ACCB lookup for a single month — replaces N+1 calls in ThisMonth.
