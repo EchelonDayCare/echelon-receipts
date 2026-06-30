@@ -3,6 +3,7 @@ import { mkdir, writeFile, exists } from "@tauri-apps/plugin-fs";
 import { DEFAULT_LOGO_DATA_URL, DEFAULT_SIGNATURE_DATA_URL } from "./defaults";
 import { loadHtml2Pdf } from "./lazy";
 import { issuerViewFor } from "./db";
+import { h } from "./html";
 
 function fmtDate(iso: string): string {
   // dd/mm/yyyy to match the existing receipt
@@ -73,21 +74,21 @@ export function buildReceiptHtml(r: Receipt, settings: SettingsMap): string {
   <div class="head">
     ${logo ? `<img class="logo" src="${logo}"/>` : `<div class="logo"></div>`}
     <div>
-      <p class="title">${s.daycare_name || "Echelon Daycare Society"}</p>
-      <p class="addr">${s.daycare_address || ""}</p>
+      <p class="title">${h(s.daycare_name || "Echelon Daycare Society")}</p>
+      <p class="addr">${h(s.daycare_address || "")}</p>
     </div>
   </div>
 
   <div class="meta">
-    <div><b>Receipt #</b> ${r.receipt_no}${r.voided ? ' <span class="voided">(VOIDED)</span>' : ""}</div>
-    <div style="text-align:right"><b>Date:</b> ${fmtDate(r.date)}</div>
+    <div><b>Receipt #</b> ${h(r.receipt_no)}${r.voided ? ' <span class="voided">(VOIDED)</span>' : ""}</div>
+    <div style="text-align:right"><b>Date:</b> ${h(fmtDate(r.date))}</div>
   </div>
 
   <div class="recv">
     <b>Received From</b>
     <span class="parents">
-      ${r.father_name_snapshot ? r.father_name_snapshot + "<br/>" : ""}
-      ${r.mother_name_snapshot || ""}
+      ${r.father_name_snapshot ? h(r.father_name_snapshot) + "<br/>" : ""}
+      ${h(r.mother_name_snapshot || "")}
     </span>
   </div>
 
@@ -97,8 +98,8 @@ export function buildReceiptHtml(r: Receipt, settings: SettingsMap): string {
     </thead>
     <tbody>
       <tr>
-        <td class="name">${r.student_name_snapshot}</td>
-        <td class="desc">${r.description}${r.is_refund ? " <b>(REFUND)</b>" : ""}</td>
+        <td class="name">${h(r.student_name_snapshot)}</td>
+        <td class="desc">${h(r.description)}${r.is_refund ? " <b>(REFUND)</b>" : ""}</td>
         <td class="amount">${r.is_refund ? "-" : ""}$${fmtAmount(Math.abs(r.amount))}</td>
       </tr>
     </tbody>
@@ -107,7 +108,7 @@ export function buildReceiptHtml(r: Receipt, settings: SettingsMap): string {
 
   <div class="comments">
     <span class="lbl">Comments:</span>
-    ${r.comments ? r.comments : ""}
+    ${r.comments ? h(r.comments) : ""}
     ${r.pending_amount > 0 ? ` <span class="pending">Pending Fees CAD${fmtAmount(r.pending_amount)}</span>` : ""}
   </div>
 
@@ -118,7 +119,7 @@ export function buildReceiptHtml(r: Receipt, settings: SettingsMap): string {
 
   <div class="footer">
     If you have any questions regarding this receipt, please feel free to contact us at:<br/>
-    ${s.contact_email || ""} or ${s.contact_phone || ""}
+    ${h(s.contact_email || "")} or ${h(s.contact_phone || "")}
     <div class="thank">THANK YOU!</div>
   </div>
 </div></body></html>`;

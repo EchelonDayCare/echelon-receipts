@@ -46,6 +46,7 @@ export default function ThisMonth() {
   const [loading, setLoading] = useState(true);
   const [showReview, setShowReview] = useState(false);
   const [batchProgress, setBatchProgress] = useState<{ done: number; total: number; current: string } | null>(null);
+  const [batchSending, setBatchSending] = useState(false);
 
   async function refresh() {
     setLoading(true);
@@ -158,26 +159,32 @@ export default function ThisMonth() {
   const skipped = rows.filter(r => r.receipt && !r.receipt.emailed_at && r.parentEmails.length === 0);
 
   async function doBatchSend() {
-    setShowReview(false);
-    setBatchProgress({ done: 0, total: readyToSend.length, current: readyToSend[0]?.student.name || "" });
-    await yieldToUI();
-    let done = 0;
-    for (let i = 0; i < readyToSend.length; i++) {
-      const row = readyToSend[i];
-      setBatchProgress({ done, total: readyToSend.length, current: row.student.name });
+    if (batchSending) return;
+    setBatchSending(true);
+    try {
+      setShowReview(false);
+      setBatchProgress({ done: 0, total: readyToSend.length, current: readyToSend[0]?.student.name || "" });
       await yieldToUI();
-      try {
-        await sendReceiptEmail({ receipt: row.receipt!, recipients: row.parentEmails, settings });
-        await markEmailed(row.receipt!.id, row.parentEmails);
-      } catch (e: any) {
-        setRows(cur => cur.map(x => x.student.id === row.student.id ? { ...x, lastResult: { kind: "err", text: e?.message || String(e) } } : x));
+      let done = 0;
+      for (let i = 0; i < readyToSend.length; i++) {
+        const row = readyToSend[i];
+        setBatchProgress({ done, total: readyToSend.length, current: row.student.name });
+        await yieldToUI();
+        try {
+          await sendReceiptEmail({ receipt: row.receipt!, recipients: row.parentEmails, settings });
+          await markEmailed(row.receipt!.id, row.parentEmails);
+        } catch (e: any) {
+          setRows(cur => cur.map(x => x.student.id === row.student.id ? { ...x, lastResult: { kind: "err", text: e?.message || String(e) } } : x));
+        }
+        done++;
+        await yieldToUI();
       }
-      done++;
-      await yieldToUI();
+      setBatchProgress({ done, total: readyToSend.length, current: "" });
+      await refresh();
+      setTimeout(() => setBatchProgress(null), 2500);
+    } finally {
+      setBatchSending(false);
     }
-    setBatchProgress({ done, total: readyToSend.length, current: "" });
-    await refresh();
-    setTimeout(() => setBatchProgress(null), 2500);
   }
 
   if (loading) return <div><h1>This Month</h1><p className="subtitle">Loading…</p></div>;
@@ -196,10 +203,10 @@ export default function ThisMonth() {
         <div className="grow"></div>
         <button className="btn secondary" onClick={refresh}>Refresh</button>
         <button className="btn"
-          disabled={readyToSend.length === 0}
+          disabled={readyToSend.length === 0 || batchSending}
           title={readyToSend.length === 0 ? "Nothing to send (either all are sent, all have no email, or no receipts have been generated)" : ""}
           onClick={() => setShowReview(true)}>
-          Send all unsent ({readyToSend.length})
+          {batchSending ? "Sending…" : `Send all unsent (${readyToSend.length})`}
         </button>
       </div>
 
@@ -248,7 +255,7 @@ export default function ThisMonth() {
                         <button className="btn ghost" onClick={() => openExisting(idx)}>Open PDF</button>
                         {!r.receipt.emailed_at && (
                           <button className="btn ghost"
-                            disabled={r.busy || r.parentEmails.length === 0}
+                            disabled={r.busy || r.parentEmails.length === 0 || batchSending}
                             onClick={() => emailOne(idx)}>
                             {r.busy ? "Sending…" : "Email"}
                           </button>
@@ -296,8 +303,10 @@ export default function ThisMonth() {
               </table>
             </div>
             <div style={{ display: "flex", gap: 10, justifyContent: "flex-end", marginTop: 16 }}>
-              <button className="btn secondary" onClick={() => setShowReview(false)}>Cancel</button>
-              <button className="btn" onClick={doBatchSend}>Send {readyToSend.length} now</button>
+              <button className="btn secondary" onClick={() => setShowReview(false)} disabled={batchSending}>Cancel</button>
+              <button className="btn" onClick={doBatchSend} disabled={batchSending}>
+                {batchSending ? "Sending…" : `Send ${readyToSend.length} now`}
+              </button>
             </div>
           </div>
         </div>

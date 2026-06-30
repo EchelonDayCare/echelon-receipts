@@ -45,6 +45,10 @@ export default function AnnualReceipts() {
   const [loading, setLoading] = useState(false);
   const [history, setHistory] = useState<{ group: AnnualGroup; list: AnnualReceipt[] } | null>(null);
   const [batchProgress, setBatchProgress] = useState<{ done: number; total: number; current: string } | null>(null);
+  const [generating, setGenerating] = useState(false);
+  const [sendingAll, setSendingAll] = useState(false);
+  // Per-row in-flight guard: prevents double-clicks on the same row's Send/Resend button.
+  const [inFlight, setInFlight] = useState<Set<number>>(new Set());
 
   async function refresh() {
     setLoading(true);
@@ -99,42 +103,53 @@ export default function AnnualReceipts() {
   }
 
   async function generateAllDrafts() {
+    if (generating || sendingAll) return;
+    setGenerating(true);
     setLoading(true);
-    const backupPath = await backupNow();
-    if (!backupPath) {
-      if (!confirm("⚠️ Auto-backup failed. Continue without a backup? (Not recommended)")) {
-        setLoading(false); return;
+    try {
+      const backupPath = await backupNow();
+      if (!backupPath) {
+        if (!confirm("⚠️ Auto-backup failed. Continue without a backup? (Not recommended)")) {
+          return;
+        }
       }
-    }
-    const targets = rows.filter(r => r.group.total > 0);
-    let i = 0;
-    for (const r of targets) {
-      i++;
-      try {
-        const arNumber = await nextAnnualReceiptNumber(year);
-        const recipientLabel = defaultRecipientLabel(r.group);
-        const supersede = r.ar || undefined;
-        const supersededNote = supersede ? `This receipt supersedes ${supersede.ar_number} issued ${supersede.issued_at.slice(0,10)}.` : null;
-        await recordAnnualReceipt({ group: r.group, year, arNumber, recipientLabel, supersede, notes: supersededNote });
-        await saveAnnualReceiptPdf({ group: r.group, year, arNumber, recipientLabel, settings, supersededNote });
-        setRows(cur => cur.map(x => x.group.person_id === r.group.person_id ? { ...x, status: "drafted" } : x));
-      } catch (e: any) {
-        setRows(cur => cur.map(x => x.group.person_id === r.group.person_id ? { ...x, status: "failed", error: e?.message || String(e) } : x));
+      const targets = rows.filter(r => r.group.total > 0);
+      let i = 0;
+      for (const r of targets) {
+        i++;
+        try {
+          const arNumber = await nextAnnualReceiptNumber(year);
+          const recipientLabel = defaultRecipientLabel(r.group);
+          const supersede = r.ar || undefined;
+          const supersededNote = supersede ? `This receipt supersedes ${supersede.ar_number} issued ${supersede.issued_at.slice(0,10)}.` : null;
+          await recordAnnualReceipt({ group: r.group, year, arNumber, recipientLabel, supersede, notes: supersededNote });
+          await saveAnnualReceiptPdf({ group: r.group, year, arNumber, recipientLabel, settings, supersededNote });
+          setRows(cur => cur.map(x => x.group.person_id === r.group.person_id ? { ...x, status: "drafted" } : x));
+        } catch (e: any) {
+          setRows(cur => cur.map(x => x.group.person_id === r.group.person_id ? { ...x, status: "failed", error: e?.message || String(e) } : x));
+        }
       }
+      await refresh();
+      setStep(4);
+      if (backupPath) {
+        alert(`✅ Drafts generated for ${i} student(s).\nBackup saved to:\n${backupPath}`);
+      }
+    } finally {
+      setLoading(false);
+      setGenerating(false);
     }
-    await refresh();
-    setStep(4);
-    if (backupPath) {
-      alert(`✅ Drafts generated for ${i} student(s).\nBackup saved to:\n${backupPath}`);
-    }
-    setLoading(false);
   }
 
   // ----- Step 4: send -----
   async function sendOne(idx: number) {
     const r = rows[idx];
+    if (!r) return;
+    // Per-row in-flight guard prevents the same row from being sent twice
+    // concurrently (which would allocate two AR numbers + send two emails).
+    if (inFlight.has(idx)) return;
     const recipients = parseRecipients(r.recipientEmails);
     if (!recipients.length) { alert("No email address."); return; }
+    setInFlight(prev => { const n = new Set(prev); n.add(idx); return n; });
     setRows(cur => cur.map((x, i) => i === idx ? { ...x, status: "sending", error: undefined } : x));
     try {
       // Generate fresh draft AR if none yet
@@ -165,32 +180,40 @@ export default function AnnualReceipts() {
       setRows(cur => cur.map((x, i) => i === idx ? { ...x, status: "sent" } : x));
     } catch (e: any) {
       setRows(cur => cur.map((x, i) => i === idx ? { ...x, status: "failed", error: e?.message || String(e) } : x));
+    } finally {
+      setInFlight(prev => { const n = new Set(prev); n.delete(idx); return n; });
     }
   }
 
   async function sendAll(retryFailedOnly: boolean) {
-    const indexes: number[] = [];
-    rows.forEach((r, i) => {
-      const ok = retryFailedOnly ? r.status === "failed" : (r.status !== "sent");
-      const haveEmail = parseRecipients(r.recipientEmails).length > 0;
-      const haveTotal = r.group.total > 0;
-      if (ok && haveEmail && haveTotal) indexes.push(i);
-    });
-    if (!indexes.length) { alert("Nothing eligible to send."); return; }
-    if (!confirm(`Send ${indexes.length} annual receipt${indexes.length === 1 ? "" : "s"} now?`)) return;
-    setBatchProgress({ done: 0, total: indexes.length, current: rows[indexes[0]]?.group.student_name || "" });
-    await yieldToUI();
-    let done = 0;
-    for (const i of indexes) {
-      setBatchProgress({ done, total: indexes.length, current: rows[i].group.student_name });
+    if (sendingAll || generating) return;
+    setSendingAll(true);
+    try {
+      const indexes: number[] = [];
+      rows.forEach((r, i) => {
+        const ok = retryFailedOnly ? r.status === "failed" : (r.status !== "sent");
+        const haveEmail = parseRecipients(r.recipientEmails).length > 0;
+        const haveTotal = r.group.total > 0;
+        if (ok && haveEmail && haveTotal) indexes.push(i);
+      });
+      if (!indexes.length) { alert("Nothing eligible to send."); return; }
+      if (!confirm(`Send ${indexes.length} annual receipt${indexes.length === 1 ? "" : "s"} now?`)) return;
+      setBatchProgress({ done: 0, total: indexes.length, current: rows[indexes[0]]?.group.student_name || "" });
       await yieldToUI();
-      await sendOne(i);
-      done++;
-      await yieldToUI();
+      let done = 0;
+      for (const i of indexes) {
+        setBatchProgress({ done, total: indexes.length, current: rows[i].group.student_name });
+        await yieldToUI();
+        await sendOne(i);
+        done++;
+        await yieldToUI();
+      }
+      setBatchProgress({ done, total: indexes.length, current: "" });
+      await refresh();
+      setTimeout(() => setBatchProgress(null), 2500);
+    } finally {
+      setSendingAll(false);
     }
-    setBatchProgress({ done, total: indexes.length, current: "" });
-    await refresh();
-    setTimeout(() => setBatchProgress(null), 2500);
   }
 
   async function openPdfFor(r: DraftRow) {
@@ -391,7 +414,9 @@ export default function AnnualReceipts() {
           </div>
           <div className="wizard-foot">
             <button className="btn secondary" onClick={() => setStep(flagged.length ? 2 : 1)}>← Back</button>
-            <button className="btn" onClick={generateAllDrafts}>Generate drafts now</button>
+            <button className="btn" onClick={generateAllDrafts} disabled={generating || sendingAll}>
+              {generating ? "Generating…" : "Generate drafts now"}
+            </button>
           </div>
         </>
       )}
@@ -408,9 +433,13 @@ export default function AnnualReceipts() {
             </div>
             <div style={{ display: "flex", gap: 8 }}>
               {rows.some(r => r.status === "failed") && (
-                <button className="btn secondary" onClick={() => sendAll(true)}>Retry failed only</button>
+                <button className="btn secondary" onClick={() => sendAll(true)} disabled={sendingAll || generating}>
+                  {sendingAll ? "Sending…" : "Retry failed only"}
+                </button>
               )}
-              <button className="btn" onClick={() => sendAll(false)}>Send all unsent</button>
+              <button className="btn" onClick={() => sendAll(false)} disabled={sendingAll || generating}>
+                {sendingAll ? "Sending…" : "Send all unsent"}
+              </button>
             </div>
           </div>
 
@@ -444,7 +473,7 @@ export default function AnnualReceipts() {
                     <td style={{ textAlign: "right", whiteSpace: "nowrap" }}>
                       <button className="btn ghost" onClick={() => openPdfFor(r)} disabled={!r.ar}>Open PDF</button>
                       <button className="btn ghost"
-                        disabled={recipients.length === 0 || r.status === "sending"}
+                        disabled={recipients.length === 0 || r.status === "sending" || sendingAll || generating || inFlight.has(i)}
                         onClick={() => sendOne(i)}>
                         {r.status === "sent" ? "Resend" : "Send"}
                       </button>

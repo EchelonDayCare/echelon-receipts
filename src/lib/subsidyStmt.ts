@@ -6,6 +6,7 @@ import type { Receipt, SettingsMap } from "../types";
 import { mkdir, writeFile, exists } from "@tauri-apps/plugin-fs";
 import { DEFAULT_LOGO_DATA_URL } from "./defaults";
 import { loadHtml2Pdf } from "./lazy";
+import { h } from "./html";
 
 const MONTHS = ["January","February","March","April","May","June","July","August","September","October","November","December"];
 
@@ -27,7 +28,7 @@ export function buildSubsidyStatementHtml(r: Receipt, s: SettingsMap): string {
   const ccfri = r.ccfri_amount ?? 0;
   const accb  = r.accb_amount ?? 0;
   const paid  = r.amount;
-  return `<!doctype html><html><head><meta charset="utf-8"><title>Subsidy Statement ${r.receipt_no}</title>
+  return `<!doctype html><html><head><meta charset="utf-8"><title>Subsidy Statement ${h(r.receipt_no)}</title>
 <style>
   @page { size: Letter; margin: 0.5in; }
   body { font-family: Georgia, "Times New Roman", serif; color: #111; margin: 0; }
@@ -53,21 +54,21 @@ export function buildSubsidyStatementHtml(r: Receipt, s: SettingsMap): string {
   <div class="head">
     ${logo ? `<img class="logo" src="${logo}"/>` : `<div class="logo"></div>`}
     <div>
-      <h1>${s.daycare_name || "Echelon Daycare Society"}</h1>
-      <p class="addr">${s.daycare_address || ""}</p>
+      <h1>${h(s.daycare_name || "Echelon Daycare Society")}</h1>
+      <p class="addr">${h(s.daycare_address || "")}</p>
     </div>
   </div>
 
   <div class="title2">MONTHLY FEE BREAKDOWN</div>
-  <div class="sub">${label} ${year}</div>
+  <div class="sub">${h(label)} ${h(year)}</div>
 
   <div class="meta">
-    <div><b>Child:</b> ${r.student_name_snapshot}</div>
-    <div style="text-align:right"><b>Receipt #</b> ${r.receipt_no}</div>
+    <div><b>Child:</b> ${h(r.student_name_snapshot)}</div>
+    <div style="text-align:right"><b>Receipt #</b> ${h(r.receipt_no)}</div>
     <div><b>Parents:</b>
-      ${[r.father_name_snapshot, r.mother_name_snapshot].filter(Boolean).join(" &amp; ") || "—"}
+      ${[r.father_name_snapshot, r.mother_name_snapshot].filter(Boolean).map((n) => h(n)).join(" &amp; ") || "—"}
     </div>
-    <div style="text-align:right"><b>Period:</b> ${label} ${year}</div>
+    <div style="text-align:right"><b>Period:</b> ${h(label)} ${h(year)}</div>
   </div>
 
   <table class="b">
@@ -82,12 +83,12 @@ export function buildSubsidyStatementHtml(r: Receipt, s: SettingsMap): string {
   <div class="note">
     <b>About this statement:</b> The amount you paid is the only portion that appears on your CRA Annual Tax Receipt
     (used for Form T778, Child Care Expenses Deduction). The CCFRI and ACCB amounts above are paid by the
-    Province of British Columbia directly to ${s.daycare_name || "Echelon Daycare Society"} on your behalf and cannot
+    Province of British Columbia directly to ${h(s.daycare_name || "Echelon Daycare Society")} on your behalf and cannot
     be claimed as a personal child-care expense.
   </div>
 
   <div class="footer">
-    Questions? ${s.contact_email || ""} · ${s.contact_phone || ""}
+    Questions? ${h(s.contact_email || "")} · ${h(s.contact_phone || "")}
   </div>
 </div></body></html>`;
 }

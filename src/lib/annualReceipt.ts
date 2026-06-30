@@ -3,6 +3,7 @@ import type { AnnualGroup } from "./db";
 import { mkdir, writeFile, exists } from "@tauri-apps/plugin-fs";
 import { DEFAULT_LOGO_DATA_URL, DEFAULT_SIGNATURE_DATA_URL } from "./defaults";
 import { loadHtml2Pdf } from "./lazy";
+import { h } from "./html";
 
 function fmtDate(iso: string): string {
   const [y, m, d] = iso.split("-");
@@ -44,13 +45,13 @@ export function buildAnnualReceiptHtml(opts: {
 
   const rows = group.receipts.map((r) => `
     <tr${r.is_refund ? ' class="refund"' : ""}>
-      <td>${fmtDate(r.date)}</td>
-      <td class="rno">#${r.receipt_no}</td>
-      <td>${r.description}${r.is_refund ? " (Refund)" : ""}</td>
+      <td>${h(fmtDate(r.date))}</td>
+      <td class="rno">#${h(r.receipt_no)}</td>
+      <td>${h(r.description)}${r.is_refund ? " (Refund)" : ""}</td>
       <td class="amt">${r.is_refund ? "-" : ""}$${fmtAmount(Math.abs(r.amount))}</td>
     </tr>`).join("");
 
-  return `<!doctype html><html><head><meta charset="utf-8"><title>${arNumber}</title>
+  return `<!doctype html><html><head><meta charset="utf-8"><title>${h(arNumber)}</title>
 <style>
   @page { size: Letter; margin: 0.5in; }
   body { font-family: Georgia, "Times New Roman", serif; color:#111; margin:0; }
@@ -85,26 +86,26 @@ export function buildAnnualReceiptHtml(opts: {
   <div class="head">
     <img class="logo" src="${logo}"/>
     <div>
-      <p class="title">${s.daycare_name || "Echelon Daycare Society"}</p>
-      <p class="addr">${s.daycare_address || ""}</p>
-      ${bn ? `<p class="bn">Business Number: ${bn}</p>` : ""}
+      <p class="title">${h(s.daycare_name || "Echelon Daycare Society")}</p>
+      <p class="addr">${h(s.daycare_address || "")}</p>
+      ${bn ? `<p class="bn">Business Number: ${h(bn)}</p>` : ""}
     </div>
   </div>
 
   <div class="docTitle">
-    <h2>ANNUAL CHILD CARE RECEIPT &mdash; ${year}</h2>
+    <h2>ANNUAL CHILD CARE RECEIPT &mdash; ${h(year)}</h2>
     <div class="sub">For CRA Form T778 / Line 21400 (Child Care Expenses Deduction)</div>
   </div>
 
-  ${opts.supersededNote ? `<div class="superseded">${opts.supersededNote}</div>` : ""}
+  ${opts.supersededNote ? `<div class="superseded">${h(opts.supersededNote)}</div>` : ""}
 
   <div class="meta">
-    <div><b>Receipt #</b> <span class="ar">${arNumber}</span></div>
-    <div style="text-align:right"><b>Issued on:</b> ${fmtDate(issuedOn)}</div>
-    <div><b>Issued to:</b> ${recipientLabel}</div>
-    <div style="text-align:right"><b>Period:</b> Jan 1 &ndash; Dec 31, ${year}</div>
-    <div><b>For child:</b> ${group.student_name}</div>
-    <div style="text-align:right"><b>Payments:</b> ${group.count}</div>
+    <div><b>Receipt #</b> <span class="ar">${h(arNumber)}</span></div>
+    <div style="text-align:right"><b>Issued on:</b> ${h(fmtDate(issuedOn))}</div>
+    <div><b>Issued to:</b> ${h(recipientLabel)}</div>
+    <div style="text-align:right"><b>Period:</b> Jan 1 &ndash; Dec 31, ${h(year)}</div>
+    <div><b>For child:</b> ${h(group.student_name)}</div>
+    <div style="text-align:right"><b>Payments:</b> ${h(group.count)}</div>
   </div>
 
   <table class="items">
@@ -114,19 +115,19 @@ export function buildAnnualReceiptHtml(opts: {
     <tbody>${rows}</tbody>
   </table>
 
-  <div class="total">Total paid in ${year}: <b>$${fmtAmount(group.total)}</b></div>
+  <div class="total">Total paid in ${h(year)}: <b>$${fmtAmount(group.total)}</b></div>
 
   <div class="sigRow">
     <div class="sigDetail">
       <div>Issued by:</div>
       <img class="sig" src="${sig}"/>
-      <div>${directorName}${directorName ? ", " : ""}${directorTitle}</div>
+      <div>${h(directorName)}${directorName ? ", " : ""}${h(directorTitle)}</div>
     </div>
   </div>
 
   <div class="footer">
     If you have any questions regarding this receipt, please contact us at
-    ${s.contact_email || ""}${s.contact_phone ? " or " + s.contact_phone : ""}.
+    ${h(s.contact_email || "")}${s.contact_phone ? " or " + h(s.contact_phone) : ""}.
   </div>
 </div></body></html>`;
 }

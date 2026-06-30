@@ -31,6 +31,7 @@ export default function NewReceipt() {
   const [amountTouched, setAmountTouched] = useState(false);
   const [preview, setPreview] = useState<{ html: string; receipt: Receipt; recipients: string[]; settings: SettingsMap } | null>(null);
   const [sending, setSending] = useState(false);
+  const [saving, setSaving] = useState(false);
 
   async function refresh() {
     const ys = await listYears();
@@ -76,65 +77,85 @@ export default function NewReceipt() {
   }, [breakdown, isRefund]); // eslint-disable-line
 
   async function onSave(action: "print" | "email" | "save") {
+    if (saving || sending) return;
     if (!student) { alert("Pick a student first."); return; }
     if (!description.trim()) { alert("Description is required."); return; }
     const amt = parseFloat(amount); if (!(amt >= 0)) { alert("Invalid amount."); return; }
     const pen = parseFloat(pending || "0") || 0;
     const bk = (breakdown && !isRefund) ? breakdown : null;
-    const newId = await createReceipt({
-      receipt_no: receiptNo, date, student_id: student.id,
-      student_name_snapshot: student.name,
-      father_name_snapshot: student.father_name,
-      mother_name_snapshot: student.mother_name,
-      description, amount: amt, pending_amount: pen, comments: comments || null,
-      is_refund: isRefund ? 1 : 0,
-      gross_amount: bk ? bk.gross : null,
-      ccfri_amount: bk ? bk.ccfri : null,
-      accb_amount:  bk ? bk.accb : null,
-    });
-    const settingsLatest = await getSettings();
-    const r = {
-      id: newId, receipt_no: receiptNo, date, student_id: student.id,
-      student_name_snapshot: student.name,
-      father_name_snapshot: student.father_name,
-      mother_name_snapshot: student.mother_name,
-      description, amount: amt, pending_amount: pen, comments: comments || null,
-      voided: 0, created_at: new Date().toISOString(),
-      emailed_at: null, emailed_to: null,
-      is_refund: isRefund ? 1 : 0,
-      gross_amount: bk ? bk.gross : null,
-      ccfri_amount: bk ? bk.ccfri : null,
-      accb_amount:  bk ? bk.accb : null,
-      void_reason: null,
-      voided_at: null,
-      issuer_snapshot_json: null,
-    };
-    let savedPath: string | null = null;
-    try { savedPath = await saveReceiptPdf(r, settingsLatest); }
-    catch (e) { console.error(e); alert("Receipt saved, but PDF auto-save failed:\n" + e); }
 
-    if (action === "email") {
-      const recipients = parseRecipients(student.email);
-      if (recipients.length === 0) {
-        alert(`Receipt #${receiptNo} saved.${savedPath ? "\nPDF: " + savedPath : ""}\n⚠️ No email on file for this student — not sent.`);
-      } else {
-        // Show preview modal; actual send happens from confirmSendEmail().
-        const html = buildReceiptHtml(r, settingsLatest);
-        setPreview({ html, receipt: r, recipients, settings: settingsLatest });
-      }
-      setReceiptNo((n) => n + 1);
-      setComments(""); setPending(""); setIsRefund(false); setAmountTouched(false);
+    // CRA-correctness guard: if subsidies are enabled and a breakdown is
+    // computed, the parent-pays amount on the receipt must equal the breakdown,
+    // otherwise the printed PDF shows an inconsistent total vs. the breakdown
+    // table. Block the save and tell the user to use the Refund flow.
+    if (bk && Math.abs(amt - bk.parent_pays) > 0.01) {
+      alert(
+        `Amount ($${amt.toFixed(2)}) does not match the subsidy breakdown (parent pays $${bk.parent_pays.toFixed(2)}).\n\n` +
+        `When subsidies are enabled, the receipt amount must equal gross − CCFRI − ACCB.\n\n` +
+        `To record a different amount, issue a Refund receipt instead.`
+      );
       return;
     }
 
-    if (action === "print") printReceipt(r, settingsLatest);
-    setReceiptNo((n) => n + 1);
-    setComments(""); setPending(""); setIsRefund(false); setAmountTouched(false);
-    alert(`Receipt #${receiptNo} saved.${savedPath ? "\nPDF: " + savedPath : ""}`);
+    setSaving(true);
+    try {
+      const newId = await createReceipt({
+        receipt_no: receiptNo, date, student_id: student.id,
+        student_name_snapshot: student.name,
+        father_name_snapshot: student.father_name,
+        mother_name_snapshot: student.mother_name,
+        description, amount: amt, pending_amount: pen, comments: comments || null,
+        is_refund: isRefund ? 1 : 0,
+        gross_amount: bk ? bk.gross : null,
+        ccfri_amount: bk ? bk.ccfri : null,
+        accb_amount:  bk ? bk.accb : null,
+      });
+      const settingsLatest = await getSettings();
+      const r = {
+        id: newId, receipt_no: receiptNo, date, student_id: student.id,
+        student_name_snapshot: student.name,
+        father_name_snapshot: student.father_name,
+        mother_name_snapshot: student.mother_name,
+        description, amount: amt, pending_amount: pen, comments: comments || null,
+        voided: 0, created_at: new Date().toISOString(),
+        emailed_at: null, emailed_to: null,
+        is_refund: isRefund ? 1 : 0,
+        gross_amount: bk ? bk.gross : null,
+        ccfri_amount: bk ? bk.ccfri : null,
+        accb_amount:  bk ? bk.accb : null,
+        void_reason: null,
+        voided_at: null,
+        issuer_snapshot_json: null,
+      };
+      let savedPath: string | null = null;
+      try { savedPath = await saveReceiptPdf(r, settingsLatest); }
+      catch (e) { console.error(e); alert("Receipt saved, but PDF auto-save failed:\n" + e); }
+
+      if (action === "email") {
+        const recipients = parseRecipients(student.email);
+        if (recipients.length === 0) {
+          alert(`Receipt #${receiptNo} saved.${savedPath ? "\nPDF: " + savedPath : ""}\n⚠️ No email on file for this student — not sent.`);
+        } else {
+          // Show preview modal; actual send happens from confirmSendEmail().
+          const html = buildReceiptHtml(r, settingsLatest);
+          setPreview({ html, receipt: r, recipients, settings: settingsLatest });
+        }
+        setReceiptNo((n) => n + 1);
+        setComments(""); setPending(""); setIsRefund(false); setAmountTouched(false);
+        return;
+      }
+
+      if (action === "print") printReceipt(r, settingsLatest);
+      setReceiptNo((n) => n + 1);
+      setComments(""); setPending(""); setIsRefund(false); setAmountTouched(false);
+      alert(`Receipt #${receiptNo} saved.${savedPath ? "\nPDF: " + savedPath : ""}`);
+    } finally {
+      setSaving(false);
+    }
   }
 
   async function confirmSendEmail() {
-    if (!preview) return;
+    if (!preview || sending) return;
     setSending(true);
     try {
       await sendReceiptEmail({ receipt: preview.receipt, recipients: preview.recipients, settings: preview.settings });
@@ -260,13 +281,17 @@ export default function NewReceipt() {
         </div>
 
         <div style={{ display: "flex", gap: 10, marginTop: 8 }}>
-          <button className="btn" onClick={() => onSave("print")}>Save &amp; Print</button>
-          <button className="btn" onClick={() => onSave("email")}
-            disabled={!student || parseRecipients(student?.email).length === 0}
-            title={!student ? "Pick a student" : parseRecipients(student.email).length === 0 ? "No email on file for this student" : ""}>
-            Save &amp; Email
+          <button className="btn" onClick={() => onSave("print")} disabled={saving || sending}>
+            {saving ? "Saving…" : "Save & Print"}
           </button>
-          <button className="btn secondary" onClick={() => onSave("save")}>Save Only</button>
+          <button className="btn" onClick={() => onSave("email")}
+            disabled={saving || sending || !student || parseRecipients(student?.email).length === 0}
+            title={!student ? "Pick a student" : parseRecipients(student.email).length === 0 ? "No email on file for this student" : ""}>
+            {saving ? "Saving…" : "Save & Email"}
+          </button>
+          <button className="btn secondary" onClick={() => onSave("save")} disabled={saving || sending}>
+            {saving ? "Saving…" : "Save Only"}
+          </button>
         </div>
       </div>
 
