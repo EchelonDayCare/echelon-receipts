@@ -19,11 +19,16 @@ export default function App() {
   const [name, setName] = useState<string>("Echelon");
   const [staffEnabled, setStaffEnabled] = useState(false);
   useEffect(() => {
-    getSettings().then((s) => {
-      if (s.logo_data_url) setLogo(s.logo_data_url);
-      if (s.daycare_name) setName(s.daycare_name.replace(/\s+Society$/i, "").trim() || s.daycare_name);
-      setStaffEnabled(s.feature_staff_hours_enabled === "1");
-    });
+    const load = () => {
+      getSettings().then((s) => {
+        if (s.logo_data_url) setLogo(s.logo_data_url);
+        if (s.daycare_name) setName(s.daycare_name.replace(/\s+Society$/i, "").trim() || s.daycare_name);
+        setStaffEnabled(s.feature_staff_hours_enabled === "1");
+      });
+    };
+    load();
+    const onSaved = () => load();
+    window.addEventListener("settings-saved", onSaved);
     // Fire-and-forget monthly backup check on app start.
     runCloudBackupIfDue().then((res) => {
       if (res?.ok) {
@@ -32,6 +37,7 @@ export default function App() {
         console.warn(`[backup] Skipped: ${res.error}`);
       }
     });
+    return () => window.removeEventListener("settings-saved", onSaved);
   }, []);
   return (
     <HashRouter>

@@ -67,6 +67,7 @@ export default function Settings() {
         setGeminiKey("");
       }
       alert("Settings saved.");
+      window.dispatchEvent(new Event("settings-saved"));
     } catch (e) {
       alert("Save failed: " + e);
     } finally {
