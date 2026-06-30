@@ -99,6 +99,7 @@ pub fn run() {
             restore::stage_restore,
             restore::restart_app,
             gemini::extract_timesheet,
+            gemini::extract_attendance,
             inbox::inbox_list_recent,
             errlog::append_error_log,
             errlog::read_error_log,

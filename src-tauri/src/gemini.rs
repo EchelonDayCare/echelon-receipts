@@ -13,6 +13,15 @@ pub struct ExtractArgs {
     pub known_staff_names: Vec<String>,
 }
 
+#[derive(Deserialize)]
+pub struct ExtractAttendanceArgs {
+    pub api_key: String,
+    pub image_b64: String,
+    pub mime_type: String,
+    pub target_date: String,             // yyyy-mm-dd (default date the sheet covers)
+    pub known_student_names: Vec<String>,
+}
+
 #[derive(Serialize, Deserialize, Clone)]
 pub struct ExtractedRow {
     pub staff_name: String,
@@ -21,9 +30,26 @@ pub struct ExtractedRow {
     pub out_time: Option<String>,
 }
 
+#[derive(Serialize, Deserialize, Clone)]
+pub struct ExtractedAttendanceRow {
+    pub child_name: String,
+    pub work_date: String,        // yyyy-mm-dd
+    pub in_time: Option<String>,
+    pub out_time: Option<String>,
+    pub status: Option<String>,   // present | absent | sick | late | holiday
+    pub signed_in_by: Option<String>,
+    pub signed_out_by: Option<String>,
+}
+
 #[derive(Serialize)]
 pub struct ExtractResult {
     pub rows: Vec<ExtractedRow>,
+    pub raw_text: String,
+}
+
+#[derive(Serialize)]
+pub struct ExtractAttendanceResult {
+    pub rows: Vec<ExtractedAttendanceRow>,
     pub raw_text: String,
 }
 
@@ -126,6 +152,107 @@ If only one time is visible, set the other to null. Use {month}-01 numbering for
     }
 
     Ok(ExtractResult { rows, raw_text: inner })
+}
+
+#[tauri::command]
+pub async fn extract_attendance(args: ExtractAttendanceArgs) -> Result<ExtractAttendanceResult, String> {
+    let key_for_redact = args.api_key.clone();
+    base64::engine::general_purpose::STANDARD
+        .decode(args.image_b64.as_bytes())
+        .map_err(|e| format!("image base64: {e}"))?;
+
+    let student_hint = if args.known_student_names.is_empty() {
+        "(none — use names exactly as written on the sheet)".to_string()
+    } else {
+        args.known_student_names.join(", ")
+    };
+
+    let prompt = format!(
+        "You are reading a daycare CHILD attendance sign-in sheet. \
+The target date for this sheet is {date}. Most rows are children; columns or fields \
+typically include name, drop-off (IN) time, pick-up (OUT) time, parent signature for \
+each, and sometimes status (Absent / Sick / Holiday). The sheet may be a single-day \
+roster OR a monthly grid (rows=children, cols=days). \
+Known children (match to the closest of these when names are written informally, \
+nicknames, or partial spelling — otherwise return the name exactly as written on the \
+sheet): {student_hint}.\n\
+Return ONLY JSON matching this schema with no commentary:\n\
+{{\"rows\": [{{\"child_name\": str, \"work_date\": \"YYYY-MM-DD\", \"in_time\": \"HH:MM\" or null, \"out_time\": \"HH:MM\" or null, \"status\": \"present\"|\"absent\"|\"sick\"|\"late\"|\"holiday\" or null, \"signed_in_by\": str or null, \"signed_out_by\": str or null}}]}}\n\
+Rules: convert all times to 24-hour HH:MM. If only one time is visible, set the other \
+to null. Use {date} as the work_date for any cell whose date cannot be otherwise \
+inferred. Skip rows for children where no time and no status is filled. If a row is \
+clearly marked Absent / Sick / Holiday with no times, return that status with null \
+times. Parent signature names go into signed_in_by / signed_out_by — if a single \
+signature applies to both, copy it into both fields.",
+        date = args.target_date,
+        student_hint = student_hint
+    );
+
+    let body = json!({
+        "contents": [{
+            "parts": [
+                { "text": prompt },
+                { "inline_data": { "mime_type": args.mime_type, "data": args.image_b64 } }
+            ]
+        }],
+        "generationConfig": {
+            "temperature": 0.0,
+            "responseMimeType": "application/json"
+        }
+    });
+
+    let url = format!(
+        "https://generativelanguage.googleapis.com/v1beta/models/{MODEL}:generateContent?key={key}",
+        MODEL = MODEL,
+        key = args.api_key
+    );
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(90))
+        .build()
+        .map_err(|e| redact(format!("http client: {e}"), &key_for_redact))?;
+
+    let resp = client
+        .post(&url)
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| redact(format!("gemini request: {e}"), &key_for_redact))?;
+
+    let status = resp.status();
+    let text = resp.text().await.map_err(|e| redact(format!("gemini read: {e}"), &key_for_redact))?;
+    if !status.is_success() {
+        return Err(redact(format!("gemini http {status}: {}", truncate(&text, 800)), &key_for_redact));
+    }
+
+    let v: serde_json::Value = serde_json::from_str(&text)
+        .map_err(|e| redact(format!("gemini json: {e}"), &key_for_redact))?;
+    let inner = v["candidates"][0]["content"]["parts"][0]["text"]
+        .as_str()
+        .ok_or_else(|| redact(format!("gemini: no text in response: {}", truncate(&text, 400)), &key_for_redact))?
+        .to_string();
+
+    let parsed: serde_json::Value = serde_json::from_str(&inner)
+        .map_err(|e| redact(format!("model output not JSON: {e} :: {}", truncate(&inner, 400)), &key_for_redact))?;
+    let rows_json = parsed["rows"].as_array().cloned().unwrap_or_default();
+    let mut rows: Vec<ExtractedAttendanceRow> = Vec::with_capacity(rows_json.len());
+    for r in rows_json {
+        let name = r["child_name"].as_str().unwrap_or("").trim().to_string();
+        let date = r["work_date"].as_str().unwrap_or("").trim().to_string();
+        if name.is_empty() || date.len() < 10 { continue; }
+        let pick = |k: &str| r[k].as_str().map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
+        rows.push(ExtractedAttendanceRow {
+            child_name: name,
+            work_date: date,
+            in_time: pick("in_time"),
+            out_time: pick("out_time"),
+            status: pick("status"),
+            signed_in_by: pick("signed_in_by"),
+            signed_out_by: pick("signed_out_by"),
+        });
+    }
+
+    Ok(ExtractAttendanceResult { rows, raw_text: inner })
 }
 
 fn truncate(s: &str, n: usize) -> String {

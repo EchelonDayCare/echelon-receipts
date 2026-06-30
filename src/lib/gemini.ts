@@ -47,3 +47,38 @@ export async function extractTimesheet(opts: {
     },
   });
 }
+
+// Child attendance sheet OCR — mirrors extractTimesheet but for daycare
+// sign-in sheets (rows are children, columns may be drop-off / pick-up / signature).
+export interface ExtractedAttendanceRow {
+  child_name: string;
+  work_date: string;
+  in_time: string | null;
+  out_time: string | null;
+  status: string | null;          // "present" | "absent" | "sick" | "late" | "holiday"
+  signed_in_by: string | null;
+  signed_out_by: string | null;
+}
+export interface ExtractAttendanceResult {
+  rows: ExtractedAttendanceRow[];
+  raw_text: string;
+}
+
+export async function extractAttendance(opts: {
+  apiKey: string;
+  imageBytes: Uint8Array;
+  mimeType: string;
+  targetDate: string; // "YYYY-MM-DD"
+  knownStudentNames: string[];
+}): Promise<ExtractAttendanceResult> {
+  const image_b64 = bytesToB64(opts.imageBytes);
+  return await invoke<ExtractAttendanceResult>("extract_attendance", {
+    args: {
+      api_key: opts.apiKey,
+      image_b64,
+      mime_type: opts.mimeType,
+      target_date: opts.targetDate,
+      known_student_names: opts.knownStudentNames,
+    },
+  });
+}

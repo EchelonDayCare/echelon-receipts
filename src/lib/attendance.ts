@@ -180,3 +180,21 @@ export async function attendanceInRange(fromDate: string, toDate: string): Promi
     [fromDate, toDate]
   );
 }
+
+// Fuzzy match an OCR'd child name back to a known student. Mirrors
+// matchStaffByName: case-insensitive exact, then prefix, then last-name token.
+export function matchStudentByName<T extends { id: number; name: string }>(name: string, students: T[]): T | null {
+  const n = name.trim().toLowerCase();
+  if (!n) return null;
+  let m = students.find((s) => s.name.toLowerCase() === n);
+  if (m) return m;
+  m = students.find((s) => s.name.toLowerCase().startsWith(n) || n.startsWith(s.name.toLowerCase()));
+  if (m) return m;
+  m = students.find((s) => {
+    const parts = s.name.toLowerCase().split(/\s+/);
+    const lastFromOcr = n.split(/\s+/).pop()!;
+    const firstFromOcr = n.split(/\s+/)[0];
+    return parts.some((p) => p === n || p === lastFromOcr || p === firstFromOcr);
+  });
+  return m || null;
+}
