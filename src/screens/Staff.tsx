@@ -31,7 +31,7 @@ export default function StaffScreen() {
   const [rows, setRows] = useState<HourRow[]>([]);
   const [editing, setEditing] = useState<Partial<Staff> | null>(null);
   const [ocrBusy, setOcrBusy] = useState(false);
-  const [ocrResult, setOcrResult] = useState<{ rows: ExtractedRow[]; unmatched: string[] } | null>(null);
+  const [ocrResult, setOcrResult] = useState<{ rows: ExtractedRow[]; unmatched: string[]; rawText?: string } | null>(null);
   const [manualDraft, setManualDraft] = useState<{ staff_id: number | ""; work_date: string; in_time: string; out_time: string }>({
     staff_id: "", work_date: new Date().toISOString().slice(0, 10), in_time: "", out_time: "",
   });
@@ -139,8 +139,12 @@ export default function StaffScreen() {
       for (const r of result.rows) {
         if (!matchStaffByName(r.staff_name, activeStaff)) unmatched.add(r.staff_name);
       }
-      setOcrResult({ rows: result.rows, unmatched: Array.from(unmatched).sort() });
-      notify(`Read ${result.rows.length} time entries. Review and import below.`);
+      setOcrResult({ rows: result.rows, unmatched: Array.from(unmatched).sort(), rawText: result.raw_text });
+      if (result.rows.length === 0) {
+        notify("AI returned 0 rows — see 'What the AI saw' below to debug.", "err");
+      } else {
+        notify(`Read ${result.rows.length} time entries. Review and import below.`);
+      }
     } catch (e: any) {
       const raw = String(e?.message || e);
       const safe = apiKey ? raw.split(apiKey).join("***") : raw;
@@ -384,6 +388,22 @@ export default function StaffScreen() {
                 </tbody>
               </table>
             </details>
+            {ocrResult.rawText && (
+              <details style={{ marginTop: 8 }}>
+                <summary style={{ cursor: "pointer", color: "var(--muted)", fontSize: 13 }}>
+                  {ocrResult.rows.length === 0 ? "🔍 What the AI saw (debug)" : "Raw AI response"}
+                </summary>
+                <pre style={{ marginTop: 8, padding: 10, background: "#f5f5f5", borderRadius: 6, fontSize: 11, maxHeight: 240, overflow: "auto", whiteSpace: "pre-wrap" }}>
+                  {ocrResult.rawText}
+                </pre>
+                {ocrResult.rows.length === 0 && (
+                  <p style={{ marginTop: 6, fontSize: 12, color: "var(--muted)" }}>
+                    If the AI returned an empty array, the photo may be too blurry, cropped, or the names may not be clearly readable.
+                    Try retaking with better lighting / closer framing, or enter the hours manually below.
+                  </p>
+                )}
+              </details>
+            )}
           </div>
         )}
       </section>

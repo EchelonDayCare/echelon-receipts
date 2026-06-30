@@ -77,24 +77,31 @@ pub async fn extract_timesheet(args: ExtractArgs) -> Result<ExtractResult, Strin
     };
 
     let prompt = format!(
-        "You are reading a staff sign-in / timesheet for {month}. The sheet may be:\n\
-        - a monthly grid (rows = staff, columns = days of the month), or\n\
-        - a single-person timesheet, or\n\
-        - a per-day list of a few people.\n\
-        Do NOT assume any particular shape. Read what is actually visible.\n\
+        "You are reading a staff sign-in / timesheet photo for {month}. First identify the layout, then extract.\n\
         \n\
-        Known staff names (match to closest of these when reasonable): {staff_hint}.\n\
+        COMMON LAYOUTS — detect which one this is:\n\
+        (A) Echelon monthly grid: 4 black corner squares + QR code, days 1-31 as ROWS down the left, staff names HANDWRITTEN in COLUMN HEADERS at the top, each staff column split into sub-columns 'in' and 'out' (and sometimes 'TH' which is usually blank — ignore TH). Weekend/holiday rows may be peach-shaded.\n\
+        (B) Single-person timesheet: one staff name at the top, many days as rows below.\n\
+        (C) Daily list: one or more rows, each with a name and times.\n\
         \n\
-        STRICT RULES — read carefully:\n\
-        1. NEVER invent placeholder names like 'Staff 1', 'Staff 2', 'Person A', 'Employee 1', or 'Unknown'. If you cannot clearly read a name, SKIP that row entirely.\n\
-        2. NEVER fabricate dates or times. Only output a row if you can read at least the staff name AND a real in_time OR out_time on the sheet.\n\
-        3. If the image is blurry, low-contrast, partially cropped, or you are not confident, return an empty rows array: {{\"rows\": []}}. It is BETTER to return nothing than to guess.\n\
-        4. The sheet may show only 1 staff member with 1 row of times — that is fine; return just that one row, not a synthetic month.\n\
-        5. Skip blank cells, weekend cells (unless filled), header rows, and totals rows.\n\
-        6. Convert all times to 24-hour HH:MM. If only one time is visible, set the other to null.\n\
-        7. Use {month}-DD for the date prefix. If the day-of-month is unreadable, skip the row.\n\
+        Known staff names (match handwriting to closest of these when reasonable): {staff_hint}.\n\
         \n\
-        Return ONLY JSON with this schema, no commentary:\n\
+        HOW TO UNWRAP LAYOUT (A) into rows — this is critical:\n\
+        - Read the column-header names ONCE (handwritten names at the top of each staff column).\n\
+        - For every day-row with at least one filled time cell, emit ONE output row PER staff column that has data, using that column's header name as staff_name and the day-row's date as work_date.\n\
+        - Skip days where ALL staff cells are blank. Skip the column-header row itself.\n\
+        - If a staff column header is blank/illegible, skip that ENTIRE column (do not invent 'Staff 1'/'Person A').\n\
+        - If a single time is visible (only 'in' or only 'out'), still emit the row with the other field null.\n\
+        \n\
+        STRICT RULES (all layouts):\n\
+        1. Extract EVERY filled cell. A monthly grid for 5 staff over 22 working days can legitimately produce 100+ rows — that is correct, not a hallucination, as long as each row corresponds to an actually-filled cell.\n\
+        2. NEVER invent placeholder names like 'Staff 1', 'Person A', 'Employee 1', 'Unknown'. Use only names you can actually read from the page or match to the known list.\n\
+        3. NEVER fabricate rows for empty cells. Output must match what is physically written.\n\
+        4. Convert all times to 24-hour HH:MM (e.g. '8' → '08:00', '8:30' → '08:30', '3' on an OUT column → '15:00' if context makes PM obvious, otherwise '03:00').\n\
+        5. Use {month}-DD for work_date (DD = the row's day-of-month, zero-padded). If only one day is visible, use that day.\n\
+        6. Skip totals rows, signature rows, and the column-header row.\n\
+        \n\
+        Return ONLY JSON, no commentary:\n\
         {{\"rows\": [{{\"staff_name\": str, \"work_date\": \"YYYY-MM-DD\", \"in_time\": \"HH:MM\" or null, \"out_time\": \"HH:MM\" or null}}]}}",
         month = args.month_year,
         staff_hint = staff_hint
@@ -178,20 +185,20 @@ pub async fn extract_attendance(args: ExtractAttendanceArgs) -> Result<ExtractAt
     };
 
     let prompt = format!(
-        "You are reading a daycare child attendance / sign-in sheet. Target date for this sheet: {date}.\n\
-        The sheet may be a single-day roster, a monthly grid (rows=children, cols=days), or a partial page with only a few children. Do NOT assume a shape — read what is actually visible.\n\
+        "You are reading a daycare child attendance / sign-in sheet. Target date: {date}.\n\
+        The sheet may be a single-day roster, a monthly grid (rows=children, cols=days), or a partial page with only a few children. Do NOT assume a shape — read what is physically on the page.\n\
         \n\
-        Known children (match to closest of these when names are written informally, nicknames, or partial spelling): {student_hint}.\n\
+        Known children (match to closest when names are written informally / nicknames): {student_hint}.\n\
         \n\
         STRICT RULES:\n\
-        1. NEVER invent placeholder names like 'Child 1', 'Student 2', 'Kid A'. If you cannot clearly read a name, SKIP that row.\n\
-        2. NEVER fabricate dates, times, or signatures. Only output a row if you can read a real child name AND at least one of: in_time, out_time, or an explicit absent/sick/holiday marking.\n\
-        3. If the image is blurry, low-contrast, partially cropped, or you are not confident, return an empty rows array: {{\"rows\": []}}. It is BETTER to return nothing than to guess.\n\
-        4. The sheet may show only 1-2 children — return just those rows, not a synthetic full roster.\n\
+        1. Extract EVERY row where you can clearly read a real child name AND at least one of: in_time, out_time, or an explicit Absent/Sick/Holiday marking. Do not skip legible rows.\n\
+        2. NEVER invent placeholder names like 'Child 1', 'Student 2', 'Kid A'. If a row's name is illegible, skip THAT row — keep all other legible rows.\n\
+        3. NEVER fabricate rows that aren't on the page.\n\
+        4. The sheet may show only 1-2 children — return just those rows.\n\
         5. Skip blank cells, header rows, totals.\n\
-        6. Convert all times to 24-hour HH:MM. If only one time is visible, set the other to null. If a row is explicitly marked Absent / Sick / Holiday with no times, return that status with null times.\n\
-        7. Use {date} for work_date when the day cannot be otherwise inferred. If the day-of-month is unreadable on a multi-day sheet, skip the row.\n\
-        8. Parent signatures go into signed_in_by / signed_out_by. If a single signature applies to both columns, copy it into both. If unreadable, leave null — do not invent names.\n\
+        6. Convert all times to 24-hour HH:MM. If only one time is visible, set the other to null. If a row is explicitly Absent/Sick/Holiday with no times, return that status with null times.\n\
+        7. Use {date} for work_date when the day cannot otherwise be inferred. On a multi-day sheet, only skip a row if its day is truly unreadable.\n\
+        8. Parent signatures go into signed_in_by / signed_out_by. If one signature covers both columns, copy it to both. If unreadable, leave null.\n\
         \n\
         Return ONLY JSON with this schema, no commentary:\n\
         {{\"rows\": [{{\"child_name\": str, \"work_date\": \"YYYY-MM-DD\", \"in_time\": \"HH:MM\" or null, \"out_time\": \"HH:MM\" or null, \"status\": \"present\"|\"absent\"|\"sick\"|\"late\"|\"holiday\" or null, \"signed_in_by\": str or null, \"signed_out_by\": str or null}}]}}",
