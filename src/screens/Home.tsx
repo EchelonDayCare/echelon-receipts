@@ -1,9 +1,13 @@
 import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
+import { openUrl } from "@tauri-apps/plugin-opener";
 import { db, getSettings, listStudents } from "../lib/db";
 import { listAllCredentialsWithStaff, credStatus } from "../lib/credentials";
 import { DEFAULT_LOGO_DATA_URL } from "../lib/defaults";
+import { checkForUpdates, type UpdateStatus } from "../lib/updateCheck";
 import type { SettingsMap } from "../types";
+
+const APP_VERSION = "0.1.0";
 
 interface Alert {
   tone: "danger" | "warn" | "info";
@@ -23,6 +27,7 @@ export default function Home() {
   const [s, setS] = useState<SettingsMap>({});
   const [alerts, setAlerts] = useState<Alert[]>([]);
   const [staffEnabled, setStaffEnabled] = useState(false);
+  const [update, setUpdate] = useState<UpdateStatus | null>(null);
 
   useEffect(() => {
     (async () => {
@@ -118,6 +123,11 @@ export default function Home() {
 
       setAlerts(list);
     })();
+
+    // Background update check (cached 24h, never blocks UI).
+    checkForUpdates(APP_VERSION).then((u) => {
+      if (u.hasUpdate) setUpdate(u);
+    });
   }, []);
 
   const daycareName = s.daycare_name || "Echelon Daycare";
@@ -173,8 +183,19 @@ export default function Home() {
         </section>
       )}
 
+      {update?.hasUpdate && (
+        <div className="home-alert tone-info" style={{ marginTop: 12 }}>
+          <span>
+            <strong>Update available:</strong> {update.latest} (you have v{update.current}).
+          </span>
+          <button className="btn link" onClick={() => update.url && void openUrl(update.url)}>
+            Download →
+          </button>
+        </div>
+      )}
+
       <footer className="home-foot">
-        <span>v0.1.0 · Echelon Receipts</span>
+        <span>v{APP_VERSION} · Echelon Receipts</span>
       </footer>
     </div>
   );
