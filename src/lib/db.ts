@@ -129,6 +129,44 @@ async function ensureSchema(d: Database): Promise<void> {
   // with future settings changes.
   await backfillIssuerSnapshot();
 
+  // Migration 008 — Staff Hours (optional feature)
+  if (!(await tableExists("staff"))) {
+    console.warn("[ensureSchema] creating staff");
+    await d.execute(`CREATE TABLE staff (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      name TEXT NOT NULL,
+      role TEXT,
+      hourly_rate REAL,
+      active INTEGER NOT NULL DEFAULT 1,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      archived_at TEXT
+    )`);
+    await d.execute("CREATE INDEX IF NOT EXISTS ix_staff_active ON staff(active)");
+  }
+  if (!(await tableExists("staff_hours"))) {
+    console.warn("[ensureSchema] creating staff_hours");
+    await d.execute(`CREATE TABLE staff_hours (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      staff_id INTEGER NOT NULL REFERENCES staff(id) ON DELETE CASCADE,
+      work_date TEXT NOT NULL,
+      in_time TEXT,
+      out_time TEXT,
+      hours_decimal REAL NOT NULL DEFAULT 0,
+      source TEXT NOT NULL DEFAULT 'manual',
+      sheet_image_path TEXT,
+      notes TEXT,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      UNIQUE(staff_id, work_date)
+    )`);
+    await d.execute("CREATE INDEX IF NOT EXISTS ix_staff_hours_date ON staff_hours(work_date)");
+    await d.execute("CREATE INDEX IF NOT EXISTS ix_staff_hours_staff ON staff_hours(staff_id)");
+  }
+  for (const [k, v] of [
+    ["feature_staff_hours_enabled", ""],
+    ["gemini_api_key_set", ""],
+    ["staff_default_hourly_rate", ""],
+  ] as const) await setting(k, v);
+
   // Backup bookkeeping (not a real migration — stored in settings)
   for (const [k, v] of [
     ["last_backup_at", ""],
