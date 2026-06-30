@@ -77,14 +77,25 @@ pub async fn extract_timesheet(args: ExtractArgs) -> Result<ExtractResult, Strin
     };
 
     let prompt = format!(
-        "You are reading a monthly staff sign-in sheet for {month}. \
-Rows are staff members; columns are days of the month. \
-Each filled cell typically contains an IN time and an OUT time (e.g. '8:30-4:30', '8:30/16:30', '0830 1630', or stacked on two lines). \
-Known staff (match to closest of these if reasonable, otherwise return the name as written): {staff_hint}. \
-Return ONLY JSON matching this schema with no commentary:\n\
-{{\"rows\": [{{\"staff_name\": str, \"work_date\": \"YYYY-MM-DD\", \"in_time\": \"HH:MM\" or null, \"out_time\": \"HH:MM\" or null}}]}}\n\
-Rules: convert all times to 24-hour HH:MM. Skip blank cells. Skip weekend cells unless they are filled. \
-If only one time is visible, set the other to null. Use {month}-01 numbering for the date prefix.",
+        "You are reading a staff sign-in / timesheet for {month}. The sheet may be:\n\
+        - a monthly grid (rows = staff, columns = days of the month), or\n\
+        - a single-person timesheet, or\n\
+        - a per-day list of a few people.\n\
+        Do NOT assume any particular shape. Read what is actually visible.\n\
+        \n\
+        Known staff names (match to closest of these when reasonable): {staff_hint}.\n\
+        \n\
+        STRICT RULES — read carefully:\n\
+        1. NEVER invent placeholder names like 'Staff 1', 'Staff 2', 'Person A', 'Employee 1', or 'Unknown'. If you cannot clearly read a name, SKIP that row entirely.\n\
+        2. NEVER fabricate dates or times. Only output a row if you can read at least the staff name AND a real in_time OR out_time on the sheet.\n\
+        3. If the image is blurry, low-contrast, partially cropped, or you are not confident, return an empty rows array: {{\"rows\": []}}. It is BETTER to return nothing than to guess.\n\
+        4. The sheet may show only 1 staff member with 1 row of times — that is fine; return just that one row, not a synthetic month.\n\
+        5. Skip blank cells, weekend cells (unless filled), header rows, and totals rows.\n\
+        6. Convert all times to 24-hour HH:MM. If only one time is visible, set the other to null.\n\
+        7. Use {month}-DD for the date prefix. If the day-of-month is unreadable, skip the row.\n\
+        \n\
+        Return ONLY JSON with this schema, no commentary:\n\
+        {{\"rows\": [{{\"staff_name\": str, \"work_date\": \"YYYY-MM-DD\", \"in_time\": \"HH:MM\" or null, \"out_time\": \"HH:MM\" or null}}]}}",
         month = args.month_year,
         staff_hint = staff_hint
     );
@@ -140,9 +151,8 @@ If only one time is visible, set the other to null. Use {month}-01 numbering for
     for r in rows_json {
         let name = r["staff_name"].as_str().unwrap_or("").trim().to_string();
         let date = r["work_date"].as_str().unwrap_or("").trim().to_string();
-        if name.is_empty() || date.len() < 10 {
-            continue;
-        }
+        if name.is_empty() || date.len() < 10 { continue; }
+        if is_placeholder_name(&name) { continue; }  // drop hallucinated "Staff 1" etc
         rows.push(ExtractedRow {
             staff_name: name,
             work_date: date,
@@ -168,22 +178,23 @@ pub async fn extract_attendance(args: ExtractAttendanceArgs) -> Result<ExtractAt
     };
 
     let prompt = format!(
-        "You are reading a daycare CHILD attendance sign-in sheet. \
-The target date for this sheet is {date}. Most rows are children; columns or fields \
-typically include name, drop-off (IN) time, pick-up (OUT) time, parent signature for \
-each, and sometimes status (Absent / Sick / Holiday). The sheet may be a single-day \
-roster OR a monthly grid (rows=children, cols=days). \
-Known children (match to the closest of these when names are written informally, \
-nicknames, or partial spelling — otherwise return the name exactly as written on the \
-sheet): {student_hint}.\n\
-Return ONLY JSON matching this schema with no commentary:\n\
-{{\"rows\": [{{\"child_name\": str, \"work_date\": \"YYYY-MM-DD\", \"in_time\": \"HH:MM\" or null, \"out_time\": \"HH:MM\" or null, \"status\": \"present\"|\"absent\"|\"sick\"|\"late\"|\"holiday\" or null, \"signed_in_by\": str or null, \"signed_out_by\": str or null}}]}}\n\
-Rules: convert all times to 24-hour HH:MM. If only one time is visible, set the other \
-to null. Use {date} as the work_date for any cell whose date cannot be otherwise \
-inferred. Skip rows for children where no time and no status is filled. If a row is \
-clearly marked Absent / Sick / Holiday with no times, return that status with null \
-times. Parent signature names go into signed_in_by / signed_out_by — if a single \
-signature applies to both, copy it into both fields.",
+        "You are reading a daycare child attendance / sign-in sheet. Target date for this sheet: {date}.\n\
+        The sheet may be a single-day roster, a monthly grid (rows=children, cols=days), or a partial page with only a few children. Do NOT assume a shape — read what is actually visible.\n\
+        \n\
+        Known children (match to closest of these when names are written informally, nicknames, or partial spelling): {student_hint}.\n\
+        \n\
+        STRICT RULES:\n\
+        1. NEVER invent placeholder names like 'Child 1', 'Student 2', 'Kid A'. If you cannot clearly read a name, SKIP that row.\n\
+        2. NEVER fabricate dates, times, or signatures. Only output a row if you can read a real child name AND at least one of: in_time, out_time, or an explicit absent/sick/holiday marking.\n\
+        3. If the image is blurry, low-contrast, partially cropped, or you are not confident, return an empty rows array: {{\"rows\": []}}. It is BETTER to return nothing than to guess.\n\
+        4. The sheet may show only 1-2 children — return just those rows, not a synthetic full roster.\n\
+        5. Skip blank cells, header rows, totals.\n\
+        6. Convert all times to 24-hour HH:MM. If only one time is visible, set the other to null. If a row is explicitly marked Absent / Sick / Holiday with no times, return that status with null times.\n\
+        7. Use {date} for work_date when the day cannot be otherwise inferred. If the day-of-month is unreadable on a multi-day sheet, skip the row.\n\
+        8. Parent signatures go into signed_in_by / signed_out_by. If a single signature applies to both columns, copy it into both. If unreadable, leave null — do not invent names.\n\
+        \n\
+        Return ONLY JSON with this schema, no commentary:\n\
+        {{\"rows\": [{{\"child_name\": str, \"work_date\": \"YYYY-MM-DD\", \"in_time\": \"HH:MM\" or null, \"out_time\": \"HH:MM\" or null, \"status\": \"present\"|\"absent\"|\"sick\"|\"late\"|\"holiday\" or null, \"signed_in_by\": str or null, \"signed_out_by\": str or null}}]}}",
         date = args.target_date,
         student_hint = student_hint
     );
@@ -240,6 +251,7 @@ signature applies to both, copy it into both fields.",
         let name = r["child_name"].as_str().unwrap_or("").trim().to_string();
         let date = r["work_date"].as_str().unwrap_or("").trim().to_string();
         if name.is_empty() || date.len() < 10 { continue; }
+        if is_placeholder_name(&name) { continue; }  // drop hallucinated "Child 1" etc
         let pick = |k: &str| r[k].as_str().map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
         rows.push(ExtractedAttendanceRow {
             child_name: name,
@@ -253,6 +265,29 @@ signature applies to both, copy it into both fields.",
     }
 
     Ok(ExtractAttendanceResult { rows, raw_text: inner })
+}
+
+/// Detect obviously-synthetic placeholder names the model sometimes fabricates
+/// when an image is unreadable ("Staff 1", "Person A", "Employee 2", "Child 3").
+/// Used to scrub hallucinations server-side as a safety net on top of the prompt.
+fn is_placeholder_name(name: &str) -> bool {
+    let n = name.trim().to_lowercase();
+    if n.is_empty() { return true; }
+    let placeholders = [
+        "staff", "person", "employee", "worker", "teacher", "child",
+        "student", "kid", "unknown", "name", "n/a", "tbd",
+    ];
+    for p in placeholders {
+        // "staff 1", "staff #1", "staff-1", "staff a"
+        if n == p { return true; }
+        if n.starts_with(&format!("{p} ")) || n.starts_with(&format!("{p}#")) || n.starts_with(&format!("{p}-")) {
+            let rest = &n[p.len()..].trim_start_matches(|c: char| c == ' ' || c == '#' || c == '-');
+            if rest.chars().all(|c| c.is_ascii_alphanumeric()) && rest.len() <= 3 {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 fn truncate(s: &str, n: usize) -> String {
