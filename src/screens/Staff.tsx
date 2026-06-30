@@ -115,15 +115,13 @@ export default function StaffScreen() {
   }
 
   // ---- OCR via Gemini ----
-  async function uploadSheet() {
+  // Shared core: given an absolute image path, run Gemini extraction and
+  // stage the rows for review. Called from both "Choose file…" (file picker)
+  // and "Import latest from Downloads" (AirDrop workflow).
+  async function runOcrOnPath(picked: string) {
     if (settings.gemini_api_key_set !== "1") {
       notify("Add your Gemini API key in Settings first.", "err"); return;
     }
-    const picked = await open({
-      multiple: false,
-      filters: [{ name: "Sign-in sheet (image)", extensions: ["jpg", "jpeg", "png", "webp", "heic", "pdf"] }],
-    });
-    if (!picked || typeof picked !== "string") return;
     setOcrBusy(true);
     setOcrResult(null);
     let apiKey: string | null = null;
@@ -144,11 +142,73 @@ export default function StaffScreen() {
       setOcrResult({ rows: result.rows, unmatched: Array.from(unmatched).sort() });
       notify(`Read ${result.rows.length} time entries. Review and import below.`);
     } catch (e: any) {
-      // Defensively redact the API key from any error before showing it.
       const raw = String(e?.message || e);
       const safe = apiKey ? raw.split(apiKey).join("***") : raw;
       notify("OCR failed: " + safe, "err");
     } finally { setOcrBusy(false); }
+  }
+
+  async function uploadSheet() {
+    if (settings.gemini_api_key_set !== "1") {
+      notify("Add your Gemini API key in Settings first.", "err"); return;
+    }
+    const picked = await open({
+      multiple: false,
+      filters: [{ name: "Sign-in sheet (image)", extensions: ["jpg", "jpeg", "png", "webp", "heic", "pdf"] }],
+    });
+    if (!picked || typeof picked !== "string") return;
+    await runOcrOnPath(picked);
+  }
+
+  // AirDrop / save-from-iPad workflow: pick up images dropped into ~/Downloads
+  // within the last 10 minutes. We ALWAYS show a confirmation (even with 1
+  // match) so an unrelated recent screenshot can never be silently uploaded.
+  async function importLatestFromDownloads() {
+    if (settings.gemini_api_key_set !== "1") {
+      notify("Add your Gemini API key in Settings first.", "err"); return;
+    }
+    if (ocrBusy) return;
+    try {
+      const items = await invoke<Array<{ path: string; name: string; modified_secs_ago: number; size: number }>>(
+        "inbox_list_recent",
+        { withinMinutes: 10, limit: 5 }
+      );
+      if (!items.length) {
+        notify("No image files found in Downloads from the last 10 minutes. AirDrop from iPad and try again.", "err");
+        return;
+      }
+
+      let picked = items[0];
+      const fmtMin = (secs: number) => Math.max(1, Math.round(secs / 60));
+      const fmtMb = (b: number) => (b / (1024 * 1024)).toFixed(1);
+
+      if (items.length === 1) {
+        const ok = window.confirm(
+          `Import "${picked.name}" (${fmtMin(picked.modified_secs_ago)} min ago, ${fmtMb(picked.size)} MB) for OCR?`
+        );
+        if (!ok) return;
+      } else {
+        const list = items
+          .map((it, i) => `${i + 1}. ${it.name}  (${fmtMin(it.modified_secs_ago)} min ago, ${fmtMb(it.size)} MB)`)
+          .join("\n");
+        const ans = window.prompt(
+          `Multiple recent images in Downloads:\n\n${list}\n\nWhich number to import?`,
+          "1"
+        );
+        if (ans === null) return;
+        const n = Number(ans.trim());
+        if (!Number.isInteger(n) || n < 1 || n > items.length) {
+          notify(`Enter a number from 1 to ${items.length}.`, "err");
+          return;
+        }
+        picked = items[n - 1];
+      }
+
+      notify(`Reading ${picked.name}…`);
+      await runOcrOnPath(picked.path);
+    } catch (e: any) {
+      notify("Couldn't read Downloads: " + (e?.message || e), "err");
+    }
   }
 
   async function importOcr() {
@@ -247,9 +307,14 @@ export default function StaffScreen() {
               <p style={{ margin: "6px 0 0", color: "#b45309", fontSize: 13 }}>⚠ Add your Gemini API key in <strong>Settings → Optional features</strong> first.</p>
             )}
           </div>
-          <button className="btn big" onClick={uploadSheet} disabled={ocrBusy || activeStaff.length === 0 || settings.gemini_api_key_set !== "1"}>
-            {ocrBusy ? "Reading sheet…" : "Choose file…"}
-          </button>
+          <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+            <button className="btn big" onClick={uploadSheet} disabled={ocrBusy || activeStaff.length === 0 || settings.gemini_api_key_set !== "1"}>
+              {ocrBusy ? "Reading sheet…" : "Choose file…"}
+            </button>
+            <button className="btn secondary" onClick={importLatestFromDownloads} disabled={ocrBusy || activeStaff.length === 0 || settings.gemini_api_key_set !== "1"} title="Picks the newest image AirDropped or saved to ~/Downloads in the last 30 min">
+              📥 Import latest from Downloads
+            </button>
+          </div>
         </div>
 
         {ocrResult && (

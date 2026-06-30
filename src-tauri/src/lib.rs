@@ -3,6 +3,7 @@ use tauri_plugin_sql::{Migration, MigrationKind};
 mod email;
 mod errlog;
 mod gemini;
+mod inbox;
 mod restore;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -98,6 +99,7 @@ pub fn run() {
             restore::stage_restore,
             restore::restart_app,
             gemini::extract_timesheet,
+            inbox::inbox_list_recent,
             errlog::append_error_log,
             errlog::read_error_log,
             errlog::error_log_path,
