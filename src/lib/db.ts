@@ -17,6 +17,10 @@ export async function db(): Promise<Database> {
       await _db.execute("PRAGMA temp_store = MEMORY");
       await _db.execute("PRAGMA mmap_size = 268435456");
       await _db.execute("PRAGMA cache_size = -16000");
+      // Wait up to 5s for a competing writer to release the lock before throwing
+      // SQLITE_BUSY. Without this, concurrent saves (e.g. settings save while a
+      // background effect re-fetches) fail with "database is locked" (code: 5).
+      await _db.execute("PRAGMA busy_timeout = 5000");
     } catch (e) { console.warn("[db] pragma setup:", e); }
   }
   if (!_schemaChecked) {
@@ -258,20 +262,36 @@ export async function setSettings(entries: Record<string, string>) {
   const d = await db();
   const keys = Object.keys(entries);
   if (keys.length === 0) return;
-  await d.execute("BEGIN");
-  try {
-    for (const k of keys) {
-      await d.execute(
-        "INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-        [k, entries[k] ?? ""]
-      );
-      if (_settingsCache) _settingsCache[k] = entries[k] ?? "";
+  // Retry the transaction a few times if SQLite reports BUSY/LOCKED. The
+  // busy_timeout PRAGMA already waits 5s, but in rare cases (long-running
+  // read in another connection) the writer can still bounce.
+  let lastErr: any = null;
+  for (let attempt = 0; attempt < 4; attempt++) {
+    try {
+      await d.execute("BEGIN IMMEDIATE");
+      try {
+        for (const k of keys) {
+          await d.execute(
+            "INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            [k, entries[k] ?? ""]
+          );
+          if (_settingsCache) _settingsCache[k] = entries[k] ?? "";
+        }
+        await d.execute("COMMIT");
+        return;
+      } catch (innerErr) {
+        try { await d.execute("ROLLBACK"); } catch { /* ignore */ }
+        throw innerErr;
+      }
+    } catch (e: any) {
+      lastErr = e;
+      const msg = String(e?.message || e);
+      if (!/locked|busy|code: 5|code: 6/i.test(msg)) throw e;
+      // Exponential-ish backoff: 100ms, 250ms, 500ms.
+      await new Promise((r) => setTimeout(r, 100 + attempt * 200));
     }
-    await d.execute("COMMIT");
-  } catch (e) {
-    await d.execute("ROLLBACK");
-    throw e;
   }
+  throw lastErr;
 }
 
 // Bulk ACCB lookup for a single month — replaces N+1 calls in ThisMonth.
