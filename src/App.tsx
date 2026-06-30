@@ -8,6 +8,8 @@ const History = lazy(() => import("./screens/History"));
 const Students = lazy(() => import("./screens/Students"));
 const Reports = lazy(() => import("./screens/Reports"));
 const AnnualReceipts = lazy(() => import("./screens/AnnualReceipts"));
+const Attendance = lazy(() => import("./screens/Attendance"));
+const AgingReport = lazy(() => import("./screens/AgingReport"));
 const StaffScreen = lazy(() => import("./screens/Staff"));
 const StaffCredentials = lazy(() => import("./screens/StaffCredentials"));
 const StaffDrills = lazy(() => import("./screens/StaffDrills"));
@@ -90,9 +92,11 @@ function Shell({ logo, name, staffEnabled }: { logo: string; name: string; staff
           { to: "/students/today", label: "Today" },
           { to: "/students/month", label: "This Month" },
           { to: "/students/new", label: "New Receipt" },
+          { to: "/students/attendance", label: "Attendance" },
           { to: "/students/history", label: "Receipt History" },
           { to: "/students/roster", label: "Roster" },
           { to: "/students/reports", label: "Reports" },
+          { to: "/students/aging", label: "Aging (A/R)" },
           { to: "/students/annual", label: "Annual Tax Receipts" },
         ]}
       />
@@ -140,9 +144,11 @@ function Shell({ logo, name, staffEnabled }: { logo: string; name: string; staff
           <Route path="/students/today" element={<Today />} />
           <Route path="/students/month" element={<ThisMonth />} />
           <Route path="/students/new" element={<NewReceipt />} />
+          <Route path="/students/attendance" element={<Attendance />} />
           <Route path="/students/history" element={<History />} />
           <Route path="/students/roster" element={<Students />} />
           <Route path="/students/reports" element={<Reports />} />
+          <Route path="/students/aging" element={<AgingReport />} />
           <Route path="/students/annual" element={<AnnualReceipts />} />
 
           {/* Staff module */}

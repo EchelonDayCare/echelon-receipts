@@ -323,6 +323,26 @@ async function ensureSchema(d: Database): Promise<void> {
     await d.execute("CREATE INDEX IF NOT EXISTS ix_staff_drills_date ON staff_drills(drill_date)");
   }
 
+  if (!(await tableExists("child_attendance"))) {
+    console.warn("[ensureSchema] creating child_attendance");
+    await d.execute(`CREATE TABLE child_attendance (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      student_id INTEGER NOT NULL REFERENCES students(id) ON DELETE CASCADE,
+      work_date TEXT NOT NULL,
+      in_time TEXT,
+      out_time TEXT,
+      hours_decimal REAL NOT NULL DEFAULT 0,
+      signed_in_by TEXT,
+      signed_out_by TEXT,
+      status TEXT NOT NULL DEFAULT 'present',
+      notes TEXT,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      UNIQUE(student_id, work_date)
+    )`);
+    await d.execute("CREATE INDEX IF NOT EXISTS ix_child_attendance_date ON child_attendance(work_date)");
+    await d.execute("CREATE INDEX IF NOT EXISTS ix_child_attendance_student ON child_attendance(student_id)");
+  }
+
   // Backup bookkeeping (not a real migration — stored in settings)
   for (const [k, v] of [
     ["last_backup_at", ""],

@@ -5,12 +5,17 @@ import type { Receipt, SettingsMap } from "../types";
 
 const MONTH_NAMES = ["","Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
 
+type Quarter = 1 | 2 | 3 | 4;
+const QUARTER_MONTHS: Record<Quarter, number[]> = { 1: [1,2,3], 2: [4,5,6], 3: [7,8,9], 4: [10,11,12] };
+const QUARTER_LABEL: Record<Quarter, string> = { 1: "Q1 (Jan–Mar)", 2: "Q2 (Apr–Jun)", 3: "Q3 (Jul–Sep)", 4: "Q4 (Oct–Dec)" };
+
 export default function Reports() {
   const [year, setYear] = useState<number>(new Date().getFullYear());
   const [monthly, setMonthly] = useState<{ ym: string; count: number; total: number }[]>([]);
   const [all, setAll] = useState<Receipt[]>([]);
   const [settings, setSettings] = useState<SettingsMap>({});
   const [subsidy, setSubsidy] = useState<SubsidyMonthRow[]>([]);
+  const [quarter, setQuarter] = useState<Quarter>(((Math.floor(new Date().getMonth() / 3) + 1) as Quarter));
 
   async function refresh() {
     const [m, r, s, sub] = await Promise.all([
@@ -71,6 +76,59 @@ export default function Reports() {
     URL.revokeObjectURL(url);
   }
 
+  // CCFRI quarterly export — filters subsidy rows to the 3 months in the
+  // selected quarter and per-receipt rows for that quarter. The exact
+  // column shape required by the BC Ministry can vary by intake form;
+  // this CSV captures everything they typically ask for so it can be
+  // copy-pasted or reshaped into the official template.
+  function exportCcfriQuarter() {
+    const months = QUARTER_MONTHS[quarter];
+    const qReceipts = all.filter((r) => {
+      if (r.voided) return false;
+      const m = parseInt(r.date.slice(5, 7), 10);
+      return months.includes(m);
+    });
+    const monthRows = subsidy
+      .filter((r) => months.includes(r.month))
+      .sort((a, b) => a.month - b.month);
+
+    const csv: string[] = [];
+    csv.push(`# CCFRI Quarterly Reconciliation - ${year} ${QUARTER_LABEL[quarter]}`);
+    csv.push(`# Generated ${new Date().toISOString().slice(0, 10)}`);
+    csv.push("");
+    csv.push("## Monthly summary");
+    csv.push("year,month,receipt_count,gross_total,ccfri_total,accb_total,parent_paid_total");
+    for (const r of monthRows) {
+      csv.push([r.year, r.month, r.receipt_count,
+        r.gross_total.toFixed(2), r.ccfri_total.toFixed(2),
+        r.accb_total.toFixed(2), r.parent_paid_total.toFixed(2)].join(","));
+    }
+    const tot = monthRows.reduce((a, r) => ({
+      g: a.g + r.gross_total, c: a.c + r.ccfri_total, ac: a.ac + r.accb_total, p: a.p + r.parent_paid_total, n: a.n + r.receipt_count,
+    }), { g: 0, c: 0, ac: 0, p: 0, n: 0 });
+    csv.push(["QUARTER TOTAL", "", tot.n, tot.g.toFixed(2), tot.c.toFixed(2), tot.ac.toFixed(2), tot.p.toFixed(2)].join(","));
+    csv.push("");
+    csv.push("## Per-receipt detail");
+    csv.push("receipt_no,date,student,description,gross,ccfri_applied,accb_applied,parent_paid,refund,voided");
+    for (const r of qReceipts) {
+      csv.push([
+        r.receipt_no, r.date,
+        `"${(r.student_name_snapshot || "").replace(/"/g, '""')}"`,
+        `"${(r.description || "").replace(/"/g, '""')}"`,
+        (r.gross_amount ?? 0).toFixed(2),
+        (r.ccfri_amount ?? 0).toFixed(2),
+        (r.accb_amount  ?? 0).toFixed(2),
+        (r.is_refund ? -r.amount : r.amount).toFixed(2),
+        r.is_refund, r.voided,
+      ].join(","));
+    }
+    const blob = new Blob([csv.join("\n")], { type: "text/csv" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url; a.download = `ccfri-${year}-Q${quarter}.csv`; a.click();
+    URL.revokeObjectURL(url);
+  }
+
   return (
     <div>
       <h1>Reports</h1>
@@ -110,9 +168,17 @@ export default function Reports() {
           <p className="subtitle" style={{ marginTop: -6 }}>
             Cross-check against your monthly CCFRI claim and ACCB deposits from the Province of BC.
           </p>
-          <div style={{ marginBottom: 8 }}>
+          <div style={{ marginBottom: 8, display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
             <button className="btn secondary" onClick={exportSubsidyCsv} disabled={subsidy.length === 0}>
-              Export Subsidy CSV
+              Export Subsidy CSV (full year)
+            </button>
+            <div style={{ width: 1, height: 24, background: "var(--border)", margin: "0 4px" }} />
+            <label style={{ fontSize: 13, color: "var(--muted)" }}>Quarter:</label>
+            <select value={quarter} onChange={(e) => setQuarter(parseInt(e.target.value, 10) as Quarter)}>
+              {([1,2,3,4] as Quarter[]).map((q) => <option key={q} value={q}>{QUARTER_LABEL[q]}</option>)}
+            </select>
+            <button className="btn" onClick={exportCcfriQuarter} disabled={subsidy.length === 0}>
+              Export CCFRI Quarter ({year} Q{quarter})
             </button>
           </div>
           {subsidy.length === 0 ? (

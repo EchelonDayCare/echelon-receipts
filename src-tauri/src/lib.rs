@@ -62,6 +62,12 @@ pub fn run() {
             sql: include_str!("../migrations/009_staff_credentials.sql"),
             kind: MigrationKind::Up,
         },
+        Migration {
+            version: 10,
+            description: "add_child_attendance",
+            sql: include_str!("../migrations/010_child_attendance.sql"),
+            kind: MigrationKind::Up,
+        },
     ];
 
     tauri::Builder::default()
