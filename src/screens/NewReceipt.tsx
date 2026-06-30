@@ -3,8 +3,8 @@ import {
   listStudents, listYears, nextReceiptNo, createReceipt, getSettings,
   computeFeeBreakdown, getAccbForMonth, subsidiesEnabled,
 } from "../lib/db";
-import type { Student, SettingsMap, FeeBreakdown } from "../types";
-import { printReceipt, saveReceiptPdf } from "../lib/receipt";
+import type { Student, SettingsMap, FeeBreakdown, Receipt } from "../types";
+import { printReceipt, saveReceiptPdf, buildReceiptHtml } from "../lib/receipt";
 import { sendReceiptEmail, parseRecipients } from "../lib/email";
 import { markEmailed } from "../lib/db";
 
@@ -29,6 +29,8 @@ export default function NewReceipt() {
   const [settings, setSettings] = useState<SettingsMap>({});
   const [accbThisMonth, setAccbThisMonth] = useState<number>(0);
   const [amountTouched, setAmountTouched] = useState(false);
+  const [preview, setPreview] = useState<{ html: string; receipt: Receipt; recipients: string[]; settings: SettingsMap } | null>(null);
+  const [sending, setSending] = useState(false);
 
   async function refresh() {
     const ys = await listYears();
@@ -111,29 +113,40 @@ export default function NewReceipt() {
     try { savedPath = await saveReceiptPdf(r, settingsLatest); }
     catch (e) { console.error(e); alert("Receipt saved, but PDF auto-save failed:\n" + e); }
 
-    let emailMsg = "";
     if (action === "email") {
       const recipients = parseRecipients(student.email);
       if (recipients.length === 0) {
-        emailMsg = "\n⚠️ No email on file for this student — not sent.";
+        alert(`Receipt #${receiptNo} saved.${savedPath ? "\nPDF: " + savedPath : ""}\n⚠️ No email on file for this student — not sent.`);
       } else {
-        const ok = confirm(`Email receipt to:\n  ${recipients.join("\n  ")}\n\nProceed?`);
-        if (ok) {
-          try {
-            await sendReceiptEmail({ receipt: r, recipients, settings: settingsLatest });
-            await markEmailed(newId, recipients);
-            emailMsg = `\n✉️ Sent to ${recipients.join(", ")}`;
-          } catch (e: any) {
-            emailMsg = "\n❌ Email failed: " + (e?.message || e);
-          }
-        } else { emailMsg = "\n(Email cancelled.)"; }
+        // Show preview modal; actual send happens from confirmSendEmail().
+        const html = buildReceiptHtml(r, settingsLatest);
+        setPreview({ html, receipt: r, recipients, settings: settingsLatest });
       }
+      setReceiptNo((n) => n + 1);
+      setComments(""); setPending(""); setIsRefund(false); setAmountTouched(false);
+      return;
     }
 
     if (action === "print") printReceipt(r, settingsLatest);
     setReceiptNo((n) => n + 1);
     setComments(""); setPending(""); setIsRefund(false); setAmountTouched(false);
-    alert(`Receipt #${receiptNo} saved.${savedPath ? "\nPDF: " + savedPath : ""}${emailMsg}`);
+    alert(`Receipt #${receiptNo} saved.${savedPath ? "\nPDF: " + savedPath : ""}`);
+  }
+
+  async function confirmSendEmail() {
+    if (!preview) return;
+    setSending(true);
+    try {
+      await sendReceiptEmail({ receipt: preview.receipt, recipients: preview.recipients, settings: preview.settings });
+      await markEmailed(preview.receipt.id, preview.recipients);
+      const recips = preview.recipients.join(", ");
+      setPreview(null);
+      alert(`✉️ Sent to ${recips}`);
+    } catch (e: any) {
+      alert("❌ Email failed: " + (e?.message || e));
+    } finally {
+      setSending(false);
+    }
   }
 
   return (
@@ -256,6 +269,47 @@ export default function NewReceipt() {
           <button className="btn secondary" onClick={() => onSave("save")}>Save Only</button>
         </div>
       </div>
+
+      {preview && (
+        <div
+          onClick={() => !sending && setPreview(null)}
+          style={{
+            position: "fixed", inset: 0, background: "rgba(0,0,0,0.55)",
+            display: "flex", alignItems: "center", justifyContent: "center", zIndex: 1000, padding: 24,
+          }}
+        >
+          <div
+            onClick={(e) => e.stopPropagation()}
+            style={{
+              background: "var(--bg, #1a1a1a)", color: "var(--text)",
+              borderRadius: 10, maxWidth: 900, width: "100%", maxHeight: "90vh",
+              display: "flex", flexDirection: "column", overflow: "hidden",
+              border: "1px solid var(--border)",
+            }}
+          >
+            <div style={{ padding: "12px 16px", borderBottom: "1px solid var(--border)", display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+              <div>
+                <strong>Preview before sending</strong>
+                <div style={{ fontSize: 12, color: "var(--muted)" }}>
+                  To: {preview.recipients.join(", ")}
+                </div>
+              </div>
+              <button className="btn ghost" onClick={() => setPreview(null)} disabled={sending}>✕</button>
+            </div>
+            <iframe
+              title="Receipt preview"
+              srcDoc={preview.html}
+              style={{ flex: 1, border: 0, background: "white", minHeight: 400 }}
+            />
+            <div style={{ padding: 12, borderTop: "1px solid var(--border)", display: "flex", gap: 10, justifyContent: "flex-end" }}>
+              <button className="btn secondary" onClick={() => setPreview(null)} disabled={sending}>Cancel</button>
+              <button className="btn" onClick={confirmSendEmail} disabled={sending}>
+                {sending ? "Sending…" : `Send to ${preview.recipients.length} recipient${preview.recipients.length === 1 ? "" : "s"}`}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
