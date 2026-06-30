@@ -76,3 +76,26 @@ export interface AnnualReceipt {
 }
 
 export type SettingsMap = Record<string, string>;
+
+export interface Staff {
+  id: number;
+  name: string;
+  role: string | null;
+  hourly_rate: number | null;
+  active: number;
+  created_at: string;
+  archived_at: string | null;
+}
+
+export interface StaffHour {
+  id: number;
+  staff_id: number;
+  work_date: string;
+  in_time: string | null;
+  out_time: string | null;
+  hours_decimal: number;
+  source: string;
+  sheet_image_path: string | null;
+  notes: string | null;
+  created_at: string;
+}

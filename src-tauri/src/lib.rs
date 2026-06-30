@@ -1,6 +1,7 @@
 use tauri_plugin_sql::{Migration, MigrationKind};
 
 mod email;
+mod gemini;
 mod restore;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -48,6 +49,12 @@ pub fn run() {
             sql: include_str!("../migrations/007_issuer_snapshot.sql"),
             kind: MigrationKind::Up,
         },
+        Migration {
+            version: 8,
+            description: "add_staff_hours",
+            sql: include_str!("../migrations/008_staff.sql"),
+            kind: MigrationKind::Up,
+        },
     ];
 
     tauri::Builder::default()
@@ -75,6 +82,7 @@ pub fn run() {
             email::keychain_delete,
             restore::stage_restore,
             restore::restart_app,
+            gemini::extract_timesheet,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

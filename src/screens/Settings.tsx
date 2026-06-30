@@ -37,6 +37,8 @@ export default function Settings() {
   const [saving, setSaving] = useState(false);
   const [smtpPassword, setSmtpPassword] = useState<string>("");
   const [hasStoredPassword, setHasStoredPassword] = useState(false);
+  const [geminiKey, setGeminiKey] = useState<string>("");
+  const [hasGeminiKey, setHasGeminiKey] = useState(false);
   const [testing, setTesting] = useState(false);
 
   useEffect(() => {
@@ -44,6 +46,7 @@ export default function Settings() {
       const loaded = await getSettings();
       setS(loaded);
       setHasStoredPassword(loaded.smtp_password_set === "1");
+      setHasGeminiKey(loaded.gemini_api_key_set === "1");
     })();
   }, []);
 
@@ -56,6 +59,12 @@ export default function Settings() {
         await setSetting("smtp_password_set", "1");
         setHasStoredPassword(true);
         setSmtpPassword("");
+      }
+      if (geminiKey.trim()) {
+        await invoke("keychain_set", { key: "gemini_api_key", value: geminiKey.trim() });
+        await setSetting("gemini_api_key_set", "1");
+        setHasGeminiKey(true);
+        setGeminiKey("");
       }
       alert("Settings saved.");
     } catch (e) {
@@ -71,6 +80,14 @@ export default function Settings() {
     await setSetting("smtp_password_set", "");
     setHasStoredPassword(false);
     alert("Password removed.");
+  }
+
+  async function clearGeminiKey() {
+    if (!confirm("Remove the stored Gemini API key from the OS keychain?")) return;
+    await invoke("keychain_delete", { key: "gemini_api_key" });
+    await setSetting("gemini_api_key_set", "");
+    setHasGeminiKey(false);
+    alert("Gemini key removed.");
   }
 
   async function runTest() {
@@ -464,6 +481,47 @@ export default function Settings() {
             <small style={{ color: "var(--muted)", alignSelf: "center" }}>→ {s.last_backup_path}</small>
           )}
         </div>
+
+        <hr style={{ border: 0, borderTop: "1px solid var(--border)", margin: "20px 0" }} />
+        <h3 style={{ margin: "0 0 4px" }}>Optional features</h3>
+        <p className="subtitle" style={{ marginBottom: 14 }}>
+          Turn on extra tools you'd like to use. They stay hidden when off.
+        </p>
+
+        <div className="field" style={{ marginBottom: 12 }}>
+          <label style={{ display: "flex", alignItems: "center", gap: 8, cursor: "pointer" }}>
+            <input
+              type="checkbox"
+              checked={s.feature_staff_hours_enabled === "1"}
+              onChange={(e) => setS({ ...s, feature_staff_hours_enabled: e.target.checked ? "1" : "" })}
+            />
+            <strong>Staff Hours</strong> &nbsp;<span style={{ color: "var(--muted)", fontWeight: 400 }}>
+              — Upload a monthly sign-in sheet and let AI extract teacher in/out times, then export the hours to Excel.
+            </span>
+          </label>
+        </div>
+
+        {s.feature_staff_hours_enabled === "1" && (
+          <div style={{ paddingLeft: 24, borderLeft: "2px solid var(--border)", marginBottom: 14 }}>
+            <div className="field">
+              <label>Google Gemini API key</label>
+              <input
+                type="password"
+                placeholder={hasGeminiKey ? "•••••••• (stored in OS keychain) — enter a new key to replace" : "Paste your Gemini API key"}
+                value={geminiKey}
+                onChange={(e) => setGeminiKey(e.target.value)}
+                autoComplete="off"
+              />
+              <small style={{ color: "var(--muted)" }}>
+                Used only to read your monthly sign-in sheets. Get one free at <code>aistudio.google.com/app/apikey</code>. Stored in the OS keychain, never in the database.
+                {hasGeminiKey && (
+                  <> &nbsp;<a href="#" onClick={(e) => { e.preventDefault(); clearGeminiKey(); }} style={{ color: "var(--danger)" }}>Remove stored key</a></>
+                )}
+              </small>
+            </div>
+            <Field s={s} setS={setS} k="staff_default_hourly_rate" label="Default hourly rate (optional)" placeholder="e.g. 28.50" hint="Used only as a starting point when you add a new staff member." />
+          </div>
+        )}
 
         <hr style={{ border: 0, borderTop: "1px solid var(--border)", margin: "20px 0" }} />
         <button className="btn" onClick={save} disabled={saving}>{saving ? "Saving…" : "Save Settings"}</button>
