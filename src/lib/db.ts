@@ -3,8 +3,22 @@ import type { Student, Receipt, SettingsMap, AnnualReceipt, AccbEntry, FeeBreakd
 
 let _db: Database | null = null;
 let _schemaChecked = false;
+let _pragmasApplied = false;
 export async function db(): Promise<Database> {
   if (!_db) _db = await Database.load("sqlite:echelon.db");
+  if (!_pragmasApplied) {
+    _pragmasApplied = true;
+    // Performance pragmas: WAL is dramatically faster for our read-heavy + occasional write workload,
+    // synchronous=NORMAL is safe with WAL, mmap_size lets SQLite skip OS syscall overhead on reads,
+    // and a 16 MB page cache keeps our entire dataset hot in memory.
+    try {
+      await _db.execute("PRAGMA journal_mode = WAL");
+      await _db.execute("PRAGMA synchronous = NORMAL");
+      await _db.execute("PRAGMA temp_store = MEMORY");
+      await _db.execute("PRAGMA mmap_size = 268435456");
+      await _db.execute("PRAGMA cache_size = -16000");
+    } catch (e) { console.warn("[db] pragma setup:", e); }
+  }
   if (!_schemaChecked) {
     _schemaChecked = true;
     try { await ensureSchema(_db); } catch (e) { console.error("[ensureSchema] failed:", e); }
@@ -226,19 +240,24 @@ export function personIdFor(name: string, father?: string | null, mother?: strin
 }
 
 // ---------- Settings ----------
+let _settingsCache: SettingsMap | null = null;
 export async function getSettings(): Promise<SettingsMap> {
+  if (_settingsCache) return _settingsCache;
   const rows = await (await db()).select<{ key: string; value: string }[]>(
     "SELECT key, value FROM settings"
   );
   const m: SettingsMap = {};
   rows.forEach((r) => (m[r.key] = r.value ?? ""));
+  _settingsCache = m;
   return m;
 }
+export function invalidateSettingsCache() { _settingsCache = null; }
 export async function setSetting(key: string, value: string) {
   await (await db()).execute(
     "INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
     [key, value]
   );
+  if (_settingsCache) _settingsCache[key] = value;
 }
 export async function nextReceiptNo(): Promise<number> {
   const s = await getSettings();

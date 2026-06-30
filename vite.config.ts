@@ -8,6 +8,27 @@ const host = process.env.TAURI_DEV_HOST;
 export default defineConfig(async () => ({
   plugins: [react()],
 
+  build: {
+    target: "esnext",
+    cssCodeSplit: true,
+    sourcemap: false,
+    chunkSizeWarningLimit: 1100,
+    rollupOptions: {
+      output: {
+        manualChunks(id) {
+          if (id.includes("node_modules")) {
+            if (id.includes("html2pdf") || id.includes("html2canvas") || id.includes("jspdf")) return "pdf";
+            if (id.includes("xlsx")) return "xlsx";
+            if (id.includes("react-router")) return "router";
+            if (id.includes("react-dom") || id.includes("/react/")) return "react";
+            if (id.includes("@tauri-apps")) return "tauri";
+            return "vendor";
+          }
+        },
+      },
+    },
+  },
+
   // Vite options tailored for Tauri development and only applied in `tauri dev` or `tauri build`
   //
   // 1. prevent Vite from obscuring rust errors

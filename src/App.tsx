@@ -1,17 +1,17 @@
 import { HashRouter, NavLink, Route, Routes, Navigate, useLocation, useNavigate } from "react-router-dom";
-import { useEffect, useState, type ReactElement } from "react";
+import { useEffect, useState, lazy, Suspense, type ReactElement } from "react";
 import Home from "./screens/Home";
-import Today from "./screens/Today";
-import ThisMonth from "./screens/ThisMonth";
-import NewReceipt from "./screens/NewReceipt";
-import History from "./screens/History";
-import Students from "./screens/Students";
-import Reports from "./screens/Reports";
-import AnnualReceipts from "./screens/AnnualReceipts";
-import StaffScreen from "./screens/Staff";
-import StaffCredentials from "./screens/StaffCredentials";
-import StaffDrills from "./screens/StaffDrills";
-import Settings from "./screens/Settings";
+const Today = lazy(() => import("./screens/Today"));
+const ThisMonth = lazy(() => import("./screens/ThisMonth"));
+const NewReceipt = lazy(() => import("./screens/NewReceipt"));
+const History = lazy(() => import("./screens/History"));
+const Students = lazy(() => import("./screens/Students"));
+const Reports = lazy(() => import("./screens/Reports"));
+const AnnualReceipts = lazy(() => import("./screens/AnnualReceipts"));
+const StaffScreen = lazy(() => import("./screens/Staff"));
+const StaffCredentials = lazy(() => import("./screens/StaffCredentials"));
+const StaffDrills = lazy(() => import("./screens/StaffDrills"));
+const Settings = lazy(() => import("./screens/Settings"));
 import { runCloudBackupIfDue } from "./lib/cloudBackup";
 import { getSettings } from "./lib/db";
 import { DEFAULT_LOGO_DATA_URL } from "./lib/defaults";
@@ -133,7 +133,8 @@ function Shell({ logo, name, staffEnabled }: { logo: string; name: string; staff
     <div className="app">
       {sidebar}
       <main className="content">
-        <Routes>
+        <Suspense fallback={<div style={{ padding: 24, color: "var(--muted)" }}>Loading…</div>}>
+          <Routes>
           {/* Students module */}
           <Route path="/students" element={<Navigate to="/students/today" replace />} />
           <Route path="/students/today" element={<Today />} />
@@ -164,6 +165,7 @@ function Shell({ logo, name, staffEnabled }: { logo: string; name: string; staff
           <Route path="/settings" element={<Navigate to="/config/identity" replace />} />
           <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>
+        </Suspense>
       </main>
     </div>
   );
