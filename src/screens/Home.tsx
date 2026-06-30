@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { db, getSettings, listStudents } from "../lib/db";
+import { listAllCredentialsWithStaff, credStatus } from "../lib/credentials";
 import { DEFAULT_LOGO_DATA_URL } from "../lib/defaults";
 import type { SettingsMap } from "../types";
 
@@ -81,6 +82,34 @@ export default function Home() {
           text: "Email isn't configured — receipts can be saved but not emailed.",
           cta: { label: "Set up email", to: "/config/email" },
         });
+      }
+
+      // Staff credential expiries (only when feature is on)
+      if (settings.feature_staff_hours_enabled === "1") {
+        try {
+          const alertDays = Number(settings.staff_cred_alert_days || "60");
+          const creds = await listAllCredentialsWithStaff();
+          let expired = 0, expiring = 0;
+          for (const c of creds) {
+            const st = credStatus(c.expiry_date, alertDays);
+            if (st === "expired") expired++;
+            else if (st === "expiring") expiring++;
+          }
+          if (expired > 0) {
+            list.push({
+              tone: "danger",
+              text: `${expired} staff credential${expired === 1 ? " has" : "s have"} expired.`,
+              cta: { label: "Review credentials", to: "/staff/credentials" },
+            });
+          }
+          if (expiring > 0) {
+            list.push({
+              tone: "warn",
+              text: `${expiring} staff credential${expiring === 1 ? "" : "s"} expir${expiring === 1 ? "es" : "e"} in the next ${alertDays} days.`,
+              cta: { label: "Review credentials", to: "/staff/credentials" },
+            });
+          }
+        } catch {}
       }
 
       // Staff cert tracker placeholder (Phase 1 not built yet — skip until built)

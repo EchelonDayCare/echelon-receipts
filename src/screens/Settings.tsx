@@ -552,6 +552,7 @@ export default function Settings() {
               </small>
             </div>
             <Field s={s} setS={setS} k="staff_default_hourly_rate" label="Default hourly rate (optional)" placeholder="e.g. 28.50" hint="Used only as a starting point when you add a new staff member." />
+            <Field s={s} setS={setS} k="staff_cred_alert_days" label="Credential warning window (days)" placeholder="60" hint="Home alerts trigger when a credential expires within this many days. Default 60." />
           </div>
         )}
       </div>

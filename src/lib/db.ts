@@ -165,7 +165,38 @@ async function ensureSchema(d: Database): Promise<void> {
     ["feature_staff_hours_enabled", ""],
     ["gemini_api_key_set", ""],
     ["staff_default_hourly_rate", ""],
+    ["staff_cred_alert_days", "60"],
   ] as const) await setting(k, v);
+
+  // Migration 009 — Staff credentials & drill log
+  if (!(await tableExists("staff_credentials"))) {
+    console.warn("[ensureSchema] creating staff_credentials");
+    await d.execute(`CREATE TABLE staff_credentials (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      staff_id INTEGER NOT NULL REFERENCES staff(id) ON DELETE CASCADE,
+      type TEXT NOT NULL,
+      issued_date TEXT,
+      expiry_date TEXT,
+      file_path TEXT,
+      notes TEXT,
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    )`);
+    await d.execute("CREATE INDEX IF NOT EXISTS ix_staff_credentials_staff ON staff_credentials(staff_id)");
+    await d.execute("CREATE INDEX IF NOT EXISTS ix_staff_credentials_expiry ON staff_credentials(expiry_date)");
+  }
+  if (!(await tableExists("staff_drills"))) {
+    console.warn("[ensureSchema] creating staff_drills");
+    await d.execute(`CREATE TABLE staff_drills (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      drill_date TEXT NOT NULL,
+      drill_type TEXT NOT NULL,
+      duration_min INTEGER,
+      children_present INTEGER,
+      notes TEXT,
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    )`);
+    await d.execute("CREATE INDEX IF NOT EXISTS ix_staff_drills_date ON staff_drills(drill_date)");
+  }
 
   // Backup bookkeeping (not a real migration — stored in settings)
   for (const [k, v] of [

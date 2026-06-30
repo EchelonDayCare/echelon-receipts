@@ -99,3 +99,24 @@ export interface StaffHour {
   notes: string | null;
   created_at: string;
 }
+
+export interface StaffCredential {
+  id: number;
+  staff_id: number;
+  type: string;
+  issued_date: string | null;
+  expiry_date: string | null;
+  file_path: string | null;
+  notes: string | null;
+  created_at: string;
+}
+
+export interface StaffDrill {
+  id: number;
+  drill_date: string;
+  drill_type: string;
+  duration_min: number | null;
+  children_present: number | null;
+  notes: string | null;
+  created_at: string;
+}

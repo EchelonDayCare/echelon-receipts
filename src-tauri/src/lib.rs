@@ -55,6 +55,12 @@ pub fn run() {
             sql: include_str!("../migrations/008_staff.sql"),
             kind: MigrationKind::Up,
         },
+        Migration {
+            version: 9,
+            description: "add_staff_credentials_drills",
+            sql: include_str!("../migrations/009_staff_credentials.sql"),
+            kind: MigrationKind::Up,
+        },
     ];
 
     tauri::Builder::default()

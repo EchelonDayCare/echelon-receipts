@@ -9,6 +9,8 @@ import Students from "./screens/Students";
 import Reports from "./screens/Reports";
 import AnnualReceipts from "./screens/AnnualReceipts";
 import StaffScreen from "./screens/Staff";
+import StaffCredentials from "./screens/StaffCredentials";
+import StaffDrills from "./screens/StaffDrills";
 import Settings from "./screens/Settings";
 import { runCloudBackupIfDue } from "./lib/cloudBackup";
 import { getSettings } from "./lib/db";
@@ -104,6 +106,8 @@ function Shell({ logo, name, staffEnabled }: { logo: string; name: string; staff
         name={name}
         items={[
           { to: "/staff/hours", label: "Hours" },
+          { to: "/staff/credentials", label: "Credentials" },
+          { to: "/staff/drills", label: "Drill Log" },
         ]}
       />
     );
@@ -143,6 +147,8 @@ function Shell({ logo, name, staffEnabled }: { logo: string; name: string; staff
           {/* Staff module */}
           <Route path="/staff" element={<Navigate to={staffEnabled ? "/staff/hours" : "/config/staff"} replace />} />
           {staffEnabled && <Route path="/staff/hours" element={<StaffScreen />} />}
+          {staffEnabled && <Route path="/staff/credentials" element={<StaffCredentials />} />}
+          {staffEnabled && <Route path="/staff/drills" element={<StaffDrills />} />}
 
           {/* Configuration module */}
           <Route path="/config" element={<Navigate to="/config/identity" replace />} />
