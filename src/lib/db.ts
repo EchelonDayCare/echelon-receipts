@@ -595,7 +595,6 @@ export interface AnnualGroup {
 }
 export async function annualGroupsForYear(year: number): Promise<AnnualGroup[]> {
   await backfillPersonIds();
-  const yPrefix = `${year}-`;
   const rs = await (await db()).select<Receipt[]>(
     `SELECT * FROM receipts WHERE voided=0 AND substr(date,1,4)=? ORDER BY date ASC, receipt_no ASC`,
     [String(year)]
@@ -627,7 +626,6 @@ export async function annualGroupsForYear(year: number): Promise<AnnualGroup[]> 
     g.total += r.is_refund ? -Math.abs(r.amount) : r.amount;
     g.count++;
   }
-  void yPrefix;
 
   // Attach the most recent NON-superseded annual receipt for this person+year.
   // Single query → in-memory bucketing avoids N+1 SELECTs.

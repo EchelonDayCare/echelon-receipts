@@ -58,13 +58,15 @@ pub async fn send_email(args: SendEmailArgs) -> Result<(), String> {
             )
             .map_err(|e| format!("build: {e}"))?;
 
-        let creds = Credentials::new(args.smtp_user, args.smtp_password);
+        let creds = Credentials::new(args.smtp_user, args.smtp_password.clone());
+        let pw = args.smtp_password.clone();
+        let redact = |s: String| if pw.is_empty() { s } else { s.replace(&pw, "***") };
         let mailer = SmtpTransport::starttls_relay(&args.smtp_host)
-            .map_err(|e| format!("starttls: {e}"))?
+            .map_err(|e| redact(format!("starttls: {e}")))?
             .port(args.smtp_port)
             .credentials(creds)
             .build();
-        mailer.send(&email).map_err(|e| format!("send: {e}"))?;
+        mailer.send(&email).map_err(|e| redact(format!("send: {e}")))?;
         Ok(())
     })
     .await

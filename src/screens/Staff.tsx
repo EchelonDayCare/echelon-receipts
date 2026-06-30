@@ -143,7 +143,10 @@ export default function StaffScreen() {
       setOcrResult({ rows: result.rows, unmatched: Array.from(unmatched).sort() });
       notify(`Read ${result.rows.length} time entries. Review and import below.`);
     } catch (e: any) {
-      notify("OCR failed: " + (e?.message || e), "err");
+      // Defensively redact the API key from any error before showing it.
+      const raw = String(e?.message || e);
+      const safe = apiKey ? raw.split(apiKey).join("***") : raw;
+      notify("OCR failed: " + safe, "err");
     } finally { setOcrBusy(false); }
   }
 
