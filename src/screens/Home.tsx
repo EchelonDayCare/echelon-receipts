@@ -37,15 +37,17 @@ export default function Home() {
       const ym = `${y}-${String(m).padStart(2, "0")}`;
       try {
         const d = await db();
-        const total = await listStudents(y, true);
-        const issued = await d.select<{ n: number }[]>(
-          `SELECT COUNT(DISTINCT student_id) AS n
-             FROM receipts
-            WHERE substr(date,1,7) = ?
-              AND voided = 0
-              AND is_refund = 0`,
-          [ym]
-        );
+        const [total, issued] = await Promise.all([
+          listStudents(y, true),
+          d.select<{ n: number }[]>(
+            `SELECT COUNT(DISTINCT student_id) AS n
+               FROM receipts
+              WHERE substr(date,1,7) = ?
+                AND voided = 0
+                AND is_refund = 0`,
+            [ym]
+          ),
+        ]);
         const issuedCount = issued[0]?.n ?? 0;
         const missing = total.length - issuedCount;
         if (missing > 0) {

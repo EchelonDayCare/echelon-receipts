@@ -25,24 +25,38 @@ function statusFor(r: Receipt): { key: StatusKey; label: string } {
 export default function History() {
   const [rows, setRows] = useState<Receipt[]>([]);
   const [search, setSearch] = useState("");
+  const [debouncedSearch, setDebouncedSearch] = useState("");
   const [year, setYear] = useState<number | "">("");
   const [month, setMonth] = useState<number | "">("");
   const [settings, setSettings] = useState<SettingsMap>({});
   const [studentEmails, setStudentEmails] = useState<Map<number, string>>(new Map());
 
+  // Debounce search keystrokes — only re-query SQLite after the user pauses 200ms.
+  useEffect(() => {
+    const t = setTimeout(() => setDebouncedSearch(search), 200);
+    return () => clearTimeout(t);
+  }, [search]);
+
   async function refresh() {
     setRows(await listReceipts({
-      search: search || undefined,
+      search: debouncedSearch || undefined,
       year: year === "" ? undefined : year,
       month: month === "" ? undefined : month,
     }));
-    setSettings(await getSettings());
-    const all = await listStudents(undefined, false);
-    const m = new Map<number, string>();
-    all.forEach((s: Student) => { if (s.email) m.set(s.id, s.email); });
-    setStudentEmails(m);
   }
-  useEffect(() => { refresh(); /* eslint-disable-next-line */ }, [search, year, month]);
+  // Refresh receipt list when search/year/month change.
+  useEffect(() => { refresh(); /* eslint-disable-next-line */ }, [debouncedSearch, year, month]);
+
+  // Settings + student emails only depend on the dataset, not the query.
+  useEffect(() => {
+    (async () => {
+      setSettings(await getSettings());
+      const all = await listStudents(undefined, false);
+      const m = new Map<number, string>();
+      all.forEach((s: Student) => { if (s.email) m.set(s.id, s.email); });
+      setStudentEmails(m);
+    })();
+  }, []);
 
   const total = useMemo(
     () => rows.filter((r) => !r.voided).reduce((acc, r) => acc + r.amount, 0),

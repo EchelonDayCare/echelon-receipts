@@ -54,7 +54,7 @@ async function renderReceiptPdfBytes(r: Receipt, s: SettingsMap): Promise<Uint8A
         margin: 0.4,
         filename: "receipt.pdf",
         image: { type: "jpeg", quality: 0.95 },
-        html2canvas: { scale: 2, useCORS: true, backgroundColor: "#ffffff" },
+        html2canvas: { scale: 1.5, useCORS: true, backgroundColor: "#ffffff" },
         jsPDF: { unit: "in", format: "letter", orientation: "portrait" },
       })
       .outputPdf("blob");

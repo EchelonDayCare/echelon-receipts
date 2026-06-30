@@ -106,7 +106,7 @@ async function renderPdfBytes(html: string): Promise<Uint8Array> {
         margin: 0.4,
         filename: "subsidy.pdf",
         image: { type: "jpeg", quality: 0.95 },
-        html2canvas: { scale: 2, useCORS: true, backgroundColor: "#ffffff" },
+        html2canvas: { scale: 1.5, useCORS: true, backgroundColor: "#ffffff" },
         jsPDF: { unit: "in", format: "letter", orientation: "portrait" },
       })
       .outputPdf("blob");

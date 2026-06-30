@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { openPath } from "@tauri-apps/plugin-opener";
 import {
   listStudents, listReceipts, nextReceiptNo, createReceipt,
-  getSettings, subsidiesEnabled, computeFeeBreakdown, getAccbForMonth, markEmailed,
+  getSettings, subsidiesEnabled, computeFeeBreakdown, getAccbForMonthBulk, markEmailed,
 } from "../lib/db";
 import type { Student, Receipt, SettingsMap } from "../types";
 import { saveReceiptPdf } from "../lib/receipt";
@@ -49,18 +49,27 @@ export default function ThisMonth() {
 
   async function refresh() {
     setLoading(true);
-    const [studs, s] = await Promise.all([listStudents(year, true), getSettings()]);
-    setSettings(s);
-    // pull this year's receipts once and bucket per-student
     const monthIdx = MONTHS.indexOf(month) + 1;
-    const allReceipts = await listReceipts({ year });
+    const subsOn = subsidiesEnabled(await getSettings());
+    const [studs, s, allReceipts, accbMap] = await Promise.all([
+      listStudents(year, true),
+      getSettings(),
+      listReceipts({ year }),
+      subsOn ? getAccbForMonthBulk(year, monthIdx) : Promise.resolve(new Map<number, number>()),
+    ]);
+    setSettings(s);
+    // Bucket receipts per-student so the inner loop is O(1) lookup.
+    const receiptByStudent = new Map<number, Receipt>();
+    for (const x of allReceipts) {
+      if (receiptMatchesFeeMonth(x, month, year)) receiptByStudent.set(x.student_id, x);
+    }
     const next: RowState[] = [];
     for (const stu of studs) {
-      const r = allReceipts.find(x => x.student_id === stu.id && receiptMatchesFeeMonth(x, month, year)) || null;
+      const r = receiptByStudent.get(stu.id) || null;
       let bk: RowState["breakdown"] = null;
       let amt = parseFloat(s.default_fee || "0") || 0;
       if (subsidiesEnabled(s)) {
-        const accb = await getAccbForMonth(stu.id, year, monthIdx);
+        const accb = accbMap.get(stu.id) ?? 0;
         const fb = computeFeeBreakdown(stu, s, accb);
         bk = { gross: fb.gross, ccfri: fb.ccfri, accb: fb.accb };
         if (fb.gross > 0) amt = fb.parent_pays;

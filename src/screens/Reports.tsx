@@ -13,10 +13,16 @@ export default function Reports() {
   const [subsidy, setSubsidy] = useState<SubsidyMonthRow[]>([]);
 
   async function refresh() {
-    setMonthly(await monthlyTotals(year));
-    setAll(await listReceipts({ year }));
-    setSettings(await getSettings());
-    setSubsidy(await subsidyReconciliation(year));
+    const [m, r, s, sub] = await Promise.all([
+      monthlyTotals(year),
+      listReceipts({ year }),
+      getSettings(),
+      subsidyReconciliation(year),
+    ]);
+    setMonthly(m);
+    setAll(r);
+    setSettings(s);
+    setSubsidy(sub);
   }
   useEffect(() => { refresh(); /* eslint-disable-next-line */ }, [year]);
 

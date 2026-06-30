@@ -4,7 +4,7 @@ import { open } from "@tauri-apps/plugin-dialog";
 import { invoke } from "@tauri-apps/api/core";
 import { copyFile, mkdir, exists } from "@tauri-apps/plugin-fs";
 import { appDataDir, join } from "@tauri-apps/api/path";
-import { getSettings, setSetting } from "../lib/db";
+import { getSettings, setSetting, setSettings as setSettingsBulk } from "../lib/db";
 import { sendTestEmail, SMTP_PRESETS } from "../lib/email";
 import { sendCloudBackup } from "../lib/cloudBackup";
 import { DEFAULT_LOGO_DATA_URL, DEFAULT_SIGNATURE_DATA_URL } from "../lib/defaults";
@@ -54,7 +54,7 @@ export default function Settings() {
   async function save() {
     setSaving(true);
     try {
-      for (const [k, v] of Object.entries(s)) await setSetting(k, v ?? "");
+      await setSettingsBulk(s as Record<string, string>);
       if (smtpPassword.trim()) {
         await invoke("keychain_set", { key: "smtp_password", value: smtpPassword.trim() });
         await setSetting("smtp_password_set", "1");
@@ -96,7 +96,7 @@ export default function Settings() {
     setTesting(true);
     try {
       // Persist current edits first so the test uses what's on screen.
-      for (const [k, v] of Object.entries(s)) await setSetting(k, v ?? "");
+      await setSettingsBulk(s as Record<string, string>);
       if (smtpPassword.trim()) {
         await invoke("keychain_set", { key: "smtp_password", value: smtpPassword.trim() });
         await setSetting("smtp_password_set", "1");
@@ -134,7 +134,7 @@ export default function Settings() {
   async function cloudBackupNow() {
     try {
       // Persist current edits first so the backup uses the current recipient/SMTP values.
-      for (const [k, v] of Object.entries(s)) await setSetting(k, v ?? "");
+      await setSettingsBulk(s as Record<string, string>);
       const now = new Date();
       const key = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`;
       const res = await sendCloudBackup(key);

@@ -24,7 +24,7 @@ async function renderPdf(html: string): Promise<Uint8Array> {
     const html2pdf = await loadHtml2Pdf();
     const blob: Blob = await html2pdf().from(target).set({
       margin: 0.4, image: { type: "jpeg", quality: 0.95 },
-      html2canvas: { scale: 2, useCORS: true, backgroundColor: "#ffffff" },
+      html2canvas: { scale: 1.5, useCORS: true, backgroundColor: "#ffffff" },
       jsPDF: { unit: "in", format: "letter", orientation: "portrait" },
     }).outputPdf("blob");
     return new Uint8Array(await blob.arrayBuffer());

@@ -6,7 +6,7 @@ import {
 import type { Student, SettingsMap, FeeBreakdown } from "../types";
 import { printReceipt, saveReceiptPdf } from "../lib/receipt";
 import { sendReceiptEmail, parseRecipients } from "../lib/email";
-import { markEmailed, listReceipts } from "../lib/db";
+import { markEmailed } from "../lib/db";
 
 const MONTHS = ["January","February","March","April","May","June","July","August","September","October","November","December"];
 
@@ -79,7 +79,7 @@ export default function NewReceipt() {
     const amt = parseFloat(amount); if (!(amt >= 0)) { alert("Invalid amount."); return; }
     const pen = parseFloat(pending || "0") || 0;
     const bk = (breakdown && !isRefund) ? breakdown : null;
-    await createReceipt({
+    const newId = await createReceipt({
       receipt_no: receiptNo, date, student_id: student.id,
       student_name_snapshot: student.name,
       father_name_snapshot: student.father_name,
@@ -92,7 +92,7 @@ export default function NewReceipt() {
     });
     const settingsLatest = await getSettings();
     const r = {
-      id: 0, receipt_no: receiptNo, date, student_id: student.id,
+      id: newId, receipt_no: receiptNo, date, student_id: student.id,
       student_name_snapshot: student.name,
       father_name_snapshot: student.father_name,
       mother_name_snapshot: student.mother_name,
@@ -121,9 +121,7 @@ export default function NewReceipt() {
         if (ok) {
           try {
             await sendReceiptEmail({ receipt: r, recipients, settings: settingsLatest });
-            const last = await listReceipts({});
-            const justSaved = last.find((x) => x.receipt_no === receiptNo);
-            if (justSaved) await markEmailed(justSaved.id, recipients);
+            await markEmailed(newId, recipients);
             emailMsg = `\n✉️ Sent to ${recipients.join(", ")}`;
           } catch (e: any) {
             emailMsg = "\n❌ Email failed: " + (e?.message || e);

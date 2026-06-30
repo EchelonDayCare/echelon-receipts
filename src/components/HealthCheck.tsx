@@ -113,7 +113,21 @@ export default function HealthCheck({ settings }: Props) {
     setRunning(false);
   }
 
-  useEffect(() => { run(); /* eslint-disable-next-line */ }, [settings]);
+  // Only re-run when the fields HealthCheck actually inspects change.
+  useEffect(() => { run(); /* eslint-disable-next-line */ }, [
+    settings.daycare_name,
+    settings.business_number,
+    settings.smtp_host,
+    settings.smtp_password_set,
+    settings.sender_email,
+    settings.contact_email,
+    settings.pdf_folder,
+    settings.subsidies_enabled,
+    settings.gross_monthly_fee,
+    settings.ccfri_monthly_reduction,
+    settings.backup_cloud_enabled,
+    settings.backup_recipient_email,
+  ]);
 
   const overall = !checks ? "running"
     : checks.some(c => c.state === "error") ? "error"

@@ -31,21 +31,33 @@ export async function db(): Promise<Database> {
 // migrations on pre-existing DBs. This idempotently patches anything missing so
 // the app self-heals on startup. Add new expectations as schema evolves.
 async function ensureSchema(d: Database): Promise<void> {
+  // Cache table and column lookups so we don't pay PRAGMA round-trips repeatedly.
+  const _tableCache = new Map<string, boolean>();
+  const _colCache = new Map<string, Set<string>>();
   const tableExists = async (name: string): Promise<boolean> => {
+    if (_tableCache.has(name)) return _tableCache.get(name)!;
     const r = await d.select<{ n: number }[]>(
       "SELECT COUNT(*) AS n FROM sqlite_master WHERE type='table' AND name=?", [name]
     );
-    return (r[0]?.n ?? 0) > 0;
+    const v = (r[0]?.n ?? 0) > 0;
+    _tableCache.set(name, v);
+    return v;
   };
   const colExists = async (table: string, col: string): Promise<boolean> => {
     if (!(await tableExists(table))) return false;
-    const rows = await d.select<{ name: string }[]>(`PRAGMA table_info(${table})`);
-    return rows.some((r) => r.name === col);
+    let cols = _colCache.get(table);
+    if (!cols) {
+      const rows = await d.select<{ name: string }[]>(`PRAGMA table_info(${table})`);
+      cols = new Set(rows.map((r) => r.name));
+      _colCache.set(table, cols);
+    }
+    return cols.has(col);
   };
   const addCol = async (table: string, col: string, decl: string) => {
     if (!(await colExists(table, col))) {
       console.warn(`[ensureSchema] adding ${table}.${col}`);
       await d.execute(`ALTER TABLE ${table} ADD COLUMN ${col} ${decl}`);
+      _colCache.get(table)?.add(col);
     }
   };
   const setting = async (key: string, value: string) => {
@@ -241,6 +253,38 @@ export function personIdFor(name: string, father?: string | null, mother?: strin
 
 // ---------- Settings ----------
 let _settingsCache: SettingsMap | null = null;
+// Bulk version — single transaction, much faster than serial setSetting() calls.
+export async function setSettings(entries: Record<string, string>) {
+  const d = await db();
+  const keys = Object.keys(entries);
+  if (keys.length === 0) return;
+  await d.execute("BEGIN");
+  try {
+    for (const k of keys) {
+      await d.execute(
+        "INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+        [k, entries[k] ?? ""]
+      );
+      if (_settingsCache) _settingsCache[k] = entries[k] ?? "";
+    }
+    await d.execute("COMMIT");
+  } catch (e) {
+    await d.execute("ROLLBACK");
+    throw e;
+  }
+}
+
+// Bulk ACCB lookup for a single month — replaces N+1 calls in ThisMonth.
+export async function getAccbForMonthBulk(year: number, month: number): Promise<Map<number, number>> {
+  const rows = await (await db()).select<{ student_id: number; amount: number }[]>(
+    "SELECT student_id, amount FROM accb_entries WHERE year=? AND month=?",
+    [year, month]
+  );
+  const m = new Map<number, number>();
+  rows.forEach((r) => m.set(r.student_id, r.amount));
+  return m;
+}
+
 export async function getSettings(): Promise<SettingsMap> {
   if (_settingsCache) return _settingsCache;
   const rows = await (await db()).select<{ key: string; value: string }[]>(
@@ -307,7 +351,10 @@ export async function deleteStudent(id: number) {
   await (await db()).execute("UPDATE students SET active=0 WHERE id=?", [id]);
 }
 // One-time backfill: any student without a person_id gets one computed from current names.
+// Memoised — only the first call per process does any work.
+let _personIdBackfillDone = false;
 export async function backfillPersonIds(): Promise<number> {
+  if (_personIdBackfillDone) return 0;
   const rows = await (await db()).select<Student[]>(
     "SELECT * FROM students WHERE person_id IS NULL OR person_id=''"
   );
@@ -315,6 +362,7 @@ export async function backfillPersonIds(): Promise<number> {
     const pid = personIdFor(r.name, r.father_name, r.mother_name);
     await (await db()).execute("UPDATE students SET person_id=? WHERE id=?", [pid, r.id]);
   }
+  _personIdBackfillDone = true;
   return rows.length;
 }
 
@@ -371,10 +419,10 @@ async function backfillIssuerSnapshot(): Promise<void> {
   await d.execute("UPDATE annual_receipts SET issuer_snapshot_json=? WHERE issuer_snapshot_json IS NULL OR issuer_snapshot_json=''", [snap]);
 }
 
-export async function createReceipt(r: Omit<Receipt, "id" | "created_at" | "voided" | "emailed_at" | "emailed_to" | "void_reason" | "voided_at" | "issuer_snapshot_json">) {
+export async function createReceipt(r: Omit<Receipt, "id" | "created_at" | "voided" | "emailed_at" | "emailed_to" | "void_reason" | "voided_at" | "issuer_snapshot_json">): Promise<number> {
   const settings = await getSettings();
   const snap = JSON.stringify(buildIssuerSnapshot(settings));
-  await (await db()).execute(
+  const res = await (await db()).execute(
     `INSERT INTO receipts(receipt_no,date,student_id,student_name_snapshot,
       father_name_snapshot,mother_name_snapshot,description,amount,pending_amount,comments,is_refund,
       gross_amount,ccfri_amount,accb_amount,issuer_snapshot_json)
@@ -389,6 +437,7 @@ export async function createReceipt(r: Omit<Receipt, "id" | "created_at" | "void
     ]
   );
   await bumpReceiptNo(r.receipt_no);
+  return Number(res.lastInsertId);
 }
 
 // ---------- BC Subsidies (CCFRI + ACCB) ----------
@@ -580,15 +629,20 @@ export async function annualGroupsForYear(year: number): Promise<AnnualGroup[]> 
   }
   void yPrefix;
 
-  // Attach the most recent NON-superseded annual receipt for this person+year
+  // Attach the most recent NON-superseded annual receipt for this person+year.
+  // Single query → in-memory bucketing avoids N+1 SELECTs.
+  const annualRows = await (await db()).select<AnnualReceipt[]>(
+    `SELECT * FROM annual_receipts
+     WHERE calendar_year=? AND superseded_by IS NULL
+     ORDER BY issued_at DESC`,
+    [year]
+  );
+  const latestByPerson = new Map<string, AnnualReceipt>();
+  for (const a of annualRows) {
+    if (!latestByPerson.has(a.person_id)) latestByPerson.set(a.person_id, a);
+  }
   for (const g of groups.values()) {
-    const rows = await (await db()).select<AnnualReceipt[]>(
-      `SELECT * FROM annual_receipts
-       WHERE person_id=? AND calendar_year=? AND superseded_by IS NULL
-       ORDER BY issued_at DESC LIMIT 1`,
-      [g.person_id, year]
-    );
-    g.last_issued = rows[0] ?? null;
+    g.last_issued = latestByPerson.get(g.person_id) ?? null;
   }
   return Array.from(groups.values()).sort((a, b) => a.student_name.localeCompare(b.student_name));
 }
