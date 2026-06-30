@@ -2,8 +2,8 @@ name: Build macOS DMG (Apple Silicon)
 
 on:
   push:
-    branches: [main]
-  workflow_dispatch:
+    tags: ['v*']            # only build when a version tag is pushed
+  workflow_dispatch:         # …or manually from the Actions tab
 
 permissions:
   contents: write
@@ -47,13 +47,13 @@ jobs:
           name: Echelon-Receipts-AppleSilicon
           path: release-assets/Echelon-Receipts-AppleSilicon.dmg
 
-      - name: Publish / Update "latest" GitHub Release
+      - name: Publish / Update GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: latest
-          name: "Latest build"
+          tag_name: ${{ github.ref_name }}
+          name: "Echelon Receipts ${{ github.ref_name }}"
           body: |
-            Auto-built from commit ${{ github.sha }}.
+            Auto-built from tag `${{ github.ref_name }}` (commit ${{ github.sha }}).
 
             **Download:** `Echelon-Receipts-AppleSilicon.dmg` (Apple Silicon: M1/M2/M3/M4)
 
