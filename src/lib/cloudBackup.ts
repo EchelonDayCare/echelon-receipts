@@ -3,7 +3,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { readFile } from "@tauri-apps/plugin-fs";
 import { appDataDir, join } from "@tauri-apps/api/path";
-import { getSettings, setSetting } from "./db";
+import { getSettings, setSetting, checkpointWal } from "./db";
 import type { SettingsMap } from "../types";
 
 function bytesToBase64(bytes: Uint8Array): string {
@@ -60,6 +60,11 @@ export async function sendCloudBackup(forMonthKey: string): Promise<CloudBackupR
   if (!host || !port) {
     return { ok: false, monthKey: forMonthKey, recipient, bytes: 0, error: "SMTP host/port not set." };
   }
+
+  // Flush the WAL into the main .db file before reading, otherwise recent
+  // commits live only in echelon.db-wal and the email backup is incomplete.
+  // A restore from a non-checkpointed snapshot would silently lose them.
+  await checkpointWal();
 
   const dbPath = await join(await appDataDir(), "echelon.db");
   const bytes = await readFile(dbPath);

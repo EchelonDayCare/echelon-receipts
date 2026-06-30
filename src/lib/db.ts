@@ -4,23 +4,82 @@ import type { Student, Receipt, SettingsMap, AnnualReceipt, AccbEntry, FeeBreakd
 let _db: Database | null = null;
 let _schemaChecked = false;
 let _pragmasApplied = false;
+
+// ---------- Concurrency & error-handling primitives ----------
+// tauri-plugin-sql uses sqlx with a multi-connection SqlitePool. Several PRAGMAs
+// (busy_timeout, foreign_keys) are per-connection in SQLite, so they don't
+// propagate to other pooled connections. Combined with JS-side BEGIN/COMMIT
+// landing on different physical connections, this causes intermittent
+// "database is locked" (code 5) and "transaction within a transaction"
+// (code 1) errors — especially on macOS where the pool churns faster.
+//
+// JS is single-threaded; the simplest correct fix is to serialize every write
+// through a Promise chain. Reads run normally (WAL allows concurrent readers).
+let _writeTail: Promise<unknown> = Promise.resolve();
+export function serializeWrite<T>(fn: () => Promise<T>): Promise<T> {
+  const next = _writeTail.then(fn, fn);
+  _writeTail = next.catch(() => undefined);
+  return next as Promise<T>;
+}
+
+// Money rounding helper — keeps every dollar amount written to DB at 2 decimals
+// so a year of subtraction/SUM operations never drifts a cent off the T778 total.
+export function roundMoney(x: number | null | undefined): number {
+  if (x == null || !isFinite(x)) return 0;
+  return Math.round(x * 100) / 100;
+}
+
+// Execute a write with automatic retry on SQLITE_BUSY/LOCKED. All writes go
+// through here so we don't have to remember to retry at every call site.
+export async function execRetry(sql: string, args: any[] = []): Promise<{ lastInsertId: number; rowsAffected: number }> {
+  return serializeWrite(async () => {
+    const d = await db();
+    let lastErr: any = null;
+    for (let attempt = 0; attempt < 5; attempt++) {
+      try {
+        const r = await d.execute(sql, args);
+        return { lastInsertId: r.lastInsertId ?? 0, rowsAffected: r.rowsAffected };
+      } catch (e: any) {
+        lastErr = e;
+        const msg = String(e?.message || e);
+        if (!/locked|busy|code: 5|code: 6/i.test(msg)) throw e;
+        await new Promise((r) => setTimeout(r, 100 + attempt * 150));
+      }
+    }
+    throw lastErr;
+  });
+}
+
+// Force WAL checkpoint — call before any file-level backup of the .db so the
+// snapshot is complete. Otherwise recent commits live only in echelon.db-wal
+// and a restore from the backup silently loses them.
+export async function checkpointWal(): Promise<void> {
+  try { await (await db()).execute("PRAGMA wal_checkpoint(TRUNCATE)"); }
+  catch (e) { console.warn("[db] wal_checkpoint failed:", e); }
+}
+
 export async function db(): Promise<Database> {
   if (!_db) _db = await Database.load("sqlite:echelon.db");
   if (!_pragmasApplied) {
     _pragmasApplied = true;
-    // Performance pragmas: WAL is dramatically faster for our read-heavy + occasional write workload,
-    // synchronous=NORMAL is safe with WAL, mmap_size lets SQLite skip OS syscall overhead on reads,
-    // and a 16 MB page cache keeps our entire dataset hot in memory.
     try {
+      // journal_mode=WAL and page_size are persisted in the DB file header, so they
+      // apply across all connections regardless of which one issued the PRAGMA.
       await _db.execute("PRAGMA journal_mode = WAL");
       await _db.execute("PRAGMA synchronous = NORMAL");
       await _db.execute("PRAGMA temp_store = MEMORY");
       await _db.execute("PRAGMA mmap_size = 268435456");
       await _db.execute("PRAGMA cache_size = -16000");
       await _db.execute("PRAGMA busy_timeout = 5000");
-      // Defensively clear any stale transaction left over from a prior crash
-      // or a pooled connection that didn't commit cleanly. Ignored if no tx
-      // is open (SQLite raises a benign error we suppress).
+      // Enforce FK constraints (ON DELETE CASCADE etc). Per-connection, but
+      // since we serialize writes through serializeWrite the first connection
+      // taken by execRetry sees it; readers don't need FK enforcement.
+      await _db.execute("PRAGMA foreign_keys = ON");
+      // Truncate WAL on startup so the .db-wal file stays bounded across long
+      // desktop sessions, and so any in-progress write from a hard kill is
+      // either committed (good) or already rolled back by SQLite recovery.
+      try { await _db.execute("PRAGMA wal_checkpoint(TRUNCATE)"); } catch { /* fine */ }
+      // Defensively clear any stale transaction left over from a prior crash.
       try { await _db.execute("ROLLBACK"); } catch { /* no active tx, fine */ }
     } catch (e) { console.warn("[db] pragma setup:", e); }
   }
@@ -68,6 +127,41 @@ async function ensureSchema(d: Database): Promise<void> {
   const setting = async (key: string, value: string) => {
     await d.execute("INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)", [key, value]);
   };
+
+  // Baseline self-heal: if migration 001 was skipped on this DB (we've seen
+  // this happen on tauri-plugin-sql's silent-skip path), ensureSchema's first
+  // INSERT OR IGNORE INTO settings will throw. CREATE TABLE IF NOT EXISTS for
+  // the three baseline tables guards against that.
+  await d.execute(`CREATE TABLE IF NOT EXISTS settings (
+    key TEXT PRIMARY KEY,
+    value TEXT
+  )`);
+  await d.execute(`CREATE TABLE IF NOT EXISTS students (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL,
+    father_name TEXT,
+    mother_name TEXT,
+    email TEXT,
+    year INTEGER NOT NULL,
+    active INTEGER NOT NULL DEFAULT 1,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  )`);
+  await d.execute(`CREATE TABLE IF NOT EXISTS receipts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    receipt_no INTEGER NOT NULL UNIQUE,
+    date TEXT NOT NULL,
+    student_id INTEGER NOT NULL,
+    student_name_snapshot TEXT NOT NULL,
+    father_name_snapshot TEXT,
+    mother_name_snapshot TEXT,
+    description TEXT NOT NULL,
+    amount REAL NOT NULL,
+    pending_amount REAL NOT NULL DEFAULT 0,
+    comments TEXT,
+    voided INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    FOREIGN KEY (student_id) REFERENCES students(id)
+  )`);
 
   // Migration 002 — pdf_folder
   await setting("pdf_folder", "");
@@ -258,38 +352,28 @@ export function personIdFor(name: string, father?: string | null, mother?: strin
 
 // ---------- Settings ----------
 let _settingsCache: SettingsMap | null = null;
-// Bulk version — single transaction, much faster than serial setSetting() calls.
+// Bulk version — small loop of upserts via execRetry. We deliberately do NOT
+// wrap this in BEGIN/COMMIT: tauri-plugin-sql pools connections, so a JS-side
+// BEGIN may execute on a different physical connection than the subsequent
+// INSERTs, leading to code 5 (locked) or code 1 (transaction within a
+// transaction). serializeWrite inside execRetry ensures the upserts happen
+// in order. Each upsert is independently atomic.
 export async function setSettings(entries: Record<string, string>) {
-  const d = await db();
   const keys = Object.keys(entries);
   if (keys.length === 0) return;
-  // NOTE: We deliberately do NOT wrap this in BEGIN/COMMIT. tauri-plugin-sql
-  // pools connections, so a JS-side BEGIN may execute on a different physical
-  // connection than the subsequent INSERTs, leading to either "database is
-  // locked" (code 5) or "cannot start a transaction within a transaction"
-  // (code 1) when the pooled connection still holds a stale transaction.
-  // Each upsert is independently atomic; settings are small and partial writes
-  // are recoverable by clicking Save again. WAL + busy_timeout=5000 handles
-  // any concurrent reader.
-  for (const k of keys) {
-    let lastErr: any = null;
-    for (let attempt = 0; attempt < 4; attempt++) {
-      try {
-        await d.execute(
-          "INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-          [k, entries[k] ?? ""]
-        );
-        if (_settingsCache) _settingsCache[k] = entries[k] ?? "";
-        lastErr = null;
-        break;
-      } catch (e: any) {
-        lastErr = e;
-        const msg = String(e?.message || e);
-        if (!/locked|busy|code: 5|code: 6/i.test(msg)) throw e;
-        await new Promise((r) => setTimeout(r, 100 + attempt * 200));
-      }
+  try {
+    for (const k of keys) {
+      await execRetry(
+        "INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+        [k, entries[k] ?? ""]
+      );
+      if (_settingsCache) _settingsCache[k] = entries[k] ?? "";
     }
-    if (lastErr) throw lastErr;
+  } catch (e) {
+    // If any write failed, the in-memory cache may now disagree with disk.
+    // Invalidate so the next getSettings() re-reads truth from DB.
+    _settingsCache = null;
+    throw e;
   }
 }
 
@@ -316,7 +400,7 @@ export async function getSettings(): Promise<SettingsMap> {
 }
 export function invalidateSettingsCache() { _settingsCache = null; }
 export async function setSetting(key: string, value: string) {
-  await (await db()).execute(
+  await execRetry(
     "INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
     [key, value]
   );
@@ -329,11 +413,25 @@ export async function nextReceiptNo(): Promise<number> {
 export async function bumpReceiptNo(used: number) {
   await setSetting("next_receipt_no", String(used + 1));
 }
+// Atomic-ish: bump first, then return the pre-bump number. If the caller's
+// INSERT crashes between this call and committing the AR, we leak one AR
+// number (acceptable — auditable gap) instead of producing two ARs with the
+// same number (a UNIQUE constraint violation that fails the user's save).
+// serializeWrite ensures concurrent generate-all loops don't interleave.
 export async function nextAnnualReceiptNumber(year: number): Promise<string> {
-  const s = await getSettings();
-  const n = parseInt(s.next_ar_no || "1", 10);
-  await setSetting("next_ar_no", String(n + 1));
-  return `AR-${year}-${String(n).padStart(4, "0")}`;
+  return serializeWrite(async () => {
+    const s = await getSettings();
+    const n = parseInt(s.next_ar_no || "1", 10);
+    // Use raw d.execute here — we already hold the serialize lock; recursing
+    // through execRetry would deadlock on _writeTail.
+    const d = await db();
+    await d.execute(
+      "INSERT INTO settings(key,value) VALUES('next_ar_no',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+      [String(n + 1)]
+    );
+    if (_settingsCache) _settingsCache["next_ar_no"] = String(n + 1);
+    return `AR-${year}-${String(n).padStart(4, "0")}`;
+  });
 }
 
 // ---------- Students ----------
@@ -353,21 +451,21 @@ export async function listYears(): Promise<number[]> {
 }
 export async function upsertStudent(s: Partial<Student> & { name: string; year: number }) {
   const pid = s.person_id || personIdFor(s.name, s.father_name, s.mother_name);
-  const grossOv = s.gross_override === undefined ? null : s.gross_override;
+  const grossOv = s.gross_override === undefined ? null : (s.gross_override == null ? null : roundMoney(Number(s.gross_override)));
   if (s.id) {
-    await (await db()).execute(
+    await execRetry(
       "UPDATE students SET name=?, father_name=?, mother_name=?, email=?, year=?, active=?, person_id=?, gross_override=? WHERE id=?",
       [s.name, s.father_name ?? null, s.mother_name ?? null, s.email ?? null, s.year, s.active ?? 1, pid, grossOv, s.id]
     );
   } else {
-    await (await db()).execute(
+    await execRetry(
       "INSERT INTO students(name,father_name,mother_name,email,year,active,person_id,gross_override) VALUES(?,?,?,?,?,1,?,?)",
       [s.name, s.father_name ?? null, s.mother_name ?? null, s.email ?? null, s.year, pid, grossOv]
     );
   }
 }
 export async function deleteStudent(id: number) {
-  await (await db()).execute("UPDATE students SET active=0 WHERE id=?", [id]);
+  await execRetry("UPDATE students SET active=0 WHERE id=?", [id]);
 }
 // One-time backfill: any student without a person_id gets one computed from current names.
 // Memoised — only the first call per process does any work.
@@ -379,7 +477,7 @@ export async function backfillPersonIds(): Promise<number> {
   );
   for (const r of rows) {
     const pid = personIdFor(r.name, r.father_name, r.mother_name);
-    await (await db()).execute("UPDATE students SET person_id=? WHERE id=?", [pid, r.id]);
+    await execRetry("UPDATE students SET person_id=? WHERE id=?", [pid, r.id]);
   }
   _personIdBackfillDone = true;
   return rows.length;
@@ -441,7 +539,11 @@ async function backfillIssuerSnapshot(): Promise<void> {
 export async function createReceipt(r: Omit<Receipt, "id" | "created_at" | "voided" | "emailed_at" | "emailed_to" | "void_reason" | "voided_at" | "issuer_snapshot_json">): Promise<number> {
   const settings = await getSettings();
   const snap = JSON.stringify(buildIssuerSnapshot(settings));
-  const res = await (await db()).execute(
+  // Bump first so even if INSERT fails we leak a number (a harmless gap)
+  // instead of returning the same number twice on a fast double-click race —
+  // which would crash the second INSERT on the receipt_no UNIQUE constraint.
+  await bumpReceiptNo(r.receipt_no);
+  const res = await execRetry(
     `INSERT INTO receipts(receipt_no,date,student_id,student_name_snapshot,
       father_name_snapshot,mother_name_snapshot,description,amount,pending_amount,comments,is_refund,
       gross_amount,ccfri_amount,accb_amount,issuer_snapshot_json)
@@ -449,13 +551,14 @@ export async function createReceipt(r: Omit<Receipt, "id" | "created_at" | "void
     [
       r.receipt_no, r.date, r.student_id, r.student_name_snapshot,
       r.father_name_snapshot, r.mother_name_snapshot,
-      r.description, r.amount, r.pending_amount, r.comments,
+      r.description, roundMoney(r.amount), roundMoney(r.pending_amount), r.comments,
       r.is_refund ? 1 : 0,
-      r.gross_amount ?? null, r.ccfri_amount ?? null, r.accb_amount ?? null,
+      r.gross_amount == null ? null : roundMoney(r.gross_amount),
+      r.ccfri_amount == null ? null : roundMoney(r.ccfri_amount),
+      r.accb_amount  == null ? null : roundMoney(r.accb_amount),
       snap,
     ]
   );
-  await bumpReceiptNo(r.receipt_no);
   return Number(res.lastInsertId);
 }
 
@@ -495,22 +598,22 @@ export async function listAccbForStudent(studentId: number): Promise<AccbEntry[]
 }
 export async function upsertAccb(studentId: number, year: number, month: number, amount: number, notes: string | null) {
   if (!amount || amount <= 0) {
-    await (await db()).execute(
+    await execRetry(
       "DELETE FROM accb_entries WHERE student_id=? AND year=? AND month=?",
       [studentId, year, month]
     );
     return;
   }
-  await (await db()).execute(
+  await execRetry(
     `INSERT INTO accb_entries(student_id,year,month,amount,notes)
      VALUES(?,?,?,?,?)
      ON CONFLICT(student_id,year,month)
      DO UPDATE SET amount=excluded.amount, notes=excluded.notes`,
-    [studentId, year, month, amount, notes]
+    [studentId, year, month, roundMoney(amount), notes]
   );
 }
 export async function deleteAccb(id: number) {
-  await (await db()).execute("DELETE FROM accb_entries WHERE id=?", [id]);
+  await execRetry("DELETE FROM accb_entries WHERE id=?", [id]);
 }
 
 // Subsidy reconciliation: totals collected per calendar month.
@@ -574,13 +677,13 @@ export async function getReceipt(id: number): Promise<Receipt | null> {
   return rows[0] ?? null;
 }
 export async function voidReceipt(id: number, reason?: string) {
-  await (await db()).execute(
+  await execRetry(
     "UPDATE receipts SET voided=1, void_reason=?, voided_at=datetime('now') WHERE id=?",
     [reason ?? null, id]
   );
 }
 export async function markEmailed(id: number, recipients: string[]) {
-  await (await db()).execute(
+  await execRetry(
     "UPDATE receipts SET emailed_at=datetime('now'), emailed_to=? WHERE id=?",
     [recipients.join(", "), id]
   );
@@ -686,31 +789,37 @@ export async function recordAnnualReceipt(opts: {
   const hash = annualPayloadHash(group);
   const settings = await getSettings();
   const snap = JSON.stringify(buildIssuerSnapshot(settings));
-  const res = await (await db()).execute(
-    `INSERT INTO annual_receipts
-      (ar_number, person_id, student_name, father_name, mother_name,
-       calendar_year, recipient_label, total_amount, receipt_count,
-       receipt_ids_json, payload_hash, notes, issuer_snapshot_json)
-     VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-    [
-      arNumber, group.person_id, group.student_name,
-      group.father_name, group.mother_name,
-      year, recipientLabel, group.total, group.count,
-      JSON.stringify(ids), hash, opts.notes ?? null, snap,
-    ]
-  );
-  const newId = res.lastInsertId as number;
-  if (opts.supersede) {
-    await (await db()).execute(
-      `UPDATE annual_receipts SET superseded_by=? WHERE id=?`,
-      [newId, opts.supersede.id]
+  // Serialize the insert + supersede so they aren't interleaved with any other
+  // write. If the supersede UPDATE fails, the new AR exists alongside the old
+  // one — both would show as "current" and the parent could get two T778s.
+  return serializeWrite(async () => {
+    const d = await db();
+    const res = await d.execute(
+      `INSERT INTO annual_receipts
+        (ar_number, person_id, student_name, father_name, mother_name,
+         calendar_year, recipient_label, total_amount, receipt_count,
+         receipt_ids_json, payload_hash, notes, issuer_snapshot_json)
+       VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+      [
+        arNumber, group.person_id, group.student_name,
+        group.father_name, group.mother_name,
+        year, recipientLabel, roundMoney(group.total), group.count,
+        JSON.stringify(ids), hash, opts.notes ?? null, snap,
+      ]
     );
-  }
-  return newId;
+    const newId = res.lastInsertId as number;
+    if (opts.supersede) {
+      await d.execute(
+        `UPDATE annual_receipts SET superseded_by=? WHERE id=?`,
+        [newId, opts.supersede.id]
+      );
+    }
+    return newId;
+  });
 }
 
 export async function markAnnualReceiptEmailed(id: number, recipients: string[]) {
-  await (await db()).execute(
+  await execRetry(
     `UPDATE annual_receipts SET emailed_at=datetime('now'), emailed_to=? WHERE id=?`,
     [recipients.join(", "), id]
   );

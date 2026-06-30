@@ -1,5 +1,5 @@
 // Staff hours helpers.
-import { db } from "./db";
+import { db, execRetry } from "./db";
 import type { Staff, StaffHour } from "../types";
 
 function hoursBetween(inT: string | null, outT: string | null): number {
@@ -20,8 +20,7 @@ export async function listStaff(includeArchived = false): Promise<Staff[]> {
 }
 
 export async function createStaff(name: string, role: string | null, hourlyRate: number | null): Promise<number> {
-  const d = await db();
-  const r = await d.execute(
+  const r = await execRetry(
     "INSERT INTO staff(name, role, hourly_rate, active) VALUES(?, ?, ?, 1)",
     [name.trim(), role?.trim() || null, hourlyRate]
   );
@@ -39,7 +38,7 @@ export async function updateStaff(id: number, fields: Partial<Pick<Staff, "name"
     hourly_rate: fields.hourly_rate !== undefined ? fields.hourly_rate : cur.hourly_rate,
     active: fields.active !== undefined ? fields.active : cur.active,
   };
-  await d.execute(
+  await execRetry(
     "UPDATE staff SET name=?, role=?, hourly_rate=?, active=?, archived_at=? WHERE id=?",
     [next.name, next.role, next.hourly_rate, next.active, next.active ? null : new Date().toISOString(), id]
   );
@@ -62,9 +61,8 @@ export async function listHoursForMonth(year: number, month: number): Promise<(S
 }
 
 export async function upsertHour(staffId: number, workDate: string, inT: string | null, outT: string | null, source: "manual" | "ocr", sheetPath: string | null = null, notes: string | null = null): Promise<void> {
-  const d = await db();
   const hours = hoursBetween(inT, outT);
-  await d.execute(
+  await execRetry(
     `INSERT INTO staff_hours(staff_id, work_date, in_time, out_time, hours_decimal, source, sheet_image_path, notes)
      VALUES(?, ?, ?, ?, ?, ?, ?, ?)
      ON CONFLICT(staff_id, work_date) DO UPDATE SET
@@ -79,8 +77,7 @@ export async function upsertHour(staffId: number, workDate: string, inT: string 
 }
 
 export async function deleteHour(id: number): Promise<void> {
-  const d = await db();
-  await d.execute("DELETE FROM staff_hours WHERE id=?", [id]);
+  await execRetry("DELETE FROM staff_hours WHERE id=?", [id]);
 }
 
 // Find best matching staff_id for a name from OCR. Case-insensitive exact, then prefix, then null.

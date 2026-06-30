@@ -1,5 +1,5 @@
 // Staff credentials & drill log helpers.
-import { db } from "./db";
+import { db, execRetry } from "./db";
 import type { StaffCredential, StaffDrill } from "../types";
 
 export interface CredentialTypeDef {
@@ -67,15 +67,14 @@ export async function listAllCredentialsWithStaff(): Promise<(StaffCredential & 
 }
 
 export async function upsertCredential(c: Partial<StaffCredential> & { staff_id: number; type: string }): Promise<number> {
-  const d = await db();
   if (c.id) {
-    await d.execute(
+    await execRetry(
       `UPDATE staff_credentials SET type=?, issued_date=?, expiry_date=?, file_path=?, notes=? WHERE id=?`,
       [c.type, c.issued_date || null, c.expiry_date || null, c.file_path || null, c.notes || null, c.id]
     );
     return c.id;
   }
-  const r = await d.execute(
+  const r = await execRetry(
     `INSERT INTO staff_credentials(staff_id, type, issued_date, expiry_date, file_path, notes)
      VALUES(?, ?, ?, ?, ?, ?)`,
     [c.staff_id, c.type, c.issued_date || null, c.expiry_date || null, c.file_path || null, c.notes || null]
@@ -84,8 +83,7 @@ export async function upsertCredential(c: Partial<StaffCredential> & { staff_id:
 }
 
 export async function deleteCredential(id: number): Promise<void> {
-  const d = await db();
-  await d.execute("DELETE FROM staff_credentials WHERE id=?", [id]);
+  await execRetry("DELETE FROM staff_credentials WHERE id=?", [id]);
 }
 
 // --- Drills ---
@@ -103,15 +101,14 @@ export async function listDrills(year?: number): Promise<StaffDrill[]> {
 }
 
 export async function upsertDrill(dr: Partial<StaffDrill> & { drill_date: string; drill_type: string }): Promise<number> {
-  const d = await db();
   if (dr.id) {
-    await d.execute(
+    await execRetry(
       `UPDATE staff_drills SET drill_date=?, drill_type=?, duration_min=?, children_present=?, notes=? WHERE id=?`,
       [dr.drill_date, dr.drill_type, dr.duration_min ?? null, dr.children_present ?? null, dr.notes || null, dr.id]
     );
     return dr.id;
   }
-  const r = await d.execute(
+  const r = await execRetry(
     `INSERT INTO staff_drills(drill_date, drill_type, duration_min, children_present, notes)
      VALUES(?, ?, ?, ?, ?)`,
     [dr.drill_date, dr.drill_type, dr.duration_min ?? null, dr.children_present ?? null, dr.notes || null]
@@ -120,6 +117,5 @@ export async function upsertDrill(dr: Partial<StaffDrill> & { drill_date: string
 }
 
 export async function deleteDrill(id: number): Promise<void> {
-  const d = await db();
-  await d.execute("DELETE FROM staff_drills WHERE id=?", [id]);
+  await execRetry("DELETE FROM staff_drills WHERE id=?", [id]);
 }

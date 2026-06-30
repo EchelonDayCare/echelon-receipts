@@ -4,7 +4,7 @@ import { open } from "@tauri-apps/plugin-dialog";
 import { invoke } from "@tauri-apps/api/core";
 import { copyFile, mkdir, exists } from "@tauri-apps/plugin-fs";
 import { appDataDir, join } from "@tauri-apps/api/path";
-import { getSettings, setSetting, setSettings as setSettingsBulk } from "../lib/db";
+import { getSettings, setSetting, setSettings as setSettingsBulk, checkpointWal } from "../lib/db";
 import { sendTestEmail, SMTP_PRESETS } from "../lib/email";
 import { sendCloudBackup } from "../lib/cloudBackup";
 import { DEFAULT_LOGO_DATA_URL, DEFAULT_SIGNATURE_DATA_URL } from "../lib/defaults";
@@ -137,6 +137,8 @@ export default function Settings() {
         ? await join(s.pdf_folder, "Backups")
         : await join(await appDataDir(), "Backups");
       if (!(await exists(folder))) await mkdir(folder, { recursive: true });
+      // Checkpoint WAL so the .db file we copy is complete.
+      await checkpointWal();
       const src = await join(await appDataDir(), "echelon.db");
       const stamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
       const dst = await join(folder, `echelon-${stamp}.db`);
