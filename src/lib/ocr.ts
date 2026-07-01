@@ -5,9 +5,8 @@ import { matchStaffByName } from "./staff";
 import type { Staff } from "../types";
 import type { ExtractedRow } from "./gemini";
 
-export type ProviderName = "gemini_pro" | "gpt5" | "mistral_ocr";
+export type ProviderName = "gpt5" | "mistral_ocr";
 export const PROVIDER_LABELS: Record<ProviderName, string> = {
-  gemini_pro: "Gemini Flash",
   gpt5: "Mistral Document AI",
   mistral_ocr: "Mistral OCR (digits)",
 };
@@ -37,7 +36,6 @@ function bytesToB64(bytes: Uint8Array): string {
 }
 
 export async function extractTimesheetConsensus(opts: {
-  geminiKey: string | null;
   azureKey: string | null;
   imageBytes: Uint8Array;
   mimeType: string;
@@ -51,7 +49,6 @@ export async function extractTimesheetConsensus(opts: {
       mime_type: opts.mimeType,
       month_year: opts.monthYear,
       known_staff_names: opts.knownStaffNames,
-      gemini_api_key: opts.geminiKey,
       azure_ai_key: opts.azureKey,
     },
   });
@@ -225,7 +222,7 @@ export function computeConsensus(
     }
   }
 
-  const semanticOrder: ProviderName[] = ["gemini_pro", "gpt5"];
+  const semanticOrder: ProviderName[] = ["gpt5"];
 
   const rows: ConsensusRow[] = [];
   for (const [key, b] of buckets) {
@@ -359,15 +356,14 @@ function parseHM(t: string): { h: number; m: number } | null {
 }
 
 // Fold Mistral's per-day digit reading into a cell already scored by the
-// semantic voters. Always appends a Mistral vote entry (for the tooltip).
-// Rules (per user requirements):
-//  - If Mistral matches the semantic value → confirm (green).
-//  - If Mistral disagrees with the semantic value → consult Gemini specifically:
-//      * Gemini agrees with Mistral → adopt Gemini's value (2-1 majority), yellow.
-//      * Gemini agrees with semantic (Doc AI) → keep semantic value, yellow.
-//      * Gemini absent → adopt Mistral's digit reading (with AM/PM inference), yellow.
-//      * Gemini disagrees with both → keep semantic, yellow (needs human review).
-//  - If semantic voters disagreed (red) → tiebreak with whichever matches Mistral.
+// (single) semantic voter (Doc AI). v0.2.4 — digits-first hierarchy:
+//   • Doc AI + digit witness agree → green.
+//   • Only Doc AI (no digit) → yellow (single-source, unconfirmed).
+//   • Only digit witness (Doc AI missed the row) → yellow, use digit
+//     with AM/PM inference.
+//   • Both present but disagree → yellow, prefer the digit witness
+//     (Mistral scored 30/30 on our test sheets vs Doc AI's ~28/30).
+// A Mistral vote entry is always appended for tooltip visibility.
 function applyMistralWitness(
   cell: ConsensusCell,
   witnessValue: string | null,
@@ -382,45 +378,22 @@ function applyMistralWitness(
   };
   const nextVotes = [...cell.votes, witnessVote];
 
+  // No witness signal at all → pass through untouched.
   if (!mistralHasDigits || witnessValue === null) {
     return { ...cell, votes: nextVotes };
   }
 
-  const geminiVote = cell.votes.find((v) => v.provider === "gemini_pro");
-  const docaiVote = cell.votes.find((v) => v.provider === "gpt5");
-
-  // Case A: semantic voters agreed on a non-null value.
-  if (cell.value !== null && cell.confidence !== "red") {
-    if (timeMatchesWitness(cell.value, witnessValue, kind)) {
-      return { ...cell, votes: nextVotes, confidence: "green" };
-    }
-    // Semantic vs Mistral mismatch — consult Gemini specifically.
-    const gemSaw = !!(geminiVote && geminiVote.sawRow && geminiVote.value);
-    const docSaw = !!(docaiVote && docaiVote.sawRow && docaiVote.value);
-    if (gemSaw && timeMatchesWitness(geminiVote!.value, witnessValue, kind)) {
-      // Gemini + Mistral majority → adopt Gemini's value.
-      return { ...cell, votes: nextVotes, value: geminiVote!.value, confidence: "yellow" };
-    }
-    if (gemSaw && docSaw && geminiVote!.value === cell.value) {
-      // Gemini + Doc AI already agree, Mistral is odd one out → keep semantic, yellow.
-      return { ...cell, votes: nextVotes, confidence: "yellow" };
-    }
-    if (!gemSaw) {
-      // Only Doc AI voted, no Gemini → prefer Mistral digits per user rule.
-      const inferred = inferAmPm(witnessValue, kind);
-      return { ...cell, votes: nextVotes, value: inferred, confidence: "yellow" };
-    }
-    // Gemini disagrees with both semantic and Mistral — leave semantic value, yellow.
-    return { ...cell, votes: nextVotes, confidence: "yellow" };
+  // Doc AI missed the row but digits have it → adopt digit reading.
+  if (cell.value === null) {
+    const inferred = inferAmPm(witnessValue, kind);
+    return { ...cell, votes: nextVotes, value: inferred, confidence: "yellow" };
   }
 
-  // Case B: semantic voters disagreed (red) — Mistral tiebreaks.
-  const semanticValues = cell.votes.filter((v) => v.sawRow && v.value !== null);
-  const matchingVote = semanticValues.find((v) => timeMatchesWitness(v.value, witnessValue, kind));
-  if (matchingVote && matchingVote.value !== null) {
-    return { ...cell, votes: nextVotes, value: matchingVote.value, confidence: "yellow" };
+  // Both present — corroborate or override.
+  if (timeMatchesWitness(cell.value, witnessValue, kind)) {
+    return { ...cell, votes: nextVotes, confidence: "green" };
   }
-  // No semantic vote matches — fall back to Mistral itself (best-effort AM/PM).
+  // Doc AI vs digits disagree → prefer digits.
   const inferred = inferAmPm(witnessValue, kind);
   return { ...cell, votes: nextVotes, value: inferred, confidence: "yellow" };
 }

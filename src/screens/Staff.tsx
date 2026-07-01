@@ -164,12 +164,12 @@ export default function StaffScreen() {
   }
 
   // ---- OCR via multi-model consensus ----
-  // Shared core: given an absolute image path, run Gemini Pro + Azure GPT-5.4
-  // + Mistral OCR in parallel and compute per-cell agreement. Called from
-  // both "Choose file…" and "Import latest from Downloads".
+  // Shared core: given an absolute image path, run Mistral Document AI +
+  // Mistral OCR (digit witness) in parallel and compute per-cell agreement.
+  // Called from both "Choose file…" and "Import latest from Downloads".
   async function runOcrOnPath(picked: string) {
-    if (settings.gemini_api_key_set !== "1") {
-      notify("Add your Gemini API key in Settings first.", "err"); return;
+    if (settings.azure_ai_key_set !== "1") {
+      notify("Add your Azure AI Foundry key in Settings first.", "err"); return;
     }
     const schemaError = await assertStaffHoursSchema();
     if (schemaError) {
@@ -179,14 +179,10 @@ export default function StaffScreen() {
 
     setOcrBusy(true);
     setConsensus(null);
-    let geminiKey: string | null = null;
     let azureKey: string | null = null;
     try {
-      geminiKey = await invoke<string | null>("keychain_get", { key: "gemini_api_key" });
-      if (!geminiKey) throw new Error("Gemini API key not found in keychain — re-save it in Settings.");
-      if (settings.azure_ai_key_set === "1") {
-        azureKey = await invoke<string | null>("keychain_get", { key: "azure_ai_key" });
-      }
+      azureKey = await invoke<string | null>("keychain_get", { key: "azure_ai_key" });
+      if (!azureKey) throw new Error("Azure AI Foundry key not found in keychain — re-save it in Settings.");
 
       // QR month lock — same fast path as before.
       let qrMonthKey: string | undefined;
@@ -206,7 +202,7 @@ export default function StaffScreen() {
       const bytes = await readFile(picked);
       const mime = fileToMime(picked);
       const result = await extractTimesheetConsensus({
-        geminiKey, azureKey,
+        azureKey,
         imageBytes: bytes, mimeType: mime,
         monthYear: qrMonthKey || monthKey(year, month),
         knownStaffNames: activeStaff.map((s) => s.name),
@@ -259,15 +255,14 @@ export default function StaffScreen() {
     } catch (e: any) {
       const raw = String(e?.message || e);
       let safe = raw;
-      if (geminiKey) safe = safe.split(geminiKey).join("***");
       if (azureKey)  safe = safe.split(azureKey).join("***");
       notify("OCR failed: " + safe, "err");
     } finally { setOcrBusy(false); }
   }
 
   async function uploadSheet() {
-    if (settings.gemini_api_key_set !== "1") {
-      notify("Add your Gemini API key in Settings first.", "err"); return;
+    if (settings.azure_ai_key_set !== "1") {
+      notify("Add your Azure AI Foundry key in Settings first.", "err"); return;
     }
     const picked = await open({
       multiple: false,
@@ -281,8 +276,8 @@ export default function StaffScreen() {
   // within the last 10 minutes. We ALWAYS show a confirmation (even with 1
   // match) so an unrelated recent screenshot can never be silently uploaded.
   async function importLatestFromDownloads() {
-    if (settings.gemini_api_key_set !== "1") {
-      notify("Add your Gemini API key in Settings first.", "err"); return;
+    if (settings.azure_ai_key_set !== "1") {
+      notify("Add your Azure AI Foundry key in Settings first.", "err"); return;
     }
     if (ocrBusy) return;
     try {
@@ -485,14 +480,14 @@ export default function StaffScreen() {
             {activeStaff.length === 0 && (
               <p style={{ margin: "6px 0 0", color: "var(--danger)", fontSize: 13 }}>Add at least one staff member below before uploading.</p>
             )}
-            {settings.gemini_api_key_set !== "1" && activeStaff.length > 0 && (
-              <p style={{ margin: "6px 0 0", color: "#b45309", fontSize: 13 }}>⚠ Add your Gemini API key in <strong>Settings → Optional features</strong> first.</p>
+            {settings.azure_ai_key_set !== "1" && activeStaff.length > 0 && (
+              <p style={{ margin: "6px 0 0", color: "#b45309", fontSize: 13 }}>⚠ Add your Azure AI Foundry key in <strong>Settings → Optional features</strong> first.</p>
             )}
           </div>
           <div style={{ display: "flex", flexDirection: "column", gap: 10, alignItems: "stretch" }}>
             <button
               onClick={importLatestFromDownloads}
-              disabled={ocrBusy || activeStaff.length === 0 || settings.gemini_api_key_set !== "1"}
+              disabled={ocrBusy || activeStaff.length === 0 || settings.azure_ai_key_set !== "1"}
               title="Picks the newest image AirDropped or saved to ~/Downloads in the last 10 min"
               style={{
                 position: "relative",
@@ -505,7 +500,7 @@ export default function StaffScreen() {
                 borderRadius: 12,
                 cursor: ocrBusy ? "not-allowed" : "pointer",
                 boxShadow: "0 4px 14px rgba(22, 163, 74, 0.35)",
-                opacity: (ocrBusy || activeStaff.length === 0 || settings.gemini_api_key_set !== "1") ? 0.55 : 1,
+                opacity: (ocrBusy || activeStaff.length === 0 || settings.azure_ai_key_set !== "1") ? 0.55 : 1,
                 minWidth: 260,
               }}
             >
@@ -522,7 +517,7 @@ export default function StaffScreen() {
             <button
               className="btn secondary"
               onClick={uploadSheet}
-              disabled={ocrBusy || activeStaff.length === 0 || settings.gemini_api_key_set !== "1"}
+              disabled={ocrBusy || activeStaff.length === 0 || settings.azure_ai_key_set !== "1"}
               style={{ fontSize: 13 }}
             >
               {ocrBusy ? "Reading sheet…" : "…or choose file manually"}
@@ -534,7 +529,7 @@ export default function StaffScreen() {
           <div style={{ background: "#fff", border: "1px solid var(--border)", padding: 14, borderRadius: 10, marginTop: 14 }}>
             {/* Provider health strip — one badge per model with latency + row count. */}
             <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 10, fontSize: 12 }}>
-              {(["gemini_pro", "gpt5", "mistral_ocr"] as ProviderName[]).map((p) => {
+              {(["gpt5", "mistral_ocr"] as ProviderName[]).map((p) => {
                 const meta = consensus.providerMeta.find((m) => m.provider === p);
                 const ok = meta?.ok;
                 return (

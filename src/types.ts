@@ -111,13 +111,3 @@ export interface StaffCredential {
   notes: string | null;
   created_at: string;
 }
-
-export interface StaffDrill {
-  id: number;
-  drill_date: string;
-  drill_type: string;
-  duration_min: number | null;
-  children_present: number | null;
-  notes: string | null;
-  created_at: string;
-}

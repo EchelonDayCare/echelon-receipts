@@ -1,23 +1,27 @@
 // Multi-model OCR consensus for staff sign-in sheets.
 //
-// Runs three providers in parallel, each producing the same
-// Vec<ExtractedRow> shape as the existing single-model path:
-//   1. Google Gemini 2.5-pro (image → JSON)
-//   2. Azure OpenAI GPT-5.4  (image → JSON via chat/completions)
-//   3. Mistral OCR           (image → markdown → parsed to rows)
+// Runs two providers in parallel:
+//   1. Mistral Document AI (image → structured JSON via Azure AI Foundry)
+//   2. Mistral OCR         (image → markdown → parsed per-cell digits)
 //
-// The frontend does the actual voting / alignment. This module just
-// returns per-provider outputs (rows + raw text + error if any) so
-// the UI can render "Gemini said X, GPT said Y, Mistral said Z" per cell.
+// Gemini was removed in v0.2.4 — it consistently scrambled row-alignment
+// (swapped OUT columns between adjacent days) on handwritten sheets, which
+// gave it deciding-vote power on the wrong answer. Doc AI + Mistral OCR
+// digits together are more accurate. Gemini is still used by the Attendance
+// screen via gemini.rs — that path is unchanged.
 
 use base64::Engine;
+use image::ImageDecoder;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use std::io::Cursor;
 use std::time::{Duration, Instant};
 
 use crate::gemini::ExtractedRow;
 
 const PROVIDER_TIMEOUT_SECS: u64 = 45;
+const MAX_IMAGE_EDGE: u32 = 2400;
+const JPEG_QUALITY: u8 = 92;
 
 #[derive(Deserialize)]
 pub struct ConsensusArgs {
@@ -25,15 +29,62 @@ pub struct ConsensusArgs {
     pub mime_type: String,
     pub month_year: String,
     pub known_staff_names: Vec<String>,
-    // All keys optional — providers with no key are skipped and reported
-    // as an error entry so the frontend can show which are missing.
-    pub gemini_api_key: Option<String>,
+    // Azure AI Foundry key (serves both Doc AI and Mistral OCR).
     pub azure_ai_key: Option<String>,
+}
+
+// Auto-normalize the uploaded image so Mac vs Windows uploads land on
+// identical bytes for the OCR services:
+//   • Honor EXIF orientation (iPhone/Mac photos often carry rotation flags)
+//   • Downscale to MAX_IMAGE_EDGE longest edge (Retina scans are huge)
+//   • Re-encode as JPEG at JPEG_QUALITY (drops HEIC/PNG variance)
+// Returns (new_base64, "image/jpeg") on success; falls back to the original
+// bytes/mime silently if decoding fails so we never block OCR entirely.
+fn normalize_image(orig_b64: &str, orig_mime: &str) -> (String, String) {
+    let bytes = match base64::engine::general_purpose::STANDARD.decode(orig_b64.as_bytes()) {
+        Ok(b) => b,
+        Err(_) => return (orig_b64.to_string(), orig_mime.to_string()),
+    };
+    let reader = match image::ImageReader::new(Cursor::new(&bytes)).with_guessed_format() {
+        Ok(r) => r,
+        Err(_) => return (orig_b64.to_string(), orig_mime.to_string()),
+    };
+    // Pull EXIF orientation from the decoder before decoding pixels.
+    let mut decoder = match reader.into_decoder() {
+        Ok(d) => d,
+        Err(_) => return (orig_b64.to_string(), orig_mime.to_string()),
+    };
+    let orientation = decoder.orientation()
+        .unwrap_or(image::metadata::Orientation::NoTransforms);
+    let mut img = match image::DynamicImage::from_decoder(decoder) {
+        Ok(i) => i,
+        Err(_) => return (orig_b64.to_string(), orig_mime.to_string()),
+    };
+    img.apply_orientation(orientation);
+    let (w, h) = (img.width(), img.height());
+    if w > MAX_IMAGE_EDGE || h > MAX_IMAGE_EDGE {
+        let scale = MAX_IMAGE_EDGE as f32 / w.max(h) as f32;
+        let nw = (w as f32 * scale) as u32;
+        let nh = (h as f32 * scale) as u32;
+        img = img.resize(nw, nh, image::imageops::FilterType::Lanczos3);
+    }
+    let rgb = img.to_rgb8();
+    let mut out = Vec::with_capacity(bytes.len());
+    let encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut out, JPEG_QUALITY);
+    if image::ImageEncoder::write_image(
+        encoder, rgb.as_raw(), rgb.width(), rgb.height(), image::ExtendedColorType::Rgb8
+    ).is_err() {
+        return (orig_b64.to_string(), orig_mime.to_string());
+    }
+    (
+        base64::engine::general_purpose::STANDARD.encode(&out),
+        "image/jpeg".to_string(),
+    )
 }
 
 #[derive(Serialize, Clone)]
 pub struct ProviderOutput {
-    pub provider: String,           // "gemini_pro" | "gpt5" | "mistral_ocr"
+    pub provider: String,           // "gpt5" | "mistral_ocr"
     pub ok: bool,
     pub rows: Vec<ExtractedRow>,
     pub detected_month_year: Option<String>,
@@ -75,35 +126,8 @@ fn is_placeholder_name(name: &str) -> bool {
     false
 }
 
-fn build_prompt(month_year: &str, known: &[String]) -> String {
-    let staff_hint = if known.is_empty() {
-        "(none — use names exactly as written on the sheet)".to_string()
-    } else {
-        known.join(", ")
-    };
-    format!(
-        "You are reading a staff sign-in / timesheet photo. The caller thinks this sheet is for {month}, but that is only a HINT — the sheet itself is authoritative.\n\
-        \n\
-        STEP 0 — DETERMINE THE SHEET'S MONTH AND YEAR (do this FIRST):\n\
-        - Look at the sheet's printed title/header text (e.g. 'JUNE 2026', 'Jun-2026', '06/2026').\n\
-        - If neither is legible, look at any pre-printed date cells or the day-of-week columns.\n\
-        - Report this as 'detected_month_year' in 'YYYY-MM' format.\n\
-        \n\
-        Echelon monthly grid layout: days 1-31 as ROWS, staff names HANDWRITTEN in column headers, each staff column split into 'IN', 'OUT', and 'No Ln' checkbox. Weekend/holiday rows may be peach-shaded.\n\
-        Known staff names (match handwriting to closest of these when reasonable): {staff_hint}.\n\
-        \n\
-        STRICT RULES:\n\
-        1. For every day-row with a filled time cell, emit ONE row PER staff column with data.\n\
-        2. NEVER invent placeholder names like 'Staff 1'. Skip illegible names.\n\
-        3. Convert times to 24-hour HH:MM (e.g. '3' on OUT column → '15:00').\n\
-        4. Format work_date as detected_month_year followed by '-DD'.\n\
-        5. no_lunch: true if the 'No Ln' box is clearly checked.\n\
-        \n\
-        Return ONLY JSON, no commentary:\n\
-        {{\"detected_month_year\":\"YYYY-MM\",\"rows\":[{{\"staff_name\":str,\"work_date\":\"YYYY-MM-DD\",\"in_time\":\"HH:MM\" or null,\"out_time\":\"HH:MM\" or null,\"no_lunch\":true|false}}]}}",
-        month = month_year, staff_hint = staff_hint
-    )
-}
+// (build_prompt removed in v0.2.4 — was only used by the Gemini provider,
+// which was retired. Mistral Document AI uses a JSON schema instead.)
 
 fn parse_structured_json(inner: &str) -> (Vec<ExtractedRow>, Option<String>) {
     let parsed: serde_json::Value = match serde_json::from_str(inner) {
@@ -131,62 +155,7 @@ fn parse_structured_json(inner: &str) -> (Vec<ExtractedRow>, Option<String>) {
     (rows, detected)
 }
 
-// ─── Provider 1: Gemini 2.5 Flash ───────────────────────────────────────
-async fn call_gemini_pro(
-    api_key: &str, image_b64: &str, mime_type: &str,
-    month_year: &str, known: &[String],
-) -> Result<(Vec<ExtractedRow>, Option<String>, String), String> {
-    let prompt = build_prompt(month_year, known);
-    let body = json!({
-        "contents": [{
-            "parts": [
-                { "text": prompt },
-                { "inline_data": { "mime_type": mime_type, "data": image_b64 } }
-            ]
-        }],
-        "generationConfig": { "temperature": 0.0, "responseMimeType": "application/json" }
-    });
-    let url = format!(
-        "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={api_key}"
-    );
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(PROVIDER_TIMEOUT_SECS))
-        .build().map_err(|e| format!("http client: {e}"))?;
-
-    // Retry once on transient 429/500/503/504 after 900ms — Gemini's free
-    // tier flaps under bursts and a single retry fixes almost every case.
-    let mut last_err = String::new();
-    for attempt in 0..2 {
-        if attempt > 0 {
-            tokio::time::sleep(Duration::from_millis(900)).await;
-        }
-        let resp = match client.post(&url).json(&body).send().await {
-            Ok(r) => r,
-            Err(e) => { last_err = format!("request: {e}"); continue; }
-        };
-        let status = resp.status();
-        let text = resp.text().await.map_err(|e| format!("read: {e}"))?;
-        if !status.is_success() {
-            last_err = format!("http {status}: {}", truncate(&text, 400));
-            let code = status.as_u16();
-            if code == 429 || code == 500 || code == 503 || code == 504 {
-                continue;
-            }
-            return Err(last_err);
-        }
-        let v: serde_json::Value = serde_json::from_str(&text)
-            .map_err(|e| format!("json: {e}"))?;
-        let inner = v["candidates"][0]["content"]["parts"][0]["text"]
-            .as_str()
-            .ok_or_else(|| format!("no text in response: {}", truncate(&text, 300)))?
-            .to_string();
-        let (rows, detected) = parse_structured_json(&inner);
-        return Ok((rows, detected, inner));
-    }
-    Err(last_err)
-}
-
-// ─── Provider 2: Mistral Document AI (structured extraction) ─────────────
+// ─── Provider 1: Mistral Document AI (structured extraction) ─────────────
 // Replaces GPT-5.4 (which was hallucinating missing rows and inventing
 // weekend rows on our test sheet). Mistral Document AI uses the same
 // /ocr endpoint as mistral-ocr-4-0 but accepts a JSON schema and returns
@@ -267,7 +236,7 @@ async fn call_azure_openai(
     Ok((rows, detected, annotation))
 }
 
-// ─── Provider 3: Mistral OCR ─────────────────────────────────────────────
+// ─── Provider 2: Mistral OCR ─────────────────────────────────────────────
 // Mistral OCR returns per-page markdown. We convert its tabular markdown
 // into ExtractedRow[] by heuristically parsing the Echelon grid layout:
 // day-number rows down the left, staff columns with alternating IN/OUT
@@ -659,7 +628,6 @@ pub async fn extract_timesheet_consensus(args: ConsensusArgs) -> Result<Consensu
         .map_err(|e| format!("image base64: {e}"))?;
 
     let secrets_owned: Vec<String> = [
-        args.gemini_api_key.clone().unwrap_or_default(),
         args.azure_ai_key.clone().unwrap_or_default(),
     ].into_iter().filter(|s| !s.is_empty()).collect();
 
@@ -668,27 +636,14 @@ pub async fn extract_timesheet_consensus(args: ConsensusArgs) -> Result<Consensu
         redact(s, &refs)
     };
 
-    // Fire all three in parallel. Each has its own timeout inside; we also
-    // wrap with tokio::time::timeout as a hard ceiling.
-    let img = args.image_b64;
-    let mime = args.mime_type;
+    // Normalize the uploaded image once (EXIF-rotate, downscale, JPEG q92)
+    // so both providers receive identical bytes regardless of Mac/Win source.
+    let (img, mime) = normalize_image(&args.image_b64, &args.mime_type);
     let month = args.month_year;
     let known = args.known_staff_names;
 
-    let gem_fut = async {
-        let started = Instant::now();
-        let key = args.gemini_api_key.clone();
-        let res = match key {
-            Some(k) if !k.is_empty() => {
-                tokio::time::timeout(
-                    Duration::from_secs(PROVIDER_TIMEOUT_SECS + 5),
-                    call_gemini_pro(&k, &img, &mime, &month, &known),
-                ).await.unwrap_or_else(|_| Err("provider timeout".to_string()))
-            }
-            _ => Err("no Gemini API key configured".to_string()),
-        };
-        (started.elapsed().as_millis() as u64, res)
-    };
+    // Fire both providers in parallel. Each has its own timeout; we also
+    // wrap with tokio::time::timeout as a hard ceiling.
     let gpt_fut = async {
         let started = Instant::now();
         let key = args.azure_ai_key.clone();
@@ -718,12 +673,11 @@ pub async fn extract_timesheet_consensus(args: ConsensusArgs) -> Result<Consensu
         (started.elapsed().as_millis() as u64, res)
     };
 
-    let ((gem_ms, gem_res), (gpt_ms, gpt_res), (mis_ms, mis_res)) =
-        tokio::join!(gem_fut, gpt_fut, mistral_fut);
+    let ((gpt_ms, gpt_res), (mis_ms, mis_res)) =
+        tokio::join!(gpt_fut, mistral_fut);
 
-    let mut providers = Vec::with_capacity(3);
+    let mut providers = Vec::with_capacity(2);
     for (name, ms, res) in [
-        ("gemini_pro", gem_ms, gem_res),
         ("gpt5", gpt_ms, gpt_res),
         ("mistral_ocr", mis_ms, mis_res),
     ] {

@@ -1,6 +1,8 @@
-// Staff credentials & drill log helpers.
+// Staff credentials helpers.
+// (Drill Log feature removed in v0.2.4 — the staff_drills table remains in
+// the DB migration but is no longer surfaced or written to by the app.)
 import { db, execRetry } from "./db";
-import type { StaffCredential, StaffDrill } from "../types";
+import type { StaffCredential } from "../types";
 
 export interface CredentialTypeDef {
   type: string;
@@ -84,38 +86,4 @@ export async function upsertCredential(c: Partial<StaffCredential> & { staff_id:
 
 export async function deleteCredential(id: number): Promise<void> {
   await execRetry("DELETE FROM staff_credentials WHERE id=?", [id]);
-}
-
-// --- Drills ---
-export const DRILL_TYPES = ["Fire", "Lockdown", "Earthquake", "Evacuation", "Shelter-in-place"] as const;
-
-export async function listDrills(year?: number): Promise<StaffDrill[]> {
-  const d = await db();
-  if (year) {
-    return d.select<StaffDrill[]>(
-      `SELECT * FROM staff_drills WHERE substr(drill_date,1,4) = ? ORDER BY drill_date DESC`,
-      [String(year)]
-    );
-  }
-  return d.select<StaffDrill[]>(`SELECT * FROM staff_drills ORDER BY drill_date DESC`);
-}
-
-export async function upsertDrill(dr: Partial<StaffDrill> & { drill_date: string; drill_type: string }): Promise<number> {
-  if (dr.id) {
-    await execRetry(
-      `UPDATE staff_drills SET drill_date=?, drill_type=?, duration_min=?, children_present=?, notes=? WHERE id=?`,
-      [dr.drill_date, dr.drill_type, dr.duration_min ?? null, dr.children_present ?? null, dr.notes || null, dr.id]
-    );
-    return dr.id;
-  }
-  const r = await execRetry(
-    `INSERT INTO staff_drills(drill_date, drill_type, duration_min, children_present, notes)
-     VALUES(?, ?, ?, ?, ?)`,
-    [dr.drill_date, dr.drill_type, dr.duration_min ?? null, dr.children_present ?? null, dr.notes || null]
-  );
-  return Number(r.lastInsertId);
-}
-
-export async function deleteDrill(id: number): Promise<void> {
-  await execRetry("DELETE FROM staff_drills WHERE id=?", [id]);
 }

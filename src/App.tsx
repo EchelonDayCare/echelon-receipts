@@ -12,7 +12,6 @@ const Attendance = lazy(() => import("./screens/Attendance"));
 const AgingReport = lazy(() => import("./screens/AgingReport"));
 const StaffScreen = lazy(() => import("./screens/Staff"));
 const StaffCredentials = lazy(() => import("./screens/StaffCredentials"));
-const StaffDrills = lazy(() => import("./screens/StaffDrills"));
 const Settings = lazy(() => import("./screens/Settings"));
 import { runCloudBackupIfDue } from "./lib/cloudBackup";
 import { getSettings } from "./lib/db";
@@ -111,7 +110,6 @@ function Shell({ logo, name, staffEnabled }: { logo: string; name: string; staff
         items={[
           { to: "/staff/hours", label: "Hours" },
           { to: "/staff/credentials", label: "Credentials" },
-          { to: "/staff/drills", label: "Drill Log" },
         ]}
       />
     );
@@ -155,7 +153,6 @@ function Shell({ logo, name, staffEnabled }: { logo: string; name: string; staff
           <Route path="/staff" element={<Navigate to={staffEnabled ? "/staff/hours" : "/config/staff"} replace />} />
           {staffEnabled && <Route path="/staff/hours" element={<StaffScreen />} />}
           {staffEnabled && <Route path="/staff/credentials" element={<StaffCredentials />} />}
-          {staffEnabled && <Route path="/staff/drills" element={<StaffDrills />} />}
 
           {/* Configuration module */}
           <Route path="/config" element={<Navigate to="/config/identity" replace />} />
