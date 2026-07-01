@@ -7,10 +7,14 @@ import { writeFile } from "@tauri-apps/plugin-fs";
 import { getSettings } from "../lib/db";
 import {
   listStaff, createStaff, updateStaff, archiveStaff,
-  listHoursForMonth, upsertHour, deleteHour, matchStaffByName, hoursBetween, paidHours,
+  listHoursForMonth, upsertHour, deleteHour, hoursBetween, paidHours,
   assertStaffHoursSchema,
 } from "../lib/staff";
-import { extractTimesheet, fileToMime, ExtractedRow } from "../lib/gemini";
+import { fileToMime } from "../lib/gemini";
+import {
+  extractTimesheetConsensus, computeConsensus, editCell, PROVIDER_LABELS,
+  type ConsensusAlignment, type ConsensusRow, type Confidence, type ProviderName,
+} from "../lib/ocr";
 import { loadXLSX } from "../lib/lazy";
 import type { Staff, StaffHour, SettingsMap } from "../types";
 
@@ -23,6 +27,16 @@ const MONTHS = [
 
 function monthKey(y: number, m: number) { return `${y}-${String(m).padStart(2, "0")}`; }
 
+function rankConf(c: Confidence): number { return c === "red" ? 2 : c === "yellow" ? 1 : 0; }
+function isEditedRow(r: ConsensusRow): boolean {
+  return r.in_time.edited || r.out_time.edited || r.no_lunch.edited;
+}
+function pillFor(c: Confidence): { bg: string; fg: string; border: string; label: string } {
+  if (c === "green")  return { bg: "#dcfce7", fg: "#166534", border: "#22c55e", label: "✓" };
+  if (c === "yellow") return { bg: "#fef3c7", fg: "#92400e", border: "#f59e0b", label: "≈" };
+  return { bg: "#fee2e2", fg: "#991b1b", border: "#ef4444", label: "✗" };
+}
+
 export default function StaffScreen() {
   const today = new Date();
   const [settings, setSettings] = useState<SettingsMap>({});
@@ -32,14 +46,14 @@ export default function StaffScreen() {
   const [rows, setRows] = useState<HourRow[]>([]);
   const [editing, setEditing] = useState<Partial<Staff> | null>(null);
   const [ocrBusy, setOcrBusy] = useState(false);
-  const [ocrResult, setOcrResult] = useState<{
-    rows: ExtractedRow[];
-    unmatched: string[];
-    rawText?: string;
+  // Consensus mode: main OCR path. Contains per-provider votes + per-cell badges.
+  const [consensus, setConsensus] = useState<{
+    align: ConsensusAlignment;
+    providerMeta: Array<{ provider: ProviderName; ok: boolean; error: string | null; latency_ms: number; rowCount: number; rawText: string }>;
+    qrMonth?: string;
+    monthMismatch?: boolean;
     qrNote?: string;
-    qrMonth?: string;     // "YYYY-MM" when decoded from sheet
-    monthMismatch?: boolean;  // true if QR month differs from UI-selected month
-    flags: Array<{ index: number; reason: string }>;  // hour-validation flags
+    flags: Map<string, string>;   // key = row.key, value = reason (hour validation)
   } | null>(null);
   const [manualDraft, setManualDraft] = useState<{ staff_id: number | ""; work_date: string; in_time: string; out_time: string }>({
     staff_id: "", work_date: new Date().toISOString().slice(0, 10), in_time: "", out_time: "",
@@ -149,18 +163,14 @@ export default function StaffScreen() {
     else notify(`Deleted ${ids.length - failed}/${ids.length}; ${failed} failed.`, "err");
   }
 
-  // ---- OCR via Gemini ----
-  // Shared core: given an absolute image path, run Gemini extraction and
-  // stage the rows for review. Called from both "Choose file…" (file picker)
-  // and "Import latest from Downloads" (AirDrop workflow).
+  // ---- OCR via multi-model consensus ----
+  // Shared core: given an absolute image path, run Gemini Pro + Azure GPT-5.4
+  // + Mistral OCR in parallel and compute per-cell agreement. Called from
+  // both "Choose file…" and "Import latest from Downloads".
   async function runOcrOnPath(picked: string) {
     if (settings.gemini_api_key_set !== "1") {
       notify("Add your Gemini API key in Settings first.", "err"); return;
     }
-
-    // Guard: refuse to run OCR if the local DB schema can't hold the result.
-    // Cheap to check, and it stops the classic "AI reads 21 rows, 0 imported,
-    // 21 'unmatched'" foot-gun where the real cause is a missing DB column.
     const schemaError = await assertStaffHoursSchema();
     if (schemaError) {
       notify(`Schema check failed — import will fail. ${schemaError}`, "err");
@@ -168,30 +178,26 @@ export default function StaffScreen() {
     }
 
     setOcrBusy(true);
-    setOcrResult(null);
-    let apiKey: string | null = null;
+    setConsensus(null);
+    let geminiKey: string | null = null;
+    let azureKey: string | null = null;
     try {
-      apiKey = await invoke<string | null>("keychain_get", { key: "gemini_api_key" });
-      if (!apiKey) throw new Error("Gemini API key not found in keychain — re-save it in Settings.");
+      geminiKey = await invoke<string | null>("keychain_get", { key: "gemini_api_key" });
+      if (!geminiKey) throw new Error("Gemini API key not found in keychain — re-save it in Settings.");
+      if (settings.azure_ai_key_set === "1") {
+        azureKey = await invoke<string | null>("keychain_get", { key: "azure_ai_key" });
+      }
 
-      // 1) Try to decode the sheet's QR to lock the month/year to the paper
-      //    (defeats "UI picker says July, sheet says June" bugs). This is the
-      //    fast path; if the QR is missing or unreadable, Gemini itself will
-      //    read the month off the sheet's printed header in step (3).
+      // QR month lock — same fast path as before.
       let qrMonthKey: string | undefined;
       let qrNote: string | undefined;
-      let effectiveYear = year;
-      let effectiveMonth = month;
       try {
         const norm = await invoke<{ qr: { year: number | null; month: number | null; sheet_id: string | null }; note: string }>(
-          "normalize_sheet",
-          { args: { image_path: picked } }
+          "normalize_sheet", { args: { image_path: picked } }
         );
         qrNote = norm.note;
         if (norm.qr.year && norm.qr.month) {
-          effectiveYear = norm.qr.year;
-          effectiveMonth = norm.qr.month;
-          qrMonthKey = monthKey(effectiveYear, effectiveMonth);
+          qrMonthKey = monthKey(norm.qr.year, norm.qr.month);
         }
       } catch (e) {
         qrNote = "QR pre-check failed: " + String((e as any)?.message || e);
@@ -199,61 +205,62 @@ export default function StaffScreen() {
 
       const bytes = await readFile(picked);
       const mime = fileToMime(picked);
-      const result = await extractTimesheet({
-        apiKey, imageBytes: bytes, mimeType: mime,
-        monthYear: qrMonthKey || monthKey(year, month),  // HINT only — Gemini also reads the header
+      const result = await extractTimesheetConsensus({
+        geminiKey, azureKey,
+        imageBytes: bytes, mimeType: mime,
+        monthYear: qrMonthKey || monthKey(year, month),
         knownStaffNames: activeStaff.map((s) => s.name),
       });
 
-      // 2) Trust the sheet, not the UI. If Gemini read a month off the sheet's
-      //    header/QR, prefer THAT over the UI picker and re-stamp every row's
-      //    YYYY-MM to match. This is what fixes "June sheet uploaded with
-      //    picker on July → all rows dated July".
+      const align = computeConsensus(result, activeStaff, qrMonthKey || null);
       const uiMonthKey = monthKey(year, month);
-      const sheetMonthKey = qrMonthKey || result.detected_month_year || undefined;
-      if (sheetMonthKey && /^\d{4}-\d{2}$/.test(sheetMonthKey)) {
-        for (const r of result.rows) {
-          if (r.work_date && r.work_date.length >= 10) {
-            const dd = r.work_date.slice(8, 10);
-            r.work_date = `${sheetMonthKey}-${dd}`;
-          }
-        }
+      const sheetMonthKey = qrMonthKey || align.detectedMonthYear || undefined;
+
+      // Hour validation on the consensus-picked values.
+      const flags = new Map<string, string>();
+      for (const r of align.rows) {
+        const inV = r.in_time.value;
+        const outV = r.out_time.value;
+        if (!inV || !outV) continue;
+        const paid = paidHours(inV, outV, r.no_lunch.value === "true");
+        if (paid < 2) flags.set(r.key, `Shift too short (${paid.toFixed(2)}h)`);
+        else if (paid > 10) flags.set(r.key, `Shift too long (${paid.toFixed(2)}h)`);
       }
 
-      const unmatched = new Set<string>();
-      for (const r of result.rows) {
-        if (!matchStaffByName(r.staff_name, activeStaff)) unmatched.add(r.staff_name);
-      }
+      const providerMeta = result.providers.map((p) => ({
+        provider: p.provider as ProviderName,
+        ok: p.ok,
+        error: p.error,
+        latency_ms: p.latency_ms,
+        rowCount: p.rows.length,
+        rawText: p.raw_text,
+      }));
 
-      // 3) Hour validation: flag rows with paid-hours < 2 or > 10 so they
-      //    can be surfaced in a banner (and skipped from auto-import).
-      const flags: Array<{ index: number; reason: string }> = [];
-      result.rows.forEach((r, i) => {
-        if (!r.in_time || !r.out_time) return;   // partial rows aren't flagged
-        const paid = paidHours(r.in_time, r.out_time, r.no_lunch === true);
-        if (paid < 2) flags.push({ index: i, reason: `Shift too short (${paid.toFixed(2)}h)` });
-        else if (paid > 10) flags.push({ index: i, reason: `Shift too long (${paid.toFixed(2)}h)` });
-      });
-
-      setOcrResult({
-        rows: result.rows,
-        unmatched: Array.from(unmatched).sort(),
-        rawText: result.raw_text,
-        qrNote,
+      setConsensus({
+        align,
+        providerMeta,
         qrMonth: sheetMonthKey,
         monthMismatch: !!sheetMonthKey && sheetMonthKey !== uiMonthKey,
+        qrNote,
         flags,
       });
-      if (result.rows.length === 0) {
-        notify("AI returned 0 rows — see 'What the AI saw' below to debug.", "err");
-      } else if (flags.length) {
-        notify(`Read ${result.rows.length} entries; ${flags.length} need attention.`, "err");
+
+      if (align.rows.length === 0) {
+        notify("All models returned 0 rows — see 'What each model saw' below to debug.", "err");
       } else {
-        notify(`Read ${result.rows.length} time entries. Ready to import.`);
+        const nSuccess = align.succeededProviders.length;
+        const red = align.rows.filter((r) => r.row_confidence === "red").length;
+        const yellow = align.rows.filter((r) => r.row_confidence === "yellow").length;
+        const green = align.rows.filter((r) => r.row_confidence === "green").length;
+        const flagged = flags.size;
+        const msg = `${nSuccess}/3 models: ${green} agree, ${yellow} majority, ${red} disagree${flagged ? `, ${flagged} flagged` : ""}.`;
+        notify(msg, red || flagged ? "err" : "ok");
       }
     } catch (e: any) {
       const raw = String(e?.message || e);
-      const safe = apiKey ? raw.split(apiKey).join("***") : raw;
+      let safe = raw;
+      if (geminiKey) safe = safe.split(geminiKey).join("***");
+      if (azureKey)  safe = safe.split(azureKey).join("***");
       notify("OCR failed: " + safe, "err");
     } finally { setOcrBusy(false); }
   }
@@ -322,41 +329,84 @@ export default function StaffScreen() {
   }
 
   async function importOcr() {
-    if (!ocrResult) return;
-    // Re-check schema right before writing. Cheap; guarantees we never hit
-    // the silent-catch trap even if the OCR guard was somehow bypassed.
+    if (!consensus) return;
     const schemaError = await assertStaffHoursSchema();
     if (schemaError) {
       notify(`Cannot import — ${schemaError}`, "err");
       return;
     }
-    const flaggedIdx = new Set(ocrResult.flags.map((f) => f.index));
-    let saved = 0, unmatched = 0, dbErrors = 0, flaggedSkipped = 0;
+    let saved = 0, blocked = 0, flaggedSkipped = 0, dbErrors = 0;
     let lastError: unknown = null;
-    for (let i = 0; i < ocrResult.rows.length; i++) {
-      const r = ocrResult.rows[i];
-      if (flaggedIdx.has(i)) { flaggedSkipped++; continue; }
-      const match = matchStaffByName(r.staff_name, activeStaff);
-      if (!match) { unmatched++; continue; }
+    for (const r of consensus.align.rows) {
+      if (r.row_confidence === "red") { blocked++; continue; }
+      if (consensus.flags.has(r.key)) { flaggedSkipped++; continue; }
       try {
-        await upsertHour(match.id, r.work_date, r.in_time, r.out_time, "ocr", null, null, r.no_lunch === true);
+        await upsertHour(
+          r.staff_id, r.work_date, r.in_time.value, r.out_time.value,
+          "ocr", null, null, r.no_lunch.value === "true",
+        );
         saved++;
       } catch (e) {
         dbErrors++;
         lastError = e;
-        console.error(`[importOcr] upsertHour failed for ${r.staff_name} @ ${r.work_date}:`, e);
+        console.error(`[importOcr] upsertHour failed for ${r.staff_name_canonical} @ ${r.work_date}:`, e);
       }
     }
-    setOcrResult(null);
+    setConsensus(null);
     await refresh();
     const bits: string[] = [`Imported ${saved} entries`];
-    if (unmatched) bits.push(`${unmatched} unmatched`);
-    if (dbErrors) bits.push(`${dbErrors} DB errors (see console)`);
+    if (blocked) bits.push(`${blocked} blocked (models disagree)`);
     if (flaggedSkipped) bits.push(`${flaggedSkipped} flagged (fix and re-import)`);
-    notify(bits.join(" · "), dbErrors ? "err" : "ok");
+    if (dbErrors) bits.push(`${dbErrors} DB errors (see console)`);
+    notify(bits.join(" · "), dbErrors || blocked ? "err" : "ok");
     if (dbErrors && lastError) {
       notify(`First DB error: ${String((lastError as Error)?.message ?? lastError).slice(0, 240)}`, "err");
     }
+  }
+
+  // Inline cell edit — user overrides consensus for one field on one row.
+  function updateCell(rowKey: string, field: "in_time" | "out_time" | "no_lunch", newValue: string | null) {
+    setConsensus((prev) => {
+      if (!prev) return prev;
+      const align = { ...prev.align, rows: prev.align.rows.map((r) => {
+        if (r.key !== rowKey) return r;
+        const nextCell = editCell(r[field], newValue);
+        const next = { ...r, [field]: nextCell };
+        // Recompute row_confidence from the (possibly edited) cells.
+        const worst: Confidence = ([next.in_time.confidence, next.out_time.confidence, next.no_lunch.confidence] as Confidence[])
+          .reduce<Confidence>((w, c) => (rankConf(c) > rankConf(w) ? c : w), "green");
+        next.row_confidence = next.phantom && !isEditedRow(next) ? "red" : worst;
+        // Re-run flag check with new values.
+        const flags = new Map(prev.flags);
+        const inV = next.in_time.value, outV = next.out_time.value;
+        if (inV && outV) {
+          const paid = paidHours(inV, outV, next.no_lunch.value === "true");
+          if (paid < 2) flags.set(next.key, `Shift too short (${paid.toFixed(2)}h)`);
+          else if (paid > 10) flags.set(next.key, `Shift too long (${paid.toFixed(2)}h)`);
+          else flags.delete(next.key);
+        }
+        // Note: because prev.flags is captured, we build the new flags Map above.
+        return next;
+      }) };
+      // Rebuild flags fresh so we don't miss deletions when other cells changed too.
+      const newFlags = new Map<string, string>();
+      for (const rr of align.rows) {
+        const inV = rr.in_time.value, outV = rr.out_time.value;
+        if (!inV || !outV) continue;
+        const paid = paidHours(inV, outV, rr.no_lunch.value === "true");
+        if (paid < 2) newFlags.set(rr.key, `Shift too short (${paid.toFixed(2)}h)`);
+        else if (paid > 10) newFlags.set(rr.key, `Shift too long (${paid.toFixed(2)}h)`);
+      }
+      return { ...prev, align, flags: newFlags };
+    });
+  }
+  function dropRow(rowKey: string) {
+    setConsensus((prev) => {
+      if (!prev) return prev;
+      const align = { ...prev.align, rows: prev.align.rows.filter((r) => r.key !== rowKey) };
+      const flags = new Map(prev.flags); flags.delete(rowKey);
+      return { ...prev, align, flags };
+    });
   }
 
   // ---- Excel export ----
@@ -480,112 +530,158 @@ export default function StaffScreen() {
           </div>
         </div>
 
-        {ocrResult && (
+        {consensus && (
           <div style={{ background: "#fff", border: "1px solid var(--border)", padding: 14, borderRadius: 10, marginTop: 14 }}>
-            {/* Month-source banner. qrMonth now holds whichever the app
-                trusted: QR (fast path) or Gemini's header-read (fallback). */}
-            {ocrResult.qrMonth && (
+            {/* Provider health strip — one badge per model with latency + row count. */}
+            <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 10, fontSize: 12 }}>
+              {(["gemini_pro", "gpt5", "mistral_ocr"] as ProviderName[]).map((p) => {
+                const meta = consensus.providerMeta.find((m) => m.provider === p);
+                const ok = meta?.ok;
+                return (
+                  <span key={p} title={meta?.error || `${meta?.rowCount ?? 0} rows in ${meta?.latency_ms ?? 0}ms`}
+                    style={{
+                      padding: "3px 10px", borderRadius: 999,
+                      background: ok ? "#dcfce7" : "#fee2e2",
+                      border: `1px solid ${ok ? "#22c55e" : "#ef4444"}`,
+                      color: ok ? "#166534" : "#991b1b", fontWeight: 600,
+                    }}>
+                    {ok ? "●" : "○"} {PROVIDER_LABELS[p]} · {ok ? `${meta?.rowCount} rows` : (meta?.error?.slice(0, 40) || "failed")}
+                  </span>
+                );
+              })}
+              {consensus.align.succeededProviders.length < 2 && (
+                <span style={{ padding: "3px 10px", borderRadius: 999, background: "#fef3c7", border: "1px solid #f59e0b", color: "#92400e", fontWeight: 600 }}>
+                  ⚠ Only {consensus.align.succeededProviders.length}/3 responded — no consensus, treating every cell as low-confidence
+                </span>
+              )}
+            </div>
+
+            {/* Month-source banner */}
+            {consensus.qrMonth && (
               <div style={{
-                background: ocrResult.monthMismatch ? "#fef3c7" : "#dcfce7",
-                border: `1px solid ${ocrResult.monthMismatch ? "#f59e0b" : "#22c55e"}`,
+                background: consensus.monthMismatch ? "#fef3c7" : "#dcfce7",
+                border: `1px solid ${consensus.monthMismatch ? "#f59e0b" : "#22c55e"}`,
                 padding: 8, borderRadius: 6, marginBottom: 10, fontSize: 13,
               }}>
-                <strong>📷 Sheet month:</strong> {ocrResult.qrMonth} (read from the sheet itself)
-                {ocrResult.monthMismatch && <> — <strong>differs from the {MONTHS[month - 1]} {year} you had selected.</strong> Trusting the sheet.</>}
+                <strong>📷 Sheet month:</strong> {consensus.qrMonth} (read from the sheet itself)
+                {consensus.monthMismatch && <> — <strong>differs from the {MONTHS[month - 1]} {year} you had selected.</strong> Trusting the sheet.</>}
               </div>
             )}
-            {ocrResult.qrMonth === undefined && (
+            {!consensus.qrMonth && (
               <div style={{ background: "#fef3c7", border: "1px solid #f59e0b", padding: 8, borderRadius: 6, marginBottom: 10, fontSize: 12 }}>
-                ⚠ Could not read the sheet's month from either the QR code or the header. Rows will be imported as <strong>{monthKey(year, month)}</strong> (the picker's month). If that's wrong, discard, fix the header month, and re-upload.
+                ⚠ Could not read the sheet's month from the QR code or any header. Rows will be imported as <strong>{monthKey(year, month)}</strong>.
               </div>
             )}
 
-            {/* Hour-validation flag banner */}
-            {ocrResult.flags.length > 0 && (
-              <div style={{
-                background: "#fef2f2", border: "1px solid #ef4444",
-                padding: 10, borderRadius: 6, marginBottom: 10, fontSize: 13,
-              }}>
-                <strong>⚠ {ocrResult.flags.length} row{ocrResult.flags.length === 1 ? "" : "s"} flagged</strong> (won't be imported until fixed):
-                <ul style={{ margin: "6px 0 0 20px", padding: 0 }}>
-                  {ocrResult.flags.slice(0, 8).map((f) => {
-                    const r = ocrResult.rows[f.index];
-                    return <li key={f.index}>{r.staff_name} on {r.work_date} · {f.reason} ({r.in_time || "?"}–{r.out_time || "?"}{r.no_lunch ? ", no lunch" : ""})</li>;
-                  })}
-                  {ocrResult.flags.length > 8 && <li>…and {ocrResult.flags.length - 8} more</li>}
-                </ul>
-              </div>
-            )}
-
-            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10, gap: 10, flexWrap: "wrap" }}>
-              <strong>AI read {ocrResult.rows.length} time entries</strong>
-              <div style={{ display: "flex", gap: 8 }}>
-                <button className="btn secondary" onClick={() => setOcrResult(null)}>Discard</button>
-                <button
-                  className="btn"
-                  onClick={importOcr}
-                  style={{ fontWeight: 700 }}
-                  title="Import all clean rows without reviewing (flagged rows are skipped)"
-                >
-                  ✓ Import all ({ocrResult.rows.length - ocrResult.flags.length} clean)
-                </button>
-              </div>
-            </div>
-            {ocrResult.unmatched.length > 0 && (
+            {/* Unmatched staff-name banner */}
+            {consensus.align.unmatchedNames.length > 0 && (
               <p style={{ margin: "0 0 8px", color: "#b45309", fontSize: 13 }}>
-                ⚠ {ocrResult.unmatched.length} name{ocrResult.unmatched.length === 1 ? "" : "s"} couldn't be matched: <strong>{ocrResult.unmatched.join(", ")}</strong>.
-                Add them under <em>Staff</em> below (or correct the spelling) and re-upload. Only matched rows will import.
+                ⚠ {consensus.align.unmatchedNames.length} name{consensus.align.unmatchedNames.length === 1 ? "" : "s"} couldn't be matched to a staff member: <strong>{consensus.align.unmatchedNames.join(", ")}</strong>. Add or correct them under <em>Staff</em> and re-upload.
               </p>
             )}
-            <details>
-              <summary style={{ cursor: "pointer", color: "var(--muted)", fontSize: 13 }}>Preview {ocrResult.rows.length} extracted rows (optional review)</summary>
-              <table className="table" style={{ marginTop: 10 }}>
-                <thead><tr><th>From sheet</th><th>Matched to</th><th>Date</th><th>In</th><th>Out</th><th>No Ln</th><th>Paid hrs</th><th>Status</th></tr></thead>
-                <tbody>
-                  {ocrResult.rows.map((r, i) => {
-                    const m = matchStaffByName(r.staff_name, activeStaff);
-                    const flag = ocrResult.flags.find((f) => f.index === i);
-                    const raw = hoursBetween(r.in_time, r.out_time);
-                    const paid = paidHours(r.in_time, r.out_time, r.no_lunch === true);
-                    return (
-                      <tr key={i} style={
-                        flag ? { background: "#fef2f2" } :
-                        !m ? { opacity: 0.55 } : undefined
-                      }>
-                        <td>{r.staff_name}</td>
-                        <td>{m ? m.name : <em>(no match)</em>}</td>
-                        <td>{r.work_date}</td>
-                        <td>{r.in_time || "—"}</td>
-                        <td>{r.out_time || "—"}</td>
-                        <td style={{ textAlign: "center" }}>{r.no_lunch ? "✓" : ""}</td>
-                        <td title={`raw ${raw.toFixed(2)}h${r.no_lunch ? "" : " − 0.5h lunch"}`}>{paid.toFixed(2)}</td>
-                        <td style={{ fontSize: 12 }}>
-                          {flag ? <span style={{ color: "#dc2626", fontWeight: 600 }}>⚠ {flag.reason}</span> :
-                           !m ? <span style={{ color: "#b45309" }}>skip: no match</span> :
-                           <span style={{ color: "#16a34a" }}>✓ ready</span>}
-                        </td>
-                      </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
+
+            {/* Summary + import controls */}
+            {(() => {
+              const rows = consensus.align.rows;
+              const red = rows.filter((r) => r.row_confidence === "red").length;
+              const yellow = rows.filter((r) => r.row_confidence === "yellow").length;
+              const green = rows.filter((r) => r.row_confidence === "green").length;
+              const flagged = consensus.flags.size;
+              const importable = rows.filter((r) => r.row_confidence !== "red" && !consensus.flags.has(r.key)).length;
+              const blocked = red + flagged;
+              return (
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10, gap: 10, flexWrap: "wrap" }}>
+                  <div>
+                    <strong>{rows.length} rows read</strong>{" "}
+                    <span style={{ color: "#166534" }}>✓ {green}</span> ·{" "}
+                    <span style={{ color: "#92400e" }}>≈ {yellow}</span> ·{" "}
+                    <span style={{ color: "#991b1b" }}>✗ {red}</span>
+                    {flagged > 0 && <> · <span style={{ color: "#dc2626", fontWeight: 600 }}>⚠ {flagged} flagged</span></>}
+                  </div>
+                  <div style={{ display: "flex", gap: 8 }}>
+                    <button className="btn secondary" onClick={() => setConsensus(null)}>Discard</button>
+                    <button
+                      className="btn" onClick={importOcr} style={{ fontWeight: 700 }}
+                      disabled={importable === 0}
+                      title={blocked ? `${blocked} rows blocked — click ✗ cells to fix, or use Drop row` : "Import all rows the models agree on"}
+                    >
+                      ✓ Import {importable}{blocked ? ` (${blocked} blocked)` : ""}
+                    </button>
+                  </div>
+                </div>
+              );
+            })()}
+
+            <table className="table" style={{ marginTop: 6 }}>
+              <thead><tr>
+                <th style={{ width: 32 }}></th>
+                <th>Staff</th><th>Date</th><th>In</th><th>Out</th><th>No Ln</th><th>Paid</th><th>Status</th><th></th>
+              </tr></thead>
+              <tbody>
+                {consensus.align.rows.map((r) => {
+                  const inV = r.in_time.value, outV = r.out_time.value;
+                  const paid = inV && outV ? paidHours(inV, outV, r.no_lunch.value === "true") : 0;
+                  const flag = consensus.flags.get(r.key);
+                  const rowP = pillFor(r.row_confidence);
+                  return (
+                    <tr key={r.key} style={{
+                      background: r.row_confidence === "red" ? "#fef2f2"
+                        : r.row_confidence === "yellow" ? "#fffbeb" : undefined,
+                    }}>
+                      <td>
+                        <span style={{
+                          display: "inline-block", padding: "2px 6px", borderRadius: 999, fontSize: 11, fontWeight: 700,
+                          background: rowP.bg, color: rowP.fg, border: `1px solid ${rowP.border}`,
+                        }} title={r.phantom ? "Only 1 model saw this row (possible hallucination)" : ""}>
+                          {rowP.label}
+                        </span>
+                      </td>
+                      <td title={r.staff_names_seen.length > 1 ? `Models wrote: ${r.staff_names_seen.join(" / ")}` : ""}>
+                        {r.staff_name_canonical}
+                        {r.phantom && <span style={{ marginLeft: 6, fontSize: 10, color: "#991b1b" }}>PHANTOM</span>}
+                      </td>
+                      <td>{r.work_date}</td>
+                      <td><CellCtl cell={r.in_time} onChange={(v) => updateCell(r.key, "in_time", v)} placeholder="HH:MM" /></td>
+                      <td><CellCtl cell={r.out_time} onChange={(v) => updateCell(r.key, "out_time", v)} placeholder="HH:MM" /></td>
+                      <td style={{ textAlign: "center" }}>
+                        <CellToggle cell={r.no_lunch} onChange={(v) => updateCell(r.key, "no_lunch", v)} />
+                      </td>
+                      <td>{inV && outV ? paid.toFixed(2) : "—"}</td>
+                      <td style={{ fontSize: 12 }}>
+                        {r.warnings.length > 0 && (
+                          <div style={{ color: "#b45309", fontWeight: 600, marginBottom: 2 }}>
+                            ⚠ {r.warnings.join("; ")}
+                          </div>
+                        )}
+                        {flag ? <span style={{ color: "#dc2626", fontWeight: 600 }}>⚠ {flag}</span> :
+                          r.row_confidence === "red" ? <span style={{ color: "#991b1b" }}>models disagree</span> :
+                          r.row_confidence === "yellow" ? <span style={{ color: "#92400e" }}>majority</span> :
+                          <span style={{ color: "#16a34a" }}>✓ ready</span>}
+                      </td>
+                      <td>
+                        <button className="btn link danger" style={{ fontSize: 11 }} onClick={() => dropRow(r.key)}>Drop</button>
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+
+            <details style={{ marginTop: 10 }}>
+              <summary style={{ cursor: "pointer", color: "var(--muted)", fontSize: 13 }}>What each model saw (debug)</summary>
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(280px, 1fr))", gap: 10, marginTop: 8 }}>
+                {consensus.providerMeta.map((m) => (
+                  <div key={m.provider} style={{ border: "1px solid var(--border)", borderRadius: 6, padding: 8 }}>
+                    <div style={{ fontWeight: 600, marginBottom: 4 }}>
+                      {PROVIDER_LABELS[m.provider]} {m.ok ? `· ${m.rowCount} rows · ${m.latency_ms}ms` : `· ✗ ${m.error}`}
+                    </div>
+                    <pre style={{ margin: 0, padding: 6, background: "#f5f5f5", borderRadius: 4, fontSize: 10, maxHeight: 200, overflow: "auto", whiteSpace: "pre-wrap" }}>
+                      {m.rawText || m.error || "(no output)"}
+                    </pre>
+                  </div>
+                ))}
+              </div>
             </details>
-            {ocrResult.rawText && (
-              <details style={{ marginTop: 8 }}>
-                <summary style={{ cursor: "pointer", color: "var(--muted)", fontSize: 13 }}>
-                  {ocrResult.rows.length === 0 ? "🔍 What the AI saw (debug)" : "Raw AI response"}
-                </summary>
-                <pre style={{ marginTop: 8, padding: 10, background: "#f5f5f5", borderRadius: 6, fontSize: 11, maxHeight: 240, overflow: "auto", whiteSpace: "pre-wrap" }}>
-                  {ocrResult.rawText}
-                </pre>
-                {ocrResult.rows.length === 0 && (
-                  <p style={{ marginTop: 6, fontSize: 12, color: "var(--muted)" }}>
-                    If the AI returned an empty array, the photo may be too blurry, cropped, or the names may not be clearly readable.
-                    Try retaking with better lighting / closer framing, or enter the hours manually below.
-                  </p>
-                )}
-              </details>
-            )}
           </div>
         )}
       </section>
@@ -784,5 +880,68 @@ export default function StaffScreen() {
 
       {toast && <div className={`toast ${toast.tone === "err" ? "toast-err" : "toast-ok"}`}>{toast.msg}</div>}
     </div>
+  );
+}
+
+// ─── Per-cell UI helpers for consensus preview ──────────────────────────
+function CellCtl({ cell, onChange, placeholder }: {
+  cell: import("../lib/ocr").ConsensusCell;
+  onChange: (v: string | null) => void;
+  placeholder?: string;
+}) {
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState(cell.value || "");
+  useEffect(() => { setDraft(cell.value || ""); }, [cell.value]);
+  const pill = pillFor(cell.confidence);
+  const tip = cell.votes.map((v) => {
+    const label = PROVIDER_LABELS[v.provider];
+    if (!v.sawRow) return `${label}: (didn't see row)`;
+    return `${label}: ${v.value ?? "null"}`;
+  }).join("\n") + (cell.edited ? "\n(edited)" : "");
+  if (editing) {
+    return (
+      <input
+        autoFocus type="text" placeholder={placeholder} value={draft}
+        onChange={(e) => setDraft(e.target.value)}
+        onBlur={() => { setEditing(false); onChange(draft.trim() || null); }}
+        onKeyDown={(e) => { if (e.key === "Enter") (e.target as HTMLInputElement).blur(); if (e.key === "Escape") { setDraft(cell.value || ""); setEditing(false); } }}
+        style={{ width: 70, padding: "2px 4px", fontSize: 12 }}
+      />
+    );
+  }
+  return (
+    <span onClick={() => setEditing(true)} title={tip} style={{
+      cursor: "text", display: "inline-flex", alignItems: "center", gap: 4,
+      padding: "2px 6px", borderRadius: 4, border: `1px solid ${pill.border}`,
+      background: pill.bg, color: pill.fg, fontVariantNumeric: "tabular-nums",
+      fontWeight: cell.edited ? 700 : 500,
+    }}>
+      <span style={{ fontSize: 10 }}>{pill.label}</span>
+      {cell.value || "—"}
+    </span>
+  );
+}
+
+function CellToggle({ cell, onChange }: {
+  cell: import("../lib/ocr").ConsensusCell;
+  onChange: (v: string | null) => void;
+}) {
+  const pill = pillFor(cell.confidence);
+  const isTrue = cell.value === "true";
+  const tip = cell.votes.map((v) => {
+    const label = PROVIDER_LABELS[v.provider];
+    if (!v.sawRow) return `${label}: (didn't see row)`;
+    return `${label}: ${v.value === "true" ? "✓ no lunch" : "empty"}`;
+  }).join("\n") + (cell.edited ? "\n(edited)" : "");
+  return (
+    <span
+      onClick={() => onChange(isTrue ? "false" : "true")}
+      title={tip}
+      style={{
+        cursor: "pointer", display: "inline-block", padding: "2px 8px", borderRadius: 4,
+        border: `1px solid ${pill.border}`, background: pill.bg, color: pill.fg,
+        fontWeight: cell.edited ? 700 : 500, minWidth: 24, textAlign: "center",
+      }}
+    >{isTrue ? "✓" : "—"}</span>
   );
 }

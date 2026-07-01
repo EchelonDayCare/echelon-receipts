@@ -3,6 +3,7 @@ use tauri_plugin_sql::{Migration, MigrationKind};
 mod email;
 mod errlog;
 mod gemini;
+mod consensus;
 mod inbox;
 mod preprocess;
 mod restore;
@@ -107,6 +108,7 @@ pub fn run() {
             restore::restart_app,
             gemini::extract_timesheet,
             gemini::extract_attendance,
+            consensus::extract_timesheet_consensus,
             inbox::inbox_list_recent,
             preprocess::normalize_sheet,
             errlog::append_error_log,

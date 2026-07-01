@@ -57,6 +57,8 @@ export default function Settings() {
   const [hasStoredPassword, setHasStoredPassword] = useState(false);
   const [geminiKey, setGeminiKey] = useState<string>("");
   const [hasGeminiKey, setHasGeminiKey] = useState(false);
+  const [azureKey, setAzureKey] = useState<string>("");
+  const [hasAzureKey, setHasAzureKey] = useState(false);
   const [testing, setTesting] = useState(false);
   const [errorLogText, setErrorLogText] = useState<string>("");
   const [errorLogPathStr, setErrorLogPathStr] = useState<string>("");
@@ -68,6 +70,7 @@ export default function Settings() {
       setS(loaded);
       setHasStoredPassword(loaded.smtp_password_set === "1");
       setHasGeminiKey(loaded.gemini_api_key_set === "1");
+      setHasAzureKey(loaded.azure_ai_key_set === "1");
     })();
   }, []);
 
@@ -86,6 +89,12 @@ export default function Settings() {
         await setSetting("gemini_api_key_set", "1");
         setHasGeminiKey(true);
         setGeminiKey("");
+      }
+      if (azureKey.trim()) {
+        await invoke("keychain_set", { key: "azure_ai_key", value: azureKey.trim() });
+        await setSetting("azure_ai_key_set", "1");
+        setHasAzureKey(true);
+        setAzureKey("");
       }
       alert("Settings saved.");
       window.dispatchEvent(new Event("settings-saved"));
@@ -110,6 +119,14 @@ export default function Settings() {
     await setSetting("gemini_api_key_set", "");
     setHasGeminiKey(false);
     alert("Gemini key removed.");
+  }
+
+  async function clearAzureKey() {
+    if (!confirm("Remove the stored Azure AI Foundry key from the OS keychain?")) return;
+    await invoke("keychain_delete", { key: "azure_ai_key" });
+    await setSetting("azure_ai_key_set", "");
+    setHasAzureKey(false);
+    alert("Azure AI key removed.");
   }
 
   async function runTest() {
@@ -571,6 +588,22 @@ export default function Settings() {
                 Used only to read your monthly sign-in sheets. Get one free at <code>aistudio.google.com/app/apikey</code>. Stored in the OS keychain, never in the database.
                 {hasGeminiKey && (
                   <> &nbsp;<a href="#" onClick={(e) => { e.preventDefault(); clearGeminiKey(); }} style={{ color: "var(--danger)" }}>Remove stored key</a></>
+                )}
+              </small>
+            </div>
+            <div className="field">
+              <label>Azure AI Foundry key<HelpTip text="Optional but recommended. Powers the 2nd and 3rd OCR opinions (GPT-5.4 vision + Mistral OCR). When all 3 models are configured, sheet uploads use consensus: each cell shows a green / yellow / red badge based on whether the models agree. Stored in the macOS keychain." /></label>
+              <input
+                type="password"
+                placeholder={hasAzureKey ? "•••••••• (stored in OS keychain) — enter a new key to replace" : "Paste your Azure AI Foundry key"}
+                value={azureKey}
+                onChange={(e) => setAzureKey(e.target.value)}
+                autoComplete="off"
+              />
+              <small style={{ color: "var(--muted)" }}>
+                Enables 3-model consensus (Gemini + GPT-5.4 + Mistral OCR). Without this key the app falls back to Gemini alone. Stored in the OS keychain, never in the database.
+                {hasAzureKey && (
+                  <> &nbsp;<a href="#" onClick={(e) => { e.preventDefault(); clearAzureKey(); }} style={{ color: "var(--danger)" }}>Remove stored key</a></>
                 )}
               </small>
             </div>
