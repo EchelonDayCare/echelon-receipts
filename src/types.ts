@@ -97,6 +97,7 @@ export interface StaffHour {
   source: string;
   sheet_image_path: string | null;
   notes: string | null;
+  no_lunch?: number;
   created_at: string;
 }
 

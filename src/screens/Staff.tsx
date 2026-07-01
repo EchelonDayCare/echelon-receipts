@@ -7,7 +7,7 @@ import { writeFile } from "@tauri-apps/plugin-fs";
 import { getSettings } from "../lib/db";
 import {
   listStaff, createStaff, updateStaff, archiveStaff,
-  listHoursForMonth, upsertHour, deleteHour, matchStaffByName, hoursBetween,
+  listHoursForMonth, upsertHour, deleteHour, matchStaffByName, hoursBetween, paidHours,
 } from "../lib/staff";
 import { extractTimesheet, fileToMime, ExtractedRow } from "../lib/gemini";
 import { loadXLSX } from "../lib/lazy";
@@ -31,7 +31,15 @@ export default function StaffScreen() {
   const [rows, setRows] = useState<HourRow[]>([]);
   const [editing, setEditing] = useState<Partial<Staff> | null>(null);
   const [ocrBusy, setOcrBusy] = useState(false);
-  const [ocrResult, setOcrResult] = useState<{ rows: ExtractedRow[]; unmatched: string[]; rawText?: string } | null>(null);
+  const [ocrResult, setOcrResult] = useState<{
+    rows: ExtractedRow[];
+    unmatched: string[];
+    rawText?: string;
+    qrNote?: string;
+    qrMonth?: string;     // "YYYY-MM" when decoded from sheet
+    monthMismatch?: boolean;  // true if QR month differs from UI-selected month
+    flags: Array<{ index: number; reason: string }>;  // hour-validation flags
+  } | null>(null);
   const [manualDraft, setManualDraft] = useState<{ staff_id: number | ""; work_date: string; in_time: string; out_time: string }>({
     staff_id: "", work_date: new Date().toISOString().slice(0, 10), in_time: "", out_time: "",
   });
@@ -128,22 +136,66 @@ export default function StaffScreen() {
     try {
       apiKey = await invoke<string | null>("keychain_get", { key: "gemini_api_key" });
       if (!apiKey) throw new Error("Gemini API key not found in keychain — re-save it in Settings.");
+
+      // 1) Try to decode the sheet's QR to lock the month/year to the paper
+      //    (defeats "UI picker says July, sheet says June" bugs).
+      let qrMonthKey: string | undefined;
+      let qrNote: string | undefined;
+      let effectiveYear = year;
+      let effectiveMonth = month;
+      try {
+        const norm = await invoke<{ qr: { year: number | null; month: number | null; sheet_id: string | null }; note: string }>(
+          "normalize_sheet",
+          { args: { image_path: picked } }
+        );
+        qrNote = norm.note;
+        if (norm.qr.year && norm.qr.month) {
+          effectiveYear = norm.qr.year;
+          effectiveMonth = norm.qr.month;
+          qrMonthKey = monthKey(effectiveYear, effectiveMonth);
+        }
+      } catch (e) {
+        qrNote = "QR pre-check failed: " + String((e as any)?.message || e);
+      }
+
       const bytes = await readFile(picked);
       const mime = fileToMime(picked);
       const result = await extractTimesheet({
         apiKey, imageBytes: bytes, mimeType: mime,
-        monthYear: monthKey(year, month),
+        monthYear: qrMonthKey || monthKey(year, month),
         knownStaffNames: activeStaff.map((s) => s.name),
       });
       const unmatched = new Set<string>();
       for (const r of result.rows) {
         if (!matchStaffByName(r.staff_name, activeStaff)) unmatched.add(r.staff_name);
       }
-      setOcrResult({ rows: result.rows, unmatched: Array.from(unmatched).sort(), rawText: result.raw_text });
+
+      // 2) Hour validation: flag rows with paid-hours < 2 or > 10 so they
+      //    can be surfaced in a banner (and skipped from auto-import).
+      const flags: Array<{ index: number; reason: string }> = [];
+      result.rows.forEach((r, i) => {
+        if (!r.in_time || !r.out_time) return;   // partial rows aren't flagged
+        const paid = paidHours(r.in_time, r.out_time, r.no_lunch === true);
+        if (paid < 2) flags.push({ index: i, reason: `Shift too short (${paid.toFixed(2)}h)` });
+        else if (paid > 10) flags.push({ index: i, reason: `Shift too long (${paid.toFixed(2)}h)` });
+      });
+
+      const uiMonthKey = monthKey(year, month);
+      setOcrResult({
+        rows: result.rows,
+        unmatched: Array.from(unmatched).sort(),
+        rawText: result.raw_text,
+        qrNote,
+        qrMonth: qrMonthKey,
+        monthMismatch: !!qrMonthKey && qrMonthKey !== uiMonthKey,
+        flags,
+      });
       if (result.rows.length === 0) {
         notify("AI returned 0 rows — see 'What the AI saw' below to debug.", "err");
+      } else if (flags.length) {
+        notify(`Read ${result.rows.length} entries; ${flags.length} need attention.`, "err");
       } else {
-        notify(`Read ${result.rows.length} time entries. Review and import below.`);
+        notify(`Read ${result.rows.length} time entries. Ready to import.`);
       }
     } catch (e: any) {
       const raw = String(e?.message || e);
@@ -217,18 +269,24 @@ export default function StaffScreen() {
 
   async function importOcr() {
     if (!ocrResult) return;
-    let saved = 0, skipped = 0;
-    for (const r of ocrResult.rows) {
+    const flaggedIdx = new Set(ocrResult.flags.map((f) => f.index));
+    let saved = 0, skipped = 0, flaggedSkipped = 0;
+    for (let i = 0; i < ocrResult.rows.length; i++) {
+      const r = ocrResult.rows[i];
+      if (flaggedIdx.has(i)) { flaggedSkipped++; continue; }
       const match = matchStaffByName(r.staff_name, activeStaff);
       if (!match) { skipped++; continue; }
       try {
-        await upsertHour(match.id, r.work_date, r.in_time, r.out_time, "ocr");
+        await upsertHour(match.id, r.work_date, r.in_time, r.out_time, "ocr", null, null, r.no_lunch === true);
         saved++;
       } catch { skipped++; }
     }
     setOcrResult(null);
     await refresh();
-    notify(`Imported ${saved} entries${skipped ? ` (${skipped} skipped — unmatched staff)` : ""}.`);
+    const bits: string[] = [`Imported ${saved} entries`];
+    if (skipped) bits.push(`${skipped} unmatched`);
+    if (flaggedSkipped) bits.push(`${flaggedSkipped} flagged (fix and re-import)`);
+    notify(bits.join(" · "));
   }
 
   // ---- Excel export ----
@@ -354,11 +412,52 @@ export default function StaffScreen() {
 
         {ocrResult && (
           <div style={{ background: "#fff", border: "1px solid var(--border)", padding: 14, borderRadius: 10, marginTop: 14 }}>
+            {/* QR / month-source banner */}
+            {ocrResult.qrMonth && (
+              <div style={{
+                background: ocrResult.monthMismatch ? "#fef3c7" : "#dcfce7",
+                border: `1px solid ${ocrResult.monthMismatch ? "#f59e0b" : "#22c55e"}`,
+                padding: 8, borderRadius: 6, marginBottom: 10, fontSize: 13,
+              }}>
+                <strong>📷 Sheet QR detected:</strong> {ocrResult.qrMonth}
+                {ocrResult.monthMismatch && <> — <strong>differs from the {MONTHS[month - 1]} {year} you had selected.</strong> Using the sheet's month.</>}
+              </div>
+            )}
+            {ocrResult.qrMonth === undefined && ocrResult.qrNote && (
+              <div style={{ background: "#f3f4f6", border: "1px solid var(--border)", padding: 8, borderRadius: 6, marginBottom: 10, fontSize: 12, color: "var(--muted)" }}>
+                ⓘ {ocrResult.qrNote}. Using UI-selected month: <strong>{monthKey(year, month)}</strong>.
+              </div>
+            )}
+
+            {/* Hour-validation flag banner */}
+            {ocrResult.flags.length > 0 && (
+              <div style={{
+                background: "#fef2f2", border: "1px solid #ef4444",
+                padding: 10, borderRadius: 6, marginBottom: 10, fontSize: 13,
+              }}>
+                <strong>⚠ {ocrResult.flags.length} row{ocrResult.flags.length === 1 ? "" : "s"} flagged</strong> (won't be imported until fixed):
+                <ul style={{ margin: "6px 0 0 20px", padding: 0 }}>
+                  {ocrResult.flags.slice(0, 8).map((f) => {
+                    const r = ocrResult.rows[f.index];
+                    return <li key={f.index}>{r.staff_name} on {r.work_date} · {f.reason} ({r.in_time || "?"}–{r.out_time || "?"}{r.no_lunch ? ", no lunch" : ""})</li>;
+                  })}
+                  {ocrResult.flags.length > 8 && <li>…and {ocrResult.flags.length - 8} more</li>}
+                </ul>
+              </div>
+            )}
+
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10, gap: 10, flexWrap: "wrap" }}>
               <strong>AI read {ocrResult.rows.length} time entries</strong>
               <div style={{ display: "flex", gap: 8 }}>
                 <button className="btn secondary" onClick={() => setOcrResult(null)}>Discard</button>
-                <button className="btn" onClick={importOcr}>Import all matched</button>
+                <button
+                  className="btn"
+                  onClick={importOcr}
+                  style={{ fontWeight: 700 }}
+                  title="Import all clean rows without reviewing (flagged rows are skipped)"
+                >
+                  ✓ Import all ({ocrResult.rows.length - ocrResult.flags.length} clean)
+                </button>
               </div>
             </div>
             {ocrResult.unmatched.length > 0 && (
@@ -368,20 +467,32 @@ export default function StaffScreen() {
               </p>
             )}
             <details>
-              <summary style={{ cursor: "pointer", color: "var(--muted)", fontSize: 13 }}>Preview {ocrResult.rows.length} extracted rows</summary>
+              <summary style={{ cursor: "pointer", color: "var(--muted)", fontSize: 13 }}>Preview {ocrResult.rows.length} extracted rows (optional review)</summary>
               <table className="table" style={{ marginTop: 10 }}>
-                <thead><tr><th>From sheet</th><th>Matched to</th><th>Date</th><th>In</th><th>Out</th><th>Hours</th></tr></thead>
+                <thead><tr><th>From sheet</th><th>Matched to</th><th>Date</th><th>In</th><th>Out</th><th>No Ln</th><th>Paid hrs</th><th>Status</th></tr></thead>
                 <tbody>
                   {ocrResult.rows.map((r, i) => {
                     const m = matchStaffByName(r.staff_name, activeStaff);
+                    const flag = ocrResult.flags.find((f) => f.index === i);
+                    const raw = hoursBetween(r.in_time, r.out_time);
+                    const paid = paidHours(r.in_time, r.out_time, r.no_lunch === true);
                     return (
-                      <tr key={i} style={!m ? { opacity: 0.55 } : undefined}>
+                      <tr key={i} style={
+                        flag ? { background: "#fef2f2" } :
+                        !m ? { opacity: 0.55 } : undefined
+                      }>
                         <td>{r.staff_name}</td>
                         <td>{m ? m.name : <em>(no match)</em>}</td>
                         <td>{r.work_date}</td>
                         <td>{r.in_time || "—"}</td>
                         <td>{r.out_time || "—"}</td>
-                        <td>{hoursBetween(r.in_time, r.out_time).toFixed(2)}</td>
+                        <td style={{ textAlign: "center" }}>{r.no_lunch ? "✓" : ""}</td>
+                        <td title={`raw ${raw.toFixed(2)}h${r.no_lunch ? "" : " − 0.5h lunch"}`}>{paid.toFixed(2)}</td>
+                        <td style={{ fontSize: 12 }}>
+                          {flag ? <span style={{ color: "#dc2626", fontWeight: 600 }}>⚠ {flag.reason}</span> :
+                           !m ? <span style={{ color: "#b45309" }}>skip: no match</span> :
+                           <span style={{ color: "#16a34a" }}>✓ ready</span>}
+                        </td>
                       </tr>
                     );
                   })}

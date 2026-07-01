@@ -4,6 +4,7 @@ mod email;
 mod errlog;
 mod gemini;
 mod inbox;
+mod preprocess;
 mod restore;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -69,6 +70,12 @@ pub fn run() {
             sql: include_str!("../migrations/010_child_attendance.sql"),
             kind: MigrationKind::Up,
         },
+        Migration {
+            version: 11,
+            description: "add_no_lunch_flag",
+            sql: include_str!("../migrations/011_no_lunch.sql"),
+            kind: MigrationKind::Up,
+        },
     ];
 
     tauri::Builder::default()
@@ -101,6 +108,7 @@ pub fn run() {
             gemini::extract_timesheet,
             gemini::extract_attendance,
             inbox::inbox_list_recent,
+            preprocess::normalize_sheet,
             errlog::append_error_log,
             errlog::read_error_log,
             errlog::error_log_path,

@@ -28,6 +28,8 @@ pub struct ExtractedRow {
     pub work_date: String,   // yyyy-mm-dd
     pub in_time: Option<String>,
     pub out_time: Option<String>,
+    #[serde(default)]
+    pub no_lunch: bool,      // true = "No Ln" box checked → skip 30-min deduction
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -88,7 +90,9 @@ pub async fn extract_timesheet(args: ExtractArgs) -> Result<ExtractResult, Strin
         \n\
         HOW TO UNWRAP LAYOUT (A) into rows — this is critical:\n\
         - Read the column-header names ONCE (handwritten names at the top of each staff column).\n\
+        - Each staff column has THREE sub-columns: 'IN', 'OUT', and 'No Ln' (a small checkbox).\n\
         - For every day-row with at least one filled time cell, emit ONE output row PER staff column that has data, using that column's header name as staff_name and the day-row's date as work_date.\n\
+        - For each emitted row, ALSO report no_lunch: true if the 'No Ln' checkbox is clearly ticked/checked/marked for that day+staff, else false. If the box is empty or unclear, return false.\n\
         - Skip days where ALL staff cells are blank. Skip the column-header row itself.\n\
         - If a staff column header is blank/illegible, skip that ENTIRE column (do not invent 'Staff 1'/'Person A').\n\
         - If a single time is visible (only 'in' or only 'out'), still emit the row with the other field null.\n\
@@ -102,7 +106,7 @@ pub async fn extract_timesheet(args: ExtractArgs) -> Result<ExtractResult, Strin
         6. Skip totals rows, signature rows, and the column-header row.\n\
         \n\
         Return ONLY JSON, no commentary:\n\
-        {{\"rows\": [{{\"staff_name\": str, \"work_date\": \"YYYY-MM-DD\", \"in_time\": \"HH:MM\" or null, \"out_time\": \"HH:MM\" or null}}]}}",
+        {{\"rows\": [{{\"staff_name\": str, \"work_date\": \"YYYY-MM-DD\", \"in_time\": \"HH:MM\" or null, \"out_time\": \"HH:MM\" or null, \"no_lunch\": true|false}}]}}",
         month = args.month_year,
         staff_hint = staff_hint
     );
@@ -165,6 +169,7 @@ pub async fn extract_timesheet(args: ExtractArgs) -> Result<ExtractResult, Strin
             work_date: date,
             in_time: r["in_time"].as_str().map(|s| s.trim().to_string()).filter(|s| !s.is_empty()),
             out_time: r["out_time"].as_str().map(|s| s.trim().to_string()).filter(|s| !s.is_empty()),
+            no_lunch: r["no_lunch"].as_bool().unwrap_or(false),
         });
     }
 

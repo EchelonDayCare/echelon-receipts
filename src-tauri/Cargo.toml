@@ -1,6 +1,6 @@
 [package]
 name = "echelon-receipts"
-version = "0.2.0"
+version = "0.2.1"
 description = "Echelon Daycare receipt generator"
 authors = ["Echelon Daycare Society"]
 edition = "2021"
@@ -26,6 +26,8 @@ keyring = { version = "3", features = ["apple-native", "windows-native", "linux-
 base64 = "0.22"
 chrono = "0.4"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"] }
+rqrr = "0.7"
 
 [profile.release]
 opt-level = "z"

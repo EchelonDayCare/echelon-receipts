@@ -6,6 +6,7 @@ export interface ExtractedRow {
   work_date: string;
   in_time: string | null;
   out_time: string | null;
+  no_lunch?: boolean;
 }
 export interface ExtractResult {
   rows: ExtractedRow[];

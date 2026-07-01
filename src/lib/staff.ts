@@ -12,6 +12,17 @@ function hoursBetween(inT: string | null, outT: string | null): number {
   return Math.round((mins / 60) * 100) / 100;
 }
 
+/**
+ * Paid hours = raw shift - 30 min unpaid lunch, UNLESS noLunch is true (staff
+ * worked through lunch and checked the "No Ln" box). Never negative.
+ */
+export function paidHours(inT: string | null, outT: string | null, noLunch: boolean): number {
+  const raw = hoursBetween(inT, outT);
+  if (raw <= 0) return 0;
+  const paid = noLunch ? raw : raw - 0.5;
+  return Math.max(0, Math.round(paid * 100) / 100);
+}
+
 export async function listStaff(includeArchived = false): Promise<Staff[]> {
   const d = await db();
   return d.select<Staff[]>(
@@ -60,19 +71,29 @@ export async function listHoursForMonth(year: number, month: number): Promise<(S
   );
 }
 
-export async function upsertHour(staffId: number, workDate: string, inT: string | null, outT: string | null, source: "manual" | "ocr", sheetPath: string | null = null, notes: string | null = null): Promise<void> {
-  const hours = hoursBetween(inT, outT);
+export async function upsertHour(
+  staffId: number,
+  workDate: string,
+  inT: string | null,
+  outT: string | null,
+  source: "manual" | "ocr",
+  sheetPath: string | null = null,
+  notes: string | null = null,
+  noLunch: boolean = false,
+): Promise<void> {
+  const hours = paidHours(inT, outT, noLunch);
   await execRetry(
-    `INSERT INTO staff_hours(staff_id, work_date, in_time, out_time, hours_decimal, source, sheet_image_path, notes)
-     VALUES(?, ?, ?, ?, ?, ?, ?, ?)
+    `INSERT INTO staff_hours(staff_id, work_date, in_time, out_time, hours_decimal, source, sheet_image_path, notes, no_lunch)
+     VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)
      ON CONFLICT(staff_id, work_date) DO UPDATE SET
        in_time=excluded.in_time,
        out_time=excluded.out_time,
        hours_decimal=excluded.hours_decimal,
        source=excluded.source,
        sheet_image_path=COALESCE(excluded.sheet_image_path, staff_hours.sheet_image_path),
-       notes=COALESCE(excluded.notes, staff_hours.notes)`,
-    [staffId, workDate, inT, outT, hours, source, sheetPath, notes]
+       notes=COALESCE(excluded.notes, staff_hours.notes),
+       no_lunch=excluded.no_lunch`,
+    [staffId, workDate, inT, outT, hours, source, sheetPath, notes, noLunch ? 1 : 0]
   );
 }
 
