@@ -134,10 +134,11 @@ export default function Attendance() {
   async function importOcrRows() {
     if (!ocrResult) return;
     const studentList = rows.map((r) => ({ id: r.student_id, name: r.student_name }));
-    let saved = 0, skipped = 0;
+    let saved = 0, unmatched = 0, dbErrors = 0;
+    let lastError: unknown = null;
     for (const r of ocrResult.rows) {
       const match = matchStudentByName(r.child_name, studentList);
-      if (!match) { skipped++; continue; }
+      if (!match) { unmatched++; continue; }
       try {
         const validStatus = (s: string | null): AttendanceStatus => {
           if (!s) return r.in_time || r.out_time ? "present" : "absent";
@@ -153,11 +154,21 @@ export default function Attendance() {
           status: validStatus(r.status),
         });
         saved++;
-      } catch { skipped++; }
+      } catch (e) {
+        dbErrors++;
+        lastError = e;
+        console.error(`[importOcrRows] upsertAttendance failed for ${r.child_name} @ ${r.work_date || date}:`, e);
+      }
     }
     setOcrResult(null);
     await refresh();
-    show(`Imported ${saved} entries${skipped ? `, skipped ${skipped}` : ""}.`);
+    const bits: string[] = [`Imported ${saved} entries`];
+    if (unmatched) bits.push(`${unmatched} unmatched`);
+    if (dbErrors) bits.push(`${dbErrors} DB errors (see console)`);
+    show(bits.join(" · ") + ".", dbErrors ? "err" : "ok");
+    if (dbErrors && lastError) {
+      show(`First DB error: ${String((lastError as Error)?.message ?? lastError).slice(0, 240)}`, "err");
+    }
   }
 
   async function patchRow(studentId: number, patch: Partial<{

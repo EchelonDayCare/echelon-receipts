@@ -11,6 +11,7 @@ export interface ExtractedRow {
 export interface ExtractResult {
   rows: ExtractedRow[];
   raw_text: string;
+  detected_month_year?: string | null;  // "YYYY-MM" read off the sheet itself
 }
 
 function bytesToB64(bytes: Uint8Array): string {

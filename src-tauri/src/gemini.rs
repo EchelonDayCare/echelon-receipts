@@ -47,6 +47,12 @@ pub struct ExtractedAttendanceRow {
 pub struct ExtractResult {
     pub rows: Vec<ExtractedRow>,
     pub raw_text: String,
+    // Month Gemini actually read off the sheet (from title / header / QR text
+    // / date column) as "YYYY-MM". None if the sheet was ambiguous and the
+    // model fell back to the caller's hint. Frontend should prefer this over
+    // its UI-picker value so a June sheet uploaded with the picker on July
+    // still gets stamped June-01, June-02, ...
+    pub detected_month_year: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -79,7 +85,14 @@ pub async fn extract_timesheet(args: ExtractArgs) -> Result<ExtractResult, Strin
     };
 
     let prompt = format!(
-        "You are reading a staff sign-in / timesheet photo for {month}. First identify the layout, then extract.\n\
+        "You are reading a staff sign-in / timesheet photo. The caller thinks this sheet is for {month}, but that is only a HINT — the sheet itself is authoritative.\n\
+        \n\
+        STEP 0 — DETERMINE THE SHEET'S MONTH AND YEAR (do this FIRST):\n\
+        - Look at the sheet's printed title/header text (e.g. 'JUNE 2026', 'Jun-2026', '06/2026').\n\
+        - If the sheet has a QR code with readable text nearby, use that too.\n\
+        - If neither is legible, look at any pre-printed date cells or the day-of-week columns.\n\
+        - Choose the month + year you can actually read from the page. Only fall back to the hint '{month}' if the sheet gives you NO usable month signal.\n\
+        - Report this in the output field `detected_month_year` as 'YYYY-MM'. Use YOUR detected month for every work_date below — NOT the hint.\n\
         \n\
         COMMON LAYOUTS — detect which one this is:\n\
         (A) Echelon monthly grid: 4 black corner squares + QR code, days 1-31 as ROWS down the left, staff names HANDWRITTEN in COLUMN HEADERS at the top, each staff column split into sub-columns 'in' and 'out' (and sometimes 'TH' which is usually blank — ignore TH). Weekend/holiday rows may be peach-shaded.\n\
@@ -102,11 +115,11 @@ pub async fn extract_timesheet(args: ExtractArgs) -> Result<ExtractResult, Strin
         2. NEVER invent placeholder names like 'Staff 1', 'Person A', 'Employee 1', 'Unknown'. Use only names you can actually read from the page or match to the known list.\n\
         3. NEVER fabricate rows for empty cells. Output must match what is physically written.\n\
         4. Convert all times to 24-hour HH:MM (e.g. '8' → '08:00', '8:30' → '08:30', '3' on an OUT column → '15:00' if context makes PM obvious, otherwise '03:00').\n\
-        5. Use {month}-DD for work_date (DD = the row's day-of-month, zero-padded). If only one day is visible, use that day.\n\
+        5. Format work_date as `{{detected_month_year}}-DD` (DD = the row's day-of-month, zero-padded). Every row's YYYY-MM must equal the detected_month_year you chose in STEP 0.\n\
         6. Skip totals rows, signature rows, and the column-header row.\n\
         \n\
         Return ONLY JSON, no commentary:\n\
-        {{\"rows\": [{{\"staff_name\": str, \"work_date\": \"YYYY-MM-DD\", \"in_time\": \"HH:MM\" or null, \"out_time\": \"HH:MM\" or null, \"no_lunch\": true|false}}]}}",
+        {{\"detected_month_year\": \"YYYY-MM\", \"rows\": [{{\"staff_name\": str, \"work_date\": \"YYYY-MM-DD\", \"in_time\": \"HH:MM\" or null, \"out_time\": \"HH:MM\" or null, \"no_lunch\": true|false}}]}}",
         month = args.month_year,
         staff_hint = staff_hint
     );
@@ -158,6 +171,11 @@ pub async fn extract_timesheet(args: ExtractArgs) -> Result<ExtractResult, Strin
     let parsed: serde_json::Value = serde_json::from_str(&inner)
         .map_err(|e| redact(format!("model output not JSON: {e} :: {}", truncate(&inner, 400)), &key_for_redact))?;
     let rows_json = parsed["rows"].as_array().cloned().unwrap_or_default();
+    // Detected month is optional — very old prompt versions or fallbacks may omit it.
+    let detected_month_year = parsed["detected_month_year"]
+        .as_str()
+        .map(|s| s.trim().to_string())
+        .filter(|s| s.len() == 7 && s.chars().nth(4) == Some('-'));
     let mut rows: Vec<ExtractedRow> = Vec::with_capacity(rows_json.len());
     for r in rows_json {
         let name = r["staff_name"].as_str().unwrap_or("").trim().to_string();
@@ -173,7 +191,7 @@ pub async fn extract_timesheet(args: ExtractArgs) -> Result<ExtractResult, Strin
         });
     }
 
-    Ok(ExtractResult { rows, raw_text: inner })
+    Ok(ExtractResult { rows, raw_text: inner, detected_month_year })
 }
 
 #[tauri::command]

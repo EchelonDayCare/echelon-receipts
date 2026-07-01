@@ -8,6 +8,7 @@ import { getSettings } from "../lib/db";
 import {
   listStaff, createStaff, updateStaff, archiveStaff,
   listHoursForMonth, upsertHour, deleteHour, matchStaffByName, hoursBetween, paidHours,
+  assertStaffHoursSchema,
 } from "../lib/staff";
 import { extractTimesheet, fileToMime, ExtractedRow } from "../lib/gemini";
 import { loadXLSX } from "../lib/lazy";
@@ -44,6 +45,16 @@ export default function StaffScreen() {
     staff_id: "", work_date: new Date().toISOString().slice(0, 10), in_time: "", out_time: "",
   });
   const [toast, setToast] = useState<{ msg: string; tone: "ok" | "err" } | null>(null);
+  // Per-employee collapse state on the entries card. Uses staff.id. Persists
+  // for the life of the screen mount; refresh() does not reset it.
+  const [collapsedStaff, setCollapsedStaff] = useState<Set<number>>(new Set());
+  function toggleCollapsed(staffId: number) {
+    setCollapsedStaff((prev) => {
+      const next = new Set(prev);
+      if (next.has(staffId)) next.delete(staffId); else next.add(staffId);
+      return next;
+    });
+  }
 
   async function refresh() {
     setStaff(await listStaff(true));
@@ -121,6 +132,22 @@ export default function StaffScreen() {
     await deleteHour(id);
     await refresh();
   }
+  // Bulk-delete every entry we have for one staff member in the currently-
+  // viewed month. Used by the "Delete all" button per employee — handy after
+  // a bad OCR import ("21 entries stamped July but sheet was June").
+  async function removeAllForStaff(staffId: number, staffName: string, count: number) {
+    if (count === 0) return;
+    const label = `${MONTHS[month - 1]} ${year}`;
+    if (!confirm(`Delete ALL ${count} entries for ${staffName} in ${label}?\n\nThis cannot be undone.`)) return;
+    const ids = rows.filter((r) => r.staff_id === staffId).map((r) => r.id);
+    let failed = 0;
+    for (const id of ids) {
+      try { await deleteHour(id); } catch { failed++; }
+    }
+    await refresh();
+    if (failed === 0) notify(`Deleted ${ids.length} entries for ${staffName}.`);
+    else notify(`Deleted ${ids.length - failed}/${ids.length}; ${failed} failed.`, "err");
+  }
 
   // ---- OCR via Gemini ----
   // Shared core: given an absolute image path, run Gemini extraction and
@@ -130,6 +157,16 @@ export default function StaffScreen() {
     if (settings.gemini_api_key_set !== "1") {
       notify("Add your Gemini API key in Settings first.", "err"); return;
     }
+
+    // Guard: refuse to run OCR if the local DB schema can't hold the result.
+    // Cheap to check, and it stops the classic "AI reads 21 rows, 0 imported,
+    // 21 'unmatched'" foot-gun where the real cause is a missing DB column.
+    const schemaError = await assertStaffHoursSchema();
+    if (schemaError) {
+      notify(`Schema check failed — import will fail. ${schemaError}`, "err");
+      return;
+    }
+
     setOcrBusy(true);
     setOcrResult(null);
     let apiKey: string | null = null;
@@ -138,7 +175,9 @@ export default function StaffScreen() {
       if (!apiKey) throw new Error("Gemini API key not found in keychain — re-save it in Settings.");
 
       // 1) Try to decode the sheet's QR to lock the month/year to the paper
-      //    (defeats "UI picker says July, sheet says June" bugs).
+      //    (defeats "UI picker says July, sheet says June" bugs). This is the
+      //    fast path; if the QR is missing or unreadable, Gemini itself will
+      //    read the month off the sheet's printed header in step (3).
       let qrMonthKey: string | undefined;
       let qrNote: string | undefined;
       let effectiveYear = year;
@@ -162,15 +201,31 @@ export default function StaffScreen() {
       const mime = fileToMime(picked);
       const result = await extractTimesheet({
         apiKey, imageBytes: bytes, mimeType: mime,
-        monthYear: qrMonthKey || monthKey(year, month),
+        monthYear: qrMonthKey || monthKey(year, month),  // HINT only — Gemini also reads the header
         knownStaffNames: activeStaff.map((s) => s.name),
       });
+
+      // 2) Trust the sheet, not the UI. If Gemini read a month off the sheet's
+      //    header/QR, prefer THAT over the UI picker and re-stamp every row's
+      //    YYYY-MM to match. This is what fixes "June sheet uploaded with
+      //    picker on July → all rows dated July".
+      const uiMonthKey = monthKey(year, month);
+      const sheetMonthKey = qrMonthKey || result.detected_month_year || undefined;
+      if (sheetMonthKey && /^\d{4}-\d{2}$/.test(sheetMonthKey)) {
+        for (const r of result.rows) {
+          if (r.work_date && r.work_date.length >= 10) {
+            const dd = r.work_date.slice(8, 10);
+            r.work_date = `${sheetMonthKey}-${dd}`;
+          }
+        }
+      }
+
       const unmatched = new Set<string>();
       for (const r of result.rows) {
         if (!matchStaffByName(r.staff_name, activeStaff)) unmatched.add(r.staff_name);
       }
 
-      // 2) Hour validation: flag rows with paid-hours < 2 or > 10 so they
+      // 3) Hour validation: flag rows with paid-hours < 2 or > 10 so they
       //    can be surfaced in a banner (and skipped from auto-import).
       const flags: Array<{ index: number; reason: string }> = [];
       result.rows.forEach((r, i) => {
@@ -180,14 +235,13 @@ export default function StaffScreen() {
         else if (paid > 10) flags.push({ index: i, reason: `Shift too long (${paid.toFixed(2)}h)` });
       });
 
-      const uiMonthKey = monthKey(year, month);
       setOcrResult({
         rows: result.rows,
         unmatched: Array.from(unmatched).sort(),
         rawText: result.raw_text,
         qrNote,
-        qrMonth: qrMonthKey,
-        monthMismatch: !!qrMonthKey && qrMonthKey !== uiMonthKey,
+        qrMonth: sheetMonthKey,
+        monthMismatch: !!sheetMonthKey && sheetMonthKey !== uiMonthKey,
         flags,
       });
       if (result.rows.length === 0) {
@@ -269,24 +323,40 @@ export default function StaffScreen() {
 
   async function importOcr() {
     if (!ocrResult) return;
+    // Re-check schema right before writing. Cheap; guarantees we never hit
+    // the silent-catch trap even if the OCR guard was somehow bypassed.
+    const schemaError = await assertStaffHoursSchema();
+    if (schemaError) {
+      notify(`Cannot import — ${schemaError}`, "err");
+      return;
+    }
     const flaggedIdx = new Set(ocrResult.flags.map((f) => f.index));
-    let saved = 0, skipped = 0, flaggedSkipped = 0;
+    let saved = 0, unmatched = 0, dbErrors = 0, flaggedSkipped = 0;
+    let lastError: unknown = null;
     for (let i = 0; i < ocrResult.rows.length; i++) {
       const r = ocrResult.rows[i];
       if (flaggedIdx.has(i)) { flaggedSkipped++; continue; }
       const match = matchStaffByName(r.staff_name, activeStaff);
-      if (!match) { skipped++; continue; }
+      if (!match) { unmatched++; continue; }
       try {
         await upsertHour(match.id, r.work_date, r.in_time, r.out_time, "ocr", null, null, r.no_lunch === true);
         saved++;
-      } catch { skipped++; }
+      } catch (e) {
+        dbErrors++;
+        lastError = e;
+        console.error(`[importOcr] upsertHour failed for ${r.staff_name} @ ${r.work_date}:`, e);
+      }
     }
     setOcrResult(null);
     await refresh();
     const bits: string[] = [`Imported ${saved} entries`];
-    if (skipped) bits.push(`${skipped} unmatched`);
+    if (unmatched) bits.push(`${unmatched} unmatched`);
+    if (dbErrors) bits.push(`${dbErrors} DB errors (see console)`);
     if (flaggedSkipped) bits.push(`${flaggedSkipped} flagged (fix and re-import)`);
-    notify(bits.join(" · "));
+    notify(bits.join(" · "), dbErrors ? "err" : "ok");
+    if (dbErrors && lastError) {
+      notify(`First DB error: ${String((lastError as Error)?.message ?? lastError).slice(0, 240)}`, "err");
+    }
   }
 
   // ---- Excel export ----
@@ -412,20 +482,21 @@ export default function StaffScreen() {
 
         {ocrResult && (
           <div style={{ background: "#fff", border: "1px solid var(--border)", padding: 14, borderRadius: 10, marginTop: 14 }}>
-            {/* QR / month-source banner */}
+            {/* Month-source banner. qrMonth now holds whichever the app
+                trusted: QR (fast path) or Gemini's header-read (fallback). */}
             {ocrResult.qrMonth && (
               <div style={{
                 background: ocrResult.monthMismatch ? "#fef3c7" : "#dcfce7",
                 border: `1px solid ${ocrResult.monthMismatch ? "#f59e0b" : "#22c55e"}`,
                 padding: 8, borderRadius: 6, marginBottom: 10, fontSize: 13,
               }}>
-                <strong>📷 Sheet QR detected:</strong> {ocrResult.qrMonth}
-                {ocrResult.monthMismatch && <> — <strong>differs from the {MONTHS[month - 1]} {year} you had selected.</strong> Using the sheet's month.</>}
+                <strong>📷 Sheet month:</strong> {ocrResult.qrMonth} (read from the sheet itself)
+                {ocrResult.monthMismatch && <> — <strong>differs from the {MONTHS[month - 1]} {year} you had selected.</strong> Trusting the sheet.</>}
               </div>
             )}
-            {ocrResult.qrMonth === undefined && ocrResult.qrNote && (
-              <div style={{ background: "#f3f4f6", border: "1px solid var(--border)", padding: 8, borderRadius: 6, marginBottom: 10, fontSize: 12, color: "var(--muted)" }}>
-                ⓘ {ocrResult.qrNote}. Using UI-selected month: <strong>{monthKey(year, month)}</strong>.
+            {ocrResult.qrMonth === undefined && (
+              <div style={{ background: "#fef3c7", border: "1px solid #f59e0b", padding: 8, borderRadius: 6, marginBottom: 10, fontSize: 12 }}>
+                ⚠ Could not read the sheet's month from either the QR code or the header. Rows will be imported as <strong>{monthKey(year, month)}</strong> (the picker's month). If that's wrong, discard, fix the header month, and re-upload.
               </div>
             )}
 
@@ -589,12 +660,28 @@ export default function StaffScreen() {
       <section className="card">
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 12, flexWrap: "wrap", gap: 8 }}>
           <h3 style={{ margin: 0 }}>{MONTHS[month - 1]} {year} entries</h3>
-          {rows.length > 0 && (
-            <div style={{ fontSize: 14 }}>
-              <span style={{ color: "var(--muted)" }}>Month total: </span>
-              <strong>{grandHours.toFixed(2)} hrs{grandPay ? ` · $${grandPay.toFixed(2)}` : ""}</strong>
-            </div>
-          )}
+          <div style={{ display: "flex", alignItems: "baseline", gap: 12, flexWrap: "wrap" }}>
+            {rows.length > 0 && (() => {
+              const staffWithRows = activeStaff.concat(staff.filter((s) => !s.active && rowsByStaff.has(s.id)))
+                .filter((s) => (rowsByStaff.get(s.id) || []).length > 0);
+              const allCollapsed = staffWithRows.length > 0 && staffWithRows.every((s) => collapsedStaff.has(s.id));
+              return (
+                <button
+                  className="btn link"
+                  onClick={() => setCollapsedStaff(allCollapsed ? new Set() : new Set(staffWithRows.map((s) => s.id)))}
+                  style={{ fontSize: 12 }}
+                >
+                  {allCollapsed ? "▸ Expand all" : "▾ Collapse all"}
+                </button>
+              );
+            })()}
+            {rows.length > 0 && (
+              <div style={{ fontSize: 14 }}>
+                <span style={{ color: "var(--muted)" }}>Month total: </span>
+                <strong>{grandHours.toFixed(2)} hrs{grandPay ? ` · $${grandPay.toFixed(2)}` : ""}</strong>
+              </div>
+            )}
+          </div>
         </div>
         {rows.length === 0 ? (
           <div style={{ textAlign: "center", padding: "30px 10px", color: "var(--muted)" }}>
@@ -607,27 +694,51 @@ export default function StaffScreen() {
             const list = rowsByStaff.get(s.id) || [];
             if (list.length === 0) return null;
             const total = list.reduce((a, b) => a + b.hours_decimal, 0);
+            const isCollapsed = collapsedStaff.has(s.id);
             return (
-              <div key={s.id} style={{ marginBottom: 20, padding: 14, background: "#fafbff", borderRadius: 10, border: "1px solid var(--border)" }}>
-                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 8 }}>
-                  <h4 style={{ margin: 0, fontSize: 15 }}>{s.name} <span style={{ color: "var(--muted)", fontWeight: 400, fontSize: 13 }}>· {list.length} day{list.length === 1 ? "" : "s"}</span></h4>
-                  <strong>{total.toFixed(2)} hrs{s.hourly_rate ? ` · $${(s.hourly_rate * total).toFixed(2)}` : ""}</strong>
+              <div key={s.id} style={{ marginBottom: 12, padding: 14, background: "#fafbff", borderRadius: 10, border: "1px solid var(--border)" }}>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                  <button
+                    onClick={() => toggleCollapsed(s.id)}
+                    title={isCollapsed ? "Expand" : "Collapse"}
+                    style={{
+                      display: "flex", alignItems: "center", gap: 6,
+                      background: "transparent", border: "none", padding: 0, cursor: "pointer",
+                      textAlign: "left", flex: "1 1 auto", minWidth: 0,
+                    }}
+                  >
+                    <span style={{ fontSize: 20, lineHeight: 1, color: "var(--muted)", width: 20, display: "inline-block", textAlign: "center" }}>{isCollapsed ? "▸" : "▾"}</span>
+                    <h4 style={{ margin: 0, fontSize: 15 }}>{s.name} <span style={{ color: "var(--muted)", fontWeight: 400, fontSize: 13 }}>· {list.length} day{list.length === 1 ? "" : "s"}</span></h4>
+                  </button>
+                  <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+                    <strong>{total.toFixed(2)} hrs{s.hourly_rate ? ` · $${(s.hourly_rate * total).toFixed(2)}` : ""}</strong>
+                    <button
+                      className="btn link danger"
+                      onClick={() => removeAllForStaff(s.id, s.name, list.length)}
+                      title={`Delete all ${list.length} entries for ${s.name} in ${MONTHS[month - 1]} ${year}`}
+                      style={{ fontSize: 12 }}
+                    >
+                      Delete all
+                    </button>
+                  </div>
                 </div>
-                <table className="table">
-                  <thead><tr><th style={{ width: 110 }}>Date</th><th style={{ width: 110 }}>In</th><th style={{ width: 110 }}>Out</th><th>Hours</th><th>Source</th><th></th></tr></thead>
-                  <tbody>
-                    {list.map((r) => (
-                      <tr key={r.id}>
-                        <td>{r.work_date}</td>
-                        <td><input type="time" defaultValue={r.in_time || ""} onBlur={(e) => editHourInline(r, { in_time: e.target.value })} /></td>
-                        <td><input type="time" defaultValue={r.out_time || ""} onBlur={(e) => editHourInline(r, { out_time: e.target.value })} /></td>
-                        <td><strong>{r.hours_decimal.toFixed(2)}</strong></td>
-                        <td><span className="pill muted">{r.source === "ocr" ? "AI" : "manual"}</span></td>
-                        <td style={{ textAlign: "right" }}><button className="btn link danger" onClick={() => removeHour(r.id)}>Delete</button></td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
+                {!isCollapsed && (
+                  <table className="table" style={{ marginTop: 8 }}>
+                    <thead><tr><th style={{ width: 110 }}>Date</th><th style={{ width: 110 }}>In</th><th style={{ width: 110 }}>Out</th><th>Hours</th><th>Source</th><th></th></tr></thead>
+                    <tbody>
+                      {list.map((r) => (
+                        <tr key={r.id}>
+                          <td>{r.work_date}</td>
+                          <td><input type="time" defaultValue={r.in_time || ""} onBlur={(e) => editHourInline(r, { in_time: e.target.value })} /></td>
+                          <td><input type="time" defaultValue={r.out_time || ""} onBlur={(e) => editHourInline(r, { out_time: e.target.value })} /></td>
+                          <td><strong>{r.hours_decimal.toFixed(2)}</strong></td>
+                          <td><span className="pill muted">{r.source === "ocr" ? "AI" : "manual"}</span></td>
+                          <td style={{ textAlign: "right" }}><button className="btn link danger" onClick={() => removeHour(r.id)}>Delete</button></td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                )}
               </div>
             );
           })

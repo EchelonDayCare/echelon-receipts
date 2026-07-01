@@ -101,6 +101,74 @@ export async function deleteHour(id: number): Promise<void> {
   await execRetry("DELETE FROM staff_hours WHERE id=?", [id]);
 }
 
+/**
+ * Verify the staff_hours table has every column the app needs. Returns null
+ * when the schema is good, otherwise a human-readable error message that
+ * names the missing columns. Use this before an OCR bulk import so we fail
+ * loud instead of getting 21 silent per-row INSERT failures — the classic
+ * symptom is "0 imported / N unmatched" when in fact all names DID match.
+ */
+// Known-good ALTER statements for columns that may be missing when the plugin's
+// migration tracker got out of sync with reality (e.g. plugin recorded a
+// migration as applied but the ALTER silently no-op'd, or the DB was restored
+// from an older snapshot). Order matters only for readability.
+const STAFF_HOURS_AUTOREPAIR: Record<string, string> = {
+  no_lunch: "ALTER TABLE staff_hours ADD COLUMN no_lunch INTEGER NOT NULL DEFAULT 0",
+};
+
+export async function assertStaffHoursSchema(): Promise<string | null> {
+  try {
+    const d = await db();
+    const cols = await d.select<Array<{ name: string }>>("PRAGMA table_info(staff_hours)");
+    if (!cols || cols.length === 0) {
+      return "Table 'staff_hours' does not exist. Reinstall the app or run migrations.";
+    }
+    const have = new Set(cols.map((c) => c.name));
+    const required = [
+      "staff_id", "work_date", "in_time", "out_time",
+      "hours_decimal", "source", "sheet_image_path", "notes", "no_lunch",
+    ];
+    let missing = required.filter((c) => !have.has(c));
+    if (missing.length === 0) return null;
+
+    // Try to self-heal any missing columns we know how to add.
+    const repairedNames: string[] = [];
+    const unrepaired: string[] = [];
+    for (const col of missing) {
+      const sql = STAFF_HOURS_AUTOREPAIR[col];
+      if (!sql) { unrepaired.push(col); continue; }
+      try {
+        await execRetry(sql, []);
+        repairedNames.push(col);
+        console.warn(`[schema] auto-repaired staff_hours.${col}`);
+      } catch (e: any) {
+        // If the column already exists (race / concurrent open), treat as OK.
+        const msg = String(e?.message || e).toLowerCase();
+        if (msg.includes("duplicate column")) {
+          repairedNames.push(col);
+        } else {
+          console.error(`[schema] auto-repair FAILED for ${col}:`, e);
+          unrepaired.push(col);
+        }
+      }
+    }
+
+    if (unrepaired.length > 0) {
+      return `staff_hours is missing column(s): ${unrepaired.join(", ")}. Reinstall the latest DMG.`;
+    }
+    // Re-verify.
+    const cols2 = await d.select<Array<{ name: string }>>("PRAGMA table_info(staff_hours)");
+    const have2 = new Set(cols2.map((c) => c.name));
+    missing = required.filter((c) => !have2.has(c));
+    if (missing.length > 0) {
+      return `staff_hours still missing after repair: ${missing.join(", ")}. Reinstall the latest DMG.`;
+    }
+    return null;
+  } catch (e: any) {
+    return `Schema check failed: ${e?.message || e}`;
+  }
+}
+
 // Find best matching staff_id for a name from OCR. Case-insensitive exact, then prefix, then null.
 export function matchStaffByName(name: string, staffList: Staff[]): Staff | null {
   const n = name.trim().toLowerCase();
