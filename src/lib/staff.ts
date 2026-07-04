@@ -105,6 +105,39 @@ export async function deleteHour(id: number): Promise<void> {
 }
 
 /**
+ * Count how many rows currently exist for (staffId, YYYY-MM). Used by the
+ * OCR importer to show a "will replace N entries" confirmation before
+ * wiping the month.
+ */
+export async function countHoursForStaffMonth(staffId: number, ym: string): Promise<number> {
+  const d = await db();
+  const rows = await d.select<Array<{ n: number }>>(
+    "SELECT COUNT(*) AS n FROM staff_hours WHERE staff_id=? AND substr(work_date,1,7)=?",
+    [staffId, ym]
+  );
+  return rows[0]?.n ?? 0;
+}
+
+/**
+ * Delete every staff_hours row for (staffId, YYYY-MM). Used before a fresh
+ * OCR import so a re-read sheet cleanly replaces any prior data for that
+ * staff/month — including stale dates the new import doesn't cover
+ * (which a plain upsert would otherwise leave behind).
+ *
+ * NOTE: This wipes BOTH ocr-sourced and manual entries for that scope.
+ * Manual corrections on the same month WILL be lost. The caller should
+ * confirm with the user before invoking.
+ */
+export async function deleteHoursForStaffMonth(staffId: number, ym: string): Promise<number> {
+  const before = await countHoursForStaffMonth(staffId, ym);
+  await execRetry(
+    "DELETE FROM staff_hours WHERE staff_id=? AND substr(work_date,1,7)=?",
+    [staffId, ym]
+  );
+  return before;
+}
+
+/**
  * Verify the staff_hours table has every column the app needs. Returns null
  * when the schema is good, otherwise a human-readable error message that
  * names the missing columns. Use this before an OCR bulk import so we fail

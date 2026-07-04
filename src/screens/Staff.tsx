@@ -8,7 +8,7 @@ import { getSettings, setSetting } from "../lib/db";
 import {
   listStaff, createStaff, updateStaff, archiveStaff,
   listHoursForMonth, upsertHour, deleteHour, hoursBetween, paidHours,
-  assertStaffHoursSchema,
+  assertStaffHoursSchema, countHoursForStaffMonth, deleteHoursForStaffMonth,
 } from "../lib/staff";
 import { fileToMime } from "../lib/gemini";
 import {
@@ -332,6 +332,59 @@ export default function StaffScreen() {
       notify(`Cannot import — ${schemaError}`, "err");
       return;
     }
+
+    // ── Re-import protection ────────────────────────────────────────────
+    // For every (staff_id, YYYY-MM) pair we're about to import, count what's
+    // already in the DB. If any of those buckets have prior rows, confirm
+    // with the user before wiping. This is what makes re-reading the same
+    // sheet cleanly REPLACE prior data instead of leaving stale dates
+    // behind (plain upsert would only overwrite matching dates).
+    const rowsToImport = consensus.align.rows.filter((r) => {
+      if (!force && r.row_confidence === "red") return false;
+      if (!force && consensus.flags.has(r.key)) return false;
+      if (!r.in_time.value && !r.out_time.value) return false;
+      return true;
+    });
+    const bucketKeys = new Set<string>();
+    for (const r of rowsToImport) {
+      bucketKeys.add(`${r.staff_id}|${r.work_date.slice(0, 7)}`);
+    }
+    const buckets: Array<{ staffId: number; ym: string; existing: number; label: string }> = [];
+    for (const key of bucketKeys) {
+      const [sid, ym] = key.split("|");
+      const staffId = Number(sid);
+      const existing = await countHoursForStaffMonth(staffId, ym);
+      if (existing > 0) {
+        const label = staff.find((s) => s.id === staffId)?.name ?? `staff #${staffId}`;
+        buckets.push({ staffId, ym, existing, label });
+      }
+    }
+    if (buckets.length > 0) {
+      const totalExisting = buckets.reduce((a, b) => a + b.existing, 0);
+      const lines = buckets
+        .slice(0, 12)
+        .map((b) => `  • ${b.label} — ${b.ym} (${b.existing} entr${b.existing === 1 ? "y" : "ies"})`)
+        .join("\n");
+      const more = buckets.length > 12 ? `\n  … and ${buckets.length - 12} more` : "";
+      const ok = confirm(
+        `This import will REPLACE ${totalExisting} existing ` +
+        `entr${totalExisting === 1 ? "y" : "ies"} for the following staff/month${buckets.length === 1 ? "" : "s"}:\n\n` +
+        lines + more +
+        `\n\nAll prior data (including any manual edits) for these staff/month combinations will be wiped and replaced with the new OCR results.\n\nContinue?`
+      );
+      if (!ok) return;
+      for (const b of buckets) {
+        try {
+          await deleteHoursForStaffMonth(b.staffId, b.ym);
+        } catch (e) {
+          console.error(`[importOcr] wipe failed for ${b.label} ${b.ym}:`, e);
+          notify(`Failed to wipe old data for ${b.label} ${b.ym} — aborting import.`, "err");
+          return;
+        }
+      }
+    }
+    // ─────────────────────────────────────────────────────────────────────
+
     let saved = 0, blocked = 0, flaggedSkipped = 0, dbErrors = 0;
     let lastError: unknown = null;
     for (const r of consensus.align.rows) {
@@ -355,6 +408,10 @@ export default function StaffScreen() {
     setConsensus(null);
     await refresh();
     const bits: string[] = [force ? `Imported ${saved} entries (forced)` : `Imported ${saved} entries`];
+    if (buckets.length > 0) {
+      const wiped = buckets.reduce((a, b) => a + b.existing, 0);
+      bits.push(`replaced ${wiped} prior entr${wiped === 1 ? "y" : "ies"}`);
+    }
     if (blocked) bits.push(`${blocked} blocked (models disagree)`);
     if (flaggedSkipped) bits.push(`${flaggedSkipped} flagged (fix and re-import)`);
     if (dbErrors) bits.push(`${dbErrors} DB errors (see console)`);
