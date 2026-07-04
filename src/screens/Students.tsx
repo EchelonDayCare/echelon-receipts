@@ -1,5 +1,6 @@
 import { showAlert, showConfirm, showPrompt } from "../lib/dialogs";
 import { useEffect, useState } from "react";
+import { useSearchParams } from "react-router-dom";
 import { open } from "@tauri-apps/plugin-dialog";
 import { readFile } from "@tauri-apps/plugin-fs";
 import { listStudents, listYears, upsertStudent, deleteStudent, hardDeleteStudent, getSettings,
@@ -9,6 +10,7 @@ import type { Student, AccbEntry, SettingsMap } from "../types";
 
 export default function Students() {
   const now = new Date().getFullYear();
+  const [searchParams, setSearchParams] = useSearchParams();
   const [years, setYears] = useState<number[]>([now]);
   const [year, setYear] = useState<number>(now);
   const [students, setStudents] = useState<Student[]>([]);
@@ -19,6 +21,17 @@ export default function Students() {
   const [accbDraft, setAccbDraft] = useState<{ year: number; month: number; amount: string; notes: string }>(
     { year: new Date().getFullYear(), month: new Date().getMonth() + 1, amount: "", notes: "" }
   );
+
+  // Auto-open the Add Student modal when arriving with ?new=1 (from Today's
+  // "+ New Student" quick action).
+  useEffect(() => {
+    if (searchParams.get("new") === "1") {
+      setEditing({ year, active: 1 });
+      searchParams.delete("new");
+      setSearchParams(searchParams, { replace: true });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   async function refresh() {
     const ys = await listYears();

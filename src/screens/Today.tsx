@@ -88,8 +88,8 @@ export default function Today() {
       {/* Big primary actions */}
       <div className="today-actions">
         <button className="btn big" onClick={() => nav("/new")}>+ New Receipt</button>
-        <button className="btn secondary big" onClick={() => nav("/students")}>+ New Student</button>
-        <button className="btn secondary big" onClick={() => nav("/history")}>Open Receipt History</button>
+        <button className="btn secondary big" onClick={() => nav("/students/roster?new=1")}>+ New Student</button>
+        <button className="btn secondary big" onClick={() => nav("/students/history")}>Open Receipt History</button>
       </div>
 
       {/* Needs attention */}
