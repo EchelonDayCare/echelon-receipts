@@ -1,3 +1,4 @@
+import { showAlert, showConfirm, showPrompt } from "../lib/dialogs";
 import { useEffect, useMemo, useState } from "react";
 import { openPath } from "@tauri-apps/plugin-opener";
 import { writeFile, exists, mkdir } from "@tauri-apps/plugin-fs";
@@ -110,14 +111,14 @@ export default function History() {
                     return;
                   }
                   await openPath(p);
-                } catch (e: any) { alert("Open failed: " + (e?.message || e)); }
+                } catch (e: any) { void showAlert("Open failed: " + (e?.message || e)); }
               };
 
               const doSavePdf = async () => {
                 try {
                   const p = await saveReceiptPdf(r, settings);
-                  alert(p ? "Saved PDF:\n" + p : "Set a PDF folder in Settings first.");
-                } catch (e) { alert("Save failed: " + e); }
+                  void showAlert(p ? "Saved PDF:\n" + p : "Set a PDF folder in Settings first.");
+                } catch (e) { void showAlert("Save failed: " + e); }
               };
 
               const doSubsidyPdf = async () => {
@@ -131,11 +132,11 @@ export default function History() {
                     await writeFile(target, bytes);
                   }
                   await openPath(target);
-                } catch (e: any) { alert("Statement failed: " + (e?.message || e)); }
+                } catch (e: any) { void showAlert("Statement failed: " + (e?.message || e)); }
               };
 
               const doEmailSubsidy = async () => {
-                if (!confirm(`Email subsidy statement for receipt #${r.receipt_no} to:\n  ${recipients.join("\n  ")}`)) return;
+                if (!await showConfirm(`Email subsidy statement for receipt #${r.receipt_no} to:\n  ${recipients.join("\n  ")}`)) return;
                 try {
                   const bytes = await renderSubsidyStatementPdf(r, settings);
                   const { year: y, label } = monthLabelFromDate(r.date);
@@ -148,28 +149,28 @@ export default function History() {
                     body: renderSubsidyEmailTemplate(bodyTpl, r, settings),
                     recipients, settings,
                   });
-                  alert(`✉️ Subsidy statement (${label} ${y}) sent to ${recipients.join(", ")}`);
-                } catch (e: any) { alert("Email failed:\n" + (e?.message || e)); }
+                  void showAlert(`✉️ Subsidy statement (${label} ${y}) sent to ${recipients.join(", ")}`);
+                } catch (e: any) { void showAlert("Email failed:\n" + (e?.message || e)); }
               };
 
               const doEmail = async () => {
-                if (!confirm(`Email receipt #${r.receipt_no} to:\n  ${recipients.join("\n  ")}`)) return;
+                if (!await showConfirm(`Email receipt #${r.receipt_no} to:\n  ${recipients.join("\n  ")}`)) return;
                 try {
                   await sendReceiptEmail({ receipt: r, recipients, settings });
                   await markEmailed(r.id, recipients);
-                  alert(`✉️ Sent to ${recipients.join(", ")}`);
+                  void showAlert(`✉️ Sent to ${recipients.join(", ")}`);
                   refresh();
-                } catch (e: any) { alert("Email failed:\n" + (e?.message || e)); }
+                } catch (e: any) { void showAlert("Email failed:\n" + (e?.message || e)); }
               };
 
               const doVoid = async () => {
-                const reason = prompt(
+                const reason = await showPrompt(
                   `Void receipt #${r.receipt_no}?\n\nThis marks the receipt as cancelled. The record stays in your history for audit but parents will see it is voided.\n\nReason (required):`,
                   ""
                 );
                 if (reason == null) return; // cancelled
                 const trimmed = reason.trim();
-                if (!trimmed) { alert("A reason is required to void a receipt."); return; }
+                if (!trimmed) { void showAlert("A reason is required to void a receipt."); return; }
                 await voidReceipt(r.id, trimmed);
                 refresh();
               };

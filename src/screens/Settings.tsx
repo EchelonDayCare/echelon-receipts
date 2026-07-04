@@ -1,3 +1,4 @@
+import { showAlert, showConfirm } from "../lib/dialogs";
 import { useEffect, useState } from "react";
 import { useParams, useNavigate, NavLink } from "react-router-dom";
 import { open } from "@tauri-apps/plugin-dialog";
@@ -96,37 +97,37 @@ export default function Settings() {
         setHasAzureKey(true);
         setAzureKey("");
       }
-      alert("Settings saved.");
+      void showAlert("Settings saved.");
       window.dispatchEvent(new Event("settings-saved"));
     } catch (e) {
-      alert("Save failed: " + e);
+      void showAlert("Save failed: " + e);
     } finally {
       setSaving(false);
     }
   }
 
   async function clearStoredPassword() {
-    if (!confirm("Remove the stored SMTP password from the OS keychain?")) return;
+    if (!await showConfirm("Remove the stored SMTP password from the OS keychain?")) return;
     await invoke("keychain_delete", { key: "smtp_password" });
     await setSetting("smtp_password_set", "");
     setHasStoredPassword(false);
-    alert("Password removed.");
+    void showAlert("Password removed.");
   }
 
   async function clearGeminiKey() {
-    if (!confirm("Remove the stored Gemini API key from the OS keychain?")) return;
+    if (!await showConfirm("Remove the stored Gemini API key from the OS keychain?")) return;
     await invoke("keychain_delete", { key: "gemini_api_key" });
     await setSetting("gemini_api_key_set", "");
     setHasGeminiKey(false);
-    alert("Gemini key removed.");
+    void showAlert("Gemini key removed.");
   }
 
   async function clearAzureKey() {
-    if (!confirm("Remove the stored Azure AI Foundry key from the OS keychain?")) return;
+    if (!await showConfirm("Remove the stored Azure AI Foundry key from the OS keychain?")) return;
     await invoke("keychain_delete", { key: "azure_ai_key" });
     await setSetting("azure_ai_key_set", "");
     setHasAzureKey(false);
-    alert("Azure AI key removed.");
+    void showAlert("Azure AI key removed.");
   }
 
   async function runTest() {
@@ -140,9 +141,9 @@ export default function Settings() {
         setHasStoredPassword(true); setSmtpPassword("");
       }
       await sendTestEmail(await getSettings());
-      alert("✅ Test email sent. Check the inbox of " + (s.sender_email || s.contact_email));
+      void showAlert("✅ Test email sent. Check the inbox of " + (s.sender_email || s.contact_email));
     } catch (e: any) {
-      alert("❌ SMTP test failed:\n\n" + (e?.message || e));
+      void showAlert("❌ SMTP test failed:\n\n" + (e?.message || e));
     } finally {
       setTesting(false);
     }
@@ -164,9 +165,9 @@ export default function Settings() {
       await setSetting("last_backup_at", now);
       await setSetting("last_backup_path", dst);
       setS((cur) => ({ ...cur, last_backup_at: now, last_backup_path: dst }));
-      alert(`✅ Backup saved to:\n${dst}`);
+      void showAlert(`✅ Backup saved to:\n${dst}`);
     } catch (e: any) {
-      alert("❌ Backup failed:\n" + (e?.message || e));
+      void showAlert("❌ Backup failed:\n" + (e?.message || e));
     }
   }
 
@@ -184,9 +185,9 @@ export default function Settings() {
         last_cloud_backup_month: key,
         last_cloud_backup_recipient: res.recipient,
       }));
-      alert(`✅ Backup emailed to ${res.recipient}\n(${(res.bytes / 1024).toFixed(1)} KB)`);
+      void showAlert(`✅ Backup emailed to ${res.recipient}\n(${(res.bytes / 1024).toFixed(1)} KB)`);
     } catch (e: any) {
-      alert("❌ Cloud backup failed:\n" + (e?.message || e));
+      void showAlert("❌ Cloud backup failed:\n" + (e?.message || e));
     }
   }
 
@@ -198,17 +199,17 @@ export default function Settings() {
         filters: [{ name: "SQLite database", extensions: ["db", "sqlite", "sqlite3"] }],
       });
       if (!picked || Array.isArray(picked)) return;
-      const ok = confirm(
+      const ok = await showConfirm(
         `⚠️  This will REPLACE your current database with:\n\n${picked}\n\n` +
         `A safety copy of your current data will be saved to the Backups folder first. ` +
         `The app will close and reopen automatically.\n\nProceed?`
       );
       if (!ok) return;
       const pending = await invoke<string>("stage_restore", { srcPath: picked });
-      alert(`✅ Restore staged.\n${pending}\n\nThe app will now restart to apply the restore.`);
+      void showAlert(`✅ Restore staged.\n${pending}\n\nThe app will now restart to apply the restore.`);
       await invoke("restart_app");
     } catch (e: any) {
-      alert("❌ Restore failed:\n" + (e?.message || e));
+      void showAlert("❌ Restore failed:\n" + (e?.message || e));
     }
   }
 

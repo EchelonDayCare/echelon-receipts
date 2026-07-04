@@ -1,3 +1,4 @@
+import { showConfirm, showPrompt } from "../lib/dialogs";
 import { useEffect, useMemo, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import { readFile } from "@tauri-apps/plugin-fs";
@@ -119,7 +120,7 @@ export default function StaffScreen() {
     } catch (e: any) { notify("Save failed: " + (e?.message || e), "err"); }
   }
   async function archive(id: number) {
-    if (!confirm("Archive this staff member? Their past hours are preserved.")) return;
+    if (!await showConfirm("Archive this staff member? Their past hours are preserved.")) return;
     await archiveStaff(id);
     await refresh();
   }
@@ -142,7 +143,7 @@ export default function StaffScreen() {
     await refresh();
   }
   async function removeHour(id: number) {
-    if (!confirm("Delete this entry?")) return;
+    if (!await showConfirm("Delete this entry?")) return;
     await deleteHour(id);
     await refresh();
   }
@@ -152,7 +153,7 @@ export default function StaffScreen() {
   async function removeAllForStaff(staffId: number, staffName: string, count: number) {
     if (count === 0) return;
     const label = `${MONTHS[month - 1]} ${year}`;
-    if (!confirm(`Delete ALL ${count} entries for ${staffName} in ${label}?\n\nThis cannot be undone.`)) return;
+    if (!await showConfirm(`Delete ALL ${count} entries for ${staffName} in ${label}?\n\nThis cannot be undone.`)) return;
     const ids = rows.filter((r) => r.staff_id === staffId).map((r) => r.id);
     let failed = 0;
     for (const id of ids) {
@@ -305,7 +306,7 @@ export default function StaffScreen() {
         const list = items
           .map((it, i) => `${i + 1}. ${it.name}  (${fmtMin(it.modified_secs_ago)} min ago, ${fmtMb(it.size)} MB)`)
           .join("\n");
-        const ans = window.prompt(
+        const ans = await showPrompt(
           `Multiple recent images in Downloads:\n\n${list}\n\nWhich number to import?`,
           "1"
         );
@@ -366,7 +367,7 @@ export default function StaffScreen() {
         .map((b) => `  • ${b.label} — ${b.ym} (${b.existing} entr${b.existing === 1 ? "y" : "ies"})`)
         .join("\n");
       const more = buckets.length > 12 ? `\n  … and ${buckets.length - 12} more` : "";
-      const ok = confirm(
+      const ok = await showConfirm(
         `This import will REPLACE ${totalExisting} existing ` +
         `entr${totalExisting === 1 ? "y" : "ies"} for the following staff/month${buckets.length === 1 ? "" : "s"}:\n\n` +
         lines + more +
@@ -760,9 +761,9 @@ export default function StaffScreen() {
                     {blocked > 0 && (
                       <button
                         className="btn"
-                        onClick={() => {
+                        onClick={async () => {
                           const totalToImport = rows.filter((r) => r.in_time.value || r.out_time.value).length;
-                          if (confirm(`Force-import all ${totalToImport} rows including the ${blocked} blocked one${blocked === 1 ? "" : "s"}?\n\nUse this only after you've manually reviewed and corrected the flagged cells.`)) {
+                          if (await showConfirm(`Force-import all ${totalToImport} rows including the ${blocked} blocked one${blocked === 1 ? "" : "s"}?\n\nUse this only after you've manually reviewed and corrected the flagged cells.`)) {
                             importOcr(true);
                           }
                         }}

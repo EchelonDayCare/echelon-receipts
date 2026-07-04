@@ -1,3 +1,4 @@
+import { showAlert, showConfirm } from "../lib/dialogs";
 import { useEffect, useMemo, useState } from "react";
 import { listStaff } from "../lib/staff";
 import {
@@ -51,7 +52,7 @@ export default function StaffCredentials() {
 
   async function save() {
     if (!editing || !editing.staff_id || !editing.type) {
-      alert("Pick a staff member and a credential type.");
+      void showAlert("Pick a staff member and a credential type.");
       return;
     }
     try {
@@ -67,12 +68,12 @@ export default function StaffCredentials() {
       setEditing(null);
       await refresh();
     } catch (e: any) {
-      alert("Save failed: " + (e?.message || e));
+      void showAlert("Save failed: " + (e?.message || e));
     }
   }
 
   async function remove(id: number) {
-    if (!confirm("Delete this credential record?")) return;
+    if (!await showConfirm("Delete this credential record?")) return;
     await deleteCredential(id);
     await refresh();
   }

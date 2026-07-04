@@ -1,3 +1,4 @@
+import { showAlert, showConfirm } from "../lib/dialogs";
 import { useEffect, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import { openPath } from "@tauri-apps/plugin-opener";
@@ -109,7 +110,7 @@ export default function AnnualReceipts() {
     try {
       const backupPath = await backupNow();
       if (!backupPath) {
-        if (!confirm("⚠️ Auto-backup failed. Continue without a backup? (Not recommended)")) {
+        if (!await showConfirm("⚠️ Auto-backup failed. Continue without a backup? (Not recommended)")) {
           return;
         }
       }
@@ -132,7 +133,7 @@ export default function AnnualReceipts() {
       await refresh();
       setStep(4);
       if (backupPath) {
-        alert(`✅ Drafts generated for ${i} student(s).\nBackup saved to:\n${backupPath}`);
+        void showAlert(`✅ Drafts generated for ${i} student(s).\nBackup saved to:\n${backupPath}`);
       }
     } finally {
       setLoading(false);
@@ -148,7 +149,7 @@ export default function AnnualReceipts() {
     // concurrently (which would allocate two AR numbers + send two emails).
     if (inFlight.has(idx)) return;
     const recipients = parseRecipients(r.recipientEmails);
-    if (!recipients.length) { alert("No email address."); return; }
+    if (!recipients.length) { void showAlert("No email address."); return; }
     setInFlight(prev => { const n = new Set(prev); n.add(idx); return n; });
     setRows(cur => cur.map((x, i) => i === idx ? { ...x, status: "sending", error: undefined } : x));
     try {
@@ -196,8 +197,8 @@ export default function AnnualReceipts() {
         const haveTotal = r.group.total > 0;
         if (ok && haveEmail && haveTotal) indexes.push(i);
       });
-      if (!indexes.length) { alert("Nothing eligible to send."); return; }
-      if (!confirm(`Send ${indexes.length} annual receipt${indexes.length === 1 ? "" : "s"} now?`)) return;
+      if (!indexes.length) { void showAlert("Nothing eligible to send."); return; }
+      if (!await showConfirm(`Send ${indexes.length} annual receipt${indexes.length === 1 ? "" : "s"} now?`)) return;
       setBatchProgress({ done: 0, total: indexes.length, current: rows[indexes[0]]?.group.student_name || "" });
       await yieldToUI();
       let done = 0;
@@ -231,7 +232,7 @@ export default function AnnualReceipts() {
       const p = await join(dir, `${r.ar.ar_number}_${r.group.student_name.replace(/[^\w]+/g, "_")}.pdf`);
       await writeFile(p, bytes);
       await openPath(p);
-    } catch (e: any) { alert("Open failed: " + (e?.message || e)); }
+    } catch (e: any) { void showAlert("Open failed: " + (e?.message || e)); }
   }
 
   async function showHistory(g: AnnualGroup) {
@@ -244,9 +245,9 @@ export default function AnnualReceipts() {
     if (!folder || Array.isArray(folder)) return;
     try {
       const out = await exportYearArchive({ year, settings, baseFolder: folder as string, onProgress: () => {} });
-      alert(`Archive written to:\n${out}`);
+      void showAlert(`Archive written to:\n${out}`);
     } catch (e: any) {
-      alert("Export failed: " + (e?.message || e));
+      void showAlert("Export failed: " + (e?.message || e));
     }
   }
 

@@ -1,3 +1,4 @@
+import { showAlert } from "../lib/dialogs";
 import { useEffect, useMemo, useState } from "react";
 import {
   listStudents, listYears, nextReceiptNo, createReceipt, getSettings,
@@ -78,9 +79,9 @@ export default function NewReceipt() {
 
   async function onSave(action: "print" | "email" | "save") {
     if (saving || sending) return;
-    if (!student) { alert("Pick a student first."); return; }
-    if (!description.trim()) { alert("Description is required."); return; }
-    const amt = parseFloat(amount); if (!(amt >= 0)) { alert("Invalid amount."); return; }
+    if (!student) { void showAlert("Pick a student first."); return; }
+    if (!description.trim()) { void showAlert("Description is required."); return; }
+    const amt = parseFloat(amount); if (!(amt >= 0)) { void showAlert("Invalid amount."); return; }
     const pen = parseFloat(pending || "0") || 0;
     const bk = (breakdown && !isRefund) ? breakdown : null;
 
@@ -89,7 +90,7 @@ export default function NewReceipt() {
     // otherwise the printed PDF shows an inconsistent total vs. the breakdown
     // table. Block the save and tell the user to use the Refund flow.
     if (bk && Math.abs(amt - bk.parent_pays) > 0.01) {
-      alert(
+      void showAlert(
         `Amount ($${amt.toFixed(2)}) does not match the subsidy breakdown (parent pays $${bk.parent_pays.toFixed(2)}).\n\n` +
         `When subsidies are enabled, the receipt amount must equal gross − CCFRI − ACCB.\n\n` +
         `To record a different amount, issue a Refund receipt instead.`
@@ -129,12 +130,12 @@ export default function NewReceipt() {
       };
       let savedPath: string | null = null;
       try { savedPath = await saveReceiptPdf(r, settingsLatest); }
-      catch (e) { console.error(e); alert("Receipt saved, but PDF auto-save failed:\n" + e); }
+      catch (e) { console.error(e); void showAlert("Receipt saved, but PDF auto-save failed:\n" + e); }
 
       if (action === "email") {
         const recipients = parseRecipients(student.email);
         if (recipients.length === 0) {
-          alert(`Receipt #${receiptNo} saved.${savedPath ? "\nPDF: " + savedPath : ""}\n⚠️ No email on file for this student — not sent.`);
+          void showAlert(`Receipt #${receiptNo} saved.${savedPath ? "\nPDF: " + savedPath : ""}\n⚠️ No email on file for this student — not sent.`);
         } else {
           // Show preview modal; actual send happens from confirmSendEmail().
           const html = buildReceiptHtml(r, settingsLatest);
@@ -148,7 +149,7 @@ export default function NewReceipt() {
       if (action === "print") printReceipt(r, settingsLatest);
       setReceiptNo((n) => n + 1);
       setComments(""); setPending(""); setIsRefund(false); setAmountTouched(false);
-      alert(`Receipt #${receiptNo} saved.${savedPath ? "\nPDF: " + savedPath : ""}`);
+      void showAlert(`Receipt #${receiptNo} saved.${savedPath ? "\nPDF: " + savedPath : ""}`);
     } finally {
       setSaving(false);
     }
@@ -162,9 +163,9 @@ export default function NewReceipt() {
       await markEmailed(preview.receipt.id, preview.recipients);
       const recips = preview.recipients.join(", ");
       setPreview(null);
-      alert(`✉️ Sent to ${recips}`);
+      void showAlert(`✉️ Sent to ${recips}`);
     } catch (e: any) {
-      alert("❌ Email failed: " + (e?.message || e));
+      void showAlert("❌ Email failed: " + (e?.message || e));
     } finally {
       setSending(false);
     }

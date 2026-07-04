@@ -1,3 +1,4 @@
+import { showPrompt } from "../lib/dialogs";
 import { useEffect, useMemo, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import { readFile } from "@tauri-apps/plugin-fs";
@@ -114,7 +115,7 @@ export default function Attendance() {
         const list = items.map((it, i) =>
           `${i + 1}. ${it.name}  (${fmtMin(it.modified_secs_ago)} min ago, ${fmtMb(it.size)} MB)`
         ).join("\n");
-        const ans = window.prompt(`Multiple recent images in Downloads:\n\n${list}\n\nWhich number to import?`, "1");
+        const ans = await showPrompt(`Multiple recent images in Downloads:\n\n${list}\n\nWhich number to import?`, "1");
         if (ans === null) return;
         const n = Number(ans.trim());
         if (!Number.isInteger(n) || n < 1 || n > items.length) {

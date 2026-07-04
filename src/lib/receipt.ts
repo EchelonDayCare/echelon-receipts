@@ -1,3 +1,4 @@
+import { showAlert } from "./dialogs";
 import type { Receipt, SettingsMap } from "../types";
 import { mkdir, writeFile, exists } from "@tauri-apps/plugin-fs";
 import { DEFAULT_LOGO_DATA_URL, DEFAULT_SIGNATURE_DATA_URL } from "./defaults";
@@ -140,7 +141,7 @@ export function printReceipt(r: Receipt, s: SettingsMap) {
   iframe.style.border = "0";
   document.body.appendChild(iframe);
   const doc = iframe.contentDocument || iframe.contentWindow?.document;
-  if (!doc) { alert("Print failed: could not open iframe."); return; }
+  if (!doc) { void showAlert("Print failed: could not open iframe."); return; }
   doc.open();
   doc.write(html);
   doc.close();
@@ -149,7 +150,7 @@ export function printReceipt(r: Receipt, s: SettingsMap) {
       iframe.contentWindow?.focus();
       iframe.contentWindow?.print();
     } catch (e) {
-      alert("Print failed: " + e);
+      void showAlert("Print failed: " + e);
     }
   };
   // Wait a tick for images (logo/signature) to lay out, then print.

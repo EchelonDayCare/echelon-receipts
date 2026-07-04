@@ -1,3 +1,4 @@
+import { showAlert } from "../lib/dialogs";
 import { useEffect, useMemo, useState } from "react";
 import { openPath } from "@tauri-apps/plugin-opener";
 import {
@@ -137,13 +138,13 @@ export default function ThisMonth() {
     try {
       const p = await saveReceiptPdf(r, settings);
       if (p) await openPath(p);
-      else alert("Set a PDF folder in Settings to archive PDFs.");
-    } catch (e: any) { alert("Open failed: " + (e?.message || e)); }
+      else void showAlert("Set a PDF folder in Settings to archive PDFs.");
+    } catch (e: any) { void showAlert("Open failed: " + (e?.message || e)); }
   }
 
   async function emailOne(idx: number) {
     const r = rows[idx]; if (!r.receipt) return;
-    if (r.parentEmails.length === 0) { alert("No email on file."); return; }
+    if (r.parentEmails.length === 0) { void showAlert("No email on file."); return; }
     setRows(cur => cur.map((x, i) => i === idx ? { ...x, busy: true, lastResult: null } : x));
     try {
       await sendReceiptEmail({ receipt: r.receipt, recipients: r.parentEmails, settings });

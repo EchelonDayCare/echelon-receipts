@@ -16,6 +16,7 @@ const Settings = lazy(() => import("./screens/Settings"));
 import { runCloudBackupIfDue } from "./lib/cloudBackup";
 import { getSettings } from "./lib/db";
 import { DEFAULT_LOGO_DATA_URL } from "./lib/defaults";
+import PromptHost from "./components/PromptHost";
 import "./App.css";
 
 function ModuleSidebar({
@@ -202,6 +203,7 @@ export default function App() {
 
   return (
     <HashRouter>
+      <PromptHost />
       <Routes>
         <Route path="/*" element={<Shell logo={logo} name={name} staffEnabled={staffEnabled} />} />
       </Routes>

@@ -1,3 +1,4 @@
+import { showAlert, showConfirm, showPrompt } from "../lib/dialogs";
 import { useEffect, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import { readFile } from "@tauri-apps/plugin-fs";
@@ -41,7 +42,7 @@ export default function Students() {
   async function saveAccbRow() {
     if (!accbFor) return;
     const amt = parseFloat(accbDraft.amount);
-    if (!amt || amt <= 0) { alert("Enter a positive amount."); return; }
+    if (!amt || amt <= 0) { void showAlert("Enter a positive amount."); return; }
     await upsertAccb(accbFor.student.id, accbDraft.year, accbDraft.month, amt, accbDraft.notes || null);
     setAccbDraft({ ...accbDraft, amount: "", notes: "" });
     refreshAccb();
@@ -50,7 +51,7 @@ export default function Students() {
   async function onHardDelete(s: Student) {
     const probe = await hardDeleteStudent(s.id, false);
     if (!probe.deleted && probe.receiptCount > 0) {
-      const ok = confirm(
+      const ok = await showConfirm(
         `⚠️  Permanently delete ${s.name}?\n\n` +
         `This student has ${probe.receiptCount} receipt${probe.receiptCount === 1 ? "" : "s"} on file. ` +
         `Deleting will also remove:\n` +
@@ -62,16 +63,16 @@ export default function Students() {
         `Continue?`
       );
       if (!ok) return;
-      const typed = prompt(`Type the student's name to confirm deletion:\n\n${s.name}`);
+      const typed = await showPrompt(`Type the student's name to confirm deletion:\n\n${s.name}`);
       if ((typed || "").trim() !== s.name.trim()) {
-        alert("Name did not match. Deletion cancelled.");
+        void showAlert("Name did not match. Deletion cancelled.");
         return;
       }
       await hardDeleteStudent(s.id, true);
       refresh();
       return;
     }
-    const ok = confirm(`Permanently delete ${s.name}?\n\nNo receipts on file, so nothing else is affected.`);
+    const ok = await showConfirm(`Permanently delete ${s.name}?\n\nNo receipts on file, so nothing else is affected.`);
     if (!ok) return;
     await hardDeleteStudent(s.id, true);
     refresh();
@@ -97,7 +98,7 @@ export default function Students() {
       const bytes = await readFile(path);
       const imported = await parseRosterFile(bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer);
       if (!imported.length) {
-        alert("No rows found. Expected columns: Student Name, Father's Name, Mother's Name, Email ID");
+        void showAlert("No rows found. Expected columns: Student Name, Father's Name, Mother's Name, Email ID");
         return;
       }
       const existing = new Set((await listStudents(targetYear, false)).map((s) => s.name.toLowerCase().trim()));
@@ -107,11 +108,11 @@ export default function Students() {
         await upsertStudent({ ...s, year: targetYear });
         added++;
       }
-      alert(`Imported: ${added} added, ${skipped} skipped (duplicates).`);
+      void showAlert(`Imported: ${added} added, ${skipped} skipped (duplicates).`);
       setYear(targetYear);
       refresh();
     } catch (err) {
-      alert("Import failed: " + (err instanceof Error ? err.message : String(err)));
+      void showAlert("Import failed: " + (err instanceof Error ? err.message : String(err)));
     }
   }
 
@@ -154,7 +155,7 @@ export default function Students() {
                   )}
                   {s.active === 1 && (
                     <button className="btn ghost" style={{ color: "var(--danger)" }}
-                      onClick={async () => { if (confirm(`Mark ${s.name} inactive?`)) { await deleteStudent(s.id); refresh(); } }}>
+                      onClick={async () => { if (await showConfirm(`Mark ${s.name} inactive?`)) { await deleteStudent(s.id); refresh(); } }}>
                       Inactivate
                     </button>
                   )}
@@ -219,7 +220,7 @@ export default function Students() {
           )}
           <div style={{ display: "flex", gap: 10 }}>
             <button className="btn" onClick={async () => {
-              if (!editing.name?.trim()) { alert("Name required."); return; }
+              if (!editing.name?.trim()) { void showAlert("Name required."); return; }
               await upsertStudent({
                 id: editing.id, name: editing.name.trim(),
                 father_name: editing.father_name || null,
@@ -327,7 +328,7 @@ export default function Students() {
                       <td>{e.notes || "—"}</td>
                       <td style={{ textAlign: "right" }}>
                         <button className="btn ghost" style={{ color: "var(--danger)" }}
-                          onClick={async () => { if (confirm("Delete this ACCB entry?")) { await deleteAccb(e.id); refreshAccb(); } }}>
+                          onClick={async () => { if (await showConfirm("Delete this ACCB entry?")) { await deleteAccb(e.id); refreshAccb(); } }}>
                           Delete
                         </button>
                       </td>
