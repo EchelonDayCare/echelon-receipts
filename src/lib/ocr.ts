@@ -5,10 +5,11 @@ import { matchStaffByName } from "./staff";
 import type { Staff } from "../types";
 import type { ExtractedRow } from "./gemini";
 
-export type ProviderName = "gpt5" | "mistral_ocr";
+export type ProviderName = "gpt5" | "mistral_ocr" | "azure_di";
 export const PROVIDER_LABELS: Record<ProviderName, string> = {
   gpt5: "Mistral Document AI",
   mistral_ocr: "Mistral OCR (digits)",
+  azure_di: "Azure Document Intelligence",
 };
 
 // Mistral OCR contributes only raw per-day digit reads (no staff name, no
@@ -41,6 +42,8 @@ export async function extractTimesheetConsensus(opts: {
   mimeType: string;
   monthYear: string;
   knownStaffNames: string[];
+  enableMistralOcr?: boolean;
+  enableAzureDi?: boolean;
 }): Promise<ConsensusResult> {
   const image_b64 = bytesToB64(opts.imageBytes);
   return await invoke<ConsensusResult>("extract_timesheet_consensus", {
@@ -50,6 +53,8 @@ export async function extractTimesheetConsensus(opts: {
       month_year: opts.monthYear,
       known_staff_names: opts.knownStaffNames,
       azure_ai_key: opts.azureKey,
+      enable_mistral_ocr: opts.enableMistralOcr ?? true,
+      enable_azure_di: opts.enableAzureDi ?? true,
     },
   });
 }
@@ -84,6 +89,7 @@ export interface ConsensusRow {
   phantom: boolean;             // only 1 provider saw this row
   row_confidence: Confidence;
   warnings: string[];           // domain-rule flags (weekend, out-of-hours)
+  synthetic?: boolean;          // true = calendar-filler row (Doc AI didn't emit it)
 }
 
 export interface ConsensusAlignment {
@@ -159,11 +165,17 @@ export function computeConsensus(
   // work_date → literal digit reads, used only to corroborate/tiebreak the
   // semantic providers' times. Mistral does NOT vote on staff name or no_lunch.
   const mistralProvider = succeeded.find((p) => p.provider === "mistral_ocr");
-  const numericGrid = new Map<string, { in: string | null; out: string | null }>();
+  // Mistral emits one row per staff column per date (up to 4 for this sheet)
+  // but they all share the sentinel staff_name — so we can't attribute them
+  // to a specific staff. Keep the full list per date and pick the best match
+  // per bucket by digit-similarity to the semantic IN vote.
+  const numericGrid = new Map<string, Array<{ in: string | null; out: string | null }>>();
   if (mistralProvider) {
     for (const r of mistralProvider.rows) {
       if (r.staff_name !== MISTRAL_DIGITS_SENTINEL) continue;
-      numericGrid.set(r.work_date, { in: r.in_time ?? null, out: r.out_time ?? null });
+      const list = numericGrid.get(r.work_date) ?? [];
+      list.push({ in: r.in_time ?? null, out: r.out_time ?? null });
+      numericGrid.set(r.work_date, list);
     }
   }
   const mistralOk = mistralProvider?.ok ?? false;
@@ -186,7 +198,7 @@ export function computeConsensus(
 
   // Re-stamp helper for Mistral's numeric grid too (if we resolved the month).
   if (monthKey && /^\d{4}-\d{2}$/.test(monthKey)) {
-    const restamped = new Map<string, { in: string | null; out: string | null }>();
+    const restamped = new Map<string, Array<{ in: string | null; out: string | null }>>();
     for (const [wd, v] of numericGrid) {
       const nd = wd.length >= 10 ? `${monthKey}-${wd.slice(8, 10)}` : wd;
       restamped.set(nd, v);
@@ -210,6 +222,14 @@ export function computeConsensus(
       if (monthKey && /^\d{4}-\d{2}$/.test(monthKey) && workDate.length >= 10) {
         workDate = `${monthKey}-${workDate.slice(8, 10)}`;
       }
+      // Reject rows for calendar days that don't exist in this month
+      // (e.g. Doc AI hallucinates day 31 in June, or day 30 in February).
+      const dm = workDate.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+      if (dm) {
+        const yy = Number(dm[1]), mm = Number(dm[2]), dd = Number(dm[3]);
+        const daysIn = new Date(yy, mm, 0).getDate();
+        if (dd < 1 || dd > daysIn) continue;
+      }
       const key = `${match.id}|${workDate}`;
       let b = buckets.get(key);
       if (!b) {
@@ -222,7 +242,7 @@ export function computeConsensus(
     }
   }
 
-  const semanticOrder: ProviderName[] = ["gpt5"];
+  const semanticOrder: ProviderName[] = ["gpt5", "azure_di"];
 
   const rows: ConsensusRow[] = [];
   for (const [key, b] of buckets) {
@@ -252,14 +272,18 @@ export function computeConsensus(
     const nlCell: ConsensusCell = { ...cellConfidence(nlVotes, effectiveCount), votes: nlVotes, edited: false };
 
     // Apply Mistral numeric-witness corroboration to in/out times.
-    // Mistral appears as an extra vote entry (for tooltip visibility) and can
-    // (a) upgrade a yellow to green when it matches, or
-    // (b) tiebreak two disagreeing semantic providers by picking the one whose
-    //     digits match Mistral's read (mod 12 for OUT, since Mistral reads
-    //     literal digits without AM/PM inference).
-    const witness = numericGrid.get(b.work_date);
-    inCell = applyMistralWitness(inCell, witness?.in ?? null, "in", mistralOk, mistralHasDigits);
-    outCell = applyMistralWitness(outCell, witness?.out ?? null, "out", mistralOk, mistralHasDigits);
+    // Mistral rows aren't attributed to a specific staff column, so we
+    // pick the Mistral row for this date whose IN best matches this
+    // bucket's semantic IN (mod 12). When semantic voters disagree
+    // (inCell.value is null/red), try to match against ANY individual
+    // semantic IN vote so we can still tiebreak.
+    const semanticIns = inCell.votes
+      .filter((v) => v.sawRow && v.value !== null && v.provider !== "mistral_ocr")
+      .map((v) => v.value as string);
+    const inCandidates = inCell.value ? [inCell.value, ...semanticIns] : semanticIns;
+    const witness = pickMistralWitnessMulti(numericGrid.get(b.work_date) ?? [], inCandidates);
+    inCell = applyMistralWitness(inCell, witness?.in ?? null, "in", mistralOk, mistralHasDigits && witness !== null);
+    outCell = applyMistralWitness(outCell, witness?.out ?? null, "out", mistralOk, mistralHasDigits && witness !== null);
 
     // Also add a Mistral placeholder vote to nlCell for tooltip consistency
     // (Mistral doesn't vote on no_lunch — sawRow=false).
@@ -267,8 +291,16 @@ export function computeConsensus(
 
     // sawCount = number of semantic providers that produced this row.
     const sawCount = semanticOrder.filter((p) => b.per[p]).length;
-    // Phantom = one semantic provider invented this row when the other should have seen it.
-    const phantom = sawCount === 1 && effectiveCount >= 2;
+    // Phantom = one semantic provider invented this row when the other should
+    // have seen it — BUT if Mistral OCR digits corroborate, it's a genuine
+    // row that the other semantic voter simply misread (e.g. read "SICK"
+    // over faint handwriting). In that case, Mistral is the 2nd witness and
+    // we should not flag it phantom.
+    const mistralCorroborates = witness !== null && (
+      (inCell.confidence !== "red" && witness.in !== null) ||
+      (outCell.confidence !== "red" && witness.out !== null)
+    );
+    const phantom = sawCount === 1 && effectiveCount >= 2 && !mistralCorroborates;
     const worst: Confidence = [inCell.confidence, outCell.confidence, nlCell.confidence]
       .reduce<Confidence>((w, c) => (rank(c) > rank(w) ? c : w), "green");
     const rowConf: Confidence = phantom ? "red" : worst;
@@ -288,6 +320,46 @@ export function computeConsensus(
     });
   }
 
+  // ─── Calendar synthesis ─────────────────────────────────────────────
+  // Doc AI is non-deterministic about emitting placeholder rows for empty
+  // days (esp. weekends). Fill in every day of the detected month for each
+  // staff we already saw at least one row for, so mom sees a full calendar
+  // and can spot capture gaps. Synthesized rows have null times and will
+  // be flagged by the domain-rules loop below.
+  if (monthKey && /^\d{4}-\d{2}$/.test(monthKey)) {
+    const [yStr, mStr] = monthKey.split("-");
+    const year = Number(yStr);
+    const month = Number(mStr);
+    const daysInMonth = new Date(year, month, 0).getDate();
+    const staffSeen = new Map<number, string>();
+    for (const b of buckets.values()) staffSeen.set(b.staff_id, b.staff_name_canonical);
+    for (const [sid, sname] of staffSeen) {
+      for (let day = 1; day <= daysInMonth; day++) {
+        const workDate = `${monthKey}-${String(day).padStart(2, "0")}`;
+        const key = `${sid}|${workDate}`;
+        if (buckets.has(key)) continue;
+        const emptyVotes: CellVote[] = semanticOrder.map((prov) => ({ provider: prov, value: null, sawRow: false }));
+        const nlEmpty: CellVote[] = [...emptyVotes, { provider: "mistral_ocr", value: null, sawRow: false }];
+        const emptyCell = (votes: CellVote[]): ConsensusCell =>
+          ({ ...cellConfidence(votes, effectiveCount), votes, edited: false });
+        rows.push({
+          key,
+          staff_id: sid,
+          staff_name_canonical: sname,
+          staff_names_seen: [],
+          work_date: workDate,
+          in_time: emptyCell(emptyVotes),
+          out_time: emptyCell(emptyVotes),
+          no_lunch: emptyCell(nlEmpty),
+          phantom: false,
+          row_confidence: "green",
+          warnings: [],
+          synthetic: true,
+        });
+      }
+    }
+  }
+
   // ─── Domain rules ───────────────────────────────────────────────────
   // Applied after consensus voting. These flag business-logic anomalies
   // (weekends, out-of-hours) and downgrade confidence so Mom reviews them.
@@ -297,7 +369,8 @@ export function computeConsensus(
     // work_date is YYYY-MM-DD in local calendar terms; use UTC parse to avoid TZ drift.
     const d = new Date(`${r.work_date}T12:00:00Z`);
     const dow = d.getUTCDay(); // 0=Sun, 6=Sat
-    if (dow === 0 || dow === 6) {
+    const isWeekend = dow === 0 || dow === 6;
+    if (isWeekend) {
       w.push(`Weekend (${dow === 0 ? "Sunday" : "Saturday"}) — center closed`);
     }
     // Time-window flags.
@@ -309,11 +382,15 @@ export function computeConsensus(
     if (outHM && (outHM.h * 60 + outHM.m) > (17 * 60 + 30)) {
       w.push(`OUT ${r.out_time.value} is after 17:30`);
     }
+    // Empty-day flag — weekday with no times captured.
+    if (!isWeekend && !r.in_time.value && !r.out_time.value) {
+      w.push(`No times captured for this day — check the sheet`);
+    }
     if (w.length > 0) {
       r.warnings = w;
       // A warning always downgrades confidence to at least yellow so the row
       // shows amber. Weekend rows go straight to red (should never import).
-      if (dow === 0 || dow === 6) r.row_confidence = "red";
+      if (isWeekend) r.row_confidence = "red";
       else if (r.row_confidence === "green") r.row_confidence = "yellow";
     }
   }
@@ -355,15 +432,49 @@ function parseHM(t: string): { h: number; m: number } | null {
   return { h: Number(m[1]), m: Number(m[2]) };
 }
 
-// Fold Mistral's per-day digit reading into a cell already scored by the
-// (single) semantic voter (Doc AI). v0.2.4 — digits-first hierarchy:
-//   • Doc AI + digit witness agree → green.
-//   • Only Doc AI (no digit) → yellow (single-source, unconfirmed).
-//   • Only digit witness (Doc AI missed the row) → yellow, use digit
-//     with AM/PM inference.
-//   • Both present but disagree → yellow, prefer the digit witness
-//     (Mistral scored 30/30 on our test sheets vs Doc AI's ~28/30).
-// A Mistral vote entry is always appended for tooltip visibility.
+// Same as pickMistralWitness but accepts multiple candidate IN values (e.g.
+// individual disagreeing semantic votes). Returns the first Mistral row whose
+// IN matches ANY of the candidates.
+function pickMistralWitnessMulti(
+  candidates: Array<{ in: string | null; out: string | null }>,
+  semanticIns: string[],
+): { in: string | null; out: string | null } | null {
+  if (candidates.length === 0) return null;
+  if (semanticIns.length === 0) {
+    // No semantic anchor — only trust single-candidate case (unambiguous).
+    return candidates.length === 1 ? candidates[0] : null;
+  }
+  const targets = semanticIns
+    .map((s) => parseHM(s))
+    .filter((x): x is { h: number; m: number } => x !== null);
+  if (targets.length === 0) return candidates.length === 1 ? candidates[0] : null;
+  for (const c of candidates) {
+    if (!c.in) continue;
+    const w = parseHM(c.in);
+    if (!w) continue;
+    for (const s of targets) {
+      if (w.m !== s.m) continue;
+      if (w.h === s.h || Math.abs(w.h - s.h) === 12) return c;
+    }
+  }
+  return null;
+}
+
+// Fold Mistral's per-day digit reading into a cell already scored by
+// semantic voters (Doc AI + gpt-5.4). v0.2.5 — true 2-of-3 majority:
+//   • Semantic majority (both semantics agree, cell.confidence === "green"):
+//       - keep green regardless of digits (2/2 semantic majority already best)
+//   • Semantic disagreement (both saw, differ):
+//       - if digits match one of the semantic votes → 2/3 majority → green
+//         with the winning value
+//       - if digits match neither → 3-way split → red (all shown in tooltip)
+//       - if digits absent → red
+//   • Semantic single-source (one saw, one null, cell.confidence === "yellow"):
+//       - digits match the present value → 2 sources agree → green
+//       - digits disagree → prefer digits, yellow
+//   • Semantic empty (nobody saw the row, cell.value === null):
+//       - digits present → adopt digits, yellow with AM/PM inference
+//       - digits absent → pass through
 function applyMistralWitness(
   cell: ConsensusCell,
   witnessValue: string | null,
@@ -371,9 +482,13 @@ function applyMistralWitness(
   mistralOk: boolean,
   mistralHasDigits: boolean,
 ): ConsensusCell {
+  // Mistral reads literal digits (no AM/PM). For OUT times a small hour is
+  // almost certainly PM at a daycare — infer here so the tooltip vote matches
+  // the semantic majority (e.g. "02:30" out → "14:30").
+  const displayWitness = witnessValue !== null ? inferAmPm(witnessValue, kind) : null;
   const witnessVote: CellVote = {
     provider: "mistral_ocr",
-    value: witnessValue,
+    value: displayWitness,
     sawRow: mistralOk && witnessValue !== null,
   };
   const nextVotes = [...cell.votes, witnessVote];
@@ -383,17 +498,42 @@ function applyMistralWitness(
     return { ...cell, votes: nextVotes };
   }
 
-  // Doc AI missed the row but digits have it → adopt digit reading.
+  // Semantic majority already achieved → keep green, ignore digits.
+  if (cell.confidence === "green") {
+    return { ...cell, votes: nextVotes };
+  }
+
+  // Semantic disagreement (both saw, they differ → cellConfidence returned
+  // red + null). Reach into individual semantic votes to check which one
+  // (if any) matches the digit witness → recover a 2/3 majority.
+  if (cell.value === null && cell.confidence === "red") {
+    const semanticSeen = cell.votes.filter((v) => v.sawRow && v.value !== null);
+    for (const sv of semanticSeen) {
+      if (timeMatchesWitness(sv.value, witnessValue, kind)) {
+        // 2 of 3 agree → strong majority. Yellow (not green) because one
+        // model dissented — user should glance at it.
+        return { ...cell, votes: nextVotes, value: sv.value, confidence: "yellow" };
+      }
+    }
+    // Digits agree with neither semantic voter → 3-way split → adopt digits
+    // as the least-bad guess but leave red-null? No — adopt digits, yellow.
+    // (The alternative red means the row is blocked from import; adopting
+    // digits at least gives mom something to review.)
+    const inferred = inferAmPm(witnessValue, kind);
+    return { ...cell, votes: nextVotes, value: inferred, confidence: "yellow" };
+  }
+
+  // Nobody saw the row semantically → adopt digit reading.
   if (cell.value === null) {
     const inferred = inferAmPm(witnessValue, kind);
     return { ...cell, votes: nextVotes, value: inferred, confidence: "yellow" };
   }
 
-  // Both present — corroborate or override.
+  // Semantic single-source (yellow): digits either confirm (→ green) or
+  // disagree (→ prefer digits, yellow).
   if (timeMatchesWitness(cell.value, witnessValue, kind)) {
     return { ...cell, votes: nextVotes, confidence: "green" };
   }
-  // Doc AI vs digits disagree → prefer digits.
   const inferred = inferAmPm(witnessValue, kind);
   return { ...cell, votes: nextVotes, value: inferred, confidence: "yellow" };
 }

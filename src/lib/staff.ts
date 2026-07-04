@@ -13,13 +13,16 @@ function hoursBetween(inT: string | null, outT: string | null): number {
 }
 
 /**
- * Paid hours = raw shift - 30 min unpaid lunch, UNLESS noLunch is true (staff
- * worked through lunch and checked the "No Ln" box). Never negative.
+ * Paid hours = raw shift hours, minus 30-min unpaid lunch when the shift is
+ * 5 hours or more. Shifts under 5 hours get no deduction because the worker
+ * doesn't take an unpaid lunch. `noLunch=true` (staff worked through their
+ * lunch) also skips the deduction. Never returns negative.
  */
 export function paidHours(inT: string | null, outT: string | null, noLunch: boolean): number {
   const raw = hoursBetween(inT, outT);
   if (raw <= 0) return 0;
-  const paid = noLunch ? raw : raw - 0.5;
+  const deductLunch = !noLunch && raw >= 5;
+  const paid = deductLunch ? raw - 0.5 : raw;
   return Math.max(0, Math.round(paid * 100) / 100);
 }
 
@@ -169,9 +172,17 @@ export async function assertStaffHoursSchema(): Promise<string | null> {
   }
 }
 
-// Find best matching staff_id for a name from OCR. Case-insensitive exact, then prefix, then null.
+// Find best matching staff_id for a name from OCR. Case-insensitive exact, then prefix,
+// then last-name, then fuzzy (Levenshtein ≤ 2) to survive OCR misreads like Kirk→Kiran.
 export function matchStaffByName(name: string, staffList: Staff[]): Staff | null {
-  const n = name.trim().toLowerCase();
+  // Strip leading/trailing non-alpha noise (e.g. "Kiranhe)" → "Kiranhe",
+  // "*Judy" → "Judy"). Preserves internal spaces for last-name matching.
+  const n = name
+    .trim()
+    .toLowerCase()
+    .replace(/^[^a-zà-ÿ]+/, '')
+    .replace(/[^a-zà-ÿ ]+$/, '')
+    .trim();
   if (!n) return null;
   let m = staffList.find((s) => s.name.toLowerCase() === n);
   if (m) return m;
@@ -182,7 +193,43 @@ export function matchStaffByName(name: string, staffList: Staff[]): Staff | null
     const parts = s.name.toLowerCase().split(/\s+/);
     return parts.some((p) => p === n || p === n.split(/\s+/).pop());
   });
-  return m || null;
+  if (m) return m;
+  // Fuzzy fallback — first-name Levenshtein for OCR misreads (Kirk→Kiran,
+  // Chloé→Chloe, Sager→Sagar, JUand→Judy). Threshold 2 by default; bumped to
+  // 3 when the first character matches AND the length differs by at most 2
+  // (e.g. juand↔judy). Guards against 2-letter fuzz storms.
+  const nFirst = n.split(/\s+/)[0];
+  if (nFirst.length < 3) return null;
+  let best: { s: Staff; d: number } | null = null;
+  for (const s of staffList) {
+    const sFirst = s.name.toLowerCase().split(/\s+/)[0];
+    if (sFirst.length < 3) continue;
+    const d = levenshtein(nFirst, sFirst);
+    const sameFirstChar = nFirst[0] === sFirst[0];
+    const lenDiff = Math.abs(nFirst.length - sFirst.length);
+    const threshold = (sameFirstChar && lenDiff <= 2) ? 3 : 2;
+    if (d <= threshold && (!best || d < best.d)) best = { s, d };
+  }
+  return best ? best.s : null;
+}
+
+function levenshtein(a: string, b: string): number {
+  if (a === b) return 0;
+  if (!a.length) return b.length;
+  if (!b.length) return a.length;
+  const prev = new Array(b.length + 1).fill(0);
+  for (let j = 0; j <= b.length; j++) prev[j] = j;
+  for (let i = 1; i <= a.length; i++) {
+    let curr = i;
+    for (let j = 1; j <= b.length; j++) {
+      const cost = a[i - 1] === b[j - 1] ? 0 : 1;
+      const next = Math.min(prev[j] + 1, curr + 1, prev[j - 1] + cost);
+      prev[j - 1] = curr;
+      curr = next;
+    }
+    prev[b.length] = curr;
+  }
+  return prev[b.length];
 }
 
 export { hoursBetween };

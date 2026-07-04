@@ -4,7 +4,7 @@ import { readFile } from "@tauri-apps/plugin-fs";
 import { invoke } from "@tauri-apps/api/core";
 import { save as saveDialog } from "@tauri-apps/plugin-dialog";
 import { writeFile } from "@tauri-apps/plugin-fs";
-import { getSettings } from "../lib/db";
+import { getSettings, setSetting } from "../lib/db";
 import {
   listStaff, createStaff, updateStaff, archiveStaff,
   listHoursForMonth, upsertHour, deleteHour, hoursBetween, paidHours,
@@ -206,6 +206,8 @@ export default function StaffScreen() {
         imageBytes: bytes, mimeType: mime,
         monthYear: qrMonthKey || monthKey(year, month),
         knownStaffNames: activeStaff.map((s) => s.name),
+        enableMistralOcr: settings.enable_mistral_ocr !== "0",
+        enableAzureDi: settings.enable_azure_di !== "0",
       });
 
       const align = computeConsensus(result, activeStaff, qrMonthKey || null);
@@ -323,7 +325,7 @@ export default function StaffScreen() {
     }
   }
 
-  async function importOcr() {
+  async function importOcr(force: boolean = false) {
     if (!consensus) return;
     const schemaError = await assertStaffHoursSchema();
     if (schemaError) {
@@ -333,8 +335,11 @@ export default function StaffScreen() {
     let saved = 0, blocked = 0, flaggedSkipped = 0, dbErrors = 0;
     let lastError: unknown = null;
     for (const r of consensus.align.rows) {
-      if (r.row_confidence === "red") { blocked++; continue; }
-      if (consensus.flags.has(r.key)) { flaggedSkipped++; continue; }
+      if (!force && r.row_confidence === "red") { blocked++; continue; }
+      if (!force && consensus.flags.has(r.key)) { flaggedSkipped++; continue; }
+      // Skip rows with no times captured (e.g. calendar-synth fillers where
+      // nobody worked that day). Nothing to upsert — even in force mode.
+      if (!r.in_time.value && !r.out_time.value) { continue; }
       try {
         await upsertHour(
           r.staff_id, r.work_date, r.in_time.value, r.out_time.value,
@@ -349,7 +354,7 @@ export default function StaffScreen() {
     }
     setConsensus(null);
     await refresh();
-    const bits: string[] = [`Imported ${saved} entries`];
+    const bits: string[] = [force ? `Imported ${saved} entries (forced)` : `Imported ${saved} entries`];
     if (blocked) bits.push(`${blocked} blocked (models disagree)`);
     if (flaggedSkipped) bits.push(`${flaggedSkipped} flagged (fix and re-import)`);
     if (dbErrors) bits.push(`${dbErrors} DB errors (see console)`);
@@ -522,6 +527,56 @@ export default function StaffScreen() {
             >
               {ocrBusy ? "Reading sheet…" : "…or choose file manually"}
             </button>
+            <label
+              title="When ON, a second OCR pass reads raw digits and cross-checks Doc AI's times. Turn OFF to use only Mistral Document AI (faster, but no digit witness cross-check)."
+              style={{
+                display: "flex", alignItems: "center", gap: 8,
+                fontSize: 12, color: "var(--muted)", cursor: "pointer",
+                marginTop: 4, userSelect: "none",
+              }}
+            >
+              <input
+                type="checkbox"
+                checked={settings.enable_mistral_ocr !== "0"}
+                onChange={async (e) => {
+                  const val = e.target.checked ? "1" : "0";
+                  await setSetting("enable_mistral_ocr", val);
+                  setSettings({ ...settings, enable_mistral_ocr: val });
+                }}
+                disabled={ocrBusy}
+              />
+              <span>
+                Use Mistral OCR digit cross-check{" "}
+                <span style={{ opacity: 0.7 }}>
+                  ({settings.enable_mistral_ocr === "0" ? "OFF — Doc AI only" : "ON"})
+                </span>
+              </span>
+            </label>
+            <label
+              title="Azure Document Intelligence — third semantic voter with strong table-structure understanding. Recommended ON for handwritten sheets."
+              style={{
+                display: "flex", alignItems: "center", gap: 8,
+                fontSize: 12, color: "var(--muted)", cursor: "pointer",
+                marginTop: 2, userSelect: "none",
+              }}
+            >
+              <input
+                type="checkbox"
+                checked={settings.enable_azure_di !== "0"}
+                onChange={async (e) => {
+                  const val = e.target.checked ? "1" : "0";
+                  await setSetting("enable_azure_di", val);
+                  setSettings({ ...settings, enable_azure_di: val });
+                }}
+                disabled={ocrBusy}
+              />
+              <span>
+                Use Azure Document Intelligence{" "}
+                <span style={{ opacity: 0.7 }}>
+                  ({settings.enable_azure_di === "0" ? "OFF" : "ON — 3rd voter"})
+                </span>
+              </span>
+            </label>
           </div>
         </div>
 
@@ -529,7 +584,12 @@ export default function StaffScreen() {
           <div style={{ background: "#fff", border: "1px solid var(--border)", padding: 14, borderRadius: 10, marginTop: 14 }}>
             {/* Provider health strip — one badge per model with latency + row count. */}
             <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 10, fontSize: 12 }}>
-              {(["gpt5", "mistral_ocr"] as ProviderName[]).map((p) => {
+              {((): ProviderName[] => {
+                const arr: ProviderName[] = ["gpt5"];
+                if (settings.enable_azure_di !== "0") arr.push("azure_di");
+                if (settings.enable_mistral_ocr !== "0") arr.push("mistral_ocr");
+                return arr;
+              })().map((p) => {
                 const meta = consensus.providerMeta.find((m) => m.provider === p);
                 const ok = meta?.ok;
                 return (
@@ -544,11 +604,20 @@ export default function StaffScreen() {
                   </span>
                 );
               })}
-              {consensus.align.succeededProviders.length < 2 && (
-                <span style={{ padding: "3px 10px", borderRadius: 999, background: "#fef3c7", border: "1px solid #f59e0b", color: "#92400e", fontWeight: 600 }}>
-                  ⚠ Only {consensus.align.succeededProviders.length}/3 responded — no consensus, treating every cell as low-confidence
+              {settings.enable_mistral_ocr === "0" && (
+                <span style={{ padding: "3px 10px", borderRadius: 999, background: "#e0e7ff", border: "1px solid #6366f1", color: "#3730a3", fontWeight: 600 }}>
+                  Digit cross-check OFF — trusting Doc AI verbatim
                 </span>
               )}
+              {(() => {
+                const expected = 1 + (settings.enable_azure_di !== "0" ? 1 : 0) + (settings.enable_mistral_ocr !== "0" ? 1 : 0);
+                const got = consensus.align.succeededProviders.length;
+                return got < expected ? (
+                  <span style={{ padding: "3px 10px", borderRadius: 999, background: "#fef3c7", border: "1px solid #f59e0b", color: "#92400e", fontWeight: 600 }}>
+                    ⚠ Only {got}/{expected} responded — reduced cross-check
+                  </span>
+                ) : null;
+              })()}
             </div>
 
             {/* Month-source banner */}
@@ -582,9 +651,28 @@ export default function StaffScreen() {
               const yellow = rows.filter((r) => r.row_confidence === "yellow").length;
               const green = rows.filter((r) => r.row_confidence === "green").length;
               const flagged = consensus.flags.size;
-              const importable = rows.filter((r) => r.row_confidence !== "red" && !consensus.flags.has(r.key)).length;
-              const blocked = red + flagged;
+              // A row is "importable" if it will produce a DB insert:
+              //  - Has at least one of in/out time
+              //  - Is not red-confidence
+              //  - Is not user-flagged
+              const importable = rows.filter((r) =>
+                r.row_confidence !== "red" && !consensus.flags.has(r.key)
+                && (r.in_time.value || r.out_time.value)
+              ).length;
+              // "Blocked" = rows the models actually disagreed on (red + flagged),
+              // excluding weekends / empty-day placeholders that were never
+              // importable anyway.
+              const disagreementReds = rows.filter((r) =>
+                r.row_confidence === "red"
+                && (r.in_time.value || r.out_time.value)
+              ).length;
+              const blocked = disagreementReds + flagged;
+              const blockedRows = rows.filter((r) =>
+                (r.row_confidence === "red" && (r.in_time.value || r.out_time.value))
+                || consensus.flags.has(r.key)
+              );
               return (
+                <>
                 <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10, gap: 10, flexWrap: "wrap" }}>
                   <div>
                     <strong>{rows.length} rows read</strong>{" "}
@@ -592,18 +680,71 @@ export default function StaffScreen() {
                     <span style={{ color: "#92400e" }}>≈ {yellow}</span> ·{" "}
                     <span style={{ color: "#991b1b" }}>✗ {red}</span>
                     {flagged > 0 && <> · <span style={{ color: "#dc2626", fontWeight: 600 }}>⚠ {flagged} flagged</span></>}
+                    {(() => {
+                      const editedCells = rows.reduce((n, r) =>
+                        n + (r.in_time.edited ? 1 : 0) + (r.out_time.edited ? 1 : 0) + (r.no_lunch.edited ? 1 : 0), 0);
+                      const editedRows = rows.filter((r) => r.in_time.edited || r.out_time.edited || r.no_lunch.edited).length;
+                      return editedCells > 0 ? (
+                        <> · <span style={{ color: "#7c3aed", fontWeight: 600 }} title={`${editedCells} cell${editedCells === 1 ? "" : "s"} edited across ${editedRows} row${editedRows === 1 ? "" : "s"}`}>
+                          ✎ {editedCells} edit{editedCells === 1 ? "" : "s"} ({editedRows} row{editedRows === 1 ? "" : "s"})
+                        </span></>
+                      ) : null;
+                    })()}
                   </div>
                   <div style={{ display: "flex", gap: 8 }}>
                     <button className="btn secondary" onClick={() => setConsensus(null)}>Discard</button>
                     <button
-                      className="btn" onClick={importOcr} style={{ fontWeight: 700 }}
+                      className="btn" onClick={() => importOcr(false)} style={{ fontWeight: 700 }}
                       disabled={importable === 0}
                       title={blocked ? `${blocked} rows blocked — click ✗ cells to fix, or use Drop row` : "Import all rows the models agree on"}
                     >
                       ✓ Import {importable}{blocked ? ` (${blocked} blocked)` : ""}
                     </button>
+                    {blocked > 0 && (
+                      <button
+                        className="btn"
+                        onClick={() => {
+                          const totalToImport = rows.filter((r) => r.in_time.value || r.out_time.value).length;
+                          if (confirm(`Force-import all ${totalToImport} rows including the ${blocked} blocked one${blocked === 1 ? "" : "s"}?\n\nUse this only after you've manually reviewed and corrected the flagged cells.`)) {
+                            importOcr(true);
+                          }
+                        }}
+                        style={{
+                          fontWeight: 700,
+                          background: "#dc2626",
+                          borderColor: "#b91c1c",
+                          color: "white",
+                        }}
+                        title="Bypass all confidence checks and import every row that has times (including reds and flagged)"
+                      >
+                        ⚡ Import All ({rows.filter((r) => r.in_time.value || r.out_time.value).length})
+                      </button>
+                    )}
                   </div>
                 </div>
+                {blocked > 0 && (
+                  <details style={{ marginBottom: 10, fontSize: 12, background: "#fef2f2", border: "1px solid #fecaca", borderRadius: 6, padding: "6px 10px" }}>
+                    <summary style={{ cursor: "pointer", fontWeight: 600, color: "#991b1b" }}>
+                      Why {blocked} row{blocked === 1 ? "" : "s"} blocked?
+                    </summary>
+                    <ul style={{ margin: "6px 0 0", paddingLeft: 20 }}>
+                      {blockedRows.map((r) => {
+                        const reasons: string[] = [];
+                        if (r.row_confidence === "red") reasons.push("red confidence");
+                        if (consensus.flags.has(r.key)) reasons.push(`flagged: ${consensus.flags.get(r.key)}`);
+                        if (r.warnings.length > 0) reasons.push(...r.warnings);
+                        const inV = r.in_time.value ?? "—";
+                        const outV = r.out_time.value ?? "—";
+                        return (
+                          <li key={r.key} style={{ marginBottom: 3 }}>
+                            <strong>{r.staff_name_canonical} · {r.work_date}</strong> ({inV} → {outV}) — {reasons.join("; ") || "no times"}
+                          </li>
+                        );
+                      })}
+                    </ul>
+                  </details>
+                )}
+                </>
               );
             })()}
 
