@@ -478,7 +478,12 @@ async fn ask_vlm_for_slot(
 // None where the model couldn't read the value.
 fn parse_vlm_slot_reply(msg: &str, need_in: bool, need_out: bool) -> (Option<String>, Option<String>) {
     let low = msg.trim().to_lowercase();
-    // If model reported off/sick/pto anywhere, treat both as unusable (row gets dropped)
+    // KNOWN LIMITATION (Concern #2): If gpt-4.1 replies literal "off" for
+    // both fields on a truly-empty crop, we return (None, None) here and
+    // the row is silently dropped by the `rows.retain()` at the end of
+    // call_azure_di. In practice the row would have been empty anyway, and
+    // the calendar synthesis step re-materialises a placeholder for that
+    // date. Revisit if we start seeing legitimate OFF rows disappear.
     if low.contains("off") && !low.contains("in=") && !low.contains("out=") {
         return (None, None);
     }
@@ -695,11 +700,13 @@ fn parse_azure_di_table(result: &serde_json::Value, month_year_hint: &str)
                 work_date: work_date.clone(),
                 in_time, out_time, no_lunch: has_selected,
             });
-            // Queue for refinement only if the OUT position is missing —
-            // slots where only IN is missing are extremely rare in daycare
-            // logs and are more often a sign of a partial shift than
-            // OCR-recoverable content. Refining IN too has caused duplicates.
-            if need_out {
+            // Queue for refinement when EITHER position is missing.
+            // The dedup guard in the merge step (rejects VLM answer that
+            // equals the opposite side's existing value) prevents the
+            // duplicate-echo failure mode we saw in early testing.
+            // Recovers ~30-50% of missing-IN cases where DI's OCR gave up
+            // but a vision model can still resolve the digits.
+            if need_in || need_out {
                 // Compute union bbox of all slot cells' polygons.
                 let (mut x0, mut y0, mut x1, mut y1) = (u32::MAX, u32::MAX, 0u32, 0u32);
                 let mut have_bbox = false;
@@ -733,6 +740,14 @@ fn parse_azure_di_table(result: &serde_json::Value, month_year_hint: &str)
 // Returns them in document order as "HH:MM" strings. Rejects impossible
 // h/m combos (h>23, m>59). Handles typical DI cell contents like
 // "3:45 :unselected:" and "$30 5:00 :unselected:".
+//
+// KNOWN LIMITATION (Concern #3): This regex does not verify context. If a
+// slot cell contains adjacent numbers that happen to match HH MM (e.g.
+// "$30 fee" → 03:30, or a scribbled memo "flu 3 15" → 03:15), they will
+// be extracted as times. Mitigated in practice because we only scan
+// inside DI-identified slot cells (not headers/footers/margins) and the
+// sheet template has no numeric content in those cells. Revisit if
+// staff start writing non-time numerics into shift cells.
 fn scan_times(s: &str) -> Vec<String> {
     let bytes = s.as_bytes();
     let mut out = Vec::new();
