@@ -497,7 +497,8 @@ export async function hardDeleteStudent(
   id: number,
   force = false
 ): Promise<{ deleted: boolean; receiptCount: number }> {
-  const rc = await (await db()).select<{ n: number }[]>(
+  const d = await db();
+  const rc = await d.select<{ n: number }[]>(
     "SELECT COUNT(*) AS n FROM receipts WHERE student_id=?",
     [id]
   );
@@ -508,18 +509,22 @@ export async function hardDeleteStudent(
   await serializeWrite(async () => {
     // Collect person_id first so we can also drop any annual receipts pinned
     // to this student. Annual receipts key off person_id, not student_id.
-    const pidRow = await (await db()).select<{ person_id: string | null }[]>(
+    const d = await db();
+    const pidRow = await d.select<{ person_id: string | null }[]>(
       "SELECT person_id FROM students WHERE id=?",
       [id]
     );
     const personId = pidRow[0]?.person_id || null;
-    await execRetry("DELETE FROM accb_entries WHERE student_id=?", [id]);
-    await execRetry("DELETE FROM child_attendance WHERE student_id=?", [id]);
-    await execRetry("DELETE FROM receipts WHERE student_id=?", [id]);
+    // Use raw execute here — the outer serializeWrite already provides the
+    // serialization guarantee, and re-entering serializeWrite (via execRetry)
+    // from inside itself deadlocks the write-tail Promise chain.
+    await d.execute("DELETE FROM accb_entries WHERE student_id=?", [id]);
+    await d.execute("DELETE FROM child_attendance WHERE student_id=?", [id]);
+    await d.execute("DELETE FROM receipts WHERE student_id=?", [id]);
     if (personId) {
-      await execRetry("DELETE FROM annual_receipts WHERE person_id=?", [personId]);
+      await d.execute("DELETE FROM annual_receipts WHERE person_id=?", [personId]);
     }
-    await execRetry("DELETE FROM students WHERE id=?", [id]);
+    await d.execute("DELETE FROM students WHERE id=?", [id]);
   });
   return { deleted: true, receiptCount };
 }

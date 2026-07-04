@@ -49,33 +49,37 @@ export default function Students() {
   }
 
   async function onHardDelete(s: Student) {
-    const probe = await hardDeleteStudent(s.id, false);
-    if (!probe.deleted && probe.receiptCount > 0) {
-      const ok = await showConfirm(
-        `⚠️  Permanently delete ${s.name}?\n\n` +
-        `This student has ${probe.receiptCount} receipt${probe.receiptCount === 1 ? "" : "s"} on file. ` +
-        `Deleting will also remove:\n` +
-        `  • All ${probe.receiptCount} receipt${probe.receiptCount === 1 ? "" : "s"}\n` +
-        `  • Any annual (CRA) receipts for this family\n` +
-        `  • Any ACCB ledger entries\n` +
-        `  • Any attendance records\n\n` +
-        `This CANNOT be undone. Use "Inactivate" instead if the student is real.\n\n` +
-        `Continue?`
-      );
-      if (!ok) return;
-      const typed = await showPrompt(`Type the student's name to confirm deletion:\n\n${s.name}`);
-      if ((typed || "").trim() !== s.name.trim()) {
-        void showAlert("Name did not match. Deletion cancelled.");
+    try {
+      const probe = await hardDeleteStudent(s.id, false);
+      if (!probe.deleted && probe.receiptCount > 0) {
+        const ok = await showConfirm(
+          `⚠️  Permanently delete ${s.name}?\n\n` +
+          `This student has ${probe.receiptCount} receipt${probe.receiptCount === 1 ? "" : "s"} on file. ` +
+          `Deleting will also remove:\n` +
+          `  • All ${probe.receiptCount} receipt${probe.receiptCount === 1 ? "" : "s"}\n` +
+          `  • Any annual (CRA) receipts for this family\n` +
+          `  • Any ACCB ledger entries\n` +
+          `  • Any attendance records\n\n` +
+          `This CANNOT be undone. Use "Inactivate" instead if the student is real.\n\n` +
+          `Continue?`
+        );
+        if (!ok) return;
+        const typed = await showPrompt(`Type the student's name to confirm deletion:\n\n${s.name}`);
+        if ((typed || "").trim() !== s.name.trim()) {
+          void showAlert("Name did not match. Deletion cancelled.");
+          return;
+        }
+        await hardDeleteStudent(s.id, true);
+        refresh();
         return;
       }
+      const ok = await showConfirm(`Permanently delete ${s.name}?\n\nNo receipts on file, so nothing else is affected.`);
+      if (!ok) return;
       await hardDeleteStudent(s.id, true);
       refresh();
-      return;
+    } catch (e) {
+      void showAlert("Delete failed: " + ((e as any)?.message || String(e)));
     }
-    const ok = await showConfirm(`Permanently delete ${s.name}?\n\nNo receipts on file, so nothing else is affected.`);
-    if (!ok) return;
-    await hardDeleteStudent(s.id, true);
-    refresh();
   }
 
   async function onImport() {
