@@ -244,8 +244,48 @@ export function computeConsensus(
 
   const semanticOrder: ProviderName[] = ["gpt5", "azure_di"];
 
+  // ─── Deterministic bucket iteration ─────────────────────────────────
+  // Process buckets in (date, priority, staff_id) order so witness-row
+  // consumption is stable across runs. Priority: buckets whose semantic
+  // voters AGREE on IN are processed first (their witness matches are
+  // unambiguous), then single-source, then disagreements. This makes the
+  // ambiguous cases pick from what's LEFT after the obvious matches have
+  // been claimed — exactly what solves Sage 06-17 in the Jun-2026 sheet.
+  const bucketPriority = (b: Bucket): number => {
+    const ins = semanticOrder.map((p) => {
+      const row = b.per[p];
+      return row ? normalizeTime(row.in_time) : null;
+    });
+    const nonNull = ins.filter((v): v is string => v !== null);
+    if (nonNull.length === 0) return 3;
+    if (nonNull.length === 1) return 1;
+    return nonNull.every((v) => v === nonNull[0]) ? 0 : 2;
+  };
+  const bucketKeys = Array.from(buckets.keys()).sort((a, b) => {
+    const ba = buckets.get(a)!;
+    const bb = buckets.get(b)!;
+    if (ba.work_date !== bb.work_date) return ba.work_date.localeCompare(bb.work_date);
+    const pa = bucketPriority(ba);
+    const pb = bucketPriority(bb);
+    if (pa !== pb) return pa - pb;
+    return ba.staff_id - bb.staff_id;
+  });
+
+  // Witness rows are numbered per-date; once a bucket claims an index the
+  // same index cannot be reused by another bucket on the same date.
+  const consumedWitness = new Map<string, Set<number>>();
+  // Track (staff_id → normalized column positions) of every witness match
+  // so we can later estimate each staff's column identity for the recovery
+  // pass. Normalized = matched_index / (rows_for_that_date - 1), 0..1.
+  const witnessPositions = new Map<number, number[]>();
+
   const rows: ConsensusRow[] = [];
-  for (const [key, b] of buckets) {
+  const phantomKeys: string[] = [];  // buckets to drop AFTER loop so
+                                     // calendar synthesis re-emits them as
+                                     // empty placeholders rather than
+                                     // showing hallucinated values.
+  for (const key of bucketKeys) {
+    const b = buckets.get(key)!;
     // Build vote array from semantic providers only.
     const mkVotes = (field: "in_time" | "out_time" | "no_lunch"): CellVote[] => {
       return semanticOrder.map((prov) => {
@@ -281,7 +321,20 @@ export function computeConsensus(
       .filter((v) => v.sawRow && v.value !== null && v.provider !== "mistral_ocr")
       .map((v) => v.value as string);
     const inCandidates = inCell.value ? [inCell.value, ...semanticIns] : semanticIns;
-    const witness = pickMistralWitnessMulti(numericGrid.get(b.work_date) ?? [], inCandidates);
+    const witnessArr = numericGrid.get(b.work_date) ?? [];
+    const consumed = consumedWitness.get(b.work_date) ?? new Set<number>();
+    const picked = pickMistralWitnessWithIndex(witnessArr, inCandidates, consumed);
+    const witness = picked?.data ?? null;
+    if (picked) {
+      if (!consumedWitness.has(b.work_date)) consumedWitness.set(b.work_date, new Set());
+      consumedWitness.get(b.work_date)!.add(picked.index);
+      // Record normalized column position for this staff.
+      const W = witnessArr.length;
+      const norm = W > 1 ? picked.index / (W - 1) : 0.5;
+      const list = witnessPositions.get(b.staff_id) ?? [];
+      list.push(norm);
+      witnessPositions.set(b.staff_id, list);
+    }
     inCell = applyMistralWitness(inCell, witness?.in ?? null, "in", mistralOk, mistralHasDigits && witness !== null);
     outCell = applyMistralWitness(outCell, witness?.out ?? null, "out", mistralOk, mistralHasDigits && witness !== null);
 
@@ -301,9 +354,21 @@ export function computeConsensus(
       (outCell.confidence !== "red" && witness.out !== null)
     );
     const phantom = sawCount === 1 && effectiveCount >= 2 && !mistralCorroborates;
+
+    // Drop phantom rows: a single semantic voter said staff X worked on
+    // date Y but neither the other voter nor the digit witness sees it.
+    // Almost certainly a column-drift hallucination (e.g. Doc AI Kiran
+    // 06-18 = 10:35→12:45 when the sheet actually said OFF/OFF). We
+    // remove the bucket too so calendar synth re-emits an empty placeholder
+    // for consistent UX with truly-blank days.
+    if (phantom) {
+      phantomKeys.push(key);
+      continue;
+    }
+
     const worst: Confidence = [inCell.confidence, outCell.confidence, nlCell.confidence]
       .reduce<Confidence>((w, c) => (rank(c) > rank(w) ? c : w), "green");
-    const rowConf: Confidence = phantom ? "red" : worst;
+    const rowConf: Confidence = worst;
 
     rows.push({
       key,
@@ -314,10 +379,88 @@ export function computeConsensus(
       in_time: inCell,
       out_time: outCell,
       no_lunch: nlCell,
-      phantom,
+      phantom: false,
       row_confidence: rowConf,
       warnings: [],
     });
+  }
+  for (const k of phantomKeys) buckets.delete(k);
+
+  // ─── Witness-only recovery ──────────────────────────────────────────
+  // For each date where the digit witness has more rows than the semantic
+  // voters accounted for, try to attribute the leftover(s) to active staff
+  // whose column position (learned globally from other days) is closest to
+  // the leftover row's position in the witness list. Yellow confidence —
+  // single-source, needs human review.
+  const columnRank = new Map<number, number>();
+  for (const [sid, positions] of witnessPositions) {
+    if (positions.length === 0) continue;
+    const sorted = [...positions].sort((a, b) => a - b);
+    columnRank.set(sid, sorted[Math.floor(sorted.length / 2)]);
+  }
+  const COLUMN_DIST_THRESHOLD = 0.34;  // tolerate ~1 column of drift
+  for (const [wDate, witnessArr] of numericGrid) {
+    const consumed = consumedWitness.get(wDate) ?? new Set<number>();
+    const unclaimed: Array<{ index: number; norm: number }> = [];
+    for (let i = 0; i < witnessArr.length; i++) {
+      if (consumed.has(i)) continue;
+      if (witnessArr[i].in === null && witnessArr[i].out === null) continue;
+      const norm = witnessArr.length > 1 ? i / (witnessArr.length - 1) : 0.5;
+      unclaimed.push({ index: i, norm });
+    }
+    if (unclaimed.length === 0) continue;
+    const missing = staff.filter((s) =>
+      s.active === 1 && !buckets.has(`${s.id}|${wDate}`)
+    );
+    if (missing.length === 0) continue;
+    const assignedStaff = new Set<number>();
+    for (const u of unclaimed) {
+      let bestStaff: typeof missing[number] | null = null;
+      let bestDist = Infinity;
+      for (const s of missing) {
+        if (assignedStaff.has(s.id)) continue;
+        const rank = columnRank.get(s.id);
+        if (rank === undefined) continue;  // no signal → don't guess
+        const dist = Math.abs(rank - u.norm);
+        if (dist < bestDist) { bestDist = dist; bestStaff = s; }
+      }
+      if (!bestStaff || bestDist > COLUMN_DIST_THRESHOLD) continue;
+      assignedStaff.add(bestStaff.id);
+      const w = witnessArr[u.index];
+      const key = `${bestStaff.id}|${wDate}`;
+      // Build a synthetic ConsensusRow: no semantic votes, mistral_ocr is
+      // the sole source. applyMistralWitness will fill in the value with
+      // yellow confidence and PM inference.
+      const emptyInVotes: CellVote[] = semanticOrder.map((prov) => ({ provider: prov, value: null, sawRow: false }));
+      const emptyOutVotes: CellVote[] = semanticOrder.map((prov) => ({ provider: prov, value: null, sawRow: false }));
+      const emptyNlVotes: CellVote[] = semanticOrder.map((prov) => ({ provider: prov, value: null, sawRow: false }));
+      let inC: ConsensusCell = { ...cellConfidence(emptyInVotes, effectiveCount), votes: emptyInVotes, edited: false };
+      let outC: ConsensusCell = { ...cellConfidence(emptyOutVotes, effectiveCount), votes: emptyOutVotes, edited: false };
+      const nlC: ConsensusCell = { ...cellConfidence(emptyNlVotes, effectiveCount), votes: [...emptyNlVotes, { provider: "mistral_ocr", value: null, sawRow: false }], edited: false };
+      inC = applyMistralWitness(inC, w.in, "in", mistralOk, w.in !== null);
+      outC = applyMistralWitness(outC, w.out, "out", mistralOk, w.out !== null);
+      // Register in buckets so calendar synth skips this date.
+      buckets.set(key, {
+        staff_id: bestStaff.id,
+        staff_name_canonical: bestStaff.name,
+        work_date: wDate,
+        per: {},
+        names_seen: new Set(),
+      });
+      rows.push({
+        key,
+        staff_id: bestStaff.id,
+        staff_name_canonical: bestStaff.name,
+        staff_names_seen: ["(recovered from digit witness)"],
+        work_date: wDate,
+        in_time: inC,
+        out_time: outC,
+        no_lunch: nlC,
+        phantom: false,
+        row_confidence: "yellow",
+        warnings: [`Recovered from Mistral OCR digit witness — no semantic voter saw this row. Please verify against the sheet.`],
+      });
+    }
   }
 
   // ─── Calendar synthesis ─────────────────────────────────────────────
@@ -433,28 +576,44 @@ function parseHM(t: string): { h: number; m: number } | null {
 }
 
 // Same as pickMistralWitness but accepts multiple candidate IN values (e.g.
-// individual disagreeing semantic votes). Returns the first Mistral row whose
-// IN matches ANY of the candidates.
-function pickMistralWitnessMulti(
+// individual disagreeing semantic votes) and a set of already-consumed
+// witness row indices. Returns the winning witness row + its index so
+// callers can mark it consumed. Iteration is TARGET-FIRST so the highest
+// priority semantic vote gets its match preferentially, and CONSUMED rows
+// are skipped so one witness row can't be claimed by two staff buckets.
+function pickMistralWitnessWithIndex(
   candidates: Array<{ in: string | null; out: string | null }>,
   semanticIns: string[],
-): { in: string | null; out: string | null } | null {
+  consumed: Set<number>,
+): { data: { in: string | null; out: string | null }; index: number } | null {
   if (candidates.length === 0) return null;
-  if (semanticIns.length === 0) {
-    // No semantic anchor — only trust single-candidate case (unambiguous).
-    return candidates.length === 1 ? candidates[0] : null;
-  }
   const targets = semanticIns
     .map((s) => parseHM(s))
     .filter((x): x is { h: number; m: number } => x !== null);
-  if (targets.length === 0) return candidates.length === 1 ? candidates[0] : null;
-  for (const c of candidates) {
-    if (!c.in) continue;
-    const w = parseHM(c.in);
-    if (!w) continue;
-    for (const s of targets) {
-      if (w.m !== s.m) continue;
-      if (w.h === s.h || Math.abs(w.h - s.h) === 12) return c;
+
+  if (targets.length === 0) {
+    // No semantic anchor — accept the unique unclaimed candidate if there is
+    // exactly one. This is what enables the witness-only recovery pass to
+    // fall back through this function safely.
+    const available: number[] = [];
+    for (let i = 0; i < candidates.length; i++) if (!consumed.has(i)) available.push(i);
+    if (available.length === 1) return { data: candidates[available[0]], index: available[0] };
+    return null;
+  }
+
+  // Targets are ordered by caller priority (semantic-majority value first,
+  // then individual voters in semanticOrder). Try each target against every
+  // unclaimed candidate before moving to the next target.
+  for (const s of targets) {
+    for (let i = 0; i < candidates.length; i++) {
+      if (consumed.has(i)) continue;
+      const c = candidates[i];
+      if (!c.in) continue;
+      const w = parseHM(c.in);
+      if (!w) continue;
+      if (w.m === s.m && (w.h === s.h || Math.abs(w.h - s.h) === 12)) {
+        return { data: c, index: i };
+      }
     }
   }
   return null;
