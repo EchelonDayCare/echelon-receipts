@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import { readFile } from "@tauri-apps/plugin-fs";
-import { listStudents, listYears, upsertStudent, deleteStudent, getSettings,
+import { listStudents, listYears, upsertStudent, deleteStudent, hardDeleteStudent, getSettings,
   listAccbForStudent, upsertAccb, deleteAccb } from "../lib/db";
 import { parseRosterFile } from "../lib/excelImport";
 import type { Student, AccbEntry, SettingsMap } from "../types";
@@ -45,6 +45,36 @@ export default function Students() {
     await upsertAccb(accbFor.student.id, accbDraft.year, accbDraft.month, amt, accbDraft.notes || null);
     setAccbDraft({ ...accbDraft, amount: "", notes: "" });
     refreshAccb();
+  }
+
+  async function onHardDelete(s: Student) {
+    const probe = await hardDeleteStudent(s.id, false);
+    if (!probe.deleted && probe.receiptCount > 0) {
+      const ok = confirm(
+        `⚠️  Permanently delete ${s.name}?\n\n` +
+        `This student has ${probe.receiptCount} receipt${probe.receiptCount === 1 ? "" : "s"} on file. ` +
+        `Deleting will also remove:\n` +
+        `  • All ${probe.receiptCount} receipt${probe.receiptCount === 1 ? "" : "s"}\n` +
+        `  • Any annual (CRA) receipts for this family\n` +
+        `  • Any ACCB ledger entries\n` +
+        `  • Any attendance records\n\n` +
+        `This CANNOT be undone. Use "Inactivate" instead if the student is real.\n\n` +
+        `Continue?`
+      );
+      if (!ok) return;
+      const typed = prompt(`Type the student's name to confirm deletion:\n\n${s.name}`);
+      if ((typed || "").trim() !== s.name.trim()) {
+        alert("Name did not match. Deletion cancelled.");
+        return;
+      }
+      await hardDeleteStudent(s.id, true);
+      refresh();
+      return;
+    }
+    const ok = confirm(`Permanently delete ${s.name}?\n\nNo receipts on file, so nothing else is affected.`);
+    if (!ok) return;
+    await hardDeleteStudent(s.id, true);
+    refresh();
   }
 
   async function onImport() {
@@ -128,6 +158,10 @@ export default function Students() {
                       Inactivate
                     </button>
                   )}
+                  <button className="btn ghost" style={{ color: "var(--danger)" }}
+                    onClick={async () => { await onHardDelete(s); }}>
+                    Delete…
+                  </button>
                 </td>
               </tr>
             ))}

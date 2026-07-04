@@ -487,6 +487,42 @@ export async function upsertStudent(s: Partial<Student> & { name: string; year: 
 export async function deleteStudent(id: number) {
   await execRetry("UPDATE students SET active=0 WHERE id=?", [id]);
 }
+
+// Hard-delete a student and everything attached to them. Two-step by design:
+//   1) Called with force=false → returns receiptCount without deleting.
+//   2) Called with force=true  → wipes accb_entries, child_attendance,
+//      annual_receipts, receipts, then the student row itself.
+// This is destructive and CRA-relevant; UI must confirm loudly before force=true.
+export async function hardDeleteStudent(
+  id: number,
+  force = false
+): Promise<{ deleted: boolean; receiptCount: number }> {
+  const rc = await (await db()).select<{ n: number }[]>(
+    "SELECT COUNT(*) AS n FROM receipts WHERE student_id=?",
+    [id]
+  );
+  const receiptCount = rc[0]?.n ?? 0;
+  if (receiptCount > 0 && !force) {
+    return { deleted: false, receiptCount };
+  }
+  await serializeWrite(async () => {
+    // Collect person_id first so we can also drop any annual receipts pinned
+    // to this student. Annual receipts key off person_id, not student_id.
+    const pidRow = await (await db()).select<{ person_id: string | null }[]>(
+      "SELECT person_id FROM students WHERE id=?",
+      [id]
+    );
+    const personId = pidRow[0]?.person_id || null;
+    await execRetry("DELETE FROM accb_entries WHERE student_id=?", [id]);
+    await execRetry("DELETE FROM child_attendance WHERE student_id=?", [id]);
+    await execRetry("DELETE FROM receipts WHERE student_id=?", [id]);
+    if (personId) {
+      await execRetry("DELETE FROM annual_receipts WHERE person_id=?", [personId]);
+    }
+    await execRetry("DELETE FROM students WHERE id=?", [id]);
+  });
+  return { deleted: true, receiptCount };
+}
 // One-time backfill: any student without a person_id gets one computed from current names.
 // Memoised — only the first call per process does any work.
 let _personIdBackfillDone = false;
