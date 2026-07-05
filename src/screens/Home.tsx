@@ -203,6 +203,12 @@ export default function Home() {
           <h2>Configuration</h2>
           <p>Daycare identity, email, backups, optional features</p>
         </button>
+
+        <button className="home-tile" onClick={() => nav("/ask")} style={{ background: "linear-gradient(135deg, #eff6ff, #dbeafe)" }}>
+          <div className="home-tile-icon">🤖</div>
+          <h2>Ask Echelon</h2>
+          <p>Plain-English questions about your data — attendance, revenue, staff, credentials</p>
+        </button>
       </div>
 
       {alerts.length > 0 && (

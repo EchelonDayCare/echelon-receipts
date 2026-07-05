@@ -31,6 +31,7 @@ const ExpenseList = lazy(() => import("./screens/expenses/ExpenseList"));
 const ExpenseRecurring = lazy(() => import("./screens/expenses/Recurring"));
 const ExpenseReports = lazy(() => import("./screens/expenses/Reports"));
 const ExpenseImport = lazy(() => import("./screens/expenses/ImportStatement"));
+const AskEchelon = lazy(() => import("./screens/AskEchelon"));
 import { runCloudBackupIfDue } from "./lib/cloudBackup";
 import { getSettings } from "./lib/db";
 import { getVersion } from "@tauri-apps/api/app";
@@ -260,6 +261,9 @@ function Shell({ logo, name, staffEnabled }: { logo: string; name: string; staff
           <Route path="/expenses/recurring" element={<ExpenseRecurring />} />
           <Route path="/expenses/import" element={<ExpenseImport />} />
           <Route path="/expenses/reports" element={<ExpenseReports />} />
+
+          {/* Ask Echelon (natural-language query) */}
+          <Route path="/ask" element={<AskEchelon />} />
 
           {/* Redirects for old Students routes now moved to Reports module */}
           <Route path="/students/reports" element={<Navigate to="/reports/monthly" replace />} />

@@ -3,6 +3,7 @@ use tauri_plugin_sql::{Migration, MigrationKind};
 mod email;
 mod errlog;
 mod azure_ai;
+mod ask_echelon;
 mod consensus;
 mod inbox;
 mod preprocess;
@@ -108,6 +109,7 @@ pub fn run() {
             restore::restart_app,
             azure_ai::extract_attendance,
             azure_ai::extract_visa_statement,
+            ask_echelon::ask_echelon,
             consensus::extract_timesheet_consensus,
             inbox::inbox_list_recent,
             preprocess::normalize_sheet,

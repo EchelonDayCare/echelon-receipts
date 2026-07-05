@@ -147,14 +147,13 @@ export default function AnnualReceipts() {
     const r = rows[idx];
     if (!r) return;
     // CRA T778 requires the issuer's Business Number on annual child-care
-    // receipts. Refuse to send if BN is missing rather than issue a receipt
-    // that a parent then can't use on their tax return.
+    // receipts. Warn if BN is missing but let the operator proceed if they
+    // knowingly want to send a receipt without one.
     if (!settings.business_number || !settings.business_number.trim()) {
-      void showAlert(
-        "Business Number (BN) is not set. CRA T778 receipts must include the issuer's BN — set it in Settings → Organization before sending annual receipts.",
-        { kind: "error" }
+      const ok = await showConfirm(
+        "⚠️ Business Number (BN) is not set.\n\nCRA T778 receipts should include the issuer's BN so parents can claim the Child Care Expense Deduction. You can set it in Settings → Organization.\n\nSend this receipt anyway?"
       );
-      return;
+      if (!ok) return;
     }
     // Per-row in-flight guard prevents the same row from being sent twice
     // concurrently (which would allocate two AR numbers + send two emails).
@@ -200,11 +199,10 @@ export default function AnnualReceipts() {
   async function sendAll(retryFailedOnly: boolean) {
     if (sendingAll || generating) return;
     if (!settings.business_number || !settings.business_number.trim()) {
-      void showAlert(
-        "Business Number (BN) is not set. CRA T778 receipts must include the issuer's BN — set it in Settings → Organization before sending annual receipts.",
-        { kind: "error" }
+      const ok = await showConfirm(
+        "⚠️ Business Number (BN) is not set.\n\nCRA T778 receipts should include the issuer's BN so parents can claim the Child Care Expense Deduction. You can set it in Settings → Organization.\n\nSend all these receipts anyway?"
       );
-      return;
+      if (!ok) return;
     }
     setSendingAll(true);
     try {
@@ -302,8 +300,8 @@ export default function AnnualReceipts() {
         <div className="today-item warn" style={{ marginBottom: 14 }}>
           <span className="today-dot">!</span>
           <span className="today-text">
-            Your Business Number (BN) is <strong>required</strong> for CRA T778 annual child-care receipts.
-            Sending is disabled until you set the BN in <a href="#/settings">Settings → Organization</a>.
+            Your Business Number (BN) is <strong>recommended</strong> for CRA T778 annual child-care receipts.
+            Parents need it to claim the Child Care Expense Deduction. Set it in <a href="#/settings">Settings → Organization</a> — you can still send without one, but you'll be asked to confirm.
           </span>
         </div>
       )}

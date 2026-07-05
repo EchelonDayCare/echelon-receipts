@@ -526,6 +526,19 @@ async function ensureSchema(d: Database): Promise<void> {
   )`);
   await d.execute("CREATE INDEX IF NOT EXISTS ix_sched_deliv_msg ON scheduled_deliveries(scheduled_id)");
   await d.execute("CREATE INDEX IF NOT EXISTS ix_sched_deliv_status ON scheduled_deliveries(scheduled_id, recipient_email, status)");
+
+  // Migration 015 — Ask Echelon (natural-language query) saved queries.
+  await d.execute(`CREATE TABLE IF NOT EXISTS saved_queries (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    question TEXT NOT NULL,
+    sql TEXT NOT NULL,
+    chart_hint TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  )`);
+  for (const [k, v] of [
+    ["ask_echelon_enabled", "1"],
+    ["ask_echelon_redact",  "1"],
+  ] as const) await setting(k, v);
 }
 
 // ---------- Person identity ----------

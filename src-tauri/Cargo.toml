@@ -1,6 +1,6 @@
 [package]
 name = "echelon-receipts"
-version = "0.4.0"
+version = "0.5.0"
 description = "Echelon Daycare receipt generator"
 authors = ["Echelon Daycare Society"]
 edition = "2021"
@@ -30,6 +30,8 @@ image = { version = "0.25", default-features = false, features = ["jpeg", "png",
 rqrr = "0.7"
 tokio = { version = "1", features = ["macros", "time", "rt-multi-thread"] }
 futures = "0.3"
+sqlparser = "0.52"
+rusqlite = { version = "0.32", features = ["bundled"] }
 
 [profile.release]
 opt-level = "z"
