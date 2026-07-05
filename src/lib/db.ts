@@ -487,6 +487,9 @@ export async function upsertStudent(s: Partial<Student> & { name: string; year: 
 export async function deleteStudent(id: number) {
   await execRetry("UPDATE students SET active=0 WHERE id=?", [id]);
 }
+export async function reactivateStudent(id: number) {
+  await execRetry("UPDATE students SET active=1 WHERE id=?", [id]);
+}
 
 // Hard-delete a student and everything attached to them. Two-step by design:
 //   1) Called with force=false → returns receiptCount without deleting.
@@ -687,10 +690,15 @@ export interface SubsidyMonthRow {
   accb_total: number;
   parent_paid_total: number;
 }
-export async function subsidyReconciliation(year?: number): Promise<SubsidyMonthRow[]> {
+export async function subsidyReconciliation(year?: number, fiscalYear?: number): Promise<SubsidyMonthRow[]> {
   const args: any[] = [];
   let where = "WHERE voided=0";
-  if (year) { where += " AND substr(date,1,4)=?"; args.push(String(year)); }
+  if (fiscalYear !== undefined) {
+    where += " AND date>=? AND date<=?";
+    args.push(`${fiscalYear}-09-01`, `${fiscalYear + 1}-08-31`);
+  } else if (year) {
+    where += " AND substr(date,1,4)=?"; args.push(String(year));
+  }
   const rows = await (await db()).select<any[]>(
     `SELECT substr(date,1,4) AS y, substr(date,6,2) AS m,
             COUNT(*) AS receipt_count,
@@ -713,11 +721,14 @@ export async function subsidyReconciliation(year?: number): Promise<SubsidyMonth
   }));
 }
 export async function listReceipts(opts: {
-  search?: string; year?: number; month?: number; studentId?: number;
+  search?: string; year?: number; month?: number; studentId?: number; fiscalYear?: number;
 } = {}): Promise<Receipt[]> {
   let sql = "SELECT * FROM receipts WHERE 1=1";
   const args: any[] = [];
-  if (opts.year) {
+  if (opts.fiscalYear !== undefined) {
+    sql += " AND date>=? AND date<=?";
+    args.push(`${opts.fiscalYear}-09-01`, `${opts.fiscalYear + 1}-08-31`);
+  } else if (opts.year) {
     sql += " AND substr(date,1,4)=?"; args.push(String(opts.year));
   }
   if (opts.month) {
@@ -752,11 +763,16 @@ export async function markEmailed(id: number, recipients: string[]) {
 
 // ---------- Reports ----------
 export interface MonthlyTotal { ym: string; count: number; total: number; }
-export async function monthlyTotals(year?: number): Promise<MonthlyTotal[]> {
+export async function monthlyTotals(year?: number, fiscalYear?: number): Promise<MonthlyTotal[]> {
   let sql = `SELECT substr(date,1,7) AS ym, COUNT(*) AS count, SUM(amount) AS total
              FROM receipts WHERE voided=0`;
   const args: any[] = [];
-  if (year) { sql += " AND substr(date,1,4)=?"; args.push(String(year)); }
+  if (fiscalYear !== undefined) {
+    sql += " AND date>=? AND date<=?";
+    args.push(`${fiscalYear}-09-01`, `${fiscalYear + 1}-08-31`);
+  } else if (year) {
+    sql += " AND substr(date,1,4)=?"; args.push(String(year));
+  }
   sql += " GROUP BY ym ORDER BY ym DESC";
   return await (await db()).select<MonthlyTotal[]>(sql, args);
 }

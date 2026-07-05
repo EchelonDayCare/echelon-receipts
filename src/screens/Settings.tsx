@@ -309,6 +309,22 @@ export default function Settings() {
           tip="Your 15-character CRA Business Number (BN) — looks like '123456789 RC0001'. Parents need this on the tax receipt to claim the daycare deduction." />
 
         <hr style={{ border: 0, borderTop: "1px solid var(--border)", margin: "16px 0" }} />
+        <SectionHead title="Financial reporting year" sub="Which 12-month period the Reports screen aggregates by. CRA annual tax receipts always use calendar year regardless." />
+        <div className="field">
+          <label>Reporting Year</label>
+          <select
+            value={s.reporting_year_mode || "fiscal_sep_aug"}
+            onChange={(e) => setS({ ...s, reporting_year_mode: e.target.value })}
+          >
+            <option value="fiscal_sep_aug">Fiscal Year (Sep 1 – Aug 31) — recommended for daycare books</option>
+            <option value="calendar">Calendar Year (Jan 1 – Dec 31)</option>
+          </select>
+          <small style={{ color: "var(--muted)" }}>
+            Sets the default view on the Reports screen. You can still toggle per-view from the Reports toolbar.
+          </small>
+        </div>
+
+        <hr style={{ border: 0, borderTop: "1px solid var(--border)", margin: "16px 0" }} />
         <SectionHead title="PDF archive" sub="Where saved/sent receipt PDFs are filed on this computer." />
         <div className="field">
           <label>PDF Archive Folder</label>

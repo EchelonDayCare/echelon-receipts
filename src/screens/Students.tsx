@@ -3,7 +3,7 @@ import { useEffect, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import { open } from "@tauri-apps/plugin-dialog";
 import { readFile } from "@tauri-apps/plugin-fs";
-import { listStudents, listYears, upsertStudent, deleteStudent, hardDeleteStudent, getSettings,
+import { listStudents, listYears, upsertStudent, deleteStudent, reactivateStudent, hardDeleteStudent, getSettings,
   listAccbForStudent, upsertAccb, deleteAccb } from "../lib/db";
 import { parseRosterFile } from "../lib/excelImport";
 import type { Student, AccbEntry, SettingsMap } from "../types";
@@ -174,6 +174,12 @@ export default function Students() {
                     <button className="btn ghost" style={{ color: "var(--danger)" }}
                       onClick={async () => { if (await showConfirm(`Mark ${s.name} inactive?`)) { await deleteStudent(s.id); refresh(); } }}>
                       Inactivate
+                    </button>
+                  )}
+                  {s.active === 0 && (
+                    <button className="btn ghost" style={{ color: "var(--ok, #15803d)" }}
+                      onClick={async () => { if (await showConfirm(`Reactivate ${s.name}?`)) { await reactivateStudent(s.id); refresh(); } }}>
+                      Activate
                     </button>
                   )}
                   <button className="btn ghost" style={{ color: "var(--danger)" }}
