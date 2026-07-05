@@ -188,6 +188,12 @@ export default function Home() {
           <h2>Reports & Compliance</h2>
           <p>Revenue, aging, subsidies, licensing rosters, credentials, drills, AGM</p>
         </button>
+
+        <button className="home-tile expenses" onClick={() => nav("/expenses/dashboard")}>
+          <div className="home-tile-icon">💵</div>
+          <h2>Expenses</h2>
+          <p>Track spending, recurring bills, WCB/CRA remittance, P&L reports</p>
+        </button>
       </div>
 
       {alerts.length > 0 && (

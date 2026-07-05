@@ -25,6 +25,11 @@ const CredentialsCompliance = lazy(() => import("./screens/reports/CredentialsCo
 const DrillLog = lazy(() => import("./screens/reports/DrillLog"));
 const SubsidyReport = lazy(() => import("./screens/reports/Subsidy"));
 const AgmPackage = lazy(() => import("./screens/reports/Agm"));
+const ExpensesDashboard = lazy(() => import("./screens/expenses/Dashboard"));
+const ExpenseForm = lazy(() => import("./screens/expenses/ExpenseForm"));
+const ExpenseList = lazy(() => import("./screens/expenses/ExpenseList"));
+const ExpenseRecurring = lazy(() => import("./screens/expenses/Recurring"));
+const ExpenseReports = lazy(() => import("./screens/expenses/Reports"));
 import { runCloudBackupIfDue } from "./lib/cloudBackup";
 import { getSettings } from "./lib/db";
 import { DEFAULT_LOGO_DATA_URL } from "./lib/defaults";
@@ -176,6 +181,22 @@ function Shell({ logo, name, staffEnabled }: { logo: string; name: string; staff
         ]}
       />
     );
+  } else if (path.startsWith("/expenses")) {
+    sidebar = (
+      <ModuleSidebar
+        title="Expenses"
+        accent="#047857"
+        logo={logo}
+        name={name}
+        items={[
+          { to: "/expenses/dashboard", label: "Dashboard" },
+          { to: "/expenses/new", label: "Add Expense" },
+          { to: "/expenses/list", label: "All Expenses" },
+          { to: "/expenses/recurring", label: "Recurring Bills" },
+          { to: "/expenses/reports", label: "Expense Reports (P&L)" },
+        ]}
+      />
+    );
   }
 
   return (
@@ -224,6 +245,15 @@ function Shell({ logo, name, staffEnabled }: { logo: string; name: string; staff
           <Route path="/reports/credentials" element={<CredentialsCompliance />} />
           <Route path="/reports/drills" element={<DrillLog />} />
           <Route path="/reports/agm" element={<AgmPackage />} />
+
+          {/* Expenses module */}
+          <Route path="/expenses" element={<Navigate to="/expenses/dashboard" replace />} />
+          <Route path="/expenses/dashboard" element={<ExpensesDashboard />} />
+          <Route path="/expenses/new" element={<ExpenseForm />} />
+          <Route path="/expenses/edit/:id" element={<ExpenseForm />} />
+          <Route path="/expenses/list" element={<ExpenseList />} />
+          <Route path="/expenses/recurring" element={<ExpenseRecurring />} />
+          <Route path="/expenses/reports" element={<ExpenseReports />} />
 
           {/* Redirects for old Students routes now moved to Reports module */}
           <Route path="/students/reports" element={<Navigate to="/reports/monthly" replace />} />

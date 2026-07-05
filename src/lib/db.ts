@@ -443,6 +443,47 @@ async function ensureSchema(d: Database): Promise<void> {
     )`);
     await d.execute("CREATE INDEX IF NOT EXISTS ix_sched_status ON scheduled_messages(status, scheduled_for)");
   }
+
+  // Migration 011 — Expenses module (expense entries + recurring templates)
+  if (!(await tableExists("expenses"))) {
+    console.warn("[ensureSchema] creating expenses");
+    await d.execute(`CREATE TABLE expenses (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      date TEXT NOT NULL,
+      category TEXT NOT NULL,
+      subcategory TEXT,
+      vendor TEXT,
+      amount REAL NOT NULL,
+      payment_method TEXT NOT NULL,
+      reference TEXT,
+      notes TEXT,
+      recurring_id INTEGER,
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    )`);
+    await d.execute("CREATE INDEX IF NOT EXISTS ix_expenses_date ON expenses(date DESC)");
+    await d.execute("CREATE INDEX IF NOT EXISTS ix_expenses_category ON expenses(category)");
+    await d.execute("CREATE INDEX IF NOT EXISTS ix_expenses_recurring ON expenses(recurring_id)");
+  }
+  if (!(await tableExists("recurring_expenses"))) {
+    console.warn("[ensureSchema] creating recurring_expenses");
+    await d.execute(`CREATE TABLE recurring_expenses (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      name TEXT NOT NULL,
+      category TEXT NOT NULL,
+      subcategory TEXT,
+      vendor TEXT,
+      amount REAL NOT NULL,
+      payment_method TEXT NOT NULL,
+      frequency TEXT NOT NULL DEFAULT 'monthly',
+      day_of_month INTEGER NOT NULL DEFAULT 1,
+      start_date TEXT NOT NULL,
+      end_date TEXT,
+      active INTEGER NOT NULL DEFAULT 1,
+      notes TEXT,
+      last_posted_date TEXT,
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    )`);
+  }
 }
 
 // ---------- Person identity ----------
