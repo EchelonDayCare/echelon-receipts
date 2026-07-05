@@ -548,6 +548,17 @@ async function ensureSchema(d: Database): Promise<void> {
     ["ask_echelon_enabled", "1"],
     ["ask_echelon_redact",  "1"],
   ] as const) await setting(k, v);
+
+  // Migration 017 — AGM Minutes draft persistence. One row per fiscal-year
+  // label ("2024-25"). The draft JSON stores the full form state so a user
+  // can walk away mid-edit and come back. `finalized_at` marks the year the
+  // .docx was generated (used as carry-forward source for the following year).
+  await d.execute(`CREATE TABLE IF NOT EXISTS agm_drafts (
+    year_label TEXT PRIMARY KEY,
+    payload_json TEXT NOT NULL,
+    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+    finalized_at TEXT
+  )`);
 }
 
 // ---------- Person identity ----------

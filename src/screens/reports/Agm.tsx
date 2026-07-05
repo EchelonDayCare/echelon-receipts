@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { db, getSettings, listYears } from "../../lib/db";
 import type { SettingsMap } from "../../types";
 import { fiscalYearBounds, fiscalYearLabel } from "../../lib/fiscalYear";
+import AgmMinutesEditor from "./AgmMinutes";
 
 interface YearRow {
   label: string;
@@ -20,6 +21,37 @@ function fmt(n: number): string {
 }
 
 export default function Agm() {
+  const [tab, setTab] = useState<"package" | "minutes">("package");
+  return (
+    <div>
+      <div className="no-print" style={{ display: "flex", gap: 4, borderBottom: "1px solid var(--border)", padding: "12px 24px 0" }}>
+        <TabBtn active={tab === "package"} onClick={() => setTab("package")}>Board Package (numbers)</TabBtn>
+        <TabBtn active={tab === "minutes"}  onClick={() => setTab("minutes")}>AGM Minutes (document)</TabBtn>
+      </div>
+      {tab === "package" ? <BoardPackage /> : <AgmMinutesEditor />}
+    </div>
+  );
+}
+
+function TabBtn({ active, onClick, children }: { active: boolean; onClick: () => void; children: React.ReactNode }) {
+  return (
+    <button onClick={onClick}
+      style={{
+        background: "transparent",
+        border: "none",
+        borderBottom: active ? "2px solid var(--accent, #2563eb)" : "2px solid transparent",
+        color: active ? "var(--fg)" : "var(--muted)",
+        fontWeight: active ? 600 : 500,
+        padding: "8px 14px",
+        cursor: "pointer",
+        marginBottom: -1,
+      }}>
+      {children}
+    </button>
+  );
+}
+
+function BoardPackage() {
   const [settings, setSettings] = useState<SettingsMap>({});
   const [rows, setRows] = useState<YearRow[]>([]);
   const [mode, setMode] = useState<"fiscal_sep_aug" | "calendar">("fiscal_sep_aug");
