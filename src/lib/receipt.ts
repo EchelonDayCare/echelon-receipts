@@ -65,8 +65,12 @@ export function buildReceiptHtml(r: Receipt, settings: SettingsMap): string {
   .comments { margin: 18px 0 6px; font-size: 14px; }
   .comments .lbl { display: inline-block; min-width: 100px; }
   .pending { font-style: italic; }
-  .recvd { margin: 24px 0 8px; font-size: 14px; display: flex; align-items: center; gap: 12px; }
-  .sig { height: 36px; }
+  .recvd { margin: 24px 0 8px; font-size: 14px; display: flex; align-items: flex-start; gap: 14px; }
+  .recvd .lbl { font-weight: 700; padding-top: 6px; min-width: 100px; }
+  .recvd .sigblock { display: inline-flex; flex-direction: column; align-items: flex-start; }
+  .sig { height: 40px; margin-bottom: 2px; }
+  .sigName { font-size: 13px; font-weight: 600; border-top: 1px solid #333; padding-top: 3px; min-width: 210px; }
+  .sigTitle { font-size: 11px; color: #444; margin-top: 1px; }
   .footer { margin-top: 36px; text-align: center; font-size: 13px; border-top: 1px solid #ccc; padding-top: 14px; }
   .thank { font-family: "Brush Script MT", "Lucida Handwriting", cursive; font-size: 24px; margin-top: 4px; }
   .voided { color: #b00020; font-weight: 700; }
@@ -114,8 +118,12 @@ export function buildReceiptHtml(r: Receipt, settings: SettingsMap): string {
   </div>
 
   <div class="recvd">
-    <b>Received by:</b>
-    ${sig ? `<img class="sig" src="${sig}"/>` : `<span style="border-bottom:1px solid #000;display:inline-block;width:200px;height:24px"></span>`}
+    <span class="lbl">${r.is_refund ? "Refunded by:" : "Received by:"}</span>
+    <span class="sigblock">
+      ${sig ? `<img class="sig" src="${sig}"/>` : `<span style="border-bottom:1px solid #000;display:inline-block;width:210px;height:36px"></span>`}
+      ${s.director_name ? `<span class="sigName">${h(s.director_name)}</span>` : ""}
+      ${(s.director_name || s.director_title) ? `<span class="sigTitle">${h(s.director_title || "")}${s.director_title && s.daycare_name ? " · " : ""}${h(s.daycare_name || "")}</span>` : ""}
+    </span>
   </div>
 
   <div class="footer">
