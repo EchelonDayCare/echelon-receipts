@@ -10,10 +10,21 @@ import DetailDrawer from "./DetailDrawer";
 
 const BANDS: AgeBand[] = ["Infant", "Toddler", "3-5yr", "School-age", "Unknown"];
 
+// Human-readable age band definitions (kept in sync with ageBand() in lib/waitlist.ts).
+const BAND_INFO: Record<AgeBand, { range: string; note: string }> = {
+  Infant:       { range: "0–18 months",   note: "Under 1.5 years old" },
+  Toddler:      { range: "19–36 months",  note: "1.5 – 3 years old" },
+  "3-5yr":      { range: "37–60 months",  note: "3 – 5 years old" },
+  "School-age": { range: "over 60 months", note: "Older than 5 years" },
+  Unknown:      { range: "—",             note: "No birthday on record" },
+};
+
+const DEFAULT_STATUSES: WaitlistStatus[] = ["new", "contacted", "offered"];
+
 export default function WaitlistList() {
   const [rows, setRows] = useState<WaitlistEntry[]>([]);
   const [statuses, setStatuses] = useState<Set<WaitlistStatus>>(
-    new Set(["new", "contacted", "offered"] as WaitlistStatus[]),
+    new Set(DEFAULT_STATUSES),
   );
   const [bands, setBands] = useState<Set<AgeBand>>(new Set());
   const [inBuildingOnly, setInBuildingOnly] = useState(false);
@@ -41,14 +52,27 @@ export default function WaitlistList() {
     return [...r].sort((a, b) => priorityScore(b) - priorityScore(a));
   }, [rows, bands, inBuildingOnly]);
 
+  const defaultStatusSet =
+    statuses.size === DEFAULT_STATUSES.length &&
+    DEFAULT_STATUSES.every((s) => statuses.has(s));
+  const filtersActive =
+    !defaultStatusSet || bands.size > 0 || inBuildingOnly || search.trim().length > 0;
+
+  const clearFilters = () => {
+    setStatuses(new Set(DEFAULT_STATUSES));
+    setBands(new Set());
+    setInBuildingOnly(false);
+    setSearch("");
+  };
+
   return (
     <div>
       <h1>Waitlist — All</h1>
 
       <div className="card" style={{ marginBottom: 16 }}>
         {/* Filter bar */}
-        <div style={{ display: "flex", flexWrap: "wrap", gap: 12, alignItems: "center" }}>
-          <div>
+        <div style={{ display: "flex", flexWrap: "wrap", gap: 16, alignItems: "flex-start" }}>
+          <div style={{ minWidth: 220 }}>
             <label style={labelSmall}>Status</label>
             <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
               {WAITLIST_STATUSES.map((s) => (
@@ -65,13 +89,22 @@ export default function WaitlistList() {
               ))}
             </div>
           </div>
-          <div>
-            <label style={labelSmall}>Age band</label>
+          <div style={{ minWidth: 280 }}>
+            <label style={labelSmall}>
+              Age band
+              <span
+                title={BANDS.map((b) => `${b}: ${BAND_INFO[b].range} (${BAND_INFO[b].note})`).join("\n")}
+                style={{ marginLeft: 6, cursor: "help", color: "var(--muted)", fontWeight: 400 }}
+              >
+                ⓘ
+              </span>
+            </label>
             <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
               {BANDS.map((b) => (
                 <Chip
                   key={b}
                   label={b}
+                  title={`${BAND_INFO[b].range} — ${BAND_INFO[b].note}`}
                   active={bands.has(b)}
                   onClick={() => {
                     const next = new Set(bands);
@@ -83,8 +116,11 @@ export default function WaitlistList() {
             </div>
           </div>
           <div>
-            <label style={labelSmall}>&nbsp;</label>
-            <label style={{ fontSize: 13, display: "flex", alignItems: "center", gap: 6 }}>
+            <label style={labelSmall}>Priority</label>
+            <label
+              title="Families who work in the same building get +100 to priority score. Toggle to only show them."
+              style={{ fontSize: 13, display: "flex", alignItems: "center", gap: 6, marginTop: 4 }}
+            >
               <input type="checkbox" checked={inBuildingOnly} onChange={(e) => setInBuildingOnly(e.target.checked)} />
               In-building only
             </label>
@@ -98,6 +134,31 @@ export default function WaitlistList() {
               style={{ width: "100%" }}
             />
           </div>
+          {filtersActive && (
+            <div style={{ alignSelf: "flex-end" }}>
+              <button
+                className="btn ghost"
+                onClick={clearFilters}
+                style={{ fontSize: 12 }}
+                title="Reset to default: status=new/contacted/offered, all age bands, no search"
+              >
+                ✕ Clear filters
+              </button>
+            </div>
+          )}
+        </div>
+        <div style={{
+          marginTop: 12, paddingTop: 10, borderTop: "1px dashed var(--border)",
+          fontSize: 11, color: "var(--muted)", display: "flex", gap: 14, flexWrap: "wrap",
+        }}>
+          <strong style={{ color: "var(--muted)" }}>Age bands:</strong>
+          {BANDS.filter((b) => b !== "Unknown").map((b) => (
+            <span key={b}>
+              <span style={{ ...bandChipStyle(b), padding: "1px 6px", fontSize: 10, marginRight: 4 }}>{b}</span>
+              {BAND_INFO[b].range}
+            </span>
+          ))}
+          <span style={{ opacity: 0.7 }}>· Showing {filtered.length} of {rows.length}</span>
         </div>
       </div>
 
@@ -158,10 +219,11 @@ function Td({ children }: { children: React.ReactNode }) {
   return <td style={{ padding: "10px 12px", fontSize: 14, verticalAlign: "top" }}>{children}</td>;
 }
 
-function Chip({ label, active, onClick }: { label: string; active: boolean; onClick: () => void }) {
+function Chip({ label, active, onClick, title }: { label: string; active: boolean; onClick: () => void; title?: string }) {
   return (
     <button
       onClick={onClick}
+      title={title}
       style={{
         padding: "4px 10px", borderRadius: 999, border: "1px solid " + (active ? "var(--accent)" : "var(--border)"),
         background: active ? "var(--accent)" : "transparent",

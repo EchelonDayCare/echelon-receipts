@@ -101,6 +101,7 @@ function ModuleSidebar({
           <NavLink
             key={it.to}
             to={it.to}
+            end
             className={({ isActive }) => "nav-item" + (isActive ? " active" : "")}
           >
             {it.label}
