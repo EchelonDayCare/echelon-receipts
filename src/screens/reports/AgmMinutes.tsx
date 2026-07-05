@@ -2,10 +2,12 @@
 // Preview mirrors the .docx output so what you see is what you get in Word.
 
 import { useEffect, useMemo, useState } from "react";
+import { save as saveDialog } from "@tauri-apps/plugin-dialog";
+import { writeFile } from "@tauri-apps/plugin-fs";
 import { showAlert, showConfirm } from "../../lib/dialogs";
 import {
   AgmMinutes, ChairmanBlock, buildInitialDraft, saveDraft,
-  generateDocxBlob, downloadBlob, listDraftYears, shortYearLabel,
+  generateDocxBlob, listDraftYears, shortYearLabel,
 } from "../../lib/agmMinutes";
 import { currentFiscalYear } from "../../lib/fiscalYear";
 
@@ -63,14 +65,30 @@ export default function AgmMinutesEditor() {
 
   async function onGenerate() {
     if (!minutes) return;
+    // Ask where to save first — if the user cancels, we don't touch anything.
+    const filename = `AGM-${minutes.yearLabel}.docx`;
+    let dest: string | null = null;
+    try {
+      dest = await saveDialog({
+        defaultPath: filename,
+        filters: [{ name: "Word Document", extensions: ["docx"] }],
+      });
+    } catch (e: any) {
+      await showAlert("Could not open save dialog: " + (e?.message || e), { kind: "error" });
+      return;
+    }
+    if (!dest) return; // user cancelled
+
     setBusy(true);
     try {
-      // Save first — every generate should also persist the exact state we exported.
+      // Save the draft (and mark finalized) once we're committed to writing.
       await saveDraft(minutes, /* finalized */ true);
       setDirty(false);
       await refreshList();
       const blob = await generateDocxBlob(minutes);
-      downloadBlob(blob, `AGM-${minutes.yearLabel}.docx`);
+      const bytes = new Uint8Array(await blob.arrayBuffer());
+      await writeFile(dest, bytes);
+      await showAlert(`✅ Document generated at:\n${dest}`);
     } catch (e: any) {
       await showAlert("Generate failed: " + (e?.message || e), { kind: "error" });
     } finally { setBusy(false); }
@@ -116,7 +134,7 @@ export default function AgmMinutesEditor() {
             {dirty ? "Save Draft" : "Saved"}
           </button>
           <button className="btn" onClick={onGenerate} disabled={busy || !minutes}>
-            📄 Generate .docx
+            📄 Generate
           </button>
         </div>
       </div>
