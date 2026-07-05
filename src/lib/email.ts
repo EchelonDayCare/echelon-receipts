@@ -22,6 +22,25 @@ function fmtAmount(n: number): string {
   return n.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 }
 
+export function renderSubject(tpl: string, r: Receipt, s: SettingsMap): string {
+  // For refunds we drop the description from the subject entirely — refund comments are
+  // usually a full sentence and would look weird when truncated. Parents get the details
+  // in the body. Normal receipts keep the original description in the subject.
+  const rForSubject: Receipt = r.is_refund
+    ? { ...r, description: "", comments: null }
+    : r;
+  let out = renderTemplate(tpl, rForSubject, s);
+  if (r.is_refund) {
+    // Prepend "Refund " if user's template doesn't already open with it,
+    // then tidy any dangling " - " left where {{description}} used to be.
+    out = out.replace(/\s*-\s*$/, "").replace(/\s+-\s+-\s+/g, " - ");
+    if (!/^refund\b/i.test(out.trim())) {
+      out = `Refund ${out}`;
+    }
+  }
+  return out;
+}
+
 export function renderTemplate(tpl: string, r: Receipt, s: SettingsMap): string {
   const pendingLine = r.pending_amount > 0 ? `\nPending Fees: CAD ${fmtAmount(r.pending_amount)}` : "";
   const isRefund = !!r.is_refund;
@@ -32,12 +51,14 @@ export function renderTemplate(tpl: string, r: Receipt, s: SettingsMap): string 
     ? ((r.comments && r.comments.trim()) ? r.comments.trim() : r.description)
     : r.description;
   const amountLabel = isRefund ? "Refund Amount" : "Amount";
+  const refundPrefix = isRefund ? "Refund " : "";
   const map: Record<string, string> = {
     receipt_no: String(r.receipt_no),
     student: r.student_name_snapshot,
     description: descForEmail,
     amount: fmtAmount(r.amount),
     amount_label: amountLabel,
+    refund_prefix: refundPrefix,
     pending: fmtAmount(r.pending_amount),
     pending_line: pendingLine,
     date: r.date,
@@ -152,7 +173,7 @@ export async function sendReceiptEmail(opts: {
       to: recipients,
       cc: [],
       bcc: s.bcc_self === "1" ? [sender] : [],
-      subject: renderTemplate(s.email_subject || "Receipt #{{receipt_no}}", r, s),
+      subject: renderSubject(s.email_subject || "Receipt #{{receipt_no}}", r, s),
       body_text: renderTemplate(s.email_body || "Receipt attached.", r, s),
       attachment_b64: b64,
       attachment_filename: `Receipt-${r.receipt_no}-${r.student_name_snapshot.replace(/[^\w]+/g, "_")}.pdf`,
