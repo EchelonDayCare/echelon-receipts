@@ -18,6 +18,13 @@ const CommsTemplates = lazy(() => import("./screens/comms/Templates"));
 const CommsHistory = lazy(() => import("./screens/comms/History"));
 const CommsDirectory = lazy(() => import("./screens/comms/Directory"));
 const CommsScheduled = lazy(() => import("./screens/comms/Scheduled"));
+const ReportsOverview = lazy(() => import("./screens/reports/Overview"));
+const EnrollmentRoster = lazy(() => import("./screens/reports/EnrollmentRoster"));
+const AttendanceSummary = lazy(() => import("./screens/reports/AttendanceSummary"));
+const CredentialsCompliance = lazy(() => import("./screens/reports/CredentialsCompliance"));
+const DrillLog = lazy(() => import("./screens/reports/DrillLog"));
+const SubsidyReport = lazy(() => import("./screens/reports/Subsidy"));
+const AgmPackage = lazy(() => import("./screens/reports/Agm"));
 import { runCloudBackupIfDue } from "./lib/cloudBackup";
 import { getSettings } from "./lib/db";
 import { DEFAULT_LOGO_DATA_URL } from "./lib/defaults";
@@ -100,8 +107,6 @@ function Shell({ logo, name, staffEnabled }: { logo: string; name: string; staff
           { to: "/students/attendance", label: "Attendance" },
           { to: "/students/history", label: "Receipt History" },
           { to: "/students/roster", label: "Roster" },
-          { to: "/students/reports", label: "Reports" },
-          { to: "/students/aging", label: "Aging (A/R)" },
           { to: "/students/annual", label: "Annual Tax Receipts" },
         ]}
       />
@@ -151,6 +156,26 @@ function Shell({ logo, name, staffEnabled }: { logo: string; name: string; staff
         ]}
       />
     );
+  } else if (path.startsWith("/reports")) {
+    sidebar = (
+      <ModuleSidebar
+        title="Reports & Compliance"
+        accent="#0369a1"
+        logo={logo}
+        name={name}
+        items={[
+          { to: "/reports/overview", label: "Overview" },
+          { to: "/reports/monthly", label: "Monthly Revenue" },
+          { to: "/reports/aging", label: "Aging (A/R)" },
+          { to: "/reports/subsidy", label: "Subsidy Reconciliation" },
+          { to: "/reports/enrollment", label: "Enrollment Roster" },
+          { to: "/reports/attendance", label: "Attendance Summary" },
+          { to: "/reports/credentials", label: "Staff Credentials" },
+          { to: "/reports/drills", label: "Drill Log" },
+          { to: "/reports/agm", label: "AGM / Board Package" },
+        ]}
+      />
+    );
   }
 
   return (
@@ -187,6 +212,22 @@ function Shell({ logo, name, staffEnabled }: { logo: string; name: string; staff
           <Route path="/communications/history" element={<CommsHistory />} />
           <Route path="/communications/directory" element={<CommsDirectory />} />
           <Route path="/communications/scheduled" element={<CommsScheduled />} />
+
+          {/* Reports & Compliance module */}
+          <Route path="/reports" element={<Navigate to="/reports/overview" replace />} />
+          <Route path="/reports/overview" element={<ReportsOverview />} />
+          <Route path="/reports/monthly" element={<Reports />} />
+          <Route path="/reports/aging" element={<AgingReport />} />
+          <Route path="/reports/subsidy" element={<SubsidyReport />} />
+          <Route path="/reports/enrollment" element={<EnrollmentRoster />} />
+          <Route path="/reports/attendance" element={<AttendanceSummary />} />
+          <Route path="/reports/credentials" element={<CredentialsCompliance />} />
+          <Route path="/reports/drills" element={<DrillLog />} />
+          <Route path="/reports/agm" element={<AgmPackage />} />
+
+          {/* Redirects for old Students routes now moved to Reports module */}
+          <Route path="/students/reports" element={<Navigate to="/reports/monthly" replace />} />
+          <Route path="/students/aging" element={<Navigate to="/reports/aging" replace />} />
 
           {/* Legacy redirects (preserve old hash links) */}
           <Route path="/today" element={<Navigate to="/students/today" replace />} />

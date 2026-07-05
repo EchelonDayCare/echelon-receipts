@@ -182,6 +182,12 @@ export default function Home() {
           <h2>Communications</h2>
           <p>Group email, templates, message history, contact directory</p>
         </button>
+
+        <button className="home-tile reports" onClick={() => nav("/reports/overview")}>
+          <div className="home-tile-icon">📊</div>
+          <h2>Reports & Compliance</h2>
+          <p>Revenue, aging, subsidies, licensing rosters, credentials, drills, AGM</p>
+        </button>
       </div>
 
       {alerts.length > 0 && (
