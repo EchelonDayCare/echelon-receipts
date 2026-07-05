@@ -105,7 +105,7 @@ export function buildReceiptHtml(r: Receipt, settings: SettingsMap): string {
     <tbody>
       <tr>
         <td class="name">${h(r.student_name_snapshot)}</td>
-        <td class="desc">${r.is_refund ? "<b>Refund</b> (refer comments)" : h(r.description)}</td>
+        <td class="desc">${r.is_refund ? "<b>Refund</b>" : h(r.description)}</td>
         <td class="amount">${r.is_refund ? "-" : ""}$${fmtAmount(Math.abs(r.amount))}</td>
       </tr>
     </tbody>
