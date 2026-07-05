@@ -74,9 +74,11 @@ export function buildAnnualReceiptHtml(opts: {
   table.items tr.refund { color:#8a1c1c; }
   .total { margin-top:8px; text-align:right; font-size:15px; }
   .total b { font-size:17px; }
-  .sigRow { margin-top:36px; display:flex; align-items:center; gap:14px; }
-  .sig { height:48px; }
-  .sigDetail { font-size:13px; }
+  .sigRow { margin-top:36px; display:flex; align-items:flex-start; gap:14px; }
+  .sig { height:48px; margin-bottom:2px; }
+  .sigDetail { font-size:13px; line-height:1.4; }
+  .sigDetail .sigName { font-weight:600; border-top:1px solid #333; padding-top:3px; min-width:240px; display:inline-block; }
+  .sigDetail .sigTitle, .sigDetail .sigOrg { font-size:12px; color:#333; }
   .ar { font-family: Consolas, monospace; }
   .superseded { background:#fff3cd; border:1px solid #d4ac0d; padding:6px 10px; margin:14px 0; font-size:12px; }
   .footer { margin-top:30px; padding-top:12px; border-top:1px solid #ccc; font-size:11px; color:#555; text-align:center; }
@@ -121,7 +123,9 @@ export function buildAnnualReceiptHtml(opts: {
     <div class="sigDetail">
       <div>Issued by:</div>
       <img class="sig" src="${sig}"/>
-      <div>${h(directorName)}${directorName ? ", " : ""}${h(directorTitle)}</div>
+      ${directorName ? `<div class="sigName">${h(directorName)}</div>` : ""}
+      ${directorTitle ? `<div class="sigTitle">${h(directorTitle)}</div>` : ""}
+      ${s.daycare_name ? `<div class="sigOrg">${h(s.daycare_name)}</div>` : ""}
     </div>
   </div>
 
