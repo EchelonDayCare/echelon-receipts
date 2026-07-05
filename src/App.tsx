@@ -30,6 +30,7 @@ const ExpenseForm = lazy(() => import("./screens/expenses/ExpenseForm"));
 const ExpenseList = lazy(() => import("./screens/expenses/ExpenseList"));
 const ExpenseRecurring = lazy(() => import("./screens/expenses/Recurring"));
 const ExpenseReports = lazy(() => import("./screens/expenses/Reports"));
+const ExpenseImport = lazy(() => import("./screens/expenses/ImportStatement"));
 import { runCloudBackupIfDue } from "./lib/cloudBackup";
 import { getSettings } from "./lib/db";
 import { DEFAULT_LOGO_DATA_URL } from "./lib/defaults";
@@ -193,6 +194,7 @@ function Shell({ logo, name, staffEnabled }: { logo: string; name: string; staff
           { to: "/expenses/new", label: "Add Expense" },
           { to: "/expenses/list", label: "All Expenses" },
           { to: "/expenses/recurring", label: "Recurring Bills" },
+          { to: "/expenses/import", label: "Import Statement (AI)" },
           { to: "/expenses/reports", label: "Expense Reports (P&L)" },
         ]}
       />
@@ -253,6 +255,7 @@ function Shell({ logo, name, staffEnabled }: { logo: string; name: string; staff
           <Route path="/expenses/edit/:id" element={<ExpenseForm />} />
           <Route path="/expenses/list" element={<ExpenseList />} />
           <Route path="/expenses/recurring" element={<ExpenseRecurring />} />
+          <Route path="/expenses/import" element={<ExpenseImport />} />
           <Route path="/expenses/reports" element={<ExpenseReports />} />
 
           {/* Redirects for old Students routes now moved to Reports module */}

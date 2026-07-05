@@ -108,6 +108,7 @@ pub fn run() {
             restore::restart_app,
             gemini::extract_timesheet,
             gemini::extract_attendance,
+            gemini::extract_visa_statement,
             consensus::extract_timesheet_consensus,
             inbox::inbox_list_recent,
             preprocess::normalize_sheet,

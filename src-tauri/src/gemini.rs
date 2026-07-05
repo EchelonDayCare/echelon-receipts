@@ -323,3 +323,136 @@ fn is_placeholder_name(name: &str) -> bool {
 fn truncate(s: &str, n: usize) -> String {
     if s.len() <= n { s.to_string() } else { format!("{}…", &s[..n]) }
 }
+
+// ─── Visa / credit-card statement extraction ────────────────────────────
+// Uploads a PDF (or image) of a Visa monthly statement and returns
+// itemised transactions ready to import as expenses.
+
+#[derive(Deserialize)]
+pub struct ExtractVisaArgs {
+    pub api_key: String,
+    pub file_b64: String,
+    pub mime_type: String, // "application/pdf" or "image/*"
+}
+
+#[derive(Serialize, Deserialize, Clone)]
+pub struct ExtractedVisaTxn {
+    pub date: String,             // yyyy-mm-dd (posting date preferred, else transaction date)
+    pub merchant: String,         // merchant name as printed
+    pub amount: f64,              // POSITIVE = charge, NEGATIVE = payment/return/credit
+    pub foreign_amount: Option<String>, // e.g. "$45.00 USD" if present, else null
+    pub category_guess: Option<String>, // free-form label the model suggests
+}
+
+#[derive(Serialize)]
+pub struct ExtractVisaResult {
+    pub statement_period: Option<String>, // e.g. "2026-06-15 to 2026-07-14"
+    pub card_last4: Option<String>,       // last 4 of the card number
+    pub statement_total: Option<f64>,     // for reconciliation
+    pub transactions: Vec<ExtractedVisaTxn>,
+    pub raw_text: String,
+}
+
+#[tauri::command]
+pub async fn extract_visa_statement(args: ExtractVisaArgs) -> Result<ExtractVisaResult, String> {
+    let key_for_redact = args.api_key.clone();
+    base64::engine::general_purpose::STANDARD
+        .decode(args.file_b64.as_bytes())
+        .map_err(|e| format!("file base64: {e}"))?;
+
+    let prompt = String::from(
+        "You are reading a Canadian Visa / credit-card monthly statement. Extract every purchase, payment, refund, credit and fee as itemised transactions.\n\
+        \n\
+        Return STRICT JSON with this exact shape (no prose, no markdown):\n\
+        {\n\
+          \"statement_period\": \"YYYY-MM-DD to YYYY-MM-DD\" or null,\n\
+          \"card_last4\": \"1234\" or null,\n\
+          \"statement_total\": number or null,   // the 'new balance' or 'total activity' figure\n\
+          \"transactions\": [\n\
+            {\n\
+              \"date\": \"YYYY-MM-DD\",         // posting date if shown; else transaction date\n\
+              \"merchant\": \"exactly as printed on the statement\",\n\
+              \"amount\": number,                 // POSITIVE for charges/purchases/fees; NEGATIVE for payments received, refunds, credits\n\
+              \"foreign_amount\": \"e.g. 45.00 USD\" or null,\n\
+              \"category_guess\": \"one short label\"   // e.g. 'Groceries', 'Utilities', 'Fuel', 'Subscription', 'Payment', 'Interest'\n\
+            }\n\
+          ]\n\
+        }\n\
+        \n\
+        RULES:\n\
+        - Extract EVERY line item, even small ones. Do NOT skip.\n\
+        - If the statement year is not printed on a specific row, infer it from the statement period.\n\
+        - Payments received / 'PAYMENT - THANK YOU' / refunds MUST be negative numbers.\n\
+        - Interest charges, foreign-currency conversion fees, annual fees are POSITIVE.\n\
+        - Keep merchant names as-printed (do not translate abbreviations).\n\
+        - Do not merge duplicate transactions on the same day — each line is a separate entry.\n\
+        - If the file is not a credit-card statement, return an empty transactions array.\n"
+    );
+
+    let body = json!({
+        "contents": [{
+            "parts": [
+                { "text": prompt },
+                { "inline_data": { "mime_type": args.mime_type, "data": args.file_b64 } }
+            ]
+        }],
+        "generationConfig": {
+            "temperature": 0.0,
+            "responseMimeType": "application/json"
+        }
+    });
+
+    let url = format!(
+        "https://generativelanguage.googleapis.com/v1beta/models/{MODEL}:generateContent?key={key}",
+        MODEL = MODEL,
+        key = args.api_key
+    );
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(180))
+        .build()
+        .map_err(|e| redact(format!("http client: {e}"), &key_for_redact))?;
+
+    let resp = client
+        .post(&url)
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| redact(format!("gemini request: {e}"), &key_for_redact))?;
+
+    let status = resp.status();
+    let text = resp.text().await.map_err(|e| redact(format!("gemini read: {e}"), &key_for_redact))?;
+    if !status.is_success() {
+        return Err(redact(format!("gemini http {status}: {}", truncate(&text, 800)), &key_for_redact));
+    }
+
+    let v: serde_json::Value = serde_json::from_str(&text)
+        .map_err(|e| redact(format!("gemini json: {e}"), &key_for_redact))?;
+    let inner = v["candidates"][0]["content"]["parts"][0]["text"]
+        .as_str()
+        .ok_or_else(|| redact(format!("gemini: no text in response: {}", truncate(&text, 400)), &key_for_redact))?
+        .to_string();
+
+    let parsed: serde_json::Value = serde_json::from_str(&inner)
+        .map_err(|e| redact(format!("model output not JSON: {e} :: {}", truncate(&inner, 400)), &key_for_redact))?;
+
+    let statement_period = parsed["statement_period"].as_str().map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
+    let card_last4 = parsed["card_last4"].as_str().map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
+    let statement_total = parsed["statement_total"].as_f64();
+
+    let txns_json = parsed["transactions"].as_array().cloned().unwrap_or_default();
+    let mut transactions: Vec<ExtractedVisaTxn> = Vec::with_capacity(txns_json.len());
+    for t in txns_json {
+        let date = t["date"].as_str().unwrap_or("").trim().to_string();
+        let merchant = t["merchant"].as_str().unwrap_or("").trim().to_string();
+        let amount = t["amount"].as_f64().unwrap_or(0.0);
+        if date.len() < 10 || merchant.is_empty() { continue; }
+        transactions.push(ExtractedVisaTxn {
+            date, merchant, amount,
+            foreign_amount: t["foreign_amount"].as_str().map(|s| s.trim().to_string()).filter(|s| !s.is_empty()),
+            category_guess: t["category_guess"].as_str().map(|s| s.trim().to_string()).filter(|s| !s.is_empty()),
+        });
+    }
+
+    Ok(ExtractVisaResult { statement_period, card_last4, statement_total, transactions, raw_text: inner })
+}

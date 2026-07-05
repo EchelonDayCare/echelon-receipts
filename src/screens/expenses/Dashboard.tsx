@@ -58,6 +58,7 @@ export default function ExpensesDashboard() {
         </div>
         <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
           <input type="month" value={ym} onChange={(e) => setYm(e.target.value)} />
+          <Link to="/expenses/import" className="btn secondary">📄 Import Statement</Link>
           <Link to="/expenses/new" className="btn">+ Add Expense</Link>
         </div>
       </div>
