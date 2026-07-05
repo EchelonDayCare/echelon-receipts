@@ -1,7 +1,7 @@
 // AGM Minutes editor — form on the left, live preview on the right.
 // Preview mirrors the .docx output so what you see is what you get in Word.
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { writeFile } from "@tauri-apps/plugin-fs";
 import { showAlert, showConfirm } from "../../lib/dialogs";
 import {
@@ -27,6 +27,13 @@ export default function AgmMinutesEditor() {
   const [aiBusy, setAiBusy] = useState<string | null>(null);   // section id being drafted, or "all"
   const [preAiSnapshot, setPreAiSnapshot] = useState<AgmMinutes | null>(null);
 
+  // Refs used to make in-flight AI work safe against year switches, unmounts and cancellations.
+  const initialRef = useRef<AgmMinutes | null>(null);   // snapshot from buildInitialDraft — used to detect user edits
+  const fyStartRef = useRef<number>(fyStart);
+  const aiEpochRef = useRef<number>(0);
+  const aiAbortRef = useRef<AbortController | null>(null);
+  useEffect(() => { fyStartRef.current = fyStart; }, [fyStart]);
+
   async function refreshList() {
     try { setSavedYears(await listDraftYears()); } catch { /* ignore */ }
   }
@@ -34,17 +41,33 @@ export default function AgmMinutesEditor() {
   useEffect(() => {
     let cancelled = false;
     setBusy(true);
+    // Abort any in-flight AI request from the previous year so its response
+    // cannot land in the newly-selected year's state.
+    if (aiAbortRef.current) { aiAbortRef.current.abort(); aiAbortRef.current = null; }
+    aiEpochRef.current++;
+    setAiBusy(null);
+    setPreAiSnapshot(null);
     (async () => {
       const m = await buildInitialDraft(fyStart);
-      if (!cancelled) { setMinutes(m); setDirty(false); }
+      if (!cancelled) {
+        setMinutes(m);
+        initialRef.current = m;
+        setDirty(false);
+      }
     })().finally(() => { if (!cancelled) setBusy(false); });
     refreshList();
-    return () => { cancelled = true; };
+    return () => {
+      cancelled = true;
+      // On unmount / year change: cancel outstanding fetches.
+      if (aiAbortRef.current) { aiAbortRef.current.abort(); aiAbortRef.current = null; }
+      aiEpochRef.current++;
+    };
   }, [fyStart]);
 
   function patch(partial: Partial<AgmMinutes>) {
-    if (!minutes) return;
-    setMinutes({ ...minutes, ...partial });
+    // Functional setState avoids stale-closure bugs when AI callbacks resolve
+    // interleaved with rapid user typing.
+    setMinutes((prev) => (prev ? { ...prev, ...partial } : prev));
     setDirty(true);
   }
 
@@ -86,20 +109,44 @@ export default function AgmMinutesEditor() {
     }
 
     setBusy(true);
+    let wroteOk = false;
     try {
-      await saveDraft(minutes, /* finalized */ true);
-      setDirty(false);
-      await refreshList();
+      // Generate + write BEFORE marking finalized in the DB, so a failed
+      // write doesn't leave the draft flagged as exported.
       const blob = await generateDocxBlob(minutes);
       const bytes = new Uint8Array(await blob.arrayBuffer());
       await writeFile(dest, bytes);
+      wroteOk = true;
+      await saveDraft(minutes, /* finalized */ true);
+      setDirty(false);
+      await refreshList();
       await showAlert(`✅ Document generated at:\n${dest}`);
     } catch (e: any) {
+      if (!wroteOk) {
+        // Still persist the current edits as an in-progress draft so nothing is lost.
+        try { await saveDraft(minutes, /* finalized */ false); setDirty(false); await refreshList(); } catch { /* ignore secondary failure */ }
+      }
       await showAlert("Generate failed: " + (e?.message || e), { kind: "error" });
     } finally { setBusy(false); }
   }
 
   // ---------- AI drafting ----------
+  /** Prepare epoch/abort for a new AI operation. Returns the captured epoch + fyStart + signal. */
+  function beginAi(): { epoch: number; fy: number; signal: AbortSignal } {
+    if (aiAbortRef.current) aiAbortRef.current.abort();
+    const controller = new AbortController();
+    aiAbortRef.current = controller;
+    aiEpochRef.current++;
+    return { epoch: aiEpochRef.current, fy: fyStartRef.current, signal: controller.signal };
+  }
+  /** Guard: only apply an AI result if we're still on the same year and the same op. */
+  function aiStillValid(epoch: number, fy: number): boolean {
+    return aiEpochRef.current === epoch && fyStartRef.current === fy;
+  }
+  function onCancelAi() {
+    if (aiAbortRef.current) aiAbortRef.current.abort();
+  }
+
   async function onDraftAll() {
     if (!minutes) return;
     const ok = await showConfirm(
@@ -110,16 +157,21 @@ export default function AgmMinutesEditor() {
       "already typed is preserved."
     );
     if (!ok) return;
+    const { epoch, fy, signal } = beginAi();
     setAiBusy("all");
     setPreAiSnapshot(minutes);
     try {
-      const ctx = await gatherYearContext(fyStart);
-      const next = await draftEntireMinutes(minutes, ctx);
+      const ctx = await gatherYearContext(fy);
+      const next = await draftEntireMinutes(minutes, ctx, { signal, initial: initialRef.current ?? undefined });
+      if (!aiStillValid(epoch, fy)) return;
       setMinutes(next);
       setDirty(true);
     } catch (e: any) {
+      if ((e?.name === "AbortError") || signal.aborted) return;   // user cancelled or year switched
       await showAlert("AI draft failed: " + (e?.message || e), { kind: "error" });
-    } finally { setAiBusy(null); }
+    } finally {
+      if (aiStillValid(epoch, fy)) setAiBusy(null);
+    }
   }
 
   function onUndoAi() {
@@ -131,19 +183,24 @@ export default function AgmMinutesEditor() {
 
   async function draftField(
     id: string,
-    fetcher: () => Promise<string>,
+    fetcher: (signal: AbortSignal) => Promise<string>,
     assign: (text: string) => void,
   ) {
     if (!minutes) return;
+    const { epoch, fy, signal } = beginAi();
     setAiBusy(id);
     setPreAiSnapshot(minutes);
     try {
-      const text = await fetcher();
+      const text = await fetcher(signal);
+      if (!aiStillValid(epoch, fy)) return;
       assign(text);
       setDirty(true);
     } catch (e: any) {
+      if ((e?.name === "AbortError") || signal.aborted) return;
       await showAlert("AI draft failed: " + (e?.message || e), { kind: "error" });
-    } finally { setAiBusy(null); }
+    } finally {
+      if (aiStillValid(epoch, fy)) setAiBusy(null);
+    }
   }
 
   // ---------- Year picker options ----------
@@ -172,7 +229,7 @@ export default function AgmMinutesEditor() {
         <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
           <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 13 }}>
             Year:
-            <select value={fyStart} onChange={(e) => setFyStart(parseInt(e.target.value, 10))} disabled={busy}>
+            <select value={fyStart} onChange={(e) => setFyStart(parseInt(e.target.value, 10))} disabled={busy || !!aiBusy}>
               {yearOptions.map((y) => {
                 const yl = shortYearLabel(y);
                 const saved = savedYears.find((s) => s.year_label === yl);
@@ -189,6 +246,11 @@ export default function AgmMinutesEditor() {
                   title="Draft empty sections and free-text bodies with AI using this year's data.">
             {aiBusy === "all" ? "✨ Drafting…" : "✨ Draft with AI"}
           </button>
+          {aiBusy && (
+            <button className="btn ghost" onClick={onCancelAi} title="Cancel the in-progress AI draft.">
+              ✕ Cancel AI
+            </button>
+          )}
           {preAiSnapshot && !aiBusy && (
             <button className="btn ghost" onClick={onUndoAi} title="Restore the text before the last AI draft.">
               ↶ Undo AI
@@ -224,30 +286,27 @@ interface FormProps {
   patch: (p: Partial<AgmMinutes>) => void;
   fyStart: number;
   aiBusy: string | null;
-  draftField: (id: string, fetcher: () => Promise<string>, assign: (text: string) => void) => Promise<void>;
+  draftField: (id: string, fetcher: (signal: AbortSignal) => Promise<string>, assign: (text: string) => void) => Promise<void>;
 }
 
 function FormPane({ minutes, patch, fyStart, aiBusy, draftField }: FormProps) {
   async function aiFin() {
     await draftField("fin",
-      async () => draftFinancialReport(await gatherYearContext(fyStart)),
+      async (signal) => draftFinancialReport(await gatherYearContext(fyStart), signal),
       (text) => patch({ financialReportBody: text }));
   }
   async function aiStaffing() {
     await draftField("staffing",
-      async () => draftStaffingChallenges(await gatherYearContext(fyStart)),
+      async (signal) => draftStaffingChallenges(await gatherYearContext(fyStart), signal),
       (text) => patch({ staffingChallenges: text }));
   }
   async function aiFacilities() {
     await draftField("facilities",
-      async () => draftFacilitiesMaintenance(await gatherYearContext(fyStart)),
+      async (signal) => draftFacilitiesMaintenance(await gatherYearContext(fyStart), signal),
       (text) => patch({ facilitiesMaintenance: text }));
   }
   async function aiChairman() {
-    // draftField is designed for text→field assignment; for the multi-block
-    // Chairman's Report we manage the busy state locally via draftField's id
-    // but perform the array patch ourselves inside the fetcher.
-    await draftField("chairman", async () => {
+    await draftField("chairman", async (signal) => {
       const ctx = await gatherYearContext(fyStart);
       const filled: ChairmanBlock[] = [];
       for (const b of minutes.chairmanReport) {
@@ -255,9 +314,12 @@ function FormPane({ minutes, patch, fyStart, aiBusy, draftField }: FormProps) {
         const isEmpty = isList ? (b.body as string[]).length === 0 : ((b.body as string).trim() === "");
         if (!isEmpty) { filled.push(b); continue; }
         try {
-          const body = await draftChairmanBlock(b.heading, ctx, isList);
+          const body = await draftChairmanBlock(b.heading, ctx, isList, signal);
           filled.push({ heading: b.heading, body });
-        } catch { filled.push(b); }
+        } catch (e) {
+          if ((e as any)?.name === "AbortError" || signal.aborted) throw e;
+          filled.push(b);
+        }
       }
       patch({ chairmanReport: filled });
       return "";

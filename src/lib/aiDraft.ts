@@ -74,13 +74,18 @@ export async function gatherYearContext(fyStart: number): Promise<YearContext> {
     [start, end], { n: 0 }
   );
 
-  const rev = await safeSelectOne<{ gross: number; ccfri: number; accb: number }>(
+  // Revenue: gross uses COALESCE(gross_amount, amount) — older rows predating
+  // migration 005 have gross_amount = NULL and their `amount` was the full fee
+  // before we split out subsidies. Parent-paid uses `amount` (already net of
+  // subsidies for post-migration rows).
+  const rev = await safeSelectOne<{ gross: number; ccfri: number; accb: number; parent_paid: number }>(
     `SELECT
-        COALESCE(SUM(CASE WHEN is_refund=1 THEN -amount ELSE amount END), 0) AS gross,
-        COALESCE(SUM(CASE WHEN is_refund=1 THEN -ccfri_amount ELSE ccfri_amount END), 0) AS ccfri,
-        COALESCE(SUM(CASE WHEN is_refund=1 THEN -accb_amount ELSE accb_amount END), 0) AS accb
+        COALESCE(SUM(CASE WHEN is_refund=1 THEN -COALESCE(gross_amount, amount) ELSE COALESCE(gross_amount, amount) END), 0) AS gross,
+        COALESCE(SUM(CASE WHEN is_refund=1 THEN -COALESCE(ccfri_amount,0) ELSE COALESCE(ccfri_amount,0) END), 0) AS ccfri,
+        COALESCE(SUM(CASE WHEN is_refund=1 THEN -COALESCE(accb_amount,0) ELSE COALESCE(accb_amount,0) END), 0) AS accb,
+        COALESCE(SUM(CASE WHEN is_refund=1 THEN -amount ELSE amount END), 0) AS parent_paid
       FROM receipts WHERE voided=0 AND date>=? AND date<=?`,
-    [start, end], { gross: 0, ccfri: 0, accb: 0 }
+    [start, end], { gross: 0, ccfri: 0, accb: 0, parent_paid: 0 }
   );
 
   const exp = await safeSelectOne<{ total: number }>(
@@ -119,7 +124,7 @@ export async function gatherYearContext(fyStart: number): Promise<YearContext> {
   try {
     const py = fiscalYearBounds(fyStart - 1);
     const pRev = await safeSelectOne<{ gross: number }>(
-      "SELECT COALESCE(SUM(CASE WHEN is_refund=1 THEN -amount ELSE amount END),0) AS gross FROM receipts WHERE voided=0 AND date>=? AND date<=?",
+      "SELECT COALESCE(SUM(CASE WHEN is_refund=1 THEN -COALESCE(gross_amount, amount) ELSE COALESCE(gross_amount, amount) END),0) AS gross FROM receipts WHERE voided=0 AND date>=? AND date<=?",
       [py.start, py.end], { gross: 0 }
     );
     const pExp = await safeSelectOne<{ total: number }>(
@@ -144,7 +149,7 @@ export async function gatherYearContext(fyStart: number): Promise<YearContext> {
     grossRevenue: rev.gross || 0,
     ccfriTotal: rev.ccfri || 0,
     accbTotal: rev.accb || 0,
-    parentPaidTotal: (rev.gross || 0) - (rev.ccfri || 0) - (rev.accb || 0),
+    parentPaidTotal: rev.parent_paid || 0,
     expensesTotal: exp.total || 0,
     topExpenseCategories: topCats,
     activeStaff: staff,
@@ -158,7 +163,31 @@ export async function gatherYearContext(fyStart: number): Promise<YearContext> {
 
 // ─── Azure chat helper ─────────────────────────────────────────────────
 
-async function azureChat(system: string, user: string, maxTokens = 400): Promise<string> {
+const CHAT_TIMEOUT_MS = 45_000;
+
+/**
+ * Combine an external AbortSignal with a timeout-driven AbortController.
+ * Returns the effective controller so callers can abort explicitly and a
+ * cleanup function that must be called after fetch resolves/rejects.
+ */
+function combinedController(external?: AbortSignal): { controller: AbortController; cleanup: () => void } {
+  const controller = new AbortController();
+  const t = setTimeout(() => controller.abort(new DOMException("Timeout", "TimeoutError")), CHAT_TIMEOUT_MS);
+  const onExtAbort = () => controller.abort(external!.reason);
+  if (external) {
+    if (external.aborted) controller.abort(external.reason);
+    else external.addEventListener("abort", onExtAbort, { once: true });
+  }
+  return {
+    controller,
+    cleanup: () => {
+      clearTimeout(t);
+      if (external) external.removeEventListener("abort", onExtAbort);
+    },
+  };
+}
+
+async function azureChat(system: string, user: string, maxTokens = 400, signal?: AbortSignal): Promise<string> {
   const settings = await getSettings();
   if (settings.azure_ai_key_set !== "1") {
     throw new Error("Azure AI key is not configured. Set it in Configuration → Identity.");
@@ -175,18 +204,24 @@ async function azureChat(system: string, user: string, maxTokens = 400): Promise
     temperature: 0.3,
     max_completion_tokens: maxTokens,
   };
-  const resp = await fetch(url, {
-    method: "POST",
-    headers: { "api-key": apiKey, "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-  });
-  if (!resp.ok) {
-    const t = await resp.text().catch(() => "");
-    throw new Error(`Azure OpenAI HTTP ${resp.status}: ${t.slice(0, 200)}`);
+  const { controller, cleanup } = combinedController(signal);
+  try {
+    const resp = await fetch(url, {
+      method: "POST",
+      headers: { "api-key": apiKey, "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+      signal: controller.signal,
+    });
+    if (!resp.ok) {
+      const t = await resp.text().catch(() => "");
+      throw new Error(`Azure OpenAI HTTP ${resp.status}: ${t.slice(0, 200)}`);
+    }
+    const json = await resp.json();
+    const content: string = json?.choices?.[0]?.message?.content ?? "";
+    return content.trim();
+  } finally {
+    cleanup();
   }
-  const json = await resp.json();
-  const content: string = json?.choices?.[0]?.message?.content ?? "";
-  return content.trim();
 }
 
 // ─── Section drafters ──────────────────────────────────────────────────
@@ -230,34 +265,34 @@ function staffFacts(c: YearContext): string {
   return lines.join("\n");
 }
 
-export async function draftFinancialReport(c: YearContext): Promise<string> {
+export async function draftFinancialReport(c: YearContext, signal?: AbortSignal): Promise<string> {
   const facts = financialFacts(c);
   const user =
     `Write one short paragraph (2–4 sentences) for the "Financial Report" section of the AGM minutes. ` +
     `Summarise the year's financial health at a high level. Mention gross revenue, subsidies received, and total expenses. ` +
     `End with "Note: Financial report is attached." on a new line.\n\nDATA:\n${facts}`;
-  return await azureChat(BASE_TONE, user, 300);
+  return await azureChat(BASE_TONE, user, 300, signal);
 }
 
-export async function draftStaffingChallenges(c: YearContext): Promise<string> {
+export async function draftStaffingChallenges(c: YearContext, signal?: AbortSignal): Promise<string> {
   const facts = staffFacts(c);
   const user =
     `Write one short paragraph (2–3 sentences) for the "Staffing Challenges" sub-section of General Discussion. ` +
     `Focus on staffing continuity, credentials due for renewal (if any), and any workforce risks implied by the data. ` +
     `If nothing notable, say the daycare maintained a stable, qualified team.\n\nDATA:\n${facts}`;
-  return await azureChat(BASE_TONE, user, 250);
+  return await azureChat(BASE_TONE, user, 250, signal);
 }
 
-export async function draftFacilitiesMaintenance(c: YearContext): Promise<string> {
+export async function draftFacilitiesMaintenance(c: YearContext, signal?: AbortSignal): Promise<string> {
   const facts = staffFacts(c) + "\n" + financialFacts(c);
   const user =
     `Write one short paragraph (2–3 sentences) for the "Facilities Maintenance" sub-section of General Discussion. ` +
     `Reference any maintenance-related expense categories if present, and drill completion for safety. ` +
     `If no maintenance-specific data, say the facility was well-maintained and safety drills were conducted regularly.\n\nDATA:\n${facts}`;
-  return await azureChat(BASE_TONE, user, 250);
+  return await azureChat(BASE_TONE, user, 250, signal);
 }
 
-export async function draftChairmanBlock(heading: string, c: YearContext, wantBullets: boolean): Promise<string | string[]> {
+export async function draftChairmanBlock(heading: string, c: YearContext, wantBullets: boolean, signal?: AbortSignal): Promise<string | string[]> {
   const facts = financialFacts(c) + "\n" + staffFacts(c);
   const user =
     `Write the body text for the "${heading.replace(/:$/, "")}" sub-heading of the Chairman's Report in the AGM minutes.\n` +
@@ -265,7 +300,7 @@ export async function draftChairmanBlock(heading: string, c: YearContext, wantBu
       ? `Reply with 3–6 short bullet points. One bullet per line. No leading dashes or bullets — plain lines only.`
       : `Reply with one short paragraph (2–4 sentences).`) +
     `\n\nDATA:\n${facts}`;
-  const raw = await azureChat(BASE_TONE, user, wantBullets ? 350 : 250);
+  const raw = await azureChat(BASE_TONE, user, wantBullets ? 350 : 250, signal);
   if (wantBullets) {
     return raw.split(/\r?\n/).map((s) => s.replace(/^\s*[-•*]\s*/, "").trim()).filter(Boolean);
   }
@@ -274,27 +309,55 @@ export async function draftChairmanBlock(heading: string, c: YearContext, wantBu
 
 // ─── Whole-document drafter ─────────────────────────────────────────────
 
-export async function draftEntireMinutes(m: AgmMinutes, c: YearContext): Promise<AgmMinutes> {
+export interface DraftAllOpts {
+  signal?: AbortSignal;
+  /** Original draft as returned by buildInitialDraft — used to detect user edits.
+   *  A field is overwritten by AI only if the current value still matches the
+   *  initial value (i.e. the user hasn't touched it). */
+  initial?: AgmMinutes;
+}
+
+function sameStringField(cur: string, init: string): boolean {
+  return (cur || "").trim() === (init || "").trim();
+}
+function sameBlockBody(cur: string | string[], init: string | string[]): boolean {
+  const norm = (v: string | string[]) => Array.isArray(v) ? v.map(s => s.trim()).filter(Boolean).join("\n") : (v || "").trim();
+  return norm(cur) === norm(init);
+}
+
+export async function draftEntireMinutes(m: AgmMinutes, c: YearContext, opts: DraftAllOpts = {}): Promise<AgmMinutes> {
   const next: AgmMinutes = JSON.parse(JSON.stringify(m));
+  const init = opts.initial;
+  const signal = opts.signal;
 
-  // 4. Financial Report body
-  try { next.financialReportBody = await draftFinancialReport(c); } catch { /* keep existing */ }
+  const canOverwriteFin = !init || sameStringField(next.financialReportBody, init.financialReportBody);
+  const canOverwriteStaff = !init || sameStringField(next.staffingChallenges, init.staffingChallenges);
+  const canOverwriteFac = !init || sameStringField(next.facilitiesMaintenance, init.facilitiesMaintenance);
 
-  // 5. General Discussion
-  try { next.staffingChallenges = await draftStaffingChallenges(c); } catch { /* keep */ }
-  try { next.facilitiesMaintenance = await draftFacilitiesMaintenance(c); } catch { /* keep */ }
+  if (canOverwriteFin) {
+    try { next.financialReportBody = await draftFinancialReport(c, signal); } catch (e) { if ((e as any)?.name === "AbortError") throw e; }
+  }
+  if (canOverwriteStaff) {
+    try { next.staffingChallenges = await draftStaffingChallenges(c, signal); } catch (e) { if ((e as any)?.name === "AbortError") throw e; }
+  }
+  if (canOverwriteFac) {
+    try { next.facilitiesMaintenance = await draftFacilitiesMaintenance(c, signal); } catch (e) { if ((e as any)?.name === "AbortError") throw e; }
+  }
 
-  // 3. Chairman's Report — draft blocks whose current body is empty, preserving
-  //    the user's existing text (including auto-filled Children Enrollment).
+  // Chairman's Report — draft blocks whose body is either empty OR unchanged from initial.
+  const initBlocks = init?.chairmanReport ?? [];
   const filled: ChairmanBlock[] = [];
   for (const b of next.chairmanReport) {
     const isList = Array.isArray(b.body);
     const isEmpty = isList ? (b.body as string[]).length === 0 : ((b.body as string).trim() === "");
-    if (!isEmpty) { filled.push(b); continue; }
+    const initBlock = initBlocks.find((x) => x.heading === b.heading);
+    const unchanged = initBlock ? sameBlockBody(b.body, initBlock.body) : true;
+    if (!isEmpty && !unchanged) { filled.push(b); continue; }
     try {
-      const body = await draftChairmanBlock(b.heading, c, isList);
+      const body = await draftChairmanBlock(b.heading, c, isList, signal);
       filled.push({ heading: b.heading, body });
-    } catch {
+    } catch (e) {
+      if ((e as any)?.name === "AbortError") throw e;
       filled.push(b);
     }
   }

@@ -87,9 +87,9 @@ function BoardPackage() {
         ),
         d.select<{ receipts: number; gross: number; ccfri: number; accb: number; paid: number; refunds: number }[]>(
           `SELECT COUNT(*) AS receipts,
-                  COALESCE(SUM(gross_amount),0) AS gross,
-                  COALESCE(SUM(ccfri_amount),0) AS ccfri,
-                  COALESCE(SUM(accb_amount),0) AS accb,
+                  COALESCE(SUM(CASE WHEN is_refund=1 THEN -COALESCE(gross_amount, amount) ELSE COALESCE(gross_amount, amount) END),0) AS gross,
+                  COALESCE(SUM(CASE WHEN is_refund=1 THEN -COALESCE(ccfri_amount,0) ELSE COALESCE(ccfri_amount,0) END),0) AS ccfri,
+                  COALESCE(SUM(CASE WHEN is_refund=1 THEN -COALESCE(accb_amount,0) ELSE COALESCE(accb_amount,0) END),0) AS accb,
                   COALESCE(SUM(CASE WHEN is_refund=1 THEN -amount ELSE amount END),0) AS paid,
                   COALESCE(SUM(CASE WHEN is_refund=1 THEN amount ELSE 0 END),0) AS refunds
              FROM receipts
