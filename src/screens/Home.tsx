@@ -204,6 +204,12 @@ export default function Home() {
           <p>Daycare identity, email, backups, optional features</p>
         </button>
 
+        <button className="home-tile waitlist" onClick={() => nav("/waitlist")} style={{ background: "linear-gradient(135deg, #f5f3ff, #ede9fe)" }}>
+          <div className="home-tile-icon">📝</div>
+          <h2>Waitlist</h2>
+          <p>Google Form applications, follow-ups, conversions to enrolled students</p>
+        </button>
+
         <button className="home-tile" onClick={() => nav("/ask")} style={{ background: "linear-gradient(135deg, #eff6ff, #dbeafe)" }}>
           <div className="home-tile-icon">🤖</div>
           <h2>Ask Echelon</h2>

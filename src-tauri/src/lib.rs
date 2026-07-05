@@ -8,6 +8,7 @@ mod consensus;
 mod inbox;
 mod preprocess;
 mod restore;
+mod waitlist;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -117,6 +118,11 @@ pub fn run() {
             errlog::read_error_log,
             errlog::error_log_path,
             errlog::clear_error_log,
+            waitlist::waitlist_test_connection,
+            waitlist::waitlist_save_credentials,
+            waitlist::waitlist_clear_credentials,
+            waitlist::waitlist_get_status,
+            waitlist::waitlist_fetch_rows,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

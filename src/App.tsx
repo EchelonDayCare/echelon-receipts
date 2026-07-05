@@ -32,6 +32,11 @@ const ExpenseRecurring = lazy(() => import("./screens/expenses/Recurring"));
 const ExpenseReports = lazy(() => import("./screens/expenses/Reports"));
 const ExpenseImport = lazy(() => import("./screens/expenses/ImportStatement"));
 const AskEchelon = lazy(() => import("./screens/AskEchelon"));
+const WaitlistOverview = lazy(() => import("./screens/waitlist/Overview"));
+const WaitlistList = lazy(() => import("./screens/waitlist/List"));
+const WaitlistEnrolled = lazy(() => import("./screens/waitlist/Enrolled"));
+const WaitlistArchived = lazy(() => import("./screens/waitlist/Archived"));
+const WaitlistSettings = lazy(() => import("./screens/waitlist/Settings"));
 import { runCloudBackupIfDue } from "./lib/cloudBackup";
 import { getSettings } from "./lib/db";
 import { getVersion } from "@tauri-apps/api/app";
@@ -233,6 +238,22 @@ function Shell({ logo, name, staffEnabled }: { logo: string; name: string; staff
         ]}
       />
     );
+  } else if (path.startsWith("/waitlist")) {
+    sidebar = (
+      <ModuleSidebar
+        title="Waitlist"
+        accent="#7c3aed"
+        logo={logo}
+        name={name}
+        items={[
+          { to: "/waitlist", label: "Overview" },
+          { to: "/waitlist/list", label: "All Applications" },
+          { to: "/waitlist/enrolled", label: "Enrolled" },
+          { to: "/waitlist/archived", label: "Archived" },
+          { to: "/waitlist/settings", label: "Settings" },
+        ]}
+      />
+    );
   }
 
   return (
@@ -294,6 +315,13 @@ function Shell({ logo, name, staffEnabled }: { logo: string; name: string; staff
 
           {/* Ask Echelon (natural-language query) */}
           <Route path="/ask" element={<AskEchelon />} />
+
+          {/* Waitlist module (v0.8.0) */}
+          <Route path="/waitlist" element={<WaitlistOverview />} />
+          <Route path="/waitlist/list" element={<WaitlistList />} />
+          <Route path="/waitlist/enrolled" element={<WaitlistEnrolled />} />
+          <Route path="/waitlist/archived" element={<WaitlistArchived />} />
+          <Route path="/waitlist/settings" element={<WaitlistSettings />} />
 
           {/* Redirects for old Students routes now moved to Reports module */}
           <Route path="/students/reports" element={<Navigate to="/reports/monthly" replace />} />
@@ -358,6 +386,14 @@ export default function App() {
         await runDueScheduled(settings);
       } catch { /* silent — visible in the Scheduled screen if it recurs */ }
     }, 15 * 60 * 1000);
+
+    // Kick off Waitlist auto-sync (idempotent — safe on re-mounts).
+    (async () => {
+      try {
+        const { startAutoSync } = await import("./lib/waitlist");
+        await startAutoSync();
+      } catch (e) { console.warn("[waitlist] auto-sync bootstrap failed:", e); }
+    })();
 
     return () => {
       window.removeEventListener("settings-saved", onSaved);

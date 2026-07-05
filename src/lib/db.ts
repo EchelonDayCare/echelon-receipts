@@ -582,6 +582,55 @@ async function ensureSchema(d: Database): Promise<void> {
   // AGM AI redact — defaults ON: staff names replaced with Staff #N tokens in
   // prompts. Users can turn this off if they want richer prose.
   await setting("agm_ai_redact", "1");
+
+  // ─── Waitlist Sync (v0.8.0) ────────────────────────────────────────
+  // Google Sheets → local mirror. Service-account JSON stays in Keychain,
+  // never in SQLite. See src-tauri/src/waitlist.rs.
+  if (!(await tableExists("waitlist_entries"))) {
+    console.warn("[ensureSchema] creating waitlist_entries");
+  }
+  await d.execute(`CREATE TABLE IF NOT EXISTS waitlist_entries (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    dedupe_key TEXT UNIQUE NOT NULL,
+    sheet_row_hash TEXT NOT NULL,
+    submitted_at TEXT NOT NULL,
+    child_name TEXT NOT NULL,
+    birthday TEXT,
+    gender TEXT,
+    parent_name TEXT,
+    parent_email TEXT,
+    phone TEXT,
+    target_start TEXT,
+    toilet_trained INTEGER,
+    in_building INTEGER,
+    notes TEXT,
+    status TEXT NOT NULL DEFAULT 'new',
+    status_note TEXT,
+    status_changed_at TEXT,
+    last_seen_in_sheet TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    converted_student_id INTEGER
+  )`);
+  await d.execute("CREATE INDEX IF NOT EXISTS idx_waitlist_status ON waitlist_entries(status)");
+  await d.execute("CREATE INDEX IF NOT EXISTS idx_waitlist_dedupe ON waitlist_entries(dedupe_key)");
+
+  await d.execute(`CREATE TABLE IF NOT EXISTS waitlist_sync_state (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    last_synced_at TEXT,
+    last_success_at TEXT,
+    last_error TEXT,
+    row_count INTEGER DEFAULT 0
+  )`);
+  await d.execute("INSERT OR IGNORE INTO waitlist_sync_state (id) VALUES (1)");
+
+  for (const [k, v] of [
+    ["waitlist_sheet_id", "10TlzA6Zea3TXai6eNQTKjbWF-Hf-6nBt7jf3mRohsS0"],
+    ["waitlist_sheet_range", "Form_Responses!A:K"],
+    ["waitlist_sync_enabled", "0"],
+    ["waitlist_sync_interval_min", "10"],
+    ["waitlist_last_synced_at", ""],
+  ] as const) await setting(k, v);
 }
 
 // ---------- Person identity ----------

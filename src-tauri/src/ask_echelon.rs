@@ -179,6 +179,13 @@ fn build_schema_context(
 fn is_pii_column(col: &str) -> bool {
     // Case-insensitive heuristic. Anything that could identify a family gets
     // redacted before we send sample rows to the LLM.
+    //
+    // Waitlist columns (v0.8.0) are covered by these substring rules:
+    //   parent_email → matches "email" and "parent"
+    //   phone        → matches "phone"
+    //   parent_name  → matches "parent" and "name"
+    //   child_name   → matches "child_name" and "name"
+    // No new patterns required, but keep this in mind when adding tables.
     let c = col.to_lowercase();
     let hits = [
         "child_name", "student_name", "name",
