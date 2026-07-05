@@ -115,6 +115,8 @@ export async function sendAnnualReceiptEmail(opts: {
   body: string;
   recipients: string[];
   settings: SettingsMap;
+  logKind?: string;      // 'annual_receipt' | 'subsidy_stmt'
+  logRelatedId?: number;
 }): Promise<void> {
   const { pdfBytes, filename, subject, body, recipients, settings: s } = opts;
   if (recipients.length === 0) throw new Error("No recipient email addresses.");
@@ -127,20 +129,41 @@ export async function sendAnnualReceiptEmail(opts: {
   const port = parseInt(s.smtp_port || "587", 10);
   if (!host || !port) throw new Error("SMTP host/port not set. Open Settings → Email.");
 
-  await invoke("send_email", {
-    args: {
-      smtp_host: host, smtp_port: port,
-      smtp_user: (s.smtp_user || sender).trim(),
-      smtp_password: password,
-      from_name: s.sender_name || s.daycare_name || "Echelon Daycare",
-      from_email: sender,
-      to: recipients, cc: [],
-      bcc: s.bcc_self === "1" ? [sender] : [],
-      subject, body_text: body,
-      attachment_b64: bytesToBase64(pdfBytes),
-      attachment_filename: filename,
-    },
-  });
+  let logErr: string | null = null;
+  try {
+    await invoke("send_email", {
+      args: {
+        smtp_host: host, smtp_port: port,
+        smtp_user: (s.smtp_user || sender).trim(),
+        smtp_password: password,
+        from_name: s.sender_name || s.daycare_name || "Echelon Daycare",
+        from_email: sender,
+        to: recipients, cc: [],
+        bcc: s.bcc_self === "1" ? [sender] : [],
+        subject, body_text: body,
+        attachment_b64: bytesToBase64(pdfBytes),
+        attachment_filename: filename,
+      },
+    });
+  } catch (e: any) {
+    logErr = String(e?.message || e);
+    throw e;
+  } finally {
+    // Best-effort audit log — failure to log must never mask a send failure.
+    try {
+      const { logCommunication } = await import("./comms");
+      await logCommunication({
+        kind: opts.logKind || "annual_receipt",
+        subject, body,
+        recipient_count: recipients.length,
+        recipients: recipients.join(", "),
+        attachment_names: JSON.stringify([filename]),
+        status: logErr ? "failed" : "sent",
+        error: logErr,
+        related_id: opts.logRelatedId ?? null,
+      });
+    } catch {}
+  }
 }
 
 export async function sendReceiptEmail(opts: {
@@ -161,24 +184,47 @@ export async function sendReceiptEmail(opts: {
 
   const pdf = await renderReceiptPdfBytes(r, s);
   const b64 = bytesToBase64(pdf);
+  const subject = renderSubject(s.email_subject || "Receipt #{{receipt_no}}", r, s);
+  const body = renderTemplate(s.email_body || "Receipt attached.", r, s);
+  const filename = `Receipt-${r.receipt_no}-${r.student_name_snapshot.replace(/[^\w]+/g, "_")}.pdf`;
 
-  await invoke("send_email", {
-    args: {
-      smtp_host: host,
-      smtp_port: port,
-      smtp_user: (s.smtp_user || sender).trim(),
-      smtp_password: password,
-      from_name: s.sender_name || s.daycare_name || "Echelon Daycare",
-      from_email: sender,
-      to: recipients,
-      cc: [],
-      bcc: s.bcc_self === "1" ? [sender] : [],
-      subject: renderSubject(s.email_subject || "Receipt #{{receipt_no}}", r, s),
-      body_text: renderTemplate(s.email_body || "Receipt attached.", r, s),
-      attachment_b64: b64,
-      attachment_filename: `Receipt-${r.receipt_no}-${r.student_name_snapshot.replace(/[^\w]+/g, "_")}.pdf`,
-    },
-  });
+  let logErr: string | null = null;
+  try {
+    await invoke("send_email", {
+      args: {
+        smtp_host: host,
+        smtp_port: port,
+        smtp_user: (s.smtp_user || sender).trim(),
+        smtp_password: password,
+        from_name: s.sender_name || s.daycare_name || "Echelon Daycare",
+        from_email: sender,
+        to: recipients,
+        cc: [],
+        bcc: s.bcc_self === "1" ? [sender] : [],
+        subject,
+        body_text: body,
+        attachment_b64: b64,
+        attachment_filename: filename,
+      },
+    });
+  } catch (e: any) {
+    logErr = String(e?.message || e);
+    throw e;
+  } finally {
+    try {
+      const { logCommunication } = await import("./comms");
+      await logCommunication({
+        kind: "receipt",
+        subject, body,
+        recipient_count: recipients.length,
+        recipients: recipients.join(", "),
+        attachment_names: JSON.stringify([filename]),
+        status: logErr ? "failed" : "sent",
+        error: logErr,
+        related_id: r.id ?? null,
+      });
+    } catch {}
+  }
 }
 
 export async function sendSubsidyStatementEmail(opts: {

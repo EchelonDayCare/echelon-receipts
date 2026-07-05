@@ -353,6 +353,96 @@ async function ensureSchema(d: Database): Promise<void> {
     ["backup_recipient_email", ""],
     ["backup_cloud_enabled", "1"],
   ] as const) await setting(k, v);
+
+  // Migration 010 — Communications module (group email, templates, history, scheduled)
+  if (!(await tableExists("message_templates"))) {
+    console.warn("[ensureSchema] creating message_templates");
+    await d.execute(`CREATE TABLE message_templates (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      name TEXT NOT NULL,
+      subject TEXT NOT NULL DEFAULT '',
+      body TEXT NOT NULL DEFAULT '',
+      kind TEXT NOT NULL DEFAULT 'general',
+      is_builtin INTEGER NOT NULL DEFAULT 0,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+    )`);
+    // Seed built-in starter templates.
+    const seeds: Array<[string, string, string, string]> = [
+      ["Holiday Closure", "Echelon Daycare will be closed {{date_range}}",
+        "Hi {{parent_name}},\n\nThis is a reminder that Echelon Daycare will be closed from {{date_range}} for {{reason}}. We will reopen on {{reopen_date}}.\n\nPlease make alternate care arrangements for {{student_name}} during this period.\n\nThank you,\n{{daycare_name}}\n{{contact_email}} | {{contact_phone}}",
+        "closure"],
+      ["Monthly Newsletter", "{{daycare_name}} — {{month}} newsletter",
+        "Hi {{parent_name}},\n\nHere's what's happening at {{daycare_name}} in {{month}}:\n\n• \n• \n• \n\nUpcoming dates:\n• \n\nThank you for being part of our community.\n\n{{daycare_name}}\n{{contact_email}} | {{contact_phone}}",
+        "newsletter"],
+      ["Sick Child Pickup", "Please pick up {{student_name}} — feeling unwell",
+        "Hi {{parent_name}},\n\n{{student_name}} isn't feeling well today and we need you to pick them up as soon as possible. Our sick-child policy asks that they stay home until symptom-free for 24 hours.\n\nPlease call {{contact_phone}} when you're on your way.\n\nThank you,\n{{daycare_name}}",
+        "reminder"],
+      ["Fee Change Notice", "Fee update effective {{effective_date}}",
+        "Hi {{parent_name}},\n\nWe're writing to let you know that our monthly fee for {{student_name}}'s program will change effective {{effective_date}}.\n\nNew monthly fee: $\n\nThe change reflects [reason]. If you have any questions or concerns, please reply to this email.\n\nThank you,\n{{daycare_name}}\n{{contact_email}} | {{contact_phone}}",
+        "fees"],
+      ["Missing Form Reminder", "Reminder: forms outstanding for {{student_name}}",
+        "Hi {{parent_name}},\n\nWe're missing the following form(s) for {{student_name}}:\n\n• \n\nPlease drop them off at the front desk or email a scan by {{due_date}}. Provincial licensing requires these to be on file.\n\nThank you,\n{{daycare_name}}\n{{contact_email}} | {{contact_phone}}",
+        "forms"],
+      ["Field Trip Notice", "Field trip permission: {{trip_name}} on {{trip_date}}",
+        "Hi {{parent_name}},\n\nWe've planned a field trip to {{trip_name}} on {{trip_date}}. Departure: {{depart_time}}, return: {{return_time}}. Transportation: {{transport}}. Additional cost: $ .\n\nPlease sign and return the attached permission form by {{signup_deadline}} so {{student_name}} can join.\n\nThank you,\n{{daycare_name}}",
+        "general"],
+    ];
+    for (const [name, subject, body, kind] of seeds) {
+      await d.execute(
+        "INSERT INTO message_templates(name, subject, body, kind, is_builtin) VALUES(?,?,?,?,1)",
+        [name, subject, body, kind]
+      );
+    }
+  }
+  if (!(await tableExists("communication_log"))) {
+    console.warn("[ensureSchema] creating communication_log");
+    await d.execute(`CREATE TABLE communication_log (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      sent_at TEXT NOT NULL DEFAULT (datetime('now')),
+      kind TEXT NOT NULL,
+      subject TEXT NOT NULL,
+      body TEXT,
+      recipient_count INTEGER NOT NULL DEFAULT 1,
+      recipients TEXT NOT NULL,
+      attachment_names TEXT,
+      status TEXT NOT NULL DEFAULT 'sent',
+      error TEXT,
+      related_id INTEGER
+    )`);
+    await d.execute("CREATE INDEX IF NOT EXISTS ix_comm_log_sent_at ON communication_log(sent_at DESC)");
+    await d.execute("CREATE INDEX IF NOT EXISTS ix_comm_log_kind ON communication_log(kind)");
+    // Backfill existing emailed receipts so History shows them from day one.
+    try {
+      await d.execute(`INSERT INTO communication_log (sent_at, kind, subject, body, recipient_count, recipients, status, related_id)
+        SELECT emailed_at, 'receipt',
+          'Receipt #' || receipt_no || ' - ' || student_name_snapshot,
+          NULL, 1, COALESCE(emailed_to, ''), 'sent', id
+        FROM receipts
+        WHERE emailed_at IS NOT NULL AND emailed_at != ''`);
+      await d.execute(`INSERT INTO communication_log (sent_at, kind, subject, body, recipient_count, recipients, status, related_id)
+        SELECT emailed_at, 'annual_receipt',
+          'Annual Receipt ' || ar_number || ' - ' || student_name,
+          NULL, 1, COALESCE(emailed_to, ''), 'sent', id
+        FROM annual_receipts
+        WHERE emailed_at IS NOT NULL AND emailed_at != ''`);
+    } catch (e) { console.warn("[ensureSchema] comm_log backfill failed:", e); }
+  }
+  if (!(await tableExists("scheduled_messages"))) {
+    console.warn("[ensureSchema] creating scheduled_messages");
+    await d.execute(`CREATE TABLE scheduled_messages (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      scheduled_for TEXT NOT NULL,
+      subject TEXT NOT NULL,
+      body TEXT NOT NULL,
+      recipient_filter TEXT NOT NULL,
+      attachments TEXT,
+      status TEXT NOT NULL DEFAULT 'pending',
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      sent_at TEXT
+    )`);
+    await d.execute("CREATE INDEX IF NOT EXISTS ix_sched_status ON scheduled_messages(status, scheduled_for)");
+  }
 }
 
 // ---------- Person identity ----------

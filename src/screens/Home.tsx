@@ -121,6 +121,19 @@ export default function Home() {
 
       // Staff cert tracker placeholder (Phase 1 not built yet — skip until built)
 
+      // Scheduled messages due
+      try {
+        const { dueScheduled } = await import("../lib/comms");
+        const due = await dueScheduled();
+        if (due.length > 0) {
+          list.push({
+            tone: "info",
+            text: `${due.length} scheduled message${due.length === 1 ? " is" : "s are"} ready to send.`,
+            cta: { label: "Review & send", to: "/communications/scheduled" },
+          });
+        }
+      } catch {}
+
       setAlerts(list);
     })();
 
@@ -162,6 +175,12 @@ export default function Home() {
           <div className="home-tile-icon">⚙️</div>
           <h2>Configuration</h2>
           <p>Daycare identity, email, backups, optional features</p>
+        </button>
+
+        <button className="home-tile comms" onClick={() => nav("/communications/compose")}>
+          <div className="home-tile-icon">✉️</div>
+          <h2>Communications</h2>
+          <p>Group email, templates, message history, contact directory</p>
         </button>
       </div>
 

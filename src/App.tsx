@@ -13,6 +13,11 @@ const AgingReport = lazy(() => import("./screens/AgingReport"));
 const StaffScreen = lazy(() => import("./screens/Staff"));
 const StaffCredentials = lazy(() => import("./screens/StaffCredentials"));
 const Settings = lazy(() => import("./screens/Settings"));
+const CommsCompose = lazy(() => import("./screens/comms/Compose"));
+const CommsTemplates = lazy(() => import("./screens/comms/Templates"));
+const CommsHistory = lazy(() => import("./screens/comms/History"));
+const CommsDirectory = lazy(() => import("./screens/comms/Directory"));
+const CommsScheduled = lazy(() => import("./screens/comms/Scheduled"));
 import { runCloudBackupIfDue } from "./lib/cloudBackup";
 import { getSettings } from "./lib/db";
 import { DEFAULT_LOGO_DATA_URL } from "./lib/defaults";
@@ -130,6 +135,22 @@ function Shell({ logo, name, staffEnabled }: { logo: string; name: string; staff
         ]}
       />
     );
+  } else if (path.startsWith("/communications")) {
+    sidebar = (
+      <ModuleSidebar
+        title="Communications"
+        accent="#c2410c"
+        logo={logo}
+        name={name}
+        items={[
+          { to: "/communications/compose", label: "Compose Group Email" },
+          { to: "/communications/templates", label: "Templates" },
+          { to: "/communications/history", label: "Message History" },
+          { to: "/communications/directory", label: "Contact Directory" },
+          { to: "/communications/scheduled", label: "Scheduled" },
+        ]}
+      />
+    );
   }
 
   return (
@@ -158,6 +179,14 @@ function Shell({ logo, name, staffEnabled }: { logo: string; name: string; staff
           {/* Configuration module */}
           <Route path="/config" element={<Navigate to="/config/identity" replace />} />
           <Route path="/config/:tab" element={<Settings />} />
+
+          {/* Communications module */}
+          <Route path="/communications" element={<Navigate to="/communications/compose" replace />} />
+          <Route path="/communications/compose" element={<CommsCompose />} />
+          <Route path="/communications/templates" element={<CommsTemplates />} />
+          <Route path="/communications/history" element={<CommsHistory />} />
+          <Route path="/communications/directory" element={<CommsDirectory />} />
+          <Route path="/communications/scheduled" element={<CommsScheduled />} />
 
           {/* Legacy redirects (preserve old hash links) */}
           <Route path="/today" element={<Navigate to="/students/today" replace />} />
