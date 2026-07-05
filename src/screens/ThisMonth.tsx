@@ -244,7 +244,35 @@ export default function ThisMonth() {
                     <span className={`status-badge ${status.key}`}>{status.label}</span>
                     {r.lastResult?.kind === "err" && <span className="status-badge voided" title={r.lastResult.text} style={{ marginLeft: 4, color: "var(--danger)" }}>Failed</span>}
                   </td>
-                  <td style={{ textAlign: "right" }}>${r.receipt ? r.receipt.amount.toFixed(2) : r.computedAmount.toFixed(2)}</td>
+                  <td style={{ textAlign: "right" }}>
+                    {r.receipt ? (
+                      `$${r.receipt.amount.toFixed(2)}`
+                    ) : (
+                      <input
+                        type="number"
+                        step="0.01"
+                        min="0"
+                        value={r.computedAmount}
+                        disabled={r.busy || batchSending}
+                        onChange={(e) => {
+                          const v = parseFloat(e.target.value);
+                          const newAmt = isNaN(v) ? 0 : v;
+                          setRows((prev) => prev.map((row, i) => {
+                            if (i !== idx) return row;
+                            // If the user overrode the amount away from the auto-computed
+                            // breakdown, drop the breakdown snapshot so the printed receipt
+                            // doesn't show gross/CCFRI/ACCB totals that don't add up to the
+                            // amount actually charged.
+                            const drift = row.breakdown && Math.abs(newAmt - row.computedAmount) > 0.01
+                              ? null
+                              : row.breakdown;
+                            return { ...row, computedAmount: newAmt, breakdown: drift };
+                          }));
+                        }}
+                        style={{ width: 90, textAlign: "right", padding: "4px 6px" }}
+                      />
+                    )}
+                  </td>
                   <td style={{ textAlign: "right", whiteSpace: "nowrap" }}>
                     {!r.receipt && (
                       <button className="btn" disabled={r.busy} onClick={() => generateOne(idx)}>
