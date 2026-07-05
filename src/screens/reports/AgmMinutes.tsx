@@ -309,6 +309,7 @@ function ChairmanEditor({ block, onChange, onRemove }: {
         <button className="btn link danger" onClick={onRemove} style={{ fontSize: 12 }}>remove</button>
       </div>
       <textarea rows={isList ? 4 : 3}
+                style={{ width: "100%", boxSizing: "border-box" }}
                 value={Array.isArray(block.body) ? block.body.join("\n") : block.body}
                 onChange={(e) => onChange({
                   ...block,
