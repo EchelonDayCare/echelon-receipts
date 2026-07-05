@@ -408,7 +408,8 @@ export async function startAutoSync(): Promise<void> {
   // Interval — read setting each tick so the frequency updates without restart.
   const scheduleNext = async () => {
     const raw = await readSetting("waitlist_sync_interval_min");
-    const min = Math.max(1, Math.min(120, Number(raw || "10")));
+    // Cap at 1440 min (24 h) — must be ≥ the largest option in Settings.tsx.
+    const min = Math.max(1, Math.min(1440, Number(raw || "720")));
     if (autoSyncTimer !== null) window.clearTimeout(autoSyncTimer);
     autoSyncTimer = window.setTimeout(async () => {
       await maybeRun();

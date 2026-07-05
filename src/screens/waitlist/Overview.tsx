@@ -6,7 +6,7 @@ import { Link } from "react-router-dom";
 import { invoke } from "@tauri-apps/api/core";
 import {
   waitlistKpis, syncOnScreenOpen, syncWaitlist, readSyncState,
-  ageBand, waitDays, type WaitlistKpis, type SyncStateRow,
+  ageBand, waitDays, startAutoSync, type WaitlistKpis, type SyncStateRow,
 } from "../../lib/waitlist";
 import DetailDrawer from "./DetailDrawer";
 
@@ -32,6 +32,11 @@ export default function WaitlistOverview() {
       await refresh();
       await syncOnScreenOpen();
       await refresh();
+      // Deferred boot (v1.0.1): kick the auto-sync timer only once a waitlist
+      // screen is actually opened. Safe to call multiple times (idempotent).
+      try { await startAutoSync(); } catch (e) {
+        console.warn("[waitlist] auto-sync bootstrap failed:", e);
+      }
     })();
   }, []);
 

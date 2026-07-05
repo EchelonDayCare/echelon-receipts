@@ -388,13 +388,11 @@ export default function App() {
       } catch { /* silent — visible in the Scheduled screen if it recurs */ }
     }, 15 * 60 * 1000);
 
-    // Kick off Waitlist auto-sync (idempotent — safe on re-mounts).
-    (async () => {
-      try {
-        const { startAutoSync } = await import("./lib/waitlist");
-        await startAutoSync();
-      } catch (e) { console.warn("[waitlist] auto-sync bootstrap failed:", e); }
-    })();
+    // Waitlist auto-sync is intentionally NOT started here (v1.0.1). It is
+    // kicked off lazily the first time a /waitlist/* screen mounts, so that
+    // fresh installs — where the module has never been opened — don't touch
+    // the Rust waitlist command (and therefore the macOS Keychain) at boot.
+    // See src/screens/waitlist/*.tsx for the trigger.
 
     return () => {
       window.removeEventListener("settings-saved", onSaved);
