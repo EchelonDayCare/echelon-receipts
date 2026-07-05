@@ -2,7 +2,6 @@
 // Preview mirrors the .docx output so what you see is what you get in Word.
 
 import { useEffect, useMemo, useState } from "react";
-import { save as saveDialog } from "@tauri-apps/plugin-dialog";
 import { writeFile } from "@tauri-apps/plugin-fs";
 import { showAlert, showConfirm } from "../../lib/dialogs";
 import {
@@ -10,6 +9,7 @@ import {
   generateDocxBlob, listDraftYears, shortYearLabel,
 } from "../../lib/agmMinutes";
 import { currentFiscalYear } from "../../lib/fiscalYear";
+import { resolveReportPath, NoReportsFolderError } from "../../lib/reportsFolder";
 
 const RECENT_FY_SPAN = 6;   // show current FY + 5 back in the year picker
 
@@ -65,23 +65,21 @@ export default function AgmMinutesEditor() {
 
   async function onGenerate() {
     if (!minutes) return;
-    // Ask where to save first — if the user cancels, we don't touch anything.
     const filename = `AGM-${minutes.yearLabel}.docx`;
-    let dest: string | null = null;
+    let dest: string;
     try {
-      dest = await saveDialog({
-        defaultPath: filename,
-        filters: [{ name: "Word Document", extensions: ["docx"] }],
-      });
+      dest = await resolveReportPath("agmMinutes", filename);
     } catch (e: any) {
-      await showAlert("Could not open save dialog: " + (e?.message || e), { kind: "error" });
+      if (e instanceof NoReportsFolderError) {
+        await showAlert("Pick a Reports folder in Settings first, then try again.", { kind: "warning" });
+      } else {
+        await showAlert("Could not resolve report path: " + (e?.message || e), { kind: "error" });
+      }
       return;
     }
-    if (!dest) return; // user cancelled
 
     setBusy(true);
     try {
-      // Save the draft (and mark finalized) once we're committed to writing.
       await saveDraft(minutes, /* finalized */ true);
       setDirty(false);
       await refreshList();

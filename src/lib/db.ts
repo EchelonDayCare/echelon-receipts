@@ -165,6 +165,7 @@ async function ensureSchema(d: Database): Promise<void> {
 
   // Migration 002 — pdf_folder
   await setting("pdf_folder", "");
+  await setting("reports_folder", "");
 
   // Migration 003 — email audit + settings
   await addCol("receipts", "emailed_at", "TEXT");

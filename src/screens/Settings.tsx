@@ -311,6 +311,26 @@ export default function Settings() {
         </div>
 
         <hr style={{ border: 0, borderTop: "1px solid var(--border)", margin: "16px 0" }} />
+        <SectionHead title="Reports folder" sub="Root folder where the app files every generated report (AGM Minutes, Attendance, Aging, etc.). Subfolders are created automatically per report type." />
+        <div className="field">
+          <label>Reports Folder</label>
+          <div style={{ display: "flex", gap: 8 }}>
+            <input style={{ flex: 1 }}
+              value={s.reports_folder || ""}
+              onChange={(e) => setS({ ...s, reports_folder: e.target.value })}
+              placeholder="(none — pick a folder to enable one-click report generation)" />
+            <button className="btn secondary" onClick={async () => {
+              const picked = await open({ directory: true, multiple: false });
+              if (picked && !Array.isArray(picked)) setS({ ...s, reports_folder: picked });
+            }}>Choose…</button>
+            {s.reports_folder && <button className="btn ghost" onClick={() => setS({ ...s, reports_folder: "" })}>Clear</button>}
+          </div>
+          <small style={{ color: "var(--muted)" }}>
+            e.g. AGM Minutes go to <code>&lt;folder&gt;/AGM Minutes/AGM-YYYY-YY.docx</code>. Other report types will use their own subfolders.
+          </small>
+        </div>
+
+        <hr style={{ border: 0, borderTop: "1px solid var(--border)", margin: "16px 0" }} />
         <SectionHead title="PDF archive" sub="Where saved/sent receipt PDFs are filed on this computer." />
         <div className="field">
           <label>PDF Archive Folder</label>
