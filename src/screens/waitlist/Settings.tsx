@@ -18,16 +18,17 @@ import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { getSettings, setSetting } from "../../lib/db";
 import { syncWaitlist, readSyncState, type SyncStateRow } from "../../lib/waitlist";
-import { showConfirm } from "../../lib/dialogs";
+import { showAlert, showConfirm } from "../../lib/dialogs";
 
 const SHEET_URL_RE = /\/spreadsheets\/d\/([a-zA-Z0-9-_]+)/;
+const DEFAULT_RANGE = "FormResponse!A:K";
 
 export default function WaitlistSettings() {
   const [sheetUrl, setSheetUrl] = useState("");
   const [sheetId, setSheetId] = useState("");
-  const [range, setRange] = useState("Form_Responses!A:K");
+  const [range, setRange] = useState(DEFAULT_RANGE);
   const [enabled, setEnabled] = useState(false);
-  const [intervalMin, setIntervalMin] = useState("10");
+  const [intervalMin, setIntervalMin] = useState("720");
   const [jsonText, setJsonText] = useState("");
   const [credsLoaded, setCredsLoaded] = useState(false);
   const [maskedEmail, setMaskedEmail] = useState<string | null>(null);
@@ -38,9 +39,9 @@ export default function WaitlistSettings() {
   const loadAll = async () => {
     const s = await getSettings();
     setSheetId(s.waitlist_sheet_id || "");
-    setRange(s.waitlist_sheet_range || "Form_Responses!A:K");
+    setRange(s.waitlist_sheet_range || DEFAULT_RANGE);
     setEnabled(s.waitlist_sync_enabled === "1");
-    setIntervalMin(s.waitlist_sync_interval_min || "10");
+    setIntervalMin(s.waitlist_sync_interval_min || "720");
     const st = await invoke<{ credentials_loaded: boolean; client_email_masked: string | null }>("waitlist_get_status");
     setCredsLoaded(st.credentials_loaded);
     setMaskedEmail(st.client_email_masked);
@@ -60,7 +61,10 @@ export default function WaitlistSettings() {
     setBusy("ids");
     try {
       await setSetting("waitlist_sheet_id", sheetId.trim());
-      await setSetting("waitlist_sheet_range", range.trim() || "Form_Responses!A:K");
+      await setSetting("waitlist_sheet_range", range.trim() || DEFAULT_RANGE);
+      await showAlert(`Sheet ID: ${sheetId.trim() || "(empty)"}\nRange: ${range.trim() || DEFAULT_RANGE}`, { title: "Sheet settings saved" });
+    } catch (e: any) {
+      await showAlert(String(e?.message || e), { title: "Could not save sheet settings" });
     } finally { setBusy(null); }
   };
 
@@ -74,8 +78,11 @@ export default function WaitlistSettings() {
       setCredsLoaded(true);
       setJsonText("");
       setTestResult({ ok: true, msg: `Saved. Client email: ${r.client_email_masked}` });
+      await showAlert(`Service-account key stored in Keychain.\nClient email: ${r.client_email_masked}`, { title: "Credentials saved" });
     } catch (e: any) {
-      setTestResult({ ok: false, msg: String(e?.message || e) });
+      const msg = String(e?.message || e);
+      setTestResult({ ok: false, msg });
+      await showAlert(msg, { title: "Could not save credentials" });
     } finally { setBusy(null); }
   };
 
@@ -83,31 +90,28 @@ export default function WaitlistSettings() {
     setBusy("test");
     setTestResult(null);
     try {
-      // If the user has typed unsaved JSON, test with that; otherwise attempt
-      // a live fetch using the stored key by triggering a sync-style call.
       let payload: string | null = jsonText.trim() ? jsonText : null;
       if (payload) {
         const r = await invoke<{ ok: boolean; row_count: number; error: string | null }>(
           "waitlist_test_connection",
           { jsonText: payload, sheetId, range },
         );
-        setTestResult({
-          ok: r.ok,
-          msg: r.ok ? `OK — ${r.row_count} rows returned.` : (r.error || "Failed."),
-        });
+        const msg = r.ok ? `OK — ${r.row_count} rows returned.` : (r.error || "Failed.");
+        setTestResult({ ok: r.ok, msg });
+        await showAlert(msg, { title: r.ok ? "Connection successful" : "Connection failed" });
       } else {
-        // Fall back to a real sync using saved creds.
         const res = await syncWaitlist({ force: true });
-        setTestResult({
-          ok: res.ok,
-          msg: res.ok
-            ? `OK — fetched ${res.fetched}, inserted ${res.inserted}, updated ${res.updated}, archived ${res.archived}.`
-            : (res.error || "Sync failed."),
-        });
+        const msg = res.ok
+          ? `OK — fetched ${res.fetched}, inserted ${res.inserted}, updated ${res.updated}, archived ${res.archived}.`
+          : (res.error || "Sync failed.");
+        setTestResult({ ok: res.ok, msg });
         setSyncState(await readSyncState());
+        await showAlert(msg, { title: res.ok ? "Connection successful" : "Connection failed" });
       }
     } catch (e: any) {
-      setTestResult({ ok: false, msg: String(e?.message || e) });
+      const msg = String(e?.message || e);
+      setTestResult({ ok: false, msg });
+      await showAlert(msg, { title: "Connection failed" });
     } finally { setBusy(null); }
   };
 
@@ -121,6 +125,9 @@ export default function WaitlistSettings() {
       setMaskedEmail(null);
       setEnabled(false);
       setTestResult(null);
+      await showAlert("Service-account key removed from Keychain and auto-sync disabled.", { title: "Credentials cleared" });
+    } catch (e: any) {
+      await showAlert(String(e?.message || e), { title: "Could not clear credentials" });
     } finally { setBusy(null); }
   };
 
@@ -234,7 +241,10 @@ export default function WaitlistSettings() {
             <option value="5">Every 5 minutes</option>
             <option value="10">Every 10 minutes</option>
             <option value="30">Every 30 minutes</option>
-            <option value="60">Every 60 minutes</option>
+            <option value="60">Every hour</option>
+            <option value="360">Every 6 hours</option>
+            <option value="720">Every 12 hours</option>
+            <option value="1440">Every 24 hours</option>
           </select>
         </div>
         <button className="btn" disabled={busy === "sync" || !credsLoaded} onClick={syncNow}>Sync now</button>

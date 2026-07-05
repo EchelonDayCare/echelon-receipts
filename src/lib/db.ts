@@ -626,11 +626,18 @@ async function ensureSchema(d: Database): Promise<void> {
 
   for (const [k, v] of [
     ["waitlist_sheet_id", "10TlzA6Zea3TXai6eNQTKjbWF-Hf-6nBt7jf3mRohsS0"],
-    ["waitlist_sheet_range", "Form_Responses!A:K"],
-    ["waitlist_sync_enabled", "0"],
-    ["waitlist_sync_interval_min", "10"],
+    ["waitlist_sheet_range", "FormResponse!A:K"],
+    ["waitlist_sync_enabled", "1"],
+    ["waitlist_sync_interval_min", "720"],
     ["waitlist_last_synced_at", ""],
   ] as const) await setting(k, v);
+
+  // One-time migration: sheet tab was renamed from "Form_Responses" to
+  // "FormResponse". If an existing install still has the old default, replace
+  // it (but leave any user-customized range untouched).
+  await d.execute(
+    "UPDATE settings SET value = 'FormResponse!A:K' WHERE key = 'waitlist_sheet_range' AND value = 'Form_Responses!A:K'"
+  );
 }
 
 // ---------- Person identity ----------
