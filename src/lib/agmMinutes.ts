@@ -10,8 +10,10 @@
 
 import { db, execRetry, getSettings } from "./db";
 import {
-  Document, Packer, Paragraph, TextRun, AlignmentType, HeadingLevel,
+  Document, Packer, Paragraph, TextRun, AlignmentType,
   Header, ImageRun, ExternalHyperlink,
+  HorizontalPositionRelativeFrom, VerticalPositionRelativeFrom,
+  TextWrappingType, TextWrappingSide,
 } from "docx";
 import { fiscalYearBounds, fiscalYearLabel } from "./fiscalYear";
 import agmLogoUrl from "../assets/agm-header-logo.png";
@@ -263,13 +265,16 @@ export async function generateDocxBlob(m: AgmMinutes): Promise<Blob> {
   const settings = await getSettings();
 
   // ---- Body header (title + association) — matches original samples ----
+  // Original is a single paragraph with a line-break, both runs at
+  // Times New Roman bold 14pt (size 28 half-points). We use two Paragraphs
+  // for cleaner line-height control; visually identical.
   children.push(new Paragraph({
     alignment: AlignmentType.CENTER,
-    children: [new TextRun({ text: `Minutes of the Annual General Meeting ${m.yearLabel}`, bold: true, size: 28 })],
+    children: [new TextRun({ text: `Minutes of the Annual General Meeting ${m.yearLabel}`, bold: true, font: "Times New Roman", size: 28 })],
   }));
   children.push(new Paragraph({
     alignment: AlignmentType.CENTER,
-    children: [new TextRun({ text: m.associationName, bold: true, size: 24 })],
+    children: [new TextRun({ text: m.associationName, bold: true, font: "Times New Roman", size: 28 })],
   }));
   children.push(blank());
   children.push(kv("Date", m.meetingDate));
@@ -408,33 +413,45 @@ async function buildSectionHeaderParagraphs(
   const phone   = settings.contact_phone?.trim() || "(604) 874-4010";
   const email   = settings.contact_email?.trim() || "echelondaycare@hotmail.com";
 
-  // Strip a leading "The " so the header matches the samples ("Echelon Daycare
-  // Teachers Association" — no leading "The" in the header, though the body
-  // title keeps it).
+  // Header shows the association name WITHOUT a leading "The " (matches the
+  // samples). Body title still keeps the "The …" wording.
   const assocForHeader = associationName.replace(/^\s*The\s+/i, "");
 
   const paragraphs: Paragraph[] = [];
 
-  // Row 1: logo (inline at start) + centered association name.
-  // We insert the ImageRun and the assoc name in the same paragraph so they
-  // sit on the same line; the paragraph itself is centered, which visually
-  // matches the samples where the logo sits in the top-left corner.
-  const logoRuns: (ImageRun | TextRun)[] = [];
+  // Row 1: floating logo (top-left) + centered association name.
+  // The logo is a *floating* image anchored to the page — it does not affect
+  // the paragraph's text flow, so the association name below can be centered
+  // independently on the page. Positioning replicates the sample's XML:
+  //   horizontal: column-relative offset -385046 EMU (≈ -0.42 in)
+  //   vertical:   page-relative   offset  336520 EMU (≈  0.37 in from top)
+  //   size:       1074420 × 1074420 EMU (1.174 in) = 113 × 113 px @ 96 DPI
+  const row1Children: (ImageRun | TextRun)[] = [];
   try {
     const buf = await loadLogoBytes();
     if (buf) {
-      logoRuns.push(new ImageRun({
-        // docx types insist on `type` field; PNG is the safe default.
+      row1Children.push(new ImageRun({
         type: "png",
         data: buf,
-        transformation: { width: 72, height: 72 },
+        transformation: { width: 113, height: 113 },
+        floating: {
+          horizontalPosition: {
+            relative: HorizontalPositionRelativeFrom.COLUMN,
+            offset: -385046,
+          },
+          verticalPosition: {
+            relative: VerticalPositionRelativeFrom.PAGE,
+            offset: 336520,
+          },
+          wrap: { type: TextWrappingType.NONE, side: TextWrappingSide.BOTH_SIDES },
+          behindDocument: false,
+          allowOverlap: false,
+        },
       } as any));
-      // small spacer between logo and title
-      logoRuns.push(new TextRun({ text: "   " }));
     }
   } catch { /* no logo, continue without */ }
 
-  logoRuns.push(new TextRun({
+  row1Children.push(new TextRun({
     text: assocForHeader,
     bold: true,
     font: "Times New Roman",
@@ -443,16 +460,16 @@ async function buildSectionHeaderParagraphs(
 
   paragraphs.push(new Paragraph({
     alignment: AlignmentType.CENTER,
-    children: logoRuns,
+    children: row1Children,
   }));
 
-  // Row 2: address (Arial 10pt)
+  // Row 2: address (Arial 10pt), centered
   paragraphs.push(new Paragraph({
     alignment: AlignmentType.CENTER,
     children: [new TextRun({ text: address, font: "Arial", size: 20 })],
   }));
 
-  // Row 3: Tel + Email hyperlink (Arial 10pt)
+  // Row 3: Tel + Email hyperlink (Arial 10pt), centered
   paragraphs.push(new Paragraph({
     alignment: AlignmentType.CENTER,
     children: [
@@ -489,9 +506,12 @@ function blank(): Paragraph {
   return new Paragraph({ children: [new TextRun({ text: "" })] });
 }
 function sectionHeading(text: string): Paragraph {
+  // NOT a Word "Heading" style — those default to blue Calibri Light and
+  // don't match the samples. The samples use Normal-style paragraphs with
+  // an explicit 13.5pt Times New Roman bold run (size 27 half-points).
   return new Paragraph({
-    heading: HeadingLevel.HEADING_2,
-    children: [new TextRun({ text, bold: true })],
+    spacing: { before: 200, after: 80 },
+    children: [new TextRun({ text, bold: true, font: "Times New Roman", size: 27 })],
   });
 }
 function labelLine(text: string): Paragraph {
