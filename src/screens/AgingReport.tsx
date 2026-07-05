@@ -98,6 +98,12 @@ export default function AgingReportScreen() {
         </div>
       )}
 
+      {rep && rep.totals.future > 0 && (
+        <div style={{ background: "#fef3c7", border: "1px solid #f59e0b", padding: 10, borderRadius: 6, marginBottom: 12, fontSize: 13 }}>
+          ⚠ ${rep.totals.future.toFixed(2)} in unpaid receipts is <strong>dated after {asOf}</strong>. These are almost certainly data-entry errors (typo in the receipt date). Review the flagged rows below and correct the receipt date before relying on the aging totals.
+        </div>
+      )}
+
       {rep && rep.rows.length === 0 ? (
         <div className="empty">No outstanding balances as of {asOf}. ✅</div>
       ) : rep && (
@@ -107,6 +113,7 @@ export default function AgingReportScreen() {
             <th>Email</th>
             <th>Oldest unpaid</th>
             <th>#</th>
+            <th style={{ textAlign: "right" }}>Future ⚠</th>
             <th style={{ textAlign: "right" }}>Current (0-30)</th>
             <th style={{ textAlign: "right" }}>31-60</th>
             <th style={{ textAlign: "right" }}>61-90</th>
@@ -125,6 +132,7 @@ export default function AgingReportScreen() {
                 <td style={{ fontSize: 12 }}>{r.email || ""}</td>
                 <td>{r.oldest_unpaid_date}</td>
                 <td>{r.receipt_count}</td>
+                <td style={{ textAlign: "right", color: r.bucket.future > 0 ? "#b45309" : undefined, fontWeight: r.bucket.future > 0 ? 600 : undefined }}>${r.bucket.future.toFixed(2)}</td>
                 <td style={{ textAlign: "right" }}>${r.bucket.current.toFixed(2)}</td>
                 <td style={{ textAlign: "right" }}>${r.bucket.d31_60.toFixed(2)}</td>
                 <td style={{ textAlign: "right" }}>${r.bucket.d61_90.toFixed(2)}</td>
@@ -136,6 +144,7 @@ export default function AgingReportScreen() {
             ))}
             <tr style={{ borderTop: "2px solid #111", fontWeight: 700 }}>
               <td colSpan={4}>TOTAL</td>
+              <td style={{ textAlign: "right", color: rep.totals.future > 0 ? "#b45309" : undefined }}>${rep.totals.future.toFixed(2)}</td>
               <td style={{ textAlign: "right" }}>${rep.totals.current.toFixed(2)}</td>
               <td style={{ textAlign: "right" }}>${rep.totals.d31_60.toFixed(2)}</td>
               <td style={{ textAlign: "right" }}>${rep.totals.d61_90.toFixed(2)}</td>

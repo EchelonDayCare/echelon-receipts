@@ -13,7 +13,14 @@ const MISTRAL_DOC_AI_URL: &str = "https://ai-nse.services.ai.azure.com/providers
 const MISTRAL_DOC_AI_MODEL: &str = "mistral-document-ai-2512";
 
 fn truncate(s: &str, n: usize) -> String {
-    if s.len() <= n { s.to_string() } else { format!("{}…", &s[..n]) }
+    // char-boundary safe. Rust panics on non-boundary byte-slice indexing, and
+    // Azure/Mistral responses routinely contain multi-byte characters
+    // (accented merchant names, the "…" ellipsis, JSON escapes for unicode).
+    if s.chars().count() <= n { s.to_string() } else {
+        let mut out: String = s.chars().take(n).collect();
+        out.push('…');
+        out
+    }
 }
 
 fn redact(s: String, secret: &str) -> String {

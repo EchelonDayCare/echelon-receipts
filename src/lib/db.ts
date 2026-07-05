@@ -484,6 +484,18 @@ async function ensureSchema(d: Database): Promise<void> {
       created_at TEXT NOT NULL DEFAULT (datetime('now'))
     )`);
   }
+
+  // Migration 012 — Expense import batches + per-txn source hash + per-period
+  // recurring uniqueness. Enables one-click "undo last import" and crash-safe
+  // idempotent recurring posting.
+  await addCol("expenses", "import_batch_id", "TEXT");
+  await addCol("expenses", "source_txn_hash", "TEXT");
+  await d.execute("CREATE INDEX IF NOT EXISTS ix_expenses_batch ON expenses(import_batch_id)");
+  await d.execute("CREATE UNIQUE INDEX IF NOT EXISTS ix_expenses_source_hash ON expenses(source_txn_hash) WHERE source_txn_hash IS NOT NULL");
+  await d.execute("CREATE UNIQUE INDEX IF NOT EXISTS ix_expenses_recurring_period ON expenses(recurring_id, substr(date,1,7)) WHERE recurring_id IS NOT NULL");
+
+  // Remove obsolete Gemini setting seed (Migration 013 — see azure_ai refactor).
+  await execRetry("DELETE FROM settings WHERE key='gemini_api_key_set'").catch(() => {});
 }
 
 // ---------- Person identity ----------
@@ -620,6 +632,17 @@ export async function deleteStudent(id: number) {
 }
 export async function reactivateStudent(id: number) {
   await execRetry("UPDATE students SET active=1 WHERE id=?", [id]);
+}
+
+// Persist an updated email to every student row that shares this person_id
+// (a family may appear across multiple years). Returns rows updated.
+export async function updateStudentEmailByPerson(personId: string, email: string): Promise<number> {
+  const clean = email.trim();
+  await execRetry("UPDATE students SET email=? WHERE person_id=?", [clean || null, personId]);
+  const r = await (await db()).select<{ n: number }[]>(
+    "SELECT COUNT(*) AS n FROM students WHERE person_id=?", [personId]
+  );
+  return r[0]?.n ?? 0;
 }
 
 // Hard-delete a student and everything attached to them. Two-step by design:
@@ -833,9 +856,9 @@ export async function subsidyReconciliation(year?: number, fiscalYear?: number):
   const rows = await (await db()).select<any[]>(
     `SELECT substr(date,1,4) AS y, substr(date,6,2) AS m,
             COUNT(*) AS receipt_count,
-            COALESCE(SUM(gross_amount),0) AS gross_total,
-            COALESCE(SUM(ccfri_amount),0) AS ccfri_total,
-            COALESCE(SUM(accb_amount),0)  AS accb_total,
+            COALESCE(SUM(CASE WHEN is_refund=1 THEN -gross_amount ELSE gross_amount END),0) AS gross_total,
+            COALESCE(SUM(CASE WHEN is_refund=1 THEN -ccfri_amount ELSE ccfri_amount END),0) AS ccfri_total,
+            COALESCE(SUM(CASE WHEN is_refund=1 THEN -accb_amount ELSE accb_amount END),0) AS accb_total,
             COALESCE(SUM(CASE WHEN is_refund=1 THEN -amount ELSE amount END),0) AS parent_paid_total
      FROM receipts ${where}
      GROUP BY y, m ORDER BY y DESC, m DESC`,

@@ -30,5 +30,5 @@ CREATE INDEX IF NOT EXISTS ix_staff_hours_staff ON staff_hours(staff_id);
 
 INSERT OR IGNORE INTO settings(key,value) VALUES
   ('feature_staff_hours_enabled',''),
-  ('gemini_api_key_set',''),
+  ('azure_ai_key_set',''),
   ('staff_default_hourly_rate','');

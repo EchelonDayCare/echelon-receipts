@@ -1,13 +1,12 @@
 import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { openUrl } from "@tauri-apps/plugin-opener";
+import { getVersion } from "@tauri-apps/api/app";
 import { db, getSettings, listStudents } from "../lib/db";
 import { listAllCredentialsWithStaff, credStatus } from "../lib/credentials";
 import { DEFAULT_LOGO_DATA_URL } from "../lib/defaults";
 import { checkForUpdates, type UpdateStatus } from "../lib/updateCheck";
 import type { SettingsMap } from "../types";
-
-const APP_VERSION = "0.1.0";
 
 interface Alert {
   tone: "danger" | "warn" | "info";
@@ -28,6 +27,7 @@ export default function Home() {
   const [alerts, setAlerts] = useState<Alert[]>([]);
   const [staffEnabled, setStaffEnabled] = useState(false);
   const [update, setUpdate] = useState<UpdateStatus | null>(null);
+  const [appVersion, setAppVersion] = useState<string>("");
 
   useEffect(() => {
     (async () => {
@@ -137,10 +137,19 @@ export default function Home() {
       setAlerts(list);
     })();
 
-    // Background update check (cached 24h, never blocks UI).
-    checkForUpdates(APP_VERSION).then((u) => {
-      if (u.hasUpdate) setUpdate(u);
-    });
+    // Read the real Cargo version at runtime and use it for both the footer
+    // and the update-check gating (hardcoding was showing v0.1.0 and turning
+    // every release into a "downgrade" prompt).
+    (async () => {
+      try {
+        const v = await getVersion();
+        setAppVersion(v);
+        const u = await checkForUpdates(v);
+        if (u.hasUpdate) setUpdate(u);
+      } catch {
+        // On non-tauri builds (never in production) fall back silently.
+      }
+    })();
   }, []);
 
   const daycareName = s.daycare_name || "Echelon Daycare";
@@ -168,13 +177,7 @@ export default function Home() {
         <button className="home-tile staff" onClick={() => nav(staffEnabled ? "/staff/hours" : "/config/staff")}>
           <div className="home-tile-icon">👩‍🏫</div>
           <h2>Staff{staffEnabled ? "" : " (disabled)"}</h2>
-          <p>{staffEnabled ? "Hours, payroll prep, credentials (coming)" : "Turn on in Configuration → Staff to enable."}</p>
-        </button>
-
-        <button className="home-tile config" onClick={() => nav("/config/identity")}>
-          <div className="home-tile-icon">⚙️</div>
-          <h2>Configuration</h2>
-          <p>Daycare identity, email, backups, optional features</p>
+          <p>{staffEnabled ? "Hours, credentials, drill log, payroll prep" : "Turn on in Configuration → Staff to enable."}</p>
         </button>
 
         <button className="home-tile comms" onClick={() => nav("/communications/compose")}>
@@ -183,16 +186,22 @@ export default function Home() {
           <p>Group email, templates, message history, contact directory</p>
         </button>
 
+        <button className="home-tile expenses" onClick={() => nav("/expenses/dashboard")}>
+          <div className="home-tile-icon">💵</div>
+          <h2>Expenses</h2>
+          <p>Track spending, recurring bills, WCB/CRA remittance, P&L reports</p>
+        </button>
+
         <button className="home-tile reports" onClick={() => nav("/reports/overview")}>
           <div className="home-tile-icon">📊</div>
           <h2>Reports & Compliance</h2>
           <p>Revenue, aging, subsidies, licensing rosters, credentials, drills, AGM</p>
         </button>
 
-        <button className="home-tile expenses" onClick={() => nav("/expenses/dashboard")}>
-          <div className="home-tile-icon">💵</div>
-          <h2>Expenses</h2>
-          <p>Track spending, recurring bills, WCB/CRA remittance, P&L reports</p>
+        <button className="home-tile config" onClick={() => nav("/config/identity")}>
+          <div className="home-tile-icon">⚙️</div>
+          <h2>Configuration</h2>
+          <p>Daycare identity, email, backups, optional features</p>
         </button>
       </div>
 
@@ -226,7 +235,7 @@ export default function Home() {
       )}
 
       <footer className="home-foot">
-        <span>v{APP_VERSION} · Echelon Receipts</span>
+        <span>{appVersion ? `v${appVersion} · ` : ""}Echelon Receipts</span>
       </footer>
     </div>
   );

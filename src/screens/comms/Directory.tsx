@@ -3,6 +3,7 @@ import { useNavigate } from "react-router-dom";
 import { listStudents, listYears } from "../../lib/db";
 import type { Student } from "../../types";
 import { parseRecipients } from "../../lib/email";
+import { showAlert } from "../../lib/dialogs";
 
 export default function Directory() {
   const nav = useNavigate();
@@ -36,11 +37,13 @@ export default function Directory() {
 
   const withEmail = filtered.filter((s) => parseRecipients(s.email).length > 0);
 
+  const [copied, setCopied] = useState(false);
   async function copyAllEmails() {
     const all = Array.from(new Set(withEmail.flatMap((s) => parseRecipients(s.email)))).join(", ");
-    if (!all) { alert("No email addresses to copy."); return; }
+    if (!all) { await showAlert("No email addresses to copy.", { kind: "warning" }); return; }
     await navigator.clipboard.writeText(all);
-    alert(`Copied ${withEmail.length} email addresses to clipboard.`);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 2500);
   }
 
   function exportCsv() {
@@ -77,7 +80,7 @@ export default function Directory() {
         </label>
         <input placeholder="Search…" value={search} onChange={(e) => setSearch(e.target.value)} style={{ padding: 6, minWidth: 220 }} />
         <div style={{ marginLeft: "auto", display: "flex", gap: 8 }}>
-          <button className="btn secondary" onClick={copyAllEmails}>Copy all emails</button>
+          <button className="btn secondary" onClick={copyAllEmails}>{copied ? `✓ Copied ${withEmail.length}` : "Copy all emails"}</button>
           <button className="btn secondary" onClick={exportCsv}>Export CSV</button>
         </div>
       </div>

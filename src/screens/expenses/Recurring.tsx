@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
+import { showConfirm, showAlert, showPrompt } from "../../lib/dialogs";
 import {
-  listRecurring, saveRecurring, deleteRecurring, postRecurring, nextDueForPeriod,
+  listRecurring, saveRecurring, deleteRecurring, postRecurring, targetDateForPeriod, isPeriodPosted,
   EXPENSE_CATEGORIES, PAYMENT_METHODS, FREQUENCIES, CATEGORY_LABEL,
   type RecurringExpense,
 } from "../../lib/expenses";
@@ -23,17 +24,27 @@ const BLANK: Partial<RecurringExpense> = {
   day_of_month: 1, start_date: todayStr(), end_date: null, active: 1, notes: "",
 };
 
+type DueInfo = { target: string | null; posted: boolean };
+
 export default function Recurring() {
   const [rows, setRows] = useState<RecurringExpense[]>([]);
+  const [dueMap, setDueMap] = useState<Record<number, DueInfo>>({});
   const [editing, setEditing] = useState<Partial<RecurringExpense> | null>(null);
   const [ym, setYm] = useState<string>(ymToday());
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState("");
 
   async function reload() {
-    setRows(await listRecurring(false));
+    const list = await listRecurring(false);
+    setRows(list);
+    const map: Record<number, DueInfo> = {};
+    for (const r of list) {
+      const target = targetDateForPeriod(r, ym);
+      map[r.id] = { target, posted: target ? await isPeriodPosted(r.id, ym) : false };
+    }
+    setDueMap(map);
   }
-  useEffect(() => { reload(); }, []);
+  useEffect(() => { void reload(); }, [ym]);
 
   async function onSave() {
     if (!editing) return;
@@ -53,17 +64,26 @@ export default function Recurring() {
   }
 
   async function onDelete(id: number) {
-    if (!confirm("Delete this recurring template? Past posted expenses are not affected.")) return;
+    if (!(await showConfirm("Delete this recurring template? Past posted expenses are not affected."))) return;
     await deleteRecurring(id);
     await reload();
   }
 
   async function onPost(r: RecurringExpense, dueDate: string) {
-    if (!confirm(`Post ${r.name} for $${fmt(r.amount)} on ${dueDate}?`)) return;
+    // Give the operator a chance to override the amount (variable bills like
+    // phone / internet / CRA are the common case).
+    const answer = await showPrompt(
+      `Post "${r.name}" for ${dueDate}\n\nAmount to post ($). Leave as-is to use the template default of $${fmt(r.amount)}.`,
+      String(r.amount)
+    );
+    if (answer == null) return;
+    const trimmed = answer.trim();
+    const amt = trimmed ? Number(trimmed) : r.amount;
+    if (!isFinite(amt) || amt <= 0) { void showAlert("Amount must be a positive number."); return; }
     setBusy(true);
     try {
-      await postRecurring(r.id, dueDate);
-      setMsg(`Posted "${r.name}" for ${dueDate}.`);
+      await postRecurring(r.id, dueDate, amt);
+      setMsg(`Posted "${r.name}" for ${dueDate} at $${fmt(amt)}.`);
       await reload();
     } catch (e: any) {
       setMsg(String(e?.message || e));
@@ -73,12 +93,11 @@ export default function Recurring() {
   async function onPostAllDue() {
     const due: Array<{ r: RecurringExpense; date: string }> = [];
     for (const r of rows) {
-      if (!r.active) continue;
-      const d = nextDueForPeriod(r, ym);
-      if (d) due.push({ r, date: d });
+      const info = dueMap[r.id];
+      if (info && info.target && !info.posted) due.push({ r, date: info.target });
     }
     if (due.length === 0) { setMsg("Nothing due for this period."); return; }
-    if (!confirm(`Post ${due.length} recurring bill(s) for ${ym}?`)) return;
+    if (!(await showConfirm(`Post ${due.length} recurring bill(s) for ${ym} at their template amounts?\n\nUse the row-level Post button if you need to override the amount for a variable bill.`))) return;
     setBusy(true);
     try {
       for (const x of due) await postRecurring(x.r.id, x.date);
@@ -95,7 +114,7 @@ export default function Recurring() {
         <div>
           <h1 style={{ margin: 0 }}>Recurring Expenses</h1>
           <p style={{ color: "var(--muted)", margin: "6px 0 0" }}>
-            Rent, WCB, CRA remittance, phone, internet, insurance and other bills that repeat.
+            Rent, WCB, CRA remittance, phone, internet, insurance and other bills that repeat. Amounts can be overridden per-post for variable bills.
           </p>
         </div>
         <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
@@ -118,7 +137,7 @@ export default function Recurring() {
               </select>
             </label>
             <label>Vendor<input value={editing.vendor || ""} onChange={(e) => setEditing({ ...editing, vendor: e.target.value })} style={inp} /></label>
-            <label>Amount ($)<input type="number" step="0.01" value={editing.amount ?? 0} onChange={(e) => setEditing({ ...editing, amount: Number(e.target.value) })} style={inp} /></label>
+            <label>Default amount ($)<input type="number" step="0.01" value={editing.amount ?? 0} onChange={(e) => setEditing({ ...editing, amount: Number(e.target.value) })} style={inp} /></label>
             <label>Payment
               <select value={editing.payment_method || ""} onChange={(e) => setEditing({ ...editing, payment_method: e.target.value })} style={inp}>
                 {PAYMENT_METHODS.map((p) => <option key={p} value={p}>{p}</option>)}
@@ -151,7 +170,7 @@ export default function Recurring() {
             <th style={th()}>Name</th>
             <th style={th()}>Category</th>
             <th style={th()}>Freq.</th>
-            <th style={{ ...th(), textAlign: "right" }}>Amount</th>
+            <th style={{ ...th(), textAlign: "right" }}>Default</th>
             <th style={th()}>Payment</th>
             <th style={th()}>Last posted</th>
             <th style={th()}>Status for {ym}</th>
@@ -162,7 +181,7 @@ export default function Recurring() {
           {rows.length === 0 ? (
             <tr><td colSpan={8} style={{ ...td(), textAlign: "center", color: "var(--muted)", padding: 20 }}>No recurring templates yet. Create one to auto-track monthly bills.</td></tr>
           ) : rows.map((r) => {
-            const due = nextDueForPeriod(r, ym);
+            const info = dueMap[r.id] || { target: null, posted: false };
             return (
               <tr key={r.id} style={{ opacity: r.active ? 1 : 0.55 }}>
                 <td style={td()}><strong>{r.name}</strong>{r.vendor ? <div style={{ color: "var(--muted)", fontSize: 12 }}>{r.vendor}</div> : null}</td>
@@ -173,11 +192,12 @@ export default function Recurring() {
                 <td style={td()}>{r.last_posted_date || "—"}</td>
                 <td style={td()}>
                   {!r.active ? <span style={{ color: "var(--muted)" }}>Paused</span>
-                    : due ? <span style={{ color: "#b45309", fontWeight: 600 }}>Due {due}</span>
-                    : <span style={{ color: "#065f46" }}>Posted / not scheduled</span>}
+                    : !info.target ? <span style={{ color: "var(--muted)" }}>Not scheduled</span>
+                    : info.posted ? <span style={{ color: "#065f46" }}>✓ Posted for {ym}</span>
+                    : <span style={{ color: "#b45309", fontWeight: 600 }}>Due {info.target}</span>}
                 </td>
                 <td style={{ ...td(), whiteSpace: "nowrap" }}>
-                  {due && r.active && <button className="btn" onClick={() => onPost(r, due)} style={{ marginRight: 6 }}>Post</button>}
+                  {info.target && !info.posted && r.active && <button className="btn" onClick={() => onPost(r, info.target!)} style={{ marginRight: 6 }}>Post</button>}
                   <button className="btn secondary" onClick={() => setEditing(r)} style={{ marginRight: 6 }}>Edit</button>
                   <button className="btn secondary" onClick={() => onDelete(r.id)} style={{ color: "#b91c1c" }}>Delete</button>
                 </td>

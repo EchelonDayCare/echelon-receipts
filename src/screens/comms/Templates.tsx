@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { listTemplates, upsertTemplate, deleteTemplate, type MessageTemplate } from "../../lib/comms";
+import { showAlert, showConfirm } from "../../lib/dialogs";
 
 const KINDS = ["general", "closure", "newsletter", "reminder", "fees", "forms"];
 
@@ -11,15 +12,15 @@ export default function Templates() {
   useEffect(() => { refresh(); }, []);
 
   async function onSave(t: MessageTemplate) {
-    if (!t.name.trim()) { alert("Name is required."); return; }
+    if (!t.name.trim()) { await showAlert("Name is required.", { kind: "warning" }); return; }
     await upsertTemplate(t);
     setEditing(null);
     await refresh();
   }
 
   async function onDelete(t: MessageTemplate) {
-    if (t.is_builtin) { alert("Built-in templates can't be deleted, but you can duplicate and edit them."); return; }
-    if (!confirm(`Delete template "${t.name}"?`)) return;
+    if (t.is_builtin) { await showAlert("Built-in templates can't be deleted, but you can duplicate and edit them."); return; }
+    if (!(await showConfirm(`Delete template "${t.name}"?`, { kind: "warning" }))) return;
     await deleteTemplate(t.id);
     await refresh();
   }

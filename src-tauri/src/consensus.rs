@@ -124,7 +124,12 @@ fn redact(s: String, secrets: &[&str]) -> String {
 }
 
 fn truncate(s: &str, n: usize) -> String {
-    if s.len() <= n { s.to_string() } else { format!("{}…", &s[..n]) }
+    // char-boundary safe (see azure_ai::truncate for rationale).
+    if s.chars().count() <= n { s.to_string() } else {
+        let mut out: String = s.chars().take(n).collect();
+        out.push('…');
+        out
+    }
 }
 
 fn is_placeholder_name(name: &str) -> bool {

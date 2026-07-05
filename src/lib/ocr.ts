@@ -160,10 +160,11 @@ export function computeConsensus(
   const failed = result.providers.filter((p) => !p.ok)
     .map((p) => ({ provider: p.provider, error: p.error || "unknown" }));
 
-  // Separate Mistral (numeric witness) from the semantic voters (Gemini + GPT).
-  // Mistral rows all carry the sentinel staff_name; the numericGrid maps
-  // work_date → literal digit reads, used only to corroborate/tiebreak the
-  // semantic providers' times. Mistral does NOT vote on staff name or no_lunch.
+  // Separate Mistral OCR (numeric witness) from the semantic voters
+  // (Mistral Document AI + GPT vision). Mistral OCR rows all carry the
+  // sentinel staff_name; the numericGrid maps work_date → literal digit
+  // reads, used only to corroborate/tiebreak the semantic providers' times.
+  // Mistral OCR does NOT vote on staff name or no_lunch.
   const mistralProvider = succeeded.find((p) => p.provider === "mistral_ocr");
   // Mistral emits one row per staff column per date (up to 4 for this sheet)
   // but they all share the sentinel staff_name — so we can't attribute them
@@ -181,7 +182,7 @@ export function computeConsensus(
   const mistralOk = mistralProvider?.ok ?? false;
   const mistralHasDigits = numericGrid.size > 0;
 
-  // Semantic voters = Gemini + GPT (whoever succeeded AND returned rows).
+  // Semantic voters = Mistral Document AI + GPT (whoever succeeded AND returned rows).
   const semantic = succeeded.filter((p) =>
     p.provider !== "mistral_ocr" && p.rows.length > 0
   );

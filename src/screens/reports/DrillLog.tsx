@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { db, execRetry, getSettings } from "../../lib/db";
+import { showAlert, showConfirm } from "../../lib/dialogs";
 import type { SettingsMap } from "../../types";
 
 interface Drill {
@@ -57,7 +58,7 @@ export default function DrillLog() {
   }
 
   async function addDrill() {
-    if (!drillDate || !drillType) { alert("Date and type are required."); return; }
+    if (!drillDate || !drillType) { await showAlert("Date and type are required.", { kind: "warning" }); return; }
     await execRetry(
       "INSERT INTO staff_drills (drill_date, drill_type, duration_min, children_present, notes) VALUES (?, ?, ?, ?, ?)",
       [drillDate, drillType, duration ? Number(duration) : null, childrenPresent ? Number(childrenPresent) : null, notes || null]
@@ -68,7 +69,7 @@ export default function DrillLog() {
   }
 
   async function del(id: number) {
-    if (!confirm("Delete this drill record?")) return;
+    if (!(await showConfirm("Delete this drill record?", { kind: "warning" }))) return;
     await execRetry("DELETE FROM staff_drills WHERE id=?", [id]);
     await refresh();
   }

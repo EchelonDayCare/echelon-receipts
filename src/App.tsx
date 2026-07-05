@@ -301,7 +301,31 @@ export default function App() {
         console.warn(`[backup] Skipped: ${res.error}`);
       }
     });
-    return () => window.removeEventListener("settings-saved", onSaved);
+
+    // Fire any due scheduled messages on app launch and every 15 min thereafter,
+    // so a session that stays open through the scheduled time still delivers.
+    (async () => {
+      try {
+        const { runDueScheduled } = await import("./lib/comms");
+        const settings = await getSettings();
+        const res = await runDueScheduled(settings);
+        if (res.attempted > 0) {
+          console.log(`[scheduled] attempted=${res.attempted} sent=${res.sent} failed=${res.failed}`);
+        }
+      } catch (e) { console.warn("[scheduled] startup run failed:", e); }
+    })();
+    const schedTimer = window.setInterval(async () => {
+      try {
+        const { runDueScheduled } = await import("./lib/comms");
+        const settings = await getSettings();
+        await runDueScheduled(settings);
+      } catch { /* silent — visible in the Scheduled screen if it recurs */ }
+    }, 15 * 60 * 1000);
+
+    return () => {
+      window.removeEventListener("settings-saved", onSaved);
+      window.clearInterval(schedTimer);
+    };
   }, []);
 
   return (

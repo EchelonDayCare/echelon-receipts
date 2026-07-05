@@ -6,6 +6,7 @@ import {
   runDueScheduled, type ScheduledMessage, type RecipientFilter,
 } from "../../lib/comms";
 import { parseRecipients } from "../../lib/email";
+import { showAlert, showConfirm } from "../../lib/dialogs";
 
 type Mode = "all_active" | "year" | "students";
 
@@ -68,14 +69,14 @@ export default function Scheduled() {
   async function onSave() {
     if (!editing) return;
     if (!editing.subject?.trim() || !editing.body?.trim() || !editing.scheduled_for) {
-      alert("Fill in subject, body, and scheduled date/time."); return;
+      await showAlert("Fill in subject, body, and scheduled date/time.", { kind: "warning" }); return;
     }
     const filter: RecipientFilter = mode === "all_active"
       ? { mode: "all_active" }
       : mode === "year" ? { mode: "year", year }
       : { mode: "students", studentIds: Array.from(selectedIds) };
     if (filter.mode === "students" && filter.studentIds.length === 0) {
-      alert("Select at least one student."); return;
+      await showAlert("Select at least one student.", { kind: "warning" }); return;
     }
     await upsertScheduled({
       id: editing.id,
@@ -91,11 +92,11 @@ export default function Scheduled() {
   }
 
   async function onRunNow() {
-    if (!confirm("Send all messages due now?")) return;
+    if (!(await showConfirm("Send all messages due now?"))) return;
     setRunning(true);
     try {
       const res = await runDueScheduled(settings);
-      alert(`Processed ${res.attempted}. Sent: ${res.sent}. Failed: ${res.failed}.`);
+      await showAlert(`Processed ${res.attempted}. Sent: ${res.sent}. Failed: ${res.failed}.`);
       refresh();
     } finally {
       setRunning(false);
@@ -149,10 +150,10 @@ export default function Scheduled() {
                         if (rf.mode === "year") setYear(rf.year);
                         if (rf.mode === "students") setSelectedIds(new Set(rf.studentIds));
                       }}>Edit</button>
-                      <button className="btn link" onClick={async () => { if (confirm("Cancel this scheduled message?")) { await cancelScheduled(m.id); refresh(); } }}>Cancel</button>
+                      <button className="btn link" onClick={async () => { if (await showConfirm("Cancel this scheduled message?")) { await cancelScheduled(m.id); refresh(); } }}>Cancel</button>
                     </>
                   )}
-                  <button className="btn link danger" onClick={async () => { if (confirm("Delete this record?")) { await deleteScheduled(m.id); refresh(); } }}>Delete</button>
+                  <button className="btn link danger" onClick={async () => { if (await showConfirm("Delete this record?", { kind: "warning" })) { await deleteScheduled(m.id); refresh(); } }}>Delete</button>
                 </td>
               </tr>
             );

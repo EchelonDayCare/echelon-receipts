@@ -133,6 +133,19 @@ export default function Students() {
     }
   }
 
+  const [searchQ, setSearchQ] = useState("");
+  const [missingEmailOnly, setMissingEmailOnly] = useState(false);
+
+  const visibleStudents = (() => {
+    const q = searchQ.trim().toLowerCase();
+    return students.filter((s) => {
+      if (missingEmailOnly && (s.email || "").trim() !== "") return false;
+      if (!q) return true;
+      const hay = [s.name, s.father_name, s.mother_name, s.email].filter(Boolean).join(" ").toLowerCase();
+      return hay.includes(q);
+    });
+  })();
+
   return (
     <div>
       <h1>Students</h1>
@@ -143,6 +156,17 @@ export default function Students() {
         <select value={year} onChange={(e) => setYear(parseInt(e.target.value, 10))}>
           {years.map((y) => <option key={y} value={y}>{y}</option>)}
         </select>
+        <input
+          type="search"
+          placeholder="Search name, parent, or email…"
+          value={searchQ}
+          onChange={(e) => setSearchQ(e.target.value)}
+          style={{ padding: "6px 10px", minWidth: 240 }}
+        />
+        <label style={{ fontSize: 13, display: "flex", alignItems: "center", gap: 4 }}>
+          <input type="checkbox" checked={missingEmailOnly} onChange={(e) => setMissingEmailOnly(e.target.checked)} />
+          Missing email only
+        </label>
         <div className="grow" />
         <button className="btn secondary" onClick={() => setEditing({ year, active: 1 })}>+ Add Student</button>
         <button className="btn" onClick={onImport}>Import from Excel</button>
@@ -150,6 +174,8 @@ export default function Students() {
 
       {students.length === 0 ? (
         <div className="empty">No students for {year}. Click <b>Import from Excel</b> to load a yearly roster.</div>
+      ) : visibleStudents.length === 0 ? (
+        <div className="empty">No students match the current filter.</div>
       ) : (
         <table className="data">
           <thead>
@@ -158,7 +184,7 @@ export default function Students() {
             </tr>
           </thead>
           <tbody>
-            {students.map((s) => (
+            {visibleStudents.map((s) => (
               <tr key={s.id}>
                 <td>{s.name}</td>
                 <td>{s.father_name || "—"}</td>

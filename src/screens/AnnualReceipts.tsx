@@ -7,6 +7,7 @@ import { appDataDir, join, tempDir } from "@tauri-apps/api/path";
 import {
   annualGroupsForYear, getSettings, setSetting, nextAnnualReceiptNumber,
   recordAnnualReceipt, markAnnualReceiptEmailed, listAnnualReceiptsForPersonYear,
+  updateStudentEmailByPerson,
   type AnnualGroup,
 } from "../lib/db";
 import {
@@ -380,10 +381,23 @@ export default function AnnualReceipts() {
                       <td>{r.group.student_name}</td>
                       <td style={{ textAlign: "right" }}>${fmt(r.group.total)}</td>
                       <td>
-                        <input style={{ width: "100%" }}
-                          value={r.recipientEmails}
-                          placeholder="parent1@example.com, parent2@example.com"
-                          onChange={(e) => setRows(cur => cur.map((x, j) => j === idx ? { ...x, recipientEmails: e.target.value } : x))} />
+                        <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+                          <input style={{ flex: 1 }}
+                            value={r.recipientEmails}
+                            placeholder="parent1@example.com, parent2@example.com"
+                            onChange={(e) => setRows(cur => cur.map((x, j) => j === idx ? { ...x, recipientEmails: e.target.value } : x))} />
+                          {r.recipientEmails.trim() && r.recipientEmails.trim() !== (r.group.email || "").trim() && (
+                            <button
+                              className="btn ghost"
+                              title="Save this email back to the student record so you don't have to re-type it next year"
+                              onClick={async () => {
+                                const n = await updateStudentEmailByPerson(r.group.person_id, r.recipientEmails.trim());
+                                setRows(cur => cur.map((x, j) => j === idx ? { ...x, group: { ...x.group, email: r.recipientEmails.trim() } } : x));
+                                void showAlert(`Saved to ${n} student record${n === 1 ? "" : "s"} (all years).`);
+                              }}
+                            >💾 Save to roster</button>
+                          )}
+                        </div>
                       </td>
                       <td style={{ fontSize: 12, color: "var(--muted)" }}>
                         {rowIssues(r).filter(x => x !== "No parent email").join(" · ") || "—"}

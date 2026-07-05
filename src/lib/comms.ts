@@ -167,6 +167,11 @@ export async function markScheduledSent(id: number): Promise<void> {
   await execRetry("UPDATE scheduled_messages SET status='sent', sent_at=datetime('now') WHERE id=?", [id]);
 }
 
+export async function markScheduledFailed(id: number, reason: string): Promise<void> {
+  await execRetry("UPDATE scheduled_messages SET status='failed', sent_at=datetime('now') WHERE id=?", [id]);
+  void reason; // reason is captured in communication_log; no dedicated column here.
+}
+
 // ---------------- Recipient resolution ----------------
 export interface ResolvedRecipient {
   student: Student;
@@ -364,6 +369,9 @@ export async function runDueScheduled(settings: SettingsMap): Promise<ScheduledR
           error: "No matching recipients at time of send",
           related_id: m.id,
         });
+        // Mark failed so we don't re-fire an unsolvable send every app open;
+        // the operator can inspect the audit log and re-schedule if desired.
+        await markScheduledFailed(m.id, "no recipients");
         failedCount++;
       } else {
         const res = await sendGroupEmail({
@@ -374,10 +382,16 @@ export async function runDueScheduled(settings: SettingsMap): Promise<ScheduledR
           settings,
           logKind: "scheduled",
         });
-        if (res.failed === 0) sentCount++;
-        else failedCount++;
+        if (res.failed === 0) {
+          sentCount++;
+          await markScheduledSent(m.id);
+        } else {
+          // Some or all recipients failed. Leave scheduled status untouched
+          // (still 'pending') so the operator can see it and retry, and record
+          // the partial-failure in the communication log for the audit trail.
+          failedCount++;
+        }
       }
-      await markScheduledSent(m.id);
     } catch (e: any) {
       failedCount++;
       await logCommunication({

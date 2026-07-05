@@ -4,6 +4,7 @@ import {
   EXPENSE_CATEGORIES, PAYMENT_METHODS,
   saveExpense, getExpense, deleteExpense,
 } from "../../lib/expenses";
+import { showConfirm } from "../../lib/dialogs";
 
 function todayStr(): string {
   const d = new Date();
@@ -65,7 +66,7 @@ export default function ExpenseForm() {
 
   async function onDelete() {
     if (!editing || !id) return;
-    if (!confirm("Delete this expense? This cannot be undone.")) return;
+    if (!(await showConfirm("Delete this expense? This cannot be undone.", { kind: "warning" }))) return;
     await deleteExpense(Number(id));
     nav("/expenses/list");
   }

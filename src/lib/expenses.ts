@@ -1,4 +1,4 @@
-import { db, execRetry } from "./db";
+import { db, execRetry, roundMoney } from "./db";
 
 export const EXPENSE_CATEGORIES: Array<{ value: string; label: string; hint?: string }> = [
   { value: "rent_lease",        label: "Rent / Lease" },
@@ -61,6 +61,8 @@ export type Expense = {
   reference: string | null;
   notes: string | null;
   recurring_id: number | null;
+  import_batch_id: string | null;
+  source_txn_hash: string | null;
   created_at: string;
 };
 
@@ -78,7 +80,7 @@ export type RecurringExpense = {
   end_date: string | null;
   active: number;
   notes: string | null;
-  last_posted_date: string | null;
+  last_posted_date: string | null; // retained for legacy display; not used for gating
   created_at: string;
 };
 
@@ -89,6 +91,7 @@ export async function listExpenses(opts: {
   payment_method?: string;
   q?: string;
   limit?: number;
+  batchId?: string;
 } = {}): Promise<Expense[]> {
   const d = await db();
   const where: string[] = [];
@@ -97,6 +100,7 @@ export async function listExpenses(opts: {
   if (opts.to)   { where.push("date <= ?"); params.push(opts.to); }
   if (opts.category) { where.push("category = ?"); params.push(opts.category); }
   if (opts.payment_method) { where.push("payment_method = ?"); params.push(opts.payment_method); }
+  if (opts.batchId) { where.push("import_batch_id = ?"); params.push(opts.batchId); }
   if (opts.q) {
     where.push("(vendor LIKE ? OR notes LIKE ? OR subcategory LIKE ? OR reference LIKE ?)");
     const q = `%${opts.q}%`;
@@ -114,22 +118,25 @@ export async function getExpense(id: number): Promise<Expense | null> {
 }
 
 export async function saveExpense(e: Partial<Expense> & { id?: number }): Promise<number> {
+  const amt = roundMoney(e.amount ?? 0);
   if (e.id) {
     await execRetry(
       `UPDATE expenses SET date=?, category=?, subcategory=?, vendor=?, amount=?, payment_method=?, reference=?, notes=?
        WHERE id=?`,
-      [e.date, e.category, e.subcategory || null, e.vendor || null, e.amount, e.payment_method, e.reference || null, e.notes || null, e.id]
+      [e.date, e.category, e.subcategory || null, e.vendor || null, amt, e.payment_method, e.reference || null, e.notes || null, e.id]
     );
     return e.id;
   }
-  const d = await db();
-  await execRetry(
-    `INSERT INTO expenses(date, category, subcategory, vendor, amount, payment_method, reference, notes, recurring_id)
-     VALUES(?,?,?,?,?,?,?,?,?)`,
-    [e.date, e.category, e.subcategory || null, e.vendor || null, e.amount, e.payment_method, e.reference || null, e.notes || null, e.recurring_id || null]
+  const res = await execRetry(
+    `INSERT INTO expenses(date, category, subcategory, vendor, amount, payment_method, reference, notes, recurring_id, import_batch_id, source_txn_hash)
+     VALUES(?,?,?,?,?,?,?,?,?,?,?)`,
+    [
+      e.date, e.category, e.subcategory || null, e.vendor || null, amt,
+      e.payment_method, e.reference || null, e.notes || null,
+      e.recurring_id || null, e.import_batch_id || null, e.source_txn_hash || null,
+    ]
   );
-  const r = await d.select<{ id: number }[]>("SELECT last_insert_rowid() AS id");
-  return r[0].id;
+  return res.lastInsertId;
 }
 
 export async function deleteExpense(id: number): Promise<void> {
@@ -143,74 +150,110 @@ export async function listRecurring(activeOnly = false): Promise<RecurringExpens
 }
 
 export async function saveRecurring(r: Partial<RecurringExpense> & { id?: number }): Promise<number> {
+  const amt = roundMoney(r.amount ?? 0);
   if (r.id) {
     await execRetry(
       `UPDATE recurring_expenses SET name=?, category=?, subcategory=?, vendor=?, amount=?, payment_method=?,
         frequency=?, day_of_month=?, start_date=?, end_date=?, active=?, notes=? WHERE id=?`,
-      [r.name, r.category, r.subcategory || null, r.vendor || null, r.amount, r.payment_method,
+      [r.name, r.category, r.subcategory || null, r.vendor || null, amt, r.payment_method,
        r.frequency || "monthly", r.day_of_month || 1, r.start_date, r.end_date || null,
        r.active ? 1 : 0, r.notes || null, r.id]
     );
     return r.id;
   }
-  const d = await db();
-  await execRetry(
+  const res = await execRetry(
     `INSERT INTO recurring_expenses(name, category, subcategory, vendor, amount, payment_method, frequency, day_of_month, start_date, end_date, active, notes)
      VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`,
-    [r.name, r.category, r.subcategory || null, r.vendor || null, r.amount, r.payment_method,
+    [r.name, r.category, r.subcategory || null, r.vendor || null, amt, r.payment_method,
      r.frequency || "monthly", r.day_of_month || 1, r.start_date, r.end_date || null,
      r.active === 0 ? 0 : 1, r.notes || null]
   );
-  const x = await d.select<{ id: number }[]>("SELECT last_insert_rowid() AS id");
-  return x[0].id;
+  return res.lastInsertId;
 }
 
 export async function deleteRecurring(id: number): Promise<void> {
   await execRetry("DELETE FROM recurring_expenses WHERE id=?", [id]);
 }
 
-// Determine whether a recurring template is "due" for a target period (YYYY-MM)
-// Returns the date-string it should be posted on, or null if not due / already posted.
-export function nextDueForPeriod(r: RecurringExpense, periodYYYYMM: string): string | null {
+// Compute the target date this template should post on for the given YYYY-MM
+// period, ignoring whether it's already posted. Returns null if the period is
+// out of range or the frequency doesn't hit this month.
+export function targetDateForPeriod(r: RecurringExpense, periodYYYYMM: string): string | null {
   if (!r.active) return null;
   const [yy, mm] = periodYYYYMM.split("-").map(Number);
+  if (!yy || !mm) return null;
   const start = new Date(r.start_date + "T00:00:00");
+  const periodStart = new Date(yy, mm - 1, 1);
   const periodEnd = new Date(yy, mm, 0); // last day of month
   if (start > periodEnd) return null;
   if (r.end_date) {
     const end = new Date(r.end_date + "T00:00:00");
-    if (end < new Date(yy, mm - 1, 1)) return null;
+    if (end < periodStart) return null;
   }
-  // Frequency check relative to start month
   const monthsSinceStart = (yy - start.getFullYear()) * 12 + (mm - 1 - start.getMonth());
   if (monthsSinceStart < 0) return null;
-  if (r.frequency === "monthly" && monthsSinceStart % 1 !== 0) return null;
   if (r.frequency === "quarterly" && monthsSinceStart % 3 !== 0) return null;
   if (r.frequency === "yearly" && monthsSinceStart % 12 !== 0) return null;
-  // Build target date
+  // monthly always matches; no modulus required.
   const day = Math.min(r.day_of_month, new Date(yy, mm, 0).getDate());
   const target = `${yy}-${String(mm).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
-  if (r.last_posted_date && r.last_posted_date >= target) return null;
+  // Guard: never post before start_date (protects mid-month starts).
+  if (target < r.start_date) return null;
+  if (r.end_date && target > r.end_date) return null;
   return target;
 }
 
-export async function postRecurring(rid: number, targetDate: string): Promise<number> {
+// True if an expense row already exists for this recurring template and period
+// (matched by month, so a manual date-shift within the month still counts).
+export async function isPeriodPosted(recurringId: number, periodYYYYMM: string): Promise<boolean> {
+  const d = await db();
+  const rows = await d.select<Array<{ n: number }>>(
+    `SELECT COUNT(*) AS n FROM expenses WHERE recurring_id=? AND substr(date,1,7)=?`,
+    [recurringId, periodYYYYMM]
+  );
+  return (rows[0]?.n ?? 0) > 0;
+}
+
+// Async version that considers the actual posted state (per-period, not
+// high-water). Prefer this in UIs; keeps backfilling missed months possible.
+export async function nextDueForPeriod(r: RecurringExpense, periodYYYYMM: string): Promise<string | null> {
+  const target = targetDateForPeriod(r, periodYYYYMM);
+  if (!target) return null;
+  if (await isPeriodPosted(r.id, periodYYYYMM)) return null;
+  return target;
+}
+
+// Post a recurring template for a specific date. Idempotent per (recurring_id,
+// month) — a partial unique index enforces this at the DB layer, so a crash
+// between insert and last_posted_date update can never produce a duplicate.
+export async function postRecurring(rid: number, targetDate: string, overrideAmount?: number): Promise<number> {
   const d = await db();
   const rows = await d.select<RecurringExpense[]>("SELECT * FROM recurring_expenses WHERE id=?", [rid]);
   const r = rows[0];
   if (!r) throw new Error("Recurring template not found");
+  if (targetDate < r.start_date) throw new Error(`Cannot post before start date ${r.start_date}`);
+  if (r.end_date && targetDate > r.end_date) throw new Error(`Cannot post after end date ${r.end_date}`);
+  const period = targetDate.slice(0, 7);
+  if (await isPeriodPosted(rid, period)) {
+    throw new Error(`${r.name} is already posted for ${period}`);
+  }
+  const amt = roundMoney(overrideAmount ?? r.amount);
   const id = await saveExpense({
     date: targetDate,
     category: r.category,
     subcategory: r.subcategory,
     vendor: r.vendor,
-    amount: r.amount,
+    amount: amt,
     payment_method: r.payment_method,
     reference: null,
     notes: r.notes ? `[${r.name}] ${r.notes}` : `[${r.name}]`,
     recurring_id: r.id,
   });
-  await execRetry("UPDATE recurring_expenses SET last_posted_date=? WHERE id=?", [targetDate, rid]);
+  // Advisory bookkeeping; not authoritative. isPeriodPosted() drives gating.
+  await execRetry(
+    "UPDATE recurring_expenses SET last_posted_date=? WHERE id=? AND (last_posted_date IS NULL OR last_posted_date < ?)",
+    [targetDate, rid, targetDate]
+  );
   return id;
 }
 
@@ -236,11 +279,20 @@ export async function summaryByMonth(from: string, to: string): Promise<Array<{ 
   );
 }
 
-// Revenue for the same period from receipts (for P&L).
-export async function revenueSummary(from: string, to: string): Promise<{ total: number; count: number }> {
+// Revenue basis for P&L. "parent_paid" = only what parents actually paid the
+// daycare (default). "operating" = daycare's operating revenue, which for
+// non-profit BC daycares typically includes ACCB paid to the daycare on
+// behalf of families and the CCFRI amount received from government.
+// CCFRI is netted from receipt.amount already (amount = parent_pays after
+// CCFRI), so operating revenue = parent_pays + ccfri + accb ~= gross_amount.
+export type RevenueBasis = "parent_paid" | "operating";
+
+export async function revenueSummary(from: string, to: string, basis: RevenueBasis = "parent_paid"): Promise<{ total: number; count: number }> {
   const d = await db();
+  // parent_paid = what parents actually paid. operating = gross fee (parent + CCFRI + ACCB).
+  const expr = basis === "operating" ? "COALESCE(gross_amount, amount)" : "amount";
   const rows = await d.select<Array<{ total: number; count: number }>>(
-    `SELECT COALESCE(SUM(CASE WHEN is_refund=1 THEN -amount ELSE amount END),0) AS total,
+    `SELECT COALESCE(SUM(CASE WHEN is_refund=1 THEN -(${expr}) ELSE (${expr}) END),0) AS total,
             COUNT(*) AS count
      FROM receipts WHERE date >= ? AND date <= ? AND voided=0`,
     [from, to]
@@ -248,13 +300,33 @@ export async function revenueSummary(from: string, to: string): Promise<{ total:
   return rows[0] || { total: 0, count: 0 };
 }
 
-export async function revenueByMonth(from: string, to: string): Promise<Array<{ ym: string; total: number }>> {
+export async function revenueByMonth(from: string, to: string, basis: RevenueBasis = "parent_paid"): Promise<Array<{ ym: string; total: number }>> {
   const d = await db();
+  const expr = basis === "operating" ? "COALESCE(gross_amount, amount)" : "amount";
   return d.select<Array<{ ym: string; total: number }>>(
     `SELECT substr(date,1,7) AS ym,
-            COALESCE(SUM(CASE WHEN is_refund=1 THEN -amount ELSE amount END),0) AS total
+            COALESCE(SUM(CASE WHEN is_refund=1 THEN -(${expr}) ELSE (${expr}) END),0) AS total
      FROM receipts WHERE date >= ? AND date <= ? AND voided=0
      GROUP BY ym ORDER BY ym`,
     [from, to]
+  );
+}
+
+// ---------- Import batches ----------
+// Rolling back an import: delete every expense tagged with the same batch id.
+export async function deleteImportBatch(batchId: string): Promise<number> {
+  const res = await execRetry("DELETE FROM expenses WHERE import_batch_id=?", [batchId]);
+  return res.rowsAffected;
+}
+
+export async function listImportBatches(limit = 20): Promise<Array<{ batch_id: string; count: number; total: number; first_date: string; last_date: string; imported_at: string }>> {
+  const d = await db();
+  return d.select(
+    `SELECT import_batch_id AS batch_id, COUNT(*) AS count, SUM(amount) AS total,
+            MIN(date) AS first_date, MAX(date) AS last_date, MAX(created_at) AS imported_at
+     FROM expenses WHERE import_batch_id IS NOT NULL
+     GROUP BY import_batch_id
+     ORDER BY imported_at DESC
+     LIMIT ${Number(limit) | 0}`
   );
 }

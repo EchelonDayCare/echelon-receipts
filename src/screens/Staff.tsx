@@ -298,7 +298,7 @@ export default function StaffScreen() {
       const fmtMb = (b: number) => (b / (1024 * 1024)).toFixed(1);
 
       if (items.length === 1) {
-        const ok = window.confirm(
+        const ok = await showConfirm(
           `Import "${picked.name}" (${fmtMin(picked.modified_secs_ago)} min ago, ${fmtMb(picked.size)} MB) for OCR?`
         );
         if (!ok) return;
@@ -538,7 +538,7 @@ export default function StaffScreen() {
           <div style={{ flex: 1, minWidth: 240 }}>
             <h3 style={{ margin: "0 0 4px" }}>Upload {MONTHS[month - 1]} sign-in sheet</h3>
             <p style={{ margin: 0, color: "var(--muted)", fontSize: 13 }}>
-              Snap a clear photo or scan of the monthly sheet. Gemini extracts in/out times for each teacher; you review and import.
+              Snap a clear photo or scan of the monthly sheet. Azure Document AI + GPT-5.4 + Mistral OCR run in parallel and agree on the in/out times; you review any low-confidence cells.
             </p>
             {activeStaff.length === 0 && (
               <p style={{ margin: "6px 0 0", color: "var(--danger)", fontSize: 13 }}>Add at least one staff member below before uploading.</p>

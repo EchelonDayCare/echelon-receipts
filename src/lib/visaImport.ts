@@ -1,5 +1,5 @@
 // Visa / credit-card statement extraction — thin wrapper around the Rust
-// `extract_visa_statement` command (which calls Gemini 2.5 Flash).
+// `extract_visa_statement` command (which calls Azure Mistral Document AI).
 import { invoke } from "@tauri-apps/api/core";
 
 export interface ExtractedVisaTxn {

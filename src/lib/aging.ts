@@ -6,6 +6,7 @@
 import { db } from "./db";
 
 export interface AgingBucket {
+  future: number;    // dated after as_of — likely a data-entry error
   current: number;   // 0-30 days old
   d31_60: number;
   d61_90: number;
@@ -64,7 +65,7 @@ export async function computeAging(asOfIso?: string): Promise<AgingReport> {
         email: r.email,
         oldest_unpaid_date: r.date,
         receipt_count: 0,
-        bucket: { current: 0, d31_60: 0, d61_90: 0, d90plus: 0, total: 0 },
+        bucket: { future: 0, current: 0, d31_60: 0, d61_90: 0, d90plus: 0, total: 0 },
       };
       byStudent.set(r.student_id, row);
     }
@@ -72,7 +73,8 @@ export async function computeAging(asOfIso?: string): Promise<AgingReport> {
     row.receipt_count += 1;
     const age = daysBetween(r.date, asOf);
     const amt = Math.round((r.pending_amount as number) * 100) / 100;
-    if (age <= 30) row.bucket.current += amt;
+    if (age < 0) row.bucket.future += amt;
+    else if (age <= 30) row.bucket.current += amt;
     else if (age <= 60) row.bucket.d31_60 += amt;
     else if (age <= 90) row.bucket.d61_90 += amt;
     else row.bucket.d90plus += amt;
@@ -83,6 +85,7 @@ export async function computeAging(asOfIso?: string): Promise<AgingReport> {
     .map((r) => ({
       ...r,
       bucket: {
+        future: Math.round(r.bucket.future * 100) / 100,
         current: Math.round(r.bucket.current * 100) / 100,
         d31_60: Math.round(r.bucket.d31_60 * 100) / 100,
         d61_90: Math.round(r.bucket.d61_90 * 100) / 100,
@@ -95,13 +98,14 @@ export async function computeAging(asOfIso?: string): Promise<AgingReport> {
 
   const totals = list.reduce<AgingBucket>(
     (acc, r) => ({
+      future: acc.future + r.bucket.future,
       current: acc.current + r.bucket.current,
       d31_60: acc.d31_60 + r.bucket.d31_60,
       d61_90: acc.d61_90 + r.bucket.d61_90,
       d90plus: acc.d90plus + r.bucket.d90plus,
       total: acc.total + r.bucket.total,
     }),
-    { current: 0, d31_60: 0, d61_90: 0, d90plus: 0, total: 0 }
+    { future: 0, current: 0, d31_60: 0, d61_90: 0, d90plus: 0, total: 0 }
   );
   // Re-round totals so summed REAL drift never appears on the report.
   for (const k of Object.keys(totals) as (keyof AgingBucket)[]) {
@@ -111,11 +115,12 @@ export async function computeAging(asOfIso?: string): Promise<AgingReport> {
 }
 
 export function agingToCsv(rep: AgingReport): string {
-  const head = "Student,Father,Mother,Email,Oldest unpaid,Receipt count,Current (0-30),31-60,61-90,90+,Total";
+  const head = "Student,Father,Mother,Email,Oldest unpaid,Receipt count,Future (data error),Current (0-30),31-60,61-90,90+,Total";
   const lines = rep.rows.map((r) => {
     const cells = [
       r.student_name, r.father_name || "", r.mother_name || "", r.email || "",
       r.oldest_unpaid_date, String(r.receipt_count),
+      r.bucket.future.toFixed(2),
       r.bucket.current.toFixed(2), r.bucket.d31_60.toFixed(2),
       r.bucket.d61_90.toFixed(2), r.bucket.d90plus.toFixed(2),
       r.bucket.total.toFixed(2),
@@ -123,6 +128,6 @@ export function agingToCsv(rep: AgingReport): string {
     return cells.map((c) => `"${String(c).replace(/"/g, '""')}"`).join(",");
   });
   const tot = rep.totals;
-  const totLine = `"TOTAL","","","","","",${tot.current.toFixed(2)},${tot.d31_60.toFixed(2)},${tot.d61_90.toFixed(2)},${tot.d90plus.toFixed(2)},${tot.total.toFixed(2)}`;
+  const totLine = `"TOTAL","","","","","",${tot.future.toFixed(2)},${tot.current.toFixed(2)},${tot.d31_60.toFixed(2)},${tot.d61_90.toFixed(2)},${tot.d90plus.toFixed(2)},${tot.total.toFixed(2)}`;
   return [head, ...lines, totLine].join("\n");
 }

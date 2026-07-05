@@ -5,6 +5,7 @@ import { open } from "@tauri-apps/plugin-dialog";
 import { invoke } from "@tauri-apps/api/core";
 import { copyFile, mkdir, exists } from "@tauri-apps/plugin-fs";
 import { appDataDir, join } from "@tauri-apps/api/path";
+import { getVersion } from "@tauri-apps/api/app";
 import { getSettings, setSetting, setSettings as setSettingsBulk, checkpointWal } from "../lib/db";
 import { sendTestEmail, SMTP_PRESETS } from "../lib/email";
 import { sendCloudBackup } from "../lib/cloudBackup";
@@ -62,6 +63,7 @@ export default function Settings() {
   const [errorLogText, setErrorLogText] = useState<string>("");
   const [errorLogPathStr, setErrorLogPathStr] = useState<string>("");
   const [showErrorLog, setShowErrorLog] = useState(false);
+  const [appVersion, setAppVersion] = useState<string>("");
 
   useEffect(() => {
     (async () => {
@@ -69,6 +71,7 @@ export default function Settings() {
       setS(loaded);
       setHasStoredPassword(loaded.smtp_password_set === "1");
       setHasAzureKey(loaded.azure_ai_key_set === "1");
+      try { setAppVersion(await getVersion()); } catch { /* fine */ }
     })();
   }, []);
 
@@ -573,24 +576,27 @@ export default function Settings() {
           </label>
         </div>
 
+        {/* Azure AI key lives outside the staff toggle — it also powers
+            the Student attendance sheet OCR and the Visa statement import. */}
+        <div className="field" style={{ marginBottom: 14 }}>
+          <label>Azure AI Foundry key<HelpTip text="Required for AI features: staff sign-in sheet OCR, student attendance sheet OCR, and Visa/credit-card statement import. Stored in the macOS keychain — never in the database or any backup email." /></label>
+          <input
+            type="password"
+            placeholder={hasAzureKey ? "•••••••• (stored in OS keychain) — enter a new key to replace" : "Paste your Azure AI Foundry key"}
+            value={azureKey}
+            onChange={(e) => setAzureKey(e.target.value)}
+            autoComplete="off"
+          />
+          <small style={{ color: "var(--muted)" }}>
+            Enables 3-model consensus (Mistral Document AI + GPT-5.4 + Mistral OCR) for staff sign-in sheets, plus single-model extraction for student attendance and Visa statement imports. Stored in the OS keychain, never in the database.
+            {hasAzureKey && (
+              <> &nbsp;<a href="#" onClick={(e) => { e.preventDefault(); clearAzureKey(); }} style={{ color: "var(--danger)" }}>Remove stored key</a></>
+            )}
+          </small>
+        </div>
+
         {s.feature_staff_hours_enabled === "1" && (
           <div style={{ paddingLeft: 24, borderLeft: "2px solid var(--border)", marginBottom: 14 }}>
-            <div className="field">
-              <label>Azure AI Foundry key<HelpTip text="Required to read scanned staff sign-in sheets and Visa statements. Powers Azure Mistral Document AI (structured OCR) plus GPT-5.4 vision and Mistral OCR consensus. Stored in the macOS keychain — never in the database or any backup email." /></label>
-              <input
-                type="password"
-                placeholder={hasAzureKey ? "•••••••• (stored in OS keychain) — enter a new key to replace" : "Paste your Azure AI Foundry key"}
-                value={azureKey}
-                onChange={(e) => setAzureKey(e.target.value)}
-                autoComplete="off"
-              />
-              <small style={{ color: "var(--muted)" }}>
-                Enables 3-model consensus (Mistral Document AI + GPT-5.4 + Mistral OCR) for staff sign-in sheets, and single-model extraction for Visa statement imports. Stored in the OS keychain, never in the database.
-                {hasAzureKey && (
-                  <> &nbsp;<a href="#" onClick={(e) => { e.preventDefault(); clearAzureKey(); }} style={{ color: "var(--danger)" }}>Remove stored key</a></>
-                )}
-              </small>
-            </div>
             <Field s={s} setS={setS} k="staff_default_hourly_rate" label="Default hourly rate (optional)" placeholder="e.g. 28.50" hint="Used only as a starting point when you add a new staff member." />
             <Field s={s} setS={setS} k="staff_cred_alert_days" label="Credential warning window (days)" placeholder="60" hint="Home alerts trigger when a credential expires within this many days. Default 60." tip="How many days before expiry should the Home screen warn you? 60 days is enough time to book a First Aid renewal or order a new Criminal Record Check." />
           </div>
@@ -608,7 +614,7 @@ export default function Settings() {
         </p>
         <div className="field">
           <label>Version</label>
-          <div>v0.1.0</div>
+          <div>{appVersion ? `v${appVersion}` : "unknown"}</div>
         </div>
         <div className="field">
           <label>Database location</label>

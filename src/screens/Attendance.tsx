@@ -1,4 +1,4 @@
-import { showPrompt } from "../lib/dialogs";
+import { showPrompt, showConfirm } from "../lib/dialogs";
 import { useEffect, useMemo, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import { readFile } from "@tauri-apps/plugin-fs";
@@ -107,7 +107,7 @@ export default function Attendance() {
       const fmtMin = (s: number) => Math.max(1, Math.round(s / 60));
       const fmtMb = (b: number) => (b / (1024 * 1024)).toFixed(1);
       if (items.length === 1) {
-        const ok = window.confirm(
+        const ok = await showConfirm(
           `Import "${picked.name}" (${fmtMin(picked.modified_secs_ago)} min ago, ${fmtMb(picked.size)} MB) for OCR?`
         );
         if (!ok) return;

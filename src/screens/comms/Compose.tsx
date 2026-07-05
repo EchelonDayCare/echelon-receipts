@@ -7,6 +7,7 @@ import {
   type MessageTemplate, type CommAttachment, type RecipientFilter, type GroupSendProgress,
 } from "../../lib/comms";
 import { parseRecipients } from "../../lib/email";
+import { showAlert, showConfirm } from "../../lib/dialogs";
 
 type Mode = "all_active" | "year" | "students";
 
@@ -47,6 +48,9 @@ export default function Compose() {
         : await listStudents(year, false);
       setStudents(list);
     })();
+    // Reset selection when the visible roster changes — otherwise stale IDs
+    // from a previous year/mode silently leak into "selected students" sends.
+    setSelectedIds(new Set());
   }, [mode, year]);
 
   const filteredStudents = useMemo(() => {
@@ -98,9 +102,9 @@ export default function Compose() {
   }, [filteredStudents, settings]);
 
   async function onSend() {
-    if (!subject.trim() || !body.trim()) { alert("Enter a subject and body first."); return; }
-    if (recipientCount.withEmail === 0) { alert("No matching students have an email address on file."); return; }
-    const ok = confirm(`Send this email to ${recipientCount.withEmail} recipient${recipientCount.withEmail === 1 ? "" : "s"}?`);
+    if (!subject.trim() || !body.trim()) { await showAlert("Enter a subject and body first.", { kind: "warning" }); return; }
+    if (recipientCount.withEmail === 0) { await showAlert("No matching students have an email address on file.", { kind: "warning" }); return; }
+    const ok = await showConfirm(`Send this email to ${recipientCount.withEmail} recipient${recipientCount.withEmail === 1 ? "" : "s"}?`);
     if (!ok) return;
     setBusy(true);
     setProgress([]);
@@ -112,10 +116,10 @@ export default function Compose() {
         settings: s,
         onProgress: (p) => setProgress((prev) => [...prev, p]),
       });
-      if (res.failed === 0) alert(`Sent to ${res.sent} recipient${res.sent === 1 ? "" : "s"}.`);
-      else alert(`Sent to ${res.sent}. Failed: ${res.failed}. See Message History for details.`);
+      if (res.failed === 0) await showAlert(`Sent to ${res.sent} recipient${res.sent === 1 ? "" : "s"}.`);
+      else await showAlert(`Sent to ${res.sent}. Failed: ${res.failed}. See Message History for details.`, { kind: "warning" });
     } catch (e: any) {
-      alert(`Send failed: ${e?.message || e}`);
+      await showAlert(`Send failed: ${e?.message || e}`, { kind: "error" });
     } finally {
       setBusy(false);
     }

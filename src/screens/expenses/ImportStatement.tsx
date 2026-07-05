@@ -1,15 +1,16 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
 import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
 import { readFile } from "@tauri-apps/plugin-fs";
+import { showConfirm } from "../../lib/dialogs";
 import {
   extractVisaStatement, guessCategory, PAYMENT_SENTINEL,
   type ExtractedVisaTxn, type ExtractVisaResult,
 } from "../../lib/visaImport";
 import {
   EXPENSE_CATEGORIES, PAYMENT_METHODS,
-  saveExpense, listExpenses,
+  saveExpense, listExpenses, deleteImportBatch, listImportBatches,
 } from "../../lib/expenses";
 
 function fileMime(path: string): string {
@@ -24,12 +25,47 @@ function fmt(n: number): string {
   return n.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 }
 
+// Detect any YYYY-MM-DD substring; return [earliest, latest].
+function extractDateRange(period: string | null | undefined, txns: ExtractedVisaTxn[]): { from: string; to: string } {
+  const dates: string[] = [];
+  if (period) {
+    const matches = period.match(/\d{4}-\d{2}-\d{2}/g) || [];
+    dates.push(...matches);
+  }
+  for (const t of txns) {
+    if (/^\d{4}-\d{2}-\d{2}$/.test(t.date)) dates.push(t.date);
+  }
+  if (dates.length === 0) return { from: "1900-01-01", to: "9999-12-31" };
+  dates.sort();
+  return { from: dates[0], to: dates[dates.length - 1] };
+}
+
+// Stable hash of a transaction for dedup across re-imports of the same
+// statement. Card last-4 anchors us to the specific card even if the AI
+// re-interprets vendor whitespace slightly.
+function txnHash(cardLast4: string | null, t: ExtractedVisaTxn): string {
+  const seed = `${cardLast4 || "----"}|${t.date}|${t.amount.toFixed(2)}|${t.merchant.trim().toLowerCase()}`;
+  let h = 5381;
+  for (let i = 0; i < seed.length; i++) h = ((h << 5) + h) ^ seed.charCodeAt(i);
+  return (h >>> 0).toString(16).padStart(8, "0");
+}
+
+// True credit-card statement payments to distinguish from merchant refunds.
+// A merchant refund on Visa still shows as a negative amount, but the merchant
+// line is not the bank's payment/thank-you sentinel. We flag only bank-side
+// payments as "excluded from expenses".
+function looksLikeCardPayment(merchant: string): boolean {
+  return /\b(payment\s*-\s*)?thank\s*you\b|payment\s*received|autopay|preauthorized\s*payment/i.test(merchant);
+}
+
 interface Row extends ExtractedVisaTxn {
   category: string;
   include: boolean;
-  isPayment: boolean;
+  isPayment: boolean;      // bank-side payment (excluded)
+  isRefund: boolean;       // merchant refund (contra-expense — negative amount)
   duplicate: boolean;
   imported: boolean;
+  hash: string;
 }
 
 export default function ImportStatement() {
@@ -40,6 +76,13 @@ export default function ImportStatement() {
   const [meta, setMeta] = useState<Pick<ExtractVisaResult, "statement_period" | "card_last4" | "statement_total"> | null>(null);
   const [rows, setRows] = useState<Row[]>([]);
   const [payment, setPayment] = useState<string>("Visa Credit Card");
+  const [lastBatchId, setLastBatchId] = useState<string | null>(null);
+  const [batches, setBatches] = useState<Awaited<ReturnType<typeof listImportBatches>>>([]);
+
+  async function refreshBatches() {
+    try { setBatches(await listImportBatches(10)); } catch { /* fine */ }
+  }
+  useEffect(() => { void refreshBatches(); }, []);
 
   async function onPick() {
     setErr(""); setStatus("");
@@ -53,41 +96,65 @@ export default function ImportStatement() {
     try {
       const apiKey = await invoke<string | null>("keychain_get", { key: "azure_ai_key" });
       if (!apiKey) {
-        setErr("Azure AI Foundry key not found in keychain. Add it in Configuration → Staff (used for staff sign-in sheets too).");
+        setErr("Azure AI Foundry key not found in keychain. Add it in Configuration → Optional features.");
         setBusy(false); return;
       }
       const bytes = await readFile(picked);
       const mime = fileMime(picked);
       setStatus("Extracting transactions with Azure Mistral Document AI… (30-90s for a full statement)");
       const result = await extractVisaStatement({ azureKey: apiKey, fileBytes: bytes, mimeType: mime });
+
+      // Sanity: transactions must have valid YYYY-MM-DD dates and finite amounts.
+      const clean = (result.transactions || []).filter((t) =>
+        /^\d{4}-\d{2}-\d{2}$/.test(t.date) && isFinite(t.amount) && t.merchant?.trim().length
+      );
+      if (clean.length === 0) {
+        setErr("No transactions extracted. If the statement is very long, try re-uploading or crop to the transaction pages.");
+        setBusy(false); return;
+      }
+
       setMeta({
         statement_period: result.statement_period,
         card_last4: result.card_last4,
         statement_total: result.statement_total,
       });
 
-      // Pull recent expenses to detect duplicates by date+amount+vendor.
-      const existing = await listExpenses({
-        from: result.statement_period?.slice(0, 10) || "1900-01-01",
-        to: result.statement_period?.slice(-10) || "9999-12-31",
-      });
-      const dupKey = (d: string, a: number, v: string) => `${d}|${a.toFixed(2)}|${v.trim().toLowerCase()}`;
-      const existingKeys = new Set(existing.map((e) => dupKey(e.date, e.amount, e.vendor || "")));
+      // Build a robust dedup window. Regex-extract from statement_period; fall
+      // back to min/max of transaction dates.
+      const range = extractDateRange(result.statement_period, clean);
+      const existing = await listExpenses({ from: range.from, to: range.to });
+      const existingHashes = new Set(existing.map((e) => e.source_txn_hash).filter(Boolean) as string[]);
 
-      const parsed: Row[] = result.transactions.map((t) => {
+      const parsed: Row[] = clean.map((t) => {
         const catGuess = guessCategory(t.merchant, t.category_guess);
-        const isPayment = catGuess === PAYMENT_SENTINEL || t.amount < 0;
+        const isPayment = catGuess === PAYMENT_SENTINEL || looksLikeCardPayment(t.merchant);
+        const isRefund = !isPayment && t.amount < 0;
+        const h = txnHash(result.card_last4, t);
         return {
           ...t,
-          category: isPayment ? "misc" : catGuess,
+          category: isPayment ? "misc" : (catGuess === PAYMENT_SENTINEL ? "misc" : catGuess),
           isPayment,
+          isRefund,
           include: !isPayment,
-          duplicate: existingKeys.has(dupKey(t.date, t.amount, t.merchant)),
+          duplicate: existingHashes.has(h),
           imported: false,
+          hash: h,
         };
       });
+
+      // Reconciliation check: sum of parsed charges vs statement total.
+      if (result.statement_total != null) {
+        const netCharges = parsed.filter((r) => !r.isPayment).reduce((a, r) => a + r.amount, 0);
+        const drift = Math.abs(netCharges - result.statement_total);
+        if (drift > 1.0) {
+          setStatus(`⚠ Extracted ${parsed.length} transactions but the sum of charges ($${fmt(netCharges)}) does not match the statement total ($${fmt(result.statement_total)}). Review carefully before importing.`);
+        } else {
+          setStatus(`Extracted ${parsed.length} transactions. Review, edit categories, then Import.`);
+        }
+      } else {
+        setStatus(`Extracted ${parsed.length} transactions. Review, edit categories, then Import.`);
+      }
       setRows(parsed);
-      setStatus(`Extracted ${parsed.length} transactions. Review, edit categories, then Import.`);
     } catch (e: any) {
       setErr(String(e?.message || e));
       setStatus("");
@@ -105,28 +172,71 @@ export default function ImportStatement() {
 
   async function onImport() {
     if (importable.length === 0) { setErr("Nothing selected to import."); return; }
+    const dupCount = importable.filter((r) => r.duplicate).length;
+    if (dupCount > 0) {
+      const proceed = await showConfirm(
+        `${dupCount} of the selected transactions match existing expenses (same date/amount/merchant). Import anyway?`,
+        { kind: "warning" }
+      );
+      if (!proceed) return;
+    }
     setBusy(true); setErr("");
+    const batchId = crypto.randomUUID();
     try {
       let n = 0;
       const updated = [...rows];
       for (let i = 0; i < updated.length; i++) {
         const r = updated[i];
         if (!r.include || r.isPayment || r.imported) continue;
-        await saveExpense({
-          date: r.date,
-          category: r.category,
-          subcategory: null,
-          vendor: r.merchant,
-          amount: r.amount,
-          payment_method: payment,
-          reference: meta?.card_last4 ? `Visa ****${meta.card_last4}` : "Visa statement import",
-          notes: r.foreign_amount ? `Foreign: ${r.foreign_amount}` : null,
-        });
-        updated[i] = { ...r, imported: true };
-        n++;
+        try {
+          await saveExpense({
+            date: r.date,
+            category: r.category,
+            subcategory: null,
+            vendor: r.merchant,
+            amount: r.amount,
+            payment_method: payment,
+            reference: meta?.card_last4 ? `Visa ****${meta.card_last4}` : "Visa statement import",
+            notes: [
+              r.isRefund ? "Merchant refund (contra-expense)" : null,
+              r.foreign_amount ? `Foreign: ${r.foreign_amount}` : null,
+            ].filter(Boolean).join(" · ") || null,
+            import_batch_id: batchId,
+            source_txn_hash: r.hash,
+          });
+          updated[i] = { ...r, imported: true };
+          n++;
+        } catch (e: any) {
+          const msg = String(e?.message || e);
+          // Unique-index collision on source_txn_hash → row already imported previously.
+          if (/UNIQUE constraint failed/i.test(msg) && /source_txn_hash/i.test(msg)) {
+            updated[i] = { ...r, imported: true, duplicate: true };
+          } else {
+            throw e;
+          }
+        }
       }
       setRows(updated);
-      setStatus(`Imported ${n} transaction${n === 1 ? "" : "s"}. You can review them in All Expenses.`);
+      setLastBatchId(batchId);
+      setStatus(`Imported ${n} transaction${n === 1 ? "" : "s"} as batch ${batchId.slice(0, 8)}. Use "Undo last import" below if you spot a mistake.`);
+      await refreshBatches();
+    } catch (e: any) {
+      setErr(String(e?.message || e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function onUndoBatch(batchId: string, label: string) {
+    if (!(await showConfirm(`Delete all ${label} expenses that came in with batch ${batchId.slice(0, 8)}? This cannot be undone.`, { kind: "warning" }))) return;
+    setBusy(true);
+    try {
+      const removed = await deleteImportBatch(batchId);
+      setStatus(`Removed ${removed} expense${removed === 1 ? "" : "s"} from batch ${batchId.slice(0, 8)}.`);
+      if (lastBatchId === batchId) setLastBatchId(null);
+      // Clear the imported flag on rows so the same file could be re-imported cleanly.
+      setRows((prev) => prev.map((r) => ({ ...r, imported: false })));
+      await refreshBatches();
     } catch (e: any) {
       setErr(String(e?.message || e));
     } finally {
@@ -140,7 +250,7 @@ export default function ImportStatement() {
         <div>
           <h1 style={{ margin: 0 }}>Import Credit-Card Statement</h1>
           <p style={{ color: "var(--muted)", margin: "6px 0 0" }}>
-            Upload a Visa / credit-card PDF statement. Gemini reads it and itemises every transaction so you can review and categorise before saving to Expenses.
+            Upload a Visa / credit-card PDF statement. Azure Mistral Document AI reads it and itemises every transaction so you can review and categorise before saving to Expenses.
           </p>
         </div>
         <div style={{ display: "flex", gap: 8 }}>
@@ -171,11 +281,12 @@ export default function ImportStatement() {
             <label><input type="checkbox" checked={rows.every((r) => r.include || r.isPayment)} onChange={(e) => {
               const on = e.target.checked;
               setRows((prev) => prev.map((r) => r.isPayment ? r : { ...r, include: on }));
-            }} /> Select all charges</label>
+            }} /> Select all charges & refunds</label>
             <div style={{ marginLeft: "auto", fontSize: 13 }}>
-              Will import <strong>{importable.length}</strong> — total <strong>${fmt(importTotal)}</strong>
+              Will import <strong>{importable.length}</strong> — net <strong>${fmt(importTotal)}</strong>
             </div>
             <button className="btn" onClick={onImport} disabled={busy || importable.length === 0}>Import selected</button>
+            {lastBatchId && <button className="btn secondary" onClick={() => onUndoBatch(lastBatchId, "just-imported")} disabled={busy} style={{ color: "#b91c1c" }}>Undo last import</button>}
             <button className="btn secondary" onClick={() => nav("/expenses/list")}>Done</button>
           </div>
 
@@ -194,7 +305,7 @@ export default function ImportStatement() {
             <tbody>
               {rows.map((r, i) => (
                 <tr key={i} style={{
-                  background: r.imported ? "#ecfdf5" : r.isPayment ? "#f3f4f6" : r.duplicate ? "#fef3c7" : undefined,
+                  background: r.imported ? "#ecfdf5" : r.isPayment ? "#f3f4f6" : r.duplicate ? "#fef3c7" : r.isRefund ? "#eff6ff" : undefined,
                   opacity: r.include || r.isPayment ? 1 : 0.55,
                 }}>
                   <td style={td()}>
@@ -213,7 +324,7 @@ export default function ImportStatement() {
                   </td>
                   <td style={td()}>
                     {r.isPayment ? (
-                      <span style={{ color: "var(--muted)" }}>Payment / credit (skipped)</span>
+                      <span style={{ color: "var(--muted)" }}>Card payment (excluded)</span>
                     ) : (
                       <select value={r.category} onChange={(e) => updateRow(i, { category: e.target.value })} disabled={r.imported}>
                         {EXPENSE_CATEGORIES.map((c) => <option key={c.value} value={c.value}>{c.label}</option>)}
@@ -221,6 +332,7 @@ export default function ImportStatement() {
                     )}
                   </td>
                   <td style={{ ...td(), fontSize: 11, color: "var(--muted)" }}>
+                    {r.isRefund && <div style={{ color: "#1d4ed8", fontWeight: 600 }}>Merchant refund</div>}
                     {r.foreign_amount ? `Foreign: ${r.foreign_amount}` : ""}
                   </td>
                   <td style={{ ...td(), fontSize: 12 }}>
@@ -234,15 +346,45 @@ export default function ImportStatement() {
           </table>
 
           <div style={{ marginTop: 12, fontSize: 12, color: "var(--muted)" }}>
-            <div>• <strong>Payments/credits</strong> (negative amounts, "Thank You" lines) are excluded by default — they're not expenses, they're transfers from your bank.</div>
-            <div>• <strong>Yellow rows</strong> already exist as expenses for that date/amount/vendor. Review before importing.</div>
-            <div>• You can edit date, merchant, amount and category before importing. All rows below are unimported until you press <em>Import selected</em>.</div>
+            <div>• <strong>Card payments</strong> (bank "Thank You" / autopay lines) are excluded by default — they're not expenses, they're transfers from your bank.</div>
+            <div>• <strong>Merchant refunds</strong> (blue rows, negative amount) are imported as negative expenses so they reduce category totals in P&L.</div>
+            <div>• <strong>Yellow rows</strong> match an already-imported transaction by hash (date + amount + merchant + card). Safe to skip.</div>
           </div>
         </>
       )}
 
+      {batches.length > 0 && (
+        <div style={{ marginTop: 24, background: "#fff", border: "1px solid var(--border)", borderRadius: 8, padding: 14 }}>
+          <h3 style={{ margin: "0 0 10px 0" }}>Recent import batches</h3>
+          <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
+            <thead>
+              <tr style={{ background: "#f8fafc" }}>
+                <th style={th()}>Batch</th>
+                <th style={th()}>Imported</th>
+                <th style={th()}>Range</th>
+                <th style={{ ...th(), textAlign: "right" }}>Count</th>
+                <th style={{ ...th(), textAlign: "right" }}>Total</th>
+                <th style={th()}></th>
+              </tr>
+            </thead>
+            <tbody>
+              {batches.map((b) => (
+                <tr key={b.batch_id}>
+                  <td style={td()}><code>{b.batch_id.slice(0, 8)}</code></td>
+                  <td style={td()}>{b.imported_at}</td>
+                  <td style={td()}>{b.first_date} → {b.last_date}</td>
+                  <td style={{ ...td(), textAlign: "right" }}>{b.count}</td>
+                  <td style={{ ...td(), textAlign: "right" }}>${fmt(b.total)}</td>
+                  <td style={td()}><button className="btn secondary" onClick={() => onUndoBatch(b.batch_id, "batch")} style={{ color: "#b91c1c", fontSize: 11, padding: "4px 8px" }}>Undo</button></td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+
       {rows.length === 0 && !busy && (
-        <div style={{ background: "#fff", border: "1px dashed var(--border)", borderRadius: 8, padding: 30, textAlign: "center", color: "var(--muted)" }}>
+        <div style={{ background: "#fff", border: "1px dashed var(--border)", borderRadius: 8, padding: 30, textAlign: "center", color: "var(--muted)", marginTop: batches.length > 0 ? 12 : 0 }}>
           Pick a Visa / credit-card statement PDF to get started. The AI will extract every purchase, refund, and fee so you can review and import them as expenses.
         </div>
       )}

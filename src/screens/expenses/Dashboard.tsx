@@ -39,7 +39,7 @@ export default function ExpensesDashboard() {
     setRecent(list);
     const due: Array<{ r: RecurringExpense; date: string }> = [];
     for (const r of recurring) {
-      const d = nextDueForPeriod(r, ym);
+      const d = await nextDueForPeriod(r, ym);
       if (d) due.push({ r, date: d });
     }
     setDueRecurring(due);
