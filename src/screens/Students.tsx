@@ -55,8 +55,13 @@ export default function Students() {
   async function saveAccbRow() {
     if (!accbFor) return;
     const amt = parseFloat(accbDraft.amount);
-    if (!amt || amt <= 0) { void showAlert("Enter a positive amount."); return; }
-    await upsertAccb(accbFor.student.id, accbDraft.year, accbDraft.month, amt, accbDraft.notes || null);
+    if (!Number.isFinite(amt) || amt < 0) { void showAlert("Enter a non-negative amount (0 clears the month)."); return; }
+    if (amt === 0) {
+      const existing = accbFor.entries.find((e) => e.year === accbDraft.year && e.month === accbDraft.month);
+      if (existing) await deleteAccb(existing.id);
+    } else {
+      await upsertAccb(accbFor.student.id, accbDraft.year, accbDraft.month, amt, accbDraft.notes || null);
+    }
     setAccbDraft({ ...accbDraft, amount: "", notes: "" });
     refreshAccb();
   }
@@ -73,12 +78,14 @@ export default function Students() {
           `  • Any annual (CRA) receipts for this family\n` +
           `  • Any ACCB ledger entries\n` +
           `  • Any attendance records\n\n` +
+          `⚠  CRA requires you to keep child-care receipts for 6 years after the tax year they were issued. Only proceed if you have already exported this family's records for backup, or the receipts were entered in error.\n\n` +
           `This CANNOT be undone. Use "Inactivate" instead if the student is real.\n\n` +
-          `Continue?`
+          `Continue?`,
+          { kind: "warning" }
         );
         if (!ok) return;
-        const typed = await showPrompt(`Type the student's name to confirm deletion:\n\n${s.name}`);
-        if ((typed || "").trim() !== s.name.trim()) {
+        const typed = await showPrompt(`Type the student's full name to confirm permanent deletion:\n\n${s.name}`);
+        if ((typed || "").trim().toLowerCase() !== s.name.trim().toLowerCase()) {
           void showAlert("Name did not match. Deletion cancelled.");
           return;
         }

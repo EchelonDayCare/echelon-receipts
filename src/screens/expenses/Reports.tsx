@@ -3,7 +3,7 @@ import { getSettings, type SubsidyMonthRow } from "../../lib/db";
 import type { SettingsMap } from "../../types";
 import {
   summaryByCategory, summaryByMonth, revenueByMonth,
-  CATEGORY_LABEL,
+  CATEGORY_LABEL, type RevenueBasis,
 } from "../../lib/expenses";
 import { type YearMode, parseYearMode, currentFiscalYear, fiscalYearBounds, fiscalYearLabel, fiscalMonthOrder } from "../../lib/fiscalYear";
 
@@ -34,6 +34,7 @@ export default function ExpenseReports() {
   const [mode, setMode] = useState<YearMode>("fiscal_sep_aug");
   const [year, setYear] = useState<number>(currentFiscalYear(now));
   const [period, setPeriod] = useState<Period>("monthly");
+  const [basis, setBasis] = useState<RevenueBasis>("parent_paid");
   const [loaded, setLoaded] = useState(false);
 
   const [byMonth, setByMonth] = useState<Array<{ ym: string; total: number; count: number }>>([]);
@@ -60,13 +61,13 @@ export default function ExpenseReports() {
       const [m, c, rev] = await Promise.all([
         summaryByMonth(bounds.from, bounds.to),
         summaryByCategory(bounds.from, bounds.to),
-        revenueByMonth(bounds.from, bounds.to),
+        revenueByMonth(bounds.from, bounds.to, basis),
       ]);
       setByMonth(m);
       setByCat(c);
       setRevenue(rev);
     })();
-  }, [loaded, bounds.from, bounds.to]);
+  }, [loaded, bounds.from, bounds.to, basis]);
 
   const expByYm = new Map(byMonth.map((r) => [r.ym, r.total]));
   const revByYm = new Map(revenue.map((r) => [r.ym, r.total]));
@@ -138,6 +139,11 @@ export default function ExpenseReports() {
           <p style={{ color: "var(--muted)", margin: 0 }}>Revenue vs Expenses — monthly, quarterly and yearly views.</p>
         </div>
         <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+          <select value={basis} onChange={(e) => setBasis(e.target.value as RevenueBasis)}
+            title="Parent-paid = cash from families only.  Operating = includes CCFRI and ACCB reimbursements paid to the daycare.">
+            <option value="parent_paid">Revenue: parent-paid</option>
+            <option value="operating">Revenue: operating (incl. subsidies)</option>
+          </select>
           <select value={period} onChange={(e) => setPeriod(e.target.value as Period)}>
             <option value="monthly">Monthly</option>
             <option value="quarterly">Quarterly</option>
@@ -283,7 +289,7 @@ export default function ExpenseReports() {
         )}
 
         <div style={{ marginTop: 24, fontSize: 11, color: "var(--muted)", textAlign: "center" }}>
-          Prepared for internal review and board reporting. Revenue includes issued receipts net of refunds; voided receipts excluded.
+          Prepared for internal review and board reporting. Revenue basis: <strong>{basis === "operating" ? "operating (parent-paid + CCFRI + ACCB)" : "parent-paid only"}</strong>; net of refunds; voided receipts excluded.
         </div>
       </div>
     </div>

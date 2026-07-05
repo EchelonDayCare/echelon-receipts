@@ -57,13 +57,14 @@ export async function listCredentials(staffId?: number): Promise<StaffCredential
   );
 }
 
-export async function listAllCredentialsWithStaff(): Promise<(StaffCredential & { staff_name: string })[]> {
+export async function listAllCredentialsWithStaff(includeArchived = false): Promise<(StaffCredential & { staff_name: string; staff_active: number })[]> {
   const d = await db();
-  return d.select<(StaffCredential & { staff_name: string })[]>(
-    `SELECT c.*, s.name AS staff_name
+  const where = includeArchived ? "" : "WHERE s.active = 1";
+  return d.select<(StaffCredential & { staff_name: string; staff_active: number })[]>(
+    `SELECT c.*, s.name AS staff_name, s.active AS staff_active
        FROM staff_credentials c
        JOIN staff s ON s.id = c.staff_id
-      WHERE s.active = 1
+       ${where}
       ORDER BY c.expiry_date IS NULL, c.expiry_date ASC, s.name COLLATE NOCASE`
   );
 }

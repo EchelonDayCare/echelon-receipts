@@ -33,6 +33,7 @@ const ExpenseReports = lazy(() => import("./screens/expenses/Reports"));
 const ExpenseImport = lazy(() => import("./screens/expenses/ImportStatement"));
 import { runCloudBackupIfDue } from "./lib/cloudBackup";
 import { getSettings } from "./lib/db";
+import { getVersion } from "@tauri-apps/api/app";
 import { DEFAULT_LOGO_DATA_URL } from "./lib/defaults";
 import PromptHost from "./components/PromptHost";
 import "./App.css";
@@ -51,6 +52,8 @@ function ModuleSidebar({
   items: { to: string; label: string }[];
 }) {
   const nav = useNavigate();
+  const [ver, setVer] = useState("");
+  useEffect(() => { getVersion().then(setVer).catch(() => setVer("")); }, []);
   return (
     <aside className="sidebar">
       <div className="brand">
@@ -80,7 +83,7 @@ function ModuleSidebar({
           </NavLink>
         ))}
       </nav>
-      <div className="sidebar-foot">v0.1.0</div>
+      <div className="sidebar-foot">{ver ? `v${ver}` : ""}</div>
     </aside>
   );
 }

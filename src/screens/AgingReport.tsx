@@ -30,12 +30,16 @@ export default function AgingReportScreen() {
     const rowsHtml = rep.rows.map((r) => `<tr>
       <td>${h(r.student_name)}<div style="font-size:10px;color:#666">${h(r.father_name || r.mother_name || "")}</div></td>
       <td>${h(r.oldest_unpaid_date)}</td>
+      <td style="text-align:right;color:${r.bucket.future > 0 ? "#b45309" : "#000"}">$${r.bucket.future.toFixed(2)}</td>
       <td style="text-align:right">$${r.bucket.current.toFixed(2)}</td>
       <td style="text-align:right">$${r.bucket.d31_60.toFixed(2)}</td>
       <td style="text-align:right">$${r.bucket.d61_90.toFixed(2)}</td>
       <td style="text-align:right;color:#b91c1c">$${r.bucket.d90plus.toFixed(2)}</td>
       <td style="text-align:right;font-weight:600">$${r.bucket.total.toFixed(2)}</td>
     </tr>`).join("");
+    const futureBanner = rep.totals.future > 0
+      ? `<div style="background:#fef3c7;border:1px solid #f59e0b;padding:6px 8px;margin:6px 0;font-size:11px">⚠ $${rep.totals.future.toFixed(2)} is future-dated (data-entry errors). Verify receipt dates before follow-up.</div>`
+      : "";
     const html = `<!doctype html><html><head><meta charset="utf-8">
       <title>Aging A/R — as of ${h(asOf)}</title>
       <style>
@@ -49,9 +53,11 @@ export default function AgingReportScreen() {
       </style></head><body>
       <h1>${h(daycareName)} — Outstanding Balances (Aging)</h1>
       <div class="sub">As of ${h(asOf)} • ${rep.rows.length} families with balance • Total $${rep.totals.total.toFixed(2)}</div>
+      ${futureBanner}
       <table>
         <thead><tr>
           <th>Family / Child</th><th>Oldest unpaid</th>
+          <th style="text-align:right">Future ⚠</th>
           <th style="text-align:right">Current (0-30)</th>
           <th style="text-align:right">31-60</th>
           <th style="text-align:right">61-90</th>
@@ -61,6 +67,7 @@ export default function AgingReportScreen() {
         <tbody>${rowsHtml}
         <tr style="border-top:2px solid #111;font-weight:700">
           <td colspan="2">TOTAL</td>
+          <td style="text-align:right;color:${rep.totals.future > 0 ? "#b45309" : "#000"}">$${rep.totals.future.toFixed(2)}</td>
           <td style="text-align:right">$${rep.totals.current.toFixed(2)}</td>
           <td style="text-align:right">$${rep.totals.d31_60.toFixed(2)}</td>
           <td style="text-align:right">$${rep.totals.d61_90.toFixed(2)}</td>

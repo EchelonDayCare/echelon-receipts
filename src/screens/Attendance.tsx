@@ -3,7 +3,7 @@ import { useEffect, useMemo, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import { readFile } from "@tauri-apps/plugin-fs";
 import { invoke } from "@tauri-apps/api/core";
-import { getSettings } from "../lib/db";
+import { getSettings, listYears } from "../lib/db";
 import {
   rosterForDate, upsertAttendance, stampIn, stampOut, markAbsent, deleteAttendance,
   matchStudentByName,
@@ -32,6 +32,8 @@ export default function Attendance() {
   const [ocrBusy, setOcrBusy] = useState(false);
   const [ocrResult, setOcrResult] = useState<{ rows: ExtractedAttendanceRow[]; unmatched: string[]; rawText?: string } | null>(null);
 
+  const [dataYears, setDataYears] = useState<number[]>([]);
+
   async function refresh() {
     setRows(await rosterForDate(year, date));
     const s = await getSettings();
@@ -39,6 +41,16 @@ export default function Attendance() {
     setDaycareName(s.daycare_name || "");
   }
   useEffect(() => { refresh(); /* eslint-disable-next-line */ }, [year, date]);
+  useEffect(() => { listYears().then(setDataYears).catch(() => {}); }, []);
+
+  // Auto-sync roster year to selected date's calendar year so operators can't
+  // silently look up attendance against the wrong roster (e.g. entering Jan
+  // next year while roster is still on the previous year).
+  useEffect(() => {
+    const y = parseInt(date.slice(0, 4), 10);
+    if (Number.isFinite(y) && y !== year) setYear(y);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [date]);
 
   function show(msg: string, tone: "ok" | "err" = "ok") {
     setToast({ msg, tone });
@@ -199,7 +211,12 @@ export default function Attendance() {
     catch (e: any) { show("Failed: " + (e?.message || e), "err"); }
   }
   async function onStampOut(studentId: number) {
-    try { await stampOut(studentId, date); await refresh(); show("Signed out"); }
+    try {
+      const ok = await stampOut(studentId, date);
+      await refresh();
+      if (ok) show("Signed out");
+      else show("⚠ Signed out without a sign-in time. Enter the child's in-time manually to compute hours.", "err");
+    }
     catch (e: any) { show("Failed: " + (e?.message || e), "err"); }
   }
   async function onMarkAbsent(studentId: number) {
@@ -217,9 +234,11 @@ export default function Attendance() {
 
   const yearOptions = useMemo(() => {
     const y = today.getFullYear();
-    return [y - 1, y, y + 1];
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+    const base = new Set<number>([y - 1, y, y + 1]);
+    dataYears.forEach((yr) => base.add(yr));
+    if (!base.has(year)) base.add(year);
+    return Array.from(base).sort((a, b) => b - a);
+  }, [dataYears, year]);
 
   function printRoster() {
     const dateLabel = new Date(date + "T00:00:00").toLocaleDateString(undefined, {

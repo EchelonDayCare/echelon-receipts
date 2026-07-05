@@ -146,6 +146,16 @@ export default function AnnualReceipts() {
   async function sendOne(idx: number) {
     const r = rows[idx];
     if (!r) return;
+    // CRA T778 requires the issuer's Business Number on annual child-care
+    // receipts. Refuse to send if BN is missing rather than issue a receipt
+    // that a parent then can't use on their tax return.
+    if (!settings.business_number || !settings.business_number.trim()) {
+      void showAlert(
+        "Business Number (BN) is not set. CRA T778 receipts must include the issuer's BN — set it in Settings → Organization before sending annual receipts.",
+        { kind: "error" }
+      );
+      return;
+    }
     // Per-row in-flight guard prevents the same row from being sent twice
     // concurrently (which would allocate two AR numbers + send two emails).
     if (inFlight.has(idx)) return;
@@ -189,6 +199,13 @@ export default function AnnualReceipts() {
 
   async function sendAll(retryFailedOnly: boolean) {
     if (sendingAll || generating) return;
+    if (!settings.business_number || !settings.business_number.trim()) {
+      void showAlert(
+        "Business Number (BN) is not set. CRA T778 receipts must include the issuer's BN — set it in Settings → Organization before sending annual receipts.",
+        { kind: "error" }
+      );
+      return;
+    }
     setSendingAll(true);
     try {
       const indexes: number[] = [];
@@ -284,7 +301,10 @@ export default function AnnualReceipts() {
       {!settings.business_number && (
         <div className="today-item warn" style={{ marginBottom: 14 }}>
           <span className="today-dot">!</span>
-          <span className="today-text">Your Business Number (BN) is not set. CRA receipts should include it — set it in Settings.</span>
+          <span className="today-text">
+            Your Business Number (BN) is <strong>required</strong> for CRA T778 annual child-care receipts.
+            Sending is disabled until you set the BN in <a href="#/settings">Settings → Organization</a>.
+          </span>
         </div>
       )}
 
@@ -359,7 +379,7 @@ export default function AnnualReceipts() {
         <>
           <div className="card" style={{ marginBottom: 14 }}>
             Edit the recipient email below for any flagged row. (Permanent edits to parent names / contacts
-            happen on the <a href="#/students">Students</a> tab. Email entered here is only used for this batch.)
+            happen on the <a href="#/students/roster">Students</a> tab. Email entered here is only used for this batch.)
           </div>
           {flagged.length === 0 ? (
             <div className="empty">No issues — you're good to proceed.</div>

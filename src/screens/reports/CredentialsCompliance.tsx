@@ -3,7 +3,7 @@ import { getSettings } from "../../lib/db";
 import { listAllCredentialsWithStaff, credStatus, daysUntil, type CredStatus } from "../../lib/credentials";
 import type { StaffCredential, SettingsMap } from "../../types";
 
-type Row = StaffCredential & { staff_name: string };
+type Row = StaffCredential & { staff_name: string; staff_active: number };
 
 const STATUS_LABEL: Record<CredStatus, string> = {
   expired: "EXPIRED",
@@ -22,15 +22,16 @@ export default function CredentialsCompliance() {
   const [settings, setSettings] = useState<SettingsMap>({});
   const [rows, setRows] = useState<Row[]>([]);
   const [alertDays, setAlertDays] = useState(60);
+  const [includeArchived, setIncludeArchived] = useState(false);
 
-  useEffect(() => {
-    (async () => {
-      const [s, list] = await Promise.all([getSettings(), listAllCredentialsWithStaff()]);
-      setSettings(s);
-      setAlertDays(Number(s.staff_cred_alert_days || "60"));
-      setRows(list);
-    })();
-  }, []);
+  async function reload(showArchived: boolean) {
+    const [s, list] = await Promise.all([getSettings(), listAllCredentialsWithStaff(showArchived)]);
+    setSettings(s);
+    setAlertDays(Number(s.staff_cred_alert_days || "60"));
+    setRows(list);
+  }
+
+  useEffect(() => { reload(includeArchived); }, [includeArchived]);
 
   const counts = rows.reduce((a, r) => {
     const st = credStatus(r.expiry_date, alertDays);
@@ -66,7 +67,11 @@ export default function CredentialsCompliance() {
             ECE Certificates, Criminal Record Checks, First Aid, TB clearance. BC Child Care Licensing Regulation requires currency for every child-facing employee.
           </p>
         </div>
-        <div style={{ display: "flex", gap: 8 }}>
+        <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+          <label style={{ fontSize: 13, display: "flex", alignItems: "center", gap: 6 }} title="Include credentials belonging to archived (inactive) staff — useful for handoff / historical audits.">
+            <input type="checkbox" checked={includeArchived} onChange={(e) => setIncludeArchived(e.target.checked)} />
+            Include archived staff
+          </label>
           <button className="btn secondary" onClick={exportCsv}>Export CSV</button>
           <button className="btn" onClick={() => window.print()}>Print</button>
         </div>

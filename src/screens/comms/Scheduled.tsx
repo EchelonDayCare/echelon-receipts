@@ -115,7 +115,7 @@ export default function Scheduled() {
         </div>
       </div>
       <div style={{ background: "#fef3c7", color: "#92400e", padding: 12, borderRadius: 6, margin: "12px 0" }}>
-        <strong>Heads-up:</strong> scheduled messages fire the next time you open this app after their scheduled time. They do <em>not</em> run in the background when the app is closed. For guaranteed background delivery, ask to set up OS-level Task Scheduler / launchd (needs a one-time install step).
+        <strong>Heads-up:</strong> scheduled messages fire when you open the app after their scheduled time, and are also re-checked every 15 minutes while the app is open. They do <em>not</em> run in the background when the app is closed. For guaranteed unattended delivery, ask to set up OS-level Task Scheduler / launchd (needs a one-time install step).
       </div>
 
       <table style={{ width: "100%", borderCollapse: "collapse", marginTop: 12 }}>

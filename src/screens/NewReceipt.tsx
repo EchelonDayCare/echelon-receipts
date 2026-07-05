@@ -98,6 +98,10 @@ export default function NewReceipt() {
       return;
     }
     const amt = parseFloat(amount); if (!(amt >= 0)) { void showAlert("Invalid amount."); return; }
+    if (!isRefund && amt <= 0) {
+      void showAlert("Amount must be greater than zero. If this is a refund or credit, tick the Refund checkbox first.", { kind: "warning" });
+      return;
+    }
     const pen = parseFloat(pending || "0") || 0;
     const bk = (breakdown && !isRefund) ? breakdown : null;
 
@@ -151,7 +155,10 @@ export default function NewReceipt() {
       if (action === "email") {
         const recipients = parseRecipients(student.email);
         if (recipients.length === 0) {
-          void showAlert(`Receipt #${receiptNo} saved.${savedPath ? "\nPDF: " + savedPath : ""}\n⚠️ No email on file for this student — not sent.`);
+          // Belt-and-suspenders: the button is disabled in the UI when no
+          // email is on file, but keep this fallback so a caller that bypasses
+          // the button (e.g., a keyboard shortcut) can't send silently.
+          void showAlert(`Receipt #${receiptNo} saved.${savedPath ? "\nPDF: " + savedPath : ""}\n⚠ No email on file for this student — not sent. Add an email on the Students tab and use Save & Email again to send.`);
         } else {
           // Show preview modal; actual send happens from confirmSendEmail().
           const html = buildReceiptHtml(r, settingsLatest);
@@ -301,18 +308,23 @@ export default function NewReceipt() {
               : "Optional notes (e.g., Pending Fees CAD120)"} />
         </div>
 
-        <div style={{ display: "flex", gap: 10, marginTop: 8 }}>
+        <div style={{ display: "flex", gap: 10, marginTop: 8, alignItems: "center" }}>
           <button className="btn" onClick={() => onSave("print")} disabled={saving || sending}>
             {saving ? "Saving…" : "Save & Print"}
           </button>
           <button className="btn" onClick={() => onSave("email")}
             disabled={saving || sending || !student || parseRecipients(student?.email).length === 0}
-            title={!student ? "Pick a student" : parseRecipients(student.email).length === 0 ? "No email on file for this student" : ""}>
+            title={!student ? "Pick a student" : parseRecipients(student.email).length === 0 ? "No email on file for this student — use Save Only, or add an email on the Students tab." : ""}>
             {saving ? "Saving…" : "Save & Email"}
           </button>
           <button className="btn secondary" onClick={() => onSave("save")} disabled={saving || sending}>
             {saving ? "Saving…" : "Save Only"}
           </button>
+          {student && parseRecipients(student.email).length === 0 && (
+            <span style={{ fontSize: 12, color: "var(--muted)" }}>
+              (no email on file — Save & Email is disabled)
+            </span>
+          )}
         </div>
       </div>
 

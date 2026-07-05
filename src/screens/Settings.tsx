@@ -634,7 +634,8 @@ export default function Settings() {
         <p className="subtitle" style={{ marginTop: 16, fontSize: 12 }}>
           Built by Echelon Daycare with GitHub Copilot. Your data stays on this computer
           (and in your monthly cloud-backup email) — nothing is sent to a third-party server
-          except optional Azure OCR for staff sign-in sheets and Visa statement imports, if enabled.
+          except optional Azure Document AI for OCR (child attendance sheets, staff sign-in sheets,
+          Visa statement imports), if enabled.
         </p>
         <div className="field" style={{ marginTop: 16 }}>
           <label>Error log</label>

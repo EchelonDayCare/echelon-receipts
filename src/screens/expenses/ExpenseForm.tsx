@@ -48,7 +48,7 @@ export default function ExpenseForm() {
     setErr("");
     const amt = Number(amount);
     if (!date) { setErr("Date is required"); return; }
-    if (!(amt > 0)) { setErr("Amount must be greater than 0"); return; }
+    if (!Number.isFinite(amt) || amt === 0) { setErr("Amount must be non-zero (use a negative amount for a refund/credit)"); return; }
     setBusy(true);
     try {
       await saveExpense({
@@ -81,7 +81,7 @@ export default function ExpenseForm() {
           <input type="date" value={date} onChange={(e) => setDate(e.target.value)} style={inputStyle} />
         </label>
         <label>Amount ($)
-          <input type="number" step="0.01" min="0" value={amount} onChange={(e) => setAmount(e.target.value)} style={inputStyle} placeholder="0.00" />
+          <input type="number" step="0.01" value={amount} onChange={(e) => setAmount(e.target.value)} style={inputStyle} placeholder="0.00 (negative for refund/credit)" />
         </label>
         <label>Category
           <select value={category} onChange={(e) => setCategory(e.target.value)} style={inputStyle}>

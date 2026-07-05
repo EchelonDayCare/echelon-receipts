@@ -139,7 +139,10 @@ export default function StaffScreen() {
   async function editHourInline(r: HourRow, patch: Partial<HourRow>) {
     const inT = patch.in_time !== undefined ? patch.in_time : r.in_time;
     const outT = patch.out_time !== undefined ? patch.out_time : r.out_time;
-    await upsertHour(r.staff_id, r.work_date, inT || null, outT || null, "manual");
+    // Preserve the existing no_lunch flag (OCR often sets this from the sheet;
+    // dropping it silently under-counts payroll by 0.5 h per shift).
+    const noLunch = !!r.no_lunch;
+    await upsertHour(r.staff_id, r.work_date, inT || null, outT || null, "manual", null, r.notes ?? null, noLunch);
     await refresh();
   }
   async function removeHour(id: number) {

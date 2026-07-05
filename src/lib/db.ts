@@ -492,10 +492,40 @@ async function ensureSchema(d: Database): Promise<void> {
   await addCol("expenses", "source_txn_hash", "TEXT");
   await d.execute("CREATE INDEX IF NOT EXISTS ix_expenses_batch ON expenses(import_batch_id)");
   await d.execute("CREATE UNIQUE INDEX IF NOT EXISTS ix_expenses_source_hash ON expenses(source_txn_hash) WHERE source_txn_hash IS NOT NULL");
+
+  // Deduplicate any pre-existing double-posts before creating the UNIQUE
+  // (recurring_id, month) index. Prior to migration-012, postRecurring used an
+  // in-row last_posted_date high-water mark that a mid-post crash or two rapid
+  // clicks could bypass, leaving multiple expenses for the same recurring bill
+  // in the same month. Creating the UNIQUE index against that data would throw
+  // and block app startup — so we scrub duplicates first, keeping the earliest.
+  await execRetry(
+    `DELETE FROM expenses
+      WHERE recurring_id IS NOT NULL
+        AND id NOT IN (
+          SELECT MIN(id) FROM expenses
+          WHERE recurring_id IS NOT NULL
+          GROUP BY recurring_id, substr(date,1,7)
+        )`
+  ).catch(() => {});
   await d.execute("CREATE UNIQUE INDEX IF NOT EXISTS ix_expenses_recurring_period ON expenses(recurring_id, substr(date,1,7)) WHERE recurring_id IS NOT NULL");
 
   // Remove obsolete Gemini setting seed (Migration 013 — see azure_ai refactor).
   await execRetry("DELETE FROM settings WHERE key='gemini_api_key_set'").catch(() => {});
+
+  // Migration 014 — Per-recipient scheduled-message delivery ledger. Prevents
+  // duplicate sends on retry after a partial failure: successful recipients get
+  // logged here and skipped on subsequent runDueScheduled ticks.
+  await d.execute(`CREATE TABLE IF NOT EXISTS scheduled_deliveries (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    scheduled_id INTEGER NOT NULL,
+    recipient_email TEXT NOT NULL,
+    status TEXT NOT NULL,           -- 'sent' | 'failed'
+    error TEXT,
+    attempted_at TEXT NOT NULL DEFAULT (datetime('now'))
+  )`);
+  await d.execute("CREATE INDEX IF NOT EXISTS ix_sched_deliv_msg ON scheduled_deliveries(scheduled_id)");
+  await d.execute("CREATE INDEX IF NOT EXISTS ix_sched_deliv_status ON scheduled_deliveries(scheduled_id, recipient_email, status)");
 }
 
 // ---------- Person identity ----------
@@ -918,7 +948,11 @@ export async function markEmailed(id: number, recipients: string[]) {
 // ---------- Reports ----------
 export interface MonthlyTotal { ym: string; count: number; total: number; }
 export async function monthlyTotals(year?: number, fiscalYear?: number): Promise<MonthlyTotal[]> {
-  let sql = `SELECT substr(date,1,7) AS ym, COUNT(*) AS count, SUM(amount) AS total
+  // Refunds carry a positive `amount` with is_refund=1. Sum them as negatives so
+  // monthly revenue reflects net cash received (matching AnnualGroup / subsidy math).
+  let sql = `SELECT substr(date,1,7) AS ym,
+                    COUNT(*) AS count,
+                    COALESCE(SUM(CASE WHEN is_refund=1 THEN -amount ELSE amount END),0) AS total
              FROM receipts WHERE voided=0`;
   const args: any[] = [];
   if (fiscalYear !== undefined) {

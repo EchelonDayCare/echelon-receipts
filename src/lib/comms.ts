@@ -168,8 +168,41 @@ export async function markScheduledSent(id: number): Promise<void> {
 }
 
 export async function markScheduledFailed(id: number, reason: string): Promise<void> {
-  await execRetry("UPDATE scheduled_messages SET status='failed', sent_at=datetime('now') WHERE id=?", [id]);
+  // Terminal-fail state. Do NOT set sent_at — the message never left the outbox.
+  // (The `sent_at IS NULL` invariant is used by audit exports.)
+  await execRetry("UPDATE scheduled_messages SET status='failed' WHERE id=?", [id]);
   void reason; // reason is captured in communication_log; no dedicated column here.
+}
+
+// ---------------- Per-recipient delivery ledger ----------------
+// Prevents duplicate sends when a scheduled message retries after a partial
+// SMTP failure. sendGroupEmail records one row per attempted recipient here
+// (when scheduledId is provided); the next runDueScheduled tick skips any
+// recipient with a prior 'sent' row.
+export interface DeliveryRow {
+  recipient_email: string;
+  status: "sent" | "failed";
+  error: string | null;
+  attempted_at: string;
+}
+export async function listDeliveries(scheduledId: number): Promise<DeliveryRow[]> {
+  return (await db()).select<DeliveryRow[]>(
+    "SELECT recipient_email, status, error, attempted_at FROM scheduled_deliveries WHERE scheduled_id=? ORDER BY attempted_at ASC",
+    [scheduledId],
+  );
+}
+async function recordDelivery(scheduledId: number, email: string, status: "sent" | "failed", error: string | null): Promise<void> {
+  await execRetry(
+    "INSERT INTO scheduled_deliveries(scheduled_id, recipient_email, status, error) VALUES(?,?,?,?)",
+    [scheduledId, email.toLowerCase(), status, error],
+  );
+}
+async function successfulRecipientSet(scheduledId: number): Promise<Set<string>> {
+  const rows = await (await db()).select<{ recipient_email: string }[]>(
+    "SELECT DISTINCT recipient_email FROM scheduled_deliveries WHERE scheduled_id=? AND status='sent'",
+    [scheduledId],
+  );
+  return new Set(rows.map((r) => r.recipient_email.toLowerCase()));
 }
 
 // ---------------- Recipient resolution ----------------
@@ -266,17 +299,22 @@ export interface GroupSendOptions {
   settings: SettingsMap;
   onProgress?: (p: GroupSendProgress) => void;
   logKind?: string; // default 'group_email' — 'scheduled' when driven by scheduler
+  // When set, per-recipient delivery outcomes are recorded in scheduled_deliveries
+  // and previously-successful recipients are skipped, so a retry after partial
+  // failure does not double-send to parents who already got the message.
+  scheduledId?: number;
 }
 
 export interface GroupSendResult {
   sent: number;
   failed: number;
+  skipped: number;              // already-succeeded recipients (retry-safe)
   errors: Array<{ recipient: string; student: string; error: string }>;
   logId: number;
 }
 
 export async function sendGroupEmail(opts: GroupSendOptions): Promise<GroupSendResult> {
-  const { recipients, attachments, subject, body, extraContext = {}, settings: s, onProgress } = opts;
+  const { recipients, attachments, subject, body, extraContext = {}, settings: s, onProgress, scheduledId } = opts;
   if (recipients.length === 0) throw new Error("No recipients matched the filter (0 students with email addresses).");
 
   const password = await invoke<string | null>("keychain_get", { key: "smtp_password" });
@@ -287,12 +325,27 @@ export async function sendGroupEmail(opts: GroupSendOptions): Promise<GroupSendR
   const port = parseInt(s.smtp_port || "587", 10);
   if (!host || !port) throw new Error("SMTP host/port not set. Open Settings → Email.");
 
+  // Retry-safe: skip recipients already marked 'sent' for this scheduled message.
+  const alreadySent = scheduledId != null ? await successfulRecipientSet(scheduledId) : new Set<string>();
+
   const errors: GroupSendResult["errors"] = [];
   let sent = 0;
+  let skipped = 0;
   const allRecipients = new Set<string>();
 
   for (let i = 0; i < recipients.length; i++) {
     const r = recipients[i];
+    // If EVERY recipient email for this student has already been delivered,
+    // skip the whole row. If only some overlap, still resend to the missing
+    // ones (each `to:` in send_email is one SMTP hop, so partial per-student
+    // dedup would require splitting the recipient list).
+    const remainingEmails = r.emails.filter((e) => !alreadySent.has(e.toLowerCase()));
+    if (scheduledId != null && remainingEmails.length === 0) {
+      skipped++;
+      onProgress?.({ index: i, total: recipients.length, recipient: r.emails.join(", "), student: r.student.name, ok: true, error: "skipped (already delivered)" });
+      continue;
+    }
+    const toAddrs = scheduledId != null ? remainingEmails : r.emails;
     const ctx = buildMergeContext(r, s, extraContext);
     const perSubject = renderCommsTemplate(subject, ctx);
     const perBody = renderCommsTemplate(body, ctx);
@@ -305,7 +358,7 @@ export async function sendGroupEmail(opts: GroupSendOptions): Promise<GroupSendR
           smtp_password: password,
           from_name: s.sender_name || s.daycare_name || "Echelon Daycare",
           from_email: sender,
-          to: r.emails,
+          to: toAddrs,
           cc: [],
           bcc: s.bcc_self === "1" && i === 0 ? [sender] : [], // bcc once per batch
           subject: perSubject,
@@ -314,14 +367,20 @@ export async function sendGroupEmail(opts: GroupSendOptions): Promise<GroupSendR
         },
       });
       sent++;
-      r.emails.forEach((e) => allRecipients.add(e));
-      onProgress?.({ index: i, total: recipients.length, recipient: r.emails.join(", "), student: r.student.name, ok: true });
+      toAddrs.forEach((e) => allRecipients.add(e));
+      if (scheduledId != null) {
+        for (const e of toAddrs) await recordDelivery(scheduledId, e, "sent", null);
+      }
+      onProgress?.({ index: i, total: recipients.length, recipient: toAddrs.join(", "), student: r.student.name, ok: true });
       // Throttle to be gentle with SMTP servers (Gmail ~100/day free — pace at ~1/sec).
       if (i < recipients.length - 1) await new Promise((res) => setTimeout(res, 400));
     } catch (e: any) {
       const msg = String(e?.message || e);
-      errors.push({ recipient: r.emails.join(", "), student: r.student.name, error: msg });
-      onProgress?.({ index: i, total: recipients.length, recipient: r.emails.join(", "), student: r.student.name, ok: false, error: msg });
+      errors.push({ recipient: toAddrs.join(", "), student: r.student.name, error: msg });
+      if (scheduledId != null) {
+        for (const em of toAddrs) await recordDelivery(scheduledId, em, "failed", msg);
+      }
+      onProgress?.({ index: i, total: recipients.length, recipient: toAddrs.join(", "), student: r.student.name, ok: false, error: msg });
     }
   }
 
@@ -335,10 +394,10 @@ export async function sendGroupEmail(opts: GroupSendOptions): Promise<GroupSendR
     attachment_names: attachments.length ? JSON.stringify(attachments.map((a) => a.filename)) : null,
     status,
     error: errors.length ? errors.map((e) => `${e.student}: ${e.error}`).join(" | ") : null,
-    related_id: null,
+    related_id: scheduledId ?? null,
   });
 
-  return { sent, failed: errors.length, errors, logId };
+  return { sent, failed: errors.length, skipped, errors, logId };
 }
 
 // ---------------- Scheduled runner (called on app launch) ----------------
@@ -381,14 +440,16 @@ export async function runDueScheduled(settings: SettingsMap): Promise<ScheduledR
           attachments,
           settings,
           logKind: "scheduled",
+          scheduledId: m.id,
         });
         if (res.failed === 0) {
+          // Everyone (including previously-skipped) is now delivered.
           sentCount++;
           await markScheduledSent(m.id);
         } else {
-          // Some or all recipients failed. Leave scheduled status untouched
-          // (still 'pending') so the operator can see it and retry, and record
-          // the partial-failure in the communication log for the audit trail.
+          // Partial failure — leave 'pending' so the next tick can retry the
+          // still-failed recipients. The per-recipient ledger guarantees we
+          // won't re-send to anyone already marked 'sent'.
           failedCount++;
         }
       }

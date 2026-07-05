@@ -120,7 +120,13 @@ export async function stampIn(studentId: number, workDate: string, who?: string)
   );
 }
 
-export async function stampOut(studentId: number, workDate: string, who?: string): Promise<void> {
+/**
+ * Stamp a child out. Returns `false` if there was no matching sign-in row for
+ * this student/date (the UI should surface a warning — the row is still
+ * created so the operator can correct it, but hours will be 0 until an
+ * in-time is entered).
+ */
+export async function stampOut(studentId: number, workDate: string, who?: string): Promise<boolean> {
   const now = new Date();
   const hhmm = `${String(now.getHours()).padStart(2, "0")}:${String(now.getMinutes()).padStart(2, "0")}`;
   const d = await db();
@@ -129,9 +135,9 @@ export async function stampOut(studentId: number, workDate: string, who?: string
     [studentId, workDate]
   );
   if (!cur.length) {
-    // No in_time yet — record out_time only.
+    // No in_time yet — record out_time only, but signal the anomaly to caller.
     await upsertAttendance({ studentId, workDate, inTime: null, outTime: hhmm, signedOutBy: who ?? null });
-    return;
+    return false;
   }
   const row = cur[0];
   const newHours = hoursBetween(row.in_time, hhmm);
@@ -140,6 +146,7 @@ export async function stampOut(studentId: number, workDate: string, who?: string
        WHERE student_id=? AND work_date=?`,
     [hhmm, newHours, who ?? null, studentId, workDate]
   );
+  return true;
 }
 
 export async function markAbsent(studentId: number, workDate: string, status: AttendanceStatus = "absent", notes: string | null = null): Promise<void> {

@@ -287,10 +287,16 @@ export async function summaryByMonth(from: string, to: string): Promise<Array<{ 
 // CCFRI), so operating revenue = parent_pays + ccfri + accb ~= gross_amount.
 export type RevenueBasis = "parent_paid" | "operating";
 
+// Whitelist so `basis` can never be user-controlled SQL, even if a future
+// refactor threads it through from a settings row or URL param.
+function revenueExpr(basis: RevenueBasis): string {
+  return basis === "operating" ? "COALESCE(gross_amount, amount)" : "amount";
+}
+
 export async function revenueSummary(from: string, to: string, basis: RevenueBasis = "parent_paid"): Promise<{ total: number; count: number }> {
   const d = await db();
   // parent_paid = what parents actually paid. operating = gross fee (parent + CCFRI + ACCB).
-  const expr = basis === "operating" ? "COALESCE(gross_amount, amount)" : "amount";
+  const expr = revenueExpr(basis);
   const rows = await d.select<Array<{ total: number; count: number }>>(
     `SELECT COALESCE(SUM(CASE WHEN is_refund=1 THEN -(${expr}) ELSE (${expr}) END),0) AS total,
             COUNT(*) AS count
@@ -302,7 +308,7 @@ export async function revenueSummary(from: string, to: string, basis: RevenueBas
 
 export async function revenueByMonth(from: string, to: string, basis: RevenueBasis = "parent_paid"): Promise<Array<{ ym: string; total: number }>> {
   const d = await db();
-  const expr = basis === "operating" ? "COALESCE(gross_amount, amount)" : "amount";
+  const expr = revenueExpr(basis);
   return d.select<Array<{ ym: string; total: number }>>(
     `SELECT substr(date,1,7) AS ym,
             COALESCE(SUM(CASE WHEN is_refund=1 THEN -(${expr}) ELSE (${expr}) END),0) AS total

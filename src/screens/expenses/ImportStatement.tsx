@@ -43,11 +43,14 @@ function extractDateRange(period: string | null | undefined, txns: ExtractedVisa
 // Stable hash of a transaction for dedup across re-imports of the same
 // statement. Card last-4 anchors us to the specific card even if the AI
 // re-interprets vendor whitespace slightly.
-function txnHash(cardLast4: string | null, t: ExtractedVisaTxn): string {
-  const seed = `${cardLast4 || "----"}|${t.date}|${t.amount.toFixed(2)}|${t.merchant.trim().toLowerCase()}`;
+function txnHashFromFields(cardLast4: string | null, date: string, amount: number, merchant: string): string {
+  const seed = `${cardLast4 || "----"}|${date}|${amount.toFixed(2)}|${merchant.trim().toLowerCase()}`;
   let h = 5381;
   for (let i = 0; i < seed.length; i++) h = ((h << 5) + h) ^ seed.charCodeAt(i);
   return (h >>> 0).toString(16).padStart(8, "0");
+}
+function txnHash(cardLast4: string | null, t: ExtractedVisaTxn): string {
+  return txnHashFromFields(cardLast4, t.date, t.amount, t.merchant);
 }
 
 // True credit-card statement payments to distinguish from merchant refunds.
@@ -123,7 +126,9 @@ export default function ImportStatement() {
       // back to min/max of transaction dates.
       const range = extractDateRange(result.statement_period, clean);
       const existing = await listExpenses({ from: range.from, to: range.to });
-      const existingHashes = new Set(existing.map((e) => e.source_txn_hash).filter(Boolean) as string[]);
+      const existingHashSet = new Set(existing.map((e) => e.source_txn_hash).filter(Boolean) as string[]);
+      setExistingHashes(existingHashSet);
+      setCardLast4(result.card_last4);
 
       const parsed: Row[] = clean.map((t) => {
         const catGuess = guessCategory(t.merchant, t.category_guess);
@@ -136,7 +141,7 @@ export default function ImportStatement() {
           isPayment,
           isRefund,
           include: !isPayment,
-          duplicate: existingHashes.has(h),
+          duplicate: existingHashSet.has(h),
           imported: false,
           hash: h,
         };
@@ -163,8 +168,23 @@ export default function ImportStatement() {
     }
   }
 
+  // Precomputed dedup set + card_last4 so field edits can recompute the hash live.
+  const [existingHashes, setExistingHashes] = useState<Set<string>>(new Set());
+  const [cardLast4, setCardLast4] = useState<string | null>(null);
+
   function updateRow(i: number, patch: Partial<Row>) {
-    setRows((prev) => prev.map((r, idx) => (idx === i ? { ...r, ...patch } : r)));
+    setRows((prev) => prev.map((r, idx) => {
+      if (idx !== i) return r;
+      const next = { ...r, ...patch };
+      // If any hash input changed, recompute hash + duplicate flag so the user
+      // sees an accurate dup warning after inline edits, and the DB unique
+      // index actually catches re-imports of edited rows.
+      if (patch.date !== undefined || patch.merchant !== undefined || patch.amount !== undefined) {
+        next.hash = txnHashFromFields(cardLast4, next.date, next.amount, next.merchant);
+        next.duplicate = existingHashes.has(next.hash);
+      }
+      return next;
+    }));
   }
 
   const importable = rows.filter((r) => r.include && !r.isPayment && !r.imported);
@@ -188,6 +208,9 @@ export default function ImportStatement() {
       for (let i = 0; i < updated.length; i++) {
         const r = updated[i];
         if (!r.include || r.isPayment || r.imported) continue;
+        // Final defense: recompute hash from current field values in case an
+        // edit slipped past the updateRow live-recompute.
+        const freshHash = txnHashFromFields(cardLast4, r.date, r.amount, r.merchant);
         try {
           await saveExpense({
             date: r.date,
@@ -202,9 +225,9 @@ export default function ImportStatement() {
               r.foreign_amount ? `Foreign: ${r.foreign_amount}` : null,
             ].filter(Boolean).join(" · ") || null,
             import_batch_id: batchId,
-            source_txn_hash: r.hash,
+            source_txn_hash: freshHash,
           });
-          updated[i] = { ...r, imported: true };
+          updated[i] = { ...r, imported: true, hash: freshHash };
           n++;
         } catch (e: any) {
           const msg = String(e?.message || e);
