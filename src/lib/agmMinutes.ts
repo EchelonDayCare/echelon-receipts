@@ -203,10 +203,10 @@ export async function buildInitialDraft(fyStart: number, opts?: { forceFresh?: b
     chairmanReport: chairman,
     financialReportPresenter: "",
     financialReportBody:
-      "The daycare remains financially stable, with sufficient funds to cover ongoing operations and sick leave entitlements.\nNote: Financial report is attached.",
+      "[Financial report to be filled in — see attached statement.]",
     staffingChallenges: "",
     facilitiesMaintenance: "",
-    boardElections: "There were no changes to the board. All members will retain their current positions.",
+    boardElections: "[Board election outcome to be recorded here.]",
     futureAgenda: [],
     adjournmentTime: DEFAULT_ADJOURN,
   };

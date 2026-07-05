@@ -21,15 +21,17 @@ import {
 
 const RECENT_FY_SPAN = 6;   // show current FY + 5 back in the year picker
 
-export default function AgmMinutesEditor() {
+export default function AgmMinutesEditor({ onDirtyChange }: { onDirtyChange?: (dirty: boolean) => void } = {}) {
   const [fyStart, setFyStart] = useState<number>(currentFiscalYear());
   const [minutes, setMinutes] = useState<AgmMinutes | null>(null);
   const [savedYears, setSavedYears] = useState<Array<{ year_label: string; updated_at: string; finalized_at: string | null }>>([]);
   const [dirty, setDirty] = useState(false);
   const [busy, setBusy] = useState(false);
   const [aiBusy, setAiBusy] = useState<string | null>(null);   // section id being drafted, or "all"
-  const [preAiSnapshot, setPreAiSnapshot] = useState<AgmMinutes | null>(null);
+  // Bounded stack of pre-AI snapshots so Undo unwinds each AI action.
+  const [aiHistory, setAiHistory] = useState<AgmMinutes[]>([]);
   const [aiEnabled, setAiEnabled] = useState(false);
+  const [aiRedact, setAiRedact] = useState(true);
 
   // Refs used to make in-flight AI work safe against year switches, unmounts and cancellations.
   const initialRef = useRef<AgmMinutes | null>(null);   // snapshot from buildInitialDraft — used to detect user edits
@@ -38,7 +40,7 @@ export default function AgmMinutesEditor() {
   const aiAbortRef = useRef<AbortController | null>(null);
   const dirtyRef = useRef(dirty);
   useEffect(() => { fyStartRef.current = fyStart; }, [fyStart]);
-  useEffect(() => { dirtyRef.current = dirty; }, [dirty]);
+  useEffect(() => { dirtyRef.current = dirty; onDirtyChange?.(dirty); }, [dirty, onDirtyChange]);
 
   // Unsaved-work guard — Tauri v2 uses onCloseRequested (beforeunload does not
   // fire reliably in the webview). Prompts the user before losing edits.
@@ -66,6 +68,7 @@ export default function AgmMinutesEditor() {
       try {
         const s = await getSettings();
         setAiEnabled(s.agm_ai_enabled === "1" && s.azure_ai_key_set === "1");
+        setAiRedact(s.agm_ai_redact !== "0");   // default ON
       } catch (e: any) {
         void logError("WARN", `[AgmMinutes getSettings] ${e?.message || e}`);
       }
@@ -85,7 +88,7 @@ export default function AgmMinutesEditor() {
     if (aiAbortRef.current) { aiAbortRef.current.abort(); aiAbortRef.current = null; }
     aiEpochRef.current++;
     setAiBusy(null);
-    setPreAiSnapshot(null);
+    setAiHistory([]);
     (async () => {
       const m = await buildInitialDraft(fyStart);
       if (!cancelled) {
@@ -116,6 +119,7 @@ export default function AgmMinutesEditor() {
     try {
       await saveDraft(minutes);
       setDirty(false);
+      setAiHistory([]);
       await refreshList();
       await showAlert("Draft saved.");
     } catch (e: any) {
@@ -128,13 +132,16 @@ export default function AgmMinutesEditor() {
     setBusy(true);
     try {
       const m = await buildInitialDraft(fyStart, { forceFresh: true });
-      setMinutes(m); setDirty(false);
+      setMinutes(m); setDirty(false); setAiHistory([]);
     } finally { setBusy(false); }
   }
 
   async function onGenerate() {
     if (!minutes) return;
-    const filename = `AGM-${minutes.yearLabel}.docx`;
+    // Derive filename from the trusted `fyStart` selector, not the JSON
+    // payload — defends against a tampered restore whose yearLabel string
+    // contains path characters.
+    const filename = `AGM-${shortYearLabel(fyStart)}.docx`;
     let dest: string;
     try {
       dest = await resolveReportPath("agmMinutes", filename);
@@ -170,6 +177,7 @@ export default function AgmMinutesEditor() {
       wroteOk = true;
       await saveDraft(minutes, /* finalized */ true);
       setDirty(false);
+      setAiHistory([]);
       await refreshList();
       await showAlert(`✅ Document generated at:\n${dest}`);
     } catch (e: any) {
@@ -200,21 +208,33 @@ export default function AgmMinutesEditor() {
     if (aiAbortRef.current) aiAbortRef.current.abort();
   }
 
+  // Bounded stack of pre-AI snapshots. Every AI action pushes the current
+  // draft onto the stack (up to `UNDO_LIMIT` entries), Undo pops the top.
+  const UNDO_LIMIT = 10;
+  function pushHistory(snap: AgmMinutes) {
+    setAiHistory((prev) => {
+      const next = [...prev, snap];
+      return next.length > UNDO_LIMIT ? next.slice(next.length - UNDO_LIMIT) : next;
+    });
+  }
+
   async function onDraftAll() {
     if (!minutes) return;
     const ok = await showConfirm(
       "Draft the whole document with AI?\n\n" +
-      "Empty sub-sections in the Chairman's Report and the free-text bodies " +
-      "(Financial Report, Staffing Challenges, Facilities Maintenance) will be " +
-      "replaced with AI-drafted prose based on this year's data. Anything you've " +
-      "already typed is preserved."
+      "Only sections you have not already filled in (Financial Report, Staffing " +
+      "Challenges, Facilities Maintenance, and empty Chairman's Report sub-sections) " +
+      "will be replaced with AI-drafted prose based on this year's data. " +
+      "Anything you have typed manually is preserved. Sections without on-device " +
+      "data (e.g. SCD Funding, Snack and Meal, Licensing) are skipped — the AI " +
+      "will not invent content for them."
     );
     if (!ok) return;
     const { epoch, fy, signal } = beginAi();
     setAiBusy("all");
-    setPreAiSnapshot(minutes);
+    pushHistory(minutes);
     try {
-      const ctx = await gatherYearContext(fy);
+      const ctx = await gatherYearContext(fy, { redact: aiRedact });
       const next = await draftEntireMinutes(minutes, ctx, { signal, initial: initialRef.current ?? undefined });
       if (!aiStillValid(epoch, fy)) return;
       setMinutes(next);
@@ -228,10 +248,13 @@ export default function AgmMinutesEditor() {
   }
 
   function onUndoAi() {
-    if (!preAiSnapshot) return;
-    setMinutes(preAiSnapshot);
-    setPreAiSnapshot(null);
-    setDirty(true);
+    setAiHistory((prev) => {
+      if (prev.length === 0) return prev;
+      const restored = prev[prev.length - 1];
+      setMinutes(restored);
+      setDirty(true);
+      return prev.slice(0, -1);
+    });
   }
 
   async function draftField(
@@ -242,7 +265,7 @@ export default function AgmMinutesEditor() {
     if (!minutes) return;
     const { epoch, fy, signal } = beginAi();
     setAiBusy(id);
-    setPreAiSnapshot(minutes);
+    pushHistory(minutes);
     try {
       const text = await fetcher(signal);
       if (!aiStillValid(epoch, fy)) return;
@@ -250,7 +273,11 @@ export default function AgmMinutesEditor() {
       setDirty(true);
     } catch (e: any) {
       if ((e?.name === "AbortError") || signal.aborted) return;
-      await showAlert("AI draft failed: " + (e?.message || e), { kind: "error" });
+      // Ungrounded sections and insufficient-data errors show a friendly
+      // message rather than a generic "AI draft failed" — they are expected
+      // outcomes, not bugs.
+      const isFriendly = e?.name === "UngroundedSectionError" || e?.name === "InsufficientDataError";
+      await showAlert(e?.message || String(e), { kind: isFriendly ? "warning" : "error" });
     } finally {
       if (aiStillValid(epoch, fy)) setAiBusy(null);
     }
@@ -306,9 +333,9 @@ export default function AgmMinutesEditor() {
               ✕ Cancel AI
             </button>
           )}
-          {preAiSnapshot && !aiBusy && (
+          {aiHistory.length > 0 && !aiBusy && (
             <button className="btn ghost" onClick={onUndoAi} title="Restore the text before the last AI draft.">
-              ↶ Undo AI
+              ↶ Undo AI ({aiHistory.length})
             </button>
           )}
           <button className="btn" onClick={onGenerate} disabled={busy || !!aiBusy || !minutes}>
@@ -325,6 +352,7 @@ export default function AgmMinutesEditor() {
                     fyStart={fyStart}
                     aiBusy={aiBusy}
                     aiEnabled={aiEnabled}
+                    aiRedact={aiRedact}
                     draftField={draftField} />
           <PreviewPane minutes={minutes} />
         </div>
@@ -343,28 +371,29 @@ interface FormProps {
   fyStart: number;
   aiBusy: string | null;
   aiEnabled: boolean;
+  aiRedact: boolean;
   draftField: (id: string, fetcher: (signal: AbortSignal) => Promise<string>, assign: (text: string) => void) => Promise<void>;
 }
 
-function FormPane({ minutes, patch, fyStart, aiBusy, aiEnabled, draftField }: FormProps) {
+function FormPane({ minutes, patch, fyStart, aiBusy, aiEnabled, aiRedact, draftField }: FormProps) {
   async function aiFin() {
     await draftField("fin",
-      async (signal) => draftFinancialReport(await gatherYearContext(fyStart), signal),
+      async (signal) => draftFinancialReport(await gatherYearContext(fyStart, { redact: aiRedact }), signal),
       (text) => patch({ financialReportBody: text }));
   }
   async function aiStaffing() {
     await draftField("staffing",
-      async (signal) => draftStaffingChallenges(await gatherYearContext(fyStart), signal),
+      async (signal) => draftStaffingChallenges(await gatherYearContext(fyStart, { redact: aiRedact }), signal),
       (text) => patch({ staffingChallenges: text }));
   }
   async function aiFacilities() {
     await draftField("facilities",
-      async (signal) => draftFacilitiesMaintenance(await gatherYearContext(fyStart), signal),
+      async (signal) => draftFacilitiesMaintenance(await gatherYearContext(fyStart, { redact: aiRedact }), signal),
       (text) => patch({ facilitiesMaintenance: text }));
   }
   async function aiChairman() {
     await draftField("chairman", async (signal) => {
-      const ctx = await gatherYearContext(fyStart);
+      const ctx = await gatherYearContext(fyStart, { redact: aiRedact });
       const filled: ChairmanBlock[] = [];
       for (const b of minutes.chairmanReport) {
         const isList = Array.isArray(b.body);
@@ -375,6 +404,8 @@ function FormPane({ minutes, patch, fyStart, aiBusy, aiEnabled, draftField }: Fo
           filled.push({ heading: b.heading, body });
         } catch (e) {
           if ((e as any)?.name === "AbortError" || signal.aborted) throw e;
+          // Ungrounded chairman blocks are silently skipped — the user sees the
+          // block still empty and can type their own content.
           filled.push(b);
         }
       }

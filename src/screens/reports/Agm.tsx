@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { db, getSettings, listYears } from "../../lib/db";
 import type { SettingsMap } from "../../types";
 import { fiscalYearBounds, fiscalYearLabel } from "../../lib/fiscalYear";
+import { showConfirm } from "../../lib/dialogs";
 import AgmMinutesEditor from "./AgmMinutes";
 
 interface YearRow {
@@ -22,13 +23,26 @@ function fmt(n: number): string {
 
 export default function Agm() {
   const [tab, setTab] = useState<"package" | "minutes">("package");
+  const [minutesDirty, setMinutesDirty] = useState(false);
+
+  async function switchTab(next: "package" | "minutes") {
+    if (tab === next) return;
+    if (tab === "minutes" && minutesDirty) {
+      const ok = await showConfirm(
+        "You have unsaved AGM Minutes edits.\n\nSwitch tabs anyway and discard them?"
+      );
+      if (!ok) return;
+    }
+    setTab(next);
+  }
+
   return (
     <div>
       <div className="no-print" style={{ display: "flex", gap: 4, borderBottom: "1px solid var(--border)", padding: "12px 24px 0" }}>
-        <TabBtn active={tab === "package"} onClick={() => setTab("package")}>Board Package (numbers)</TabBtn>
-        <TabBtn active={tab === "minutes"}  onClick={() => setTab("minutes")}>AGM Minutes (document)</TabBtn>
+        <TabBtn active={tab === "package"} onClick={() => switchTab("package")}>Board Package (numbers)</TabBtn>
+        <TabBtn active={tab === "minutes"}  onClick={() => switchTab("minutes")}>AGM Minutes (document)</TabBtn>
       </div>
-      {tab === "package" ? <BoardPackage /> : <AgmMinutesEditor />}
+      {tab === "package" ? <BoardPackage /> : <AgmMinutesEditor onDirtyChange={setMinutesDirty} />}
     </div>
   );
 }

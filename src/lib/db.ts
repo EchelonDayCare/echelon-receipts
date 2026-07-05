@@ -579,6 +579,9 @@ async function ensureSchema(d: Database): Promise<void> {
   // AGM AI opt-in — defaults OFF so packaged builds don't call Azure until the
   // user explicitly turns it on in Settings.
   await setting("agm_ai_enabled", "0");
+  // AGM AI redact — defaults ON: staff names replaced with Staff #N tokens in
+  // prompts. Users can turn this off if they want richer prose.
+  await setting("agm_ai_redact", "1");
 }
 
 // ---------- Person identity ----------

@@ -66,9 +66,12 @@ async function safeSelect<T>(sql: string, args: any[] = []): Promise<T[]> {
   }
 }
 
-export async function gatherYearContext(fyStart: number): Promise<YearContext> {
+export interface GatherOpts { redact?: boolean }
+
+export async function gatherYearContext(fyStart: number, opts: GatherOpts = {}): Promise<YearContext> {
   const { start, end } = fiscalYearBounds(fyStart);
   const rosterYear = fyStart + 1;
+  const redact = !!opts.redact;
 
   const enroll = await safeSelectOne<{ active: number; total: number }>(
     "SELECT SUM(CASE WHEN active=1 THEN 1 ELSE 0 END) AS active, COUNT(*) AS total FROM students WHERE year=?",
@@ -160,6 +163,18 @@ export async function gatherYearContext(fyStart: number): Promise<YearContext> {
     priorActive = pAct.active || 0;
   } catch (e: any) { void logError("WARN", `[aiDraft prior-year] ${e?.message || e}`); }
 
+  // When the redact toggle is on, staff & credential names are replaced with
+  // opaque tokens before they leave this machine. Roles/types/expiry dates
+  // still travel — the AI needs enough context to produce useful prose.
+  const staffOut = redact
+    ? staff.map((s, i) => ({ name: `Staff #${i + 1}`, role: s.role }))
+    : staff;
+  const nameToToken = new Map<string, string>();
+  staff.forEach((s, i) => nameToToken.set(s.name, `Staff #${i + 1}`));
+  const credOut = redact
+    ? credExp.map((c) => ({ ...c, staff: nameToToken.get(c.staff) || "Staff (redacted)" }))
+    : credExp;
+
   return {
     yearLabel: fiscalYearLabel(fyStart),
     fyStart,
@@ -172,13 +187,37 @@ export async function gatherYearContext(fyStart: number): Promise<YearContext> {
     parentPaidTotal: rev.parent_paid || 0,
     expensesTotal: exp.total || 0,
     topExpenseCategories: topCats,
-    activeStaff: staff,
-    credentialsExpiringSoon: credExp,
+    activeStaff: staffOut,
+    credentialsExpiringSoon: credOut,
     drillsCompleted: drills.n || 0,
     priorGrossRevenue: priorGross,
     priorExpensesTotal: priorExp,
     priorActiveChildren: priorActive,
   };
+}
+
+// ─── Min-data floor ────────────────────────────────────────────────────
+// Refuse to invent prose out of thin air. Users see a clear message telling
+// them what to enter first, instead of the AI hallucinating a "stable and
+// well-managed year" from four data points.
+export class InsufficientDataError extends Error {
+  constructor(public yearLabel: string, public score: number) {
+    super(`Not enough data for FY ${yearLabel} to draft AGM minutes with AI (score ${score}/4). Enter more receipts, expenses, or staff for the year first.`);
+    this.name = "InsufficientDataError";
+  }
+}
+
+export function dataDensity(c: YearContext): number {
+  let s = 0;
+  if (c.activeChildren > 0) s++;
+  if (c.receiptsIssued >= 5) s++;
+  if (c.activeStaff.length >= 1) s++;
+  if (c.expensesTotal > 0 || c.grossRevenue > 0) s++;
+  return s;
+}
+function assertEnoughData(c: YearContext) {
+  const s = dataDensity(c);
+  if (s < 3) throw new InsufficientDataError(c.yearLabel, s);
 }
 
 // ─── Azure chat helper ─────────────────────────────────────────────────
@@ -280,9 +319,22 @@ function sanitizePromptString(s: string): string {
 
 const BASE_TONE =
   "You are drafting minutes for a BC non-profit daycare's Annual General Meeting. " +
-  "Tone: formal, factual, concise. Use past tense (\"was presented\", \"were noted\"). " +
+  "Tone: neutral, factual, concise. Use past tense (\"was presented\", \"were noted\"). " +
   "Do NOT invent numbers, names or events — only reference facts provided in the data. " +
+  "Do NOT use evaluative language like \"stable\", \"healthy\", \"well-maintained\", \"strong\" " +
+  "or similar judgements — the board decides those characterisations, not you. " +
   "Never use markdown, headings, bullets or symbols. Reply with plain prose only.";
+
+// Sections known to be GROUNDED in on-device data. Everything else is treated
+// as ungrounded — the app refuses to generate prose for it because the model
+// would be making things up. Users still get an empty field to type into.
+const GROUNDED_CHAIRMAN_HEADINGS = new Set([
+  "children enrollment",   // exact string, minus trailing colon, lowercased
+]);
+export function isChairmanHeadingGrounded(heading: string): boolean {
+  const key = heading.replace(/:$/, "").trim().toLowerCase();
+  return GROUNDED_CHAIRMAN_HEADINGS.has(key);
+}
 
 function fmtMoney(n: number): string {
   return `$${(n || 0).toLocaleString("en-CA", { minimumFractionDigits: 0, maximumFractionDigits: 0 })}`;
@@ -317,34 +369,58 @@ function staffFacts(c: YearContext): string {
   return lines.join("\n");
 }
 
+export class UngroundedSectionError extends Error {
+  constructor(public section: string) {
+    super(`Section "${section}" has no source data in the app. Type your own summary here — the AI will not invent one.`);
+    this.name = "UngroundedSectionError";
+  }
+}
+
 export async function draftFinancialReport(c: YearContext, signal?: AbortSignal): Promise<string> {
+  assertEnoughData(c);
   const facts = financialFacts(c);
   const user =
     `Write one short paragraph (2–4 sentences) for the "Financial Report" section of the AGM minutes. ` +
-    `Summarise the year's financial health at a high level. Mention gross revenue, subsidies received, and total expenses. ` +
+    `State the year's gross revenue, subsidies received, and total expenses using the figures below. ` +
+    `Do not characterise these numbers as stable, healthy or otherwise — just state them. ` +
     `End with "Note: Financial report is attached." on a new line.\n\nDATA:\n${facts}`;
   return await azureChat(BASE_TONE, user, 300, signal, { section: "financialReport", yearLabel: c.yearLabel });
 }
 
 export async function draftStaffingChallenges(c: YearContext, signal?: AbortSignal): Promise<string> {
+  assertEnoughData(c);
+  if (c.activeStaff.length === 0 && c.credentialsExpiringSoon.length === 0) {
+    throw new UngroundedSectionError("Staffing Challenges");
+  }
   const facts = staffFacts(c);
   const user =
     `Write one short paragraph (2–3 sentences) for the "Staffing Challenges" sub-section of General Discussion. ` +
-    `Focus on staffing continuity, credentials due for renewal (if any), and any workforce risks implied by the data. ` +
-    `If nothing notable, say the daycare maintained a stable, qualified team.\n\nDATA:\n${facts}`;
+    `Report the number of active staff and note any credentials expiring within 90 days after year-end. ` +
+    `Do not describe the team as stable, qualified, dedicated or use similar praise — state facts only.\n\nDATA:\n${facts}`;
   return await azureChat(BASE_TONE, user, 250, signal, { section: "staffingChallenges", yearLabel: c.yearLabel });
 }
 
 export async function draftFacilitiesMaintenance(c: YearContext, signal?: AbortSignal): Promise<string> {
+  assertEnoughData(c);
+  // Facilities Maintenance is only grounded when we actually recorded drills.
+  // Without drills data, we would be inventing a "well-maintained" narrative
+  // out of thin air — refuse and force the user to type.
+  if (c.drillsCompleted === 0) {
+    throw new UngroundedSectionError("Facilities Maintenance");
+  }
   const facts = staffFacts(c) + "\n" + financialFacts(c);
   const user =
     `Write one short paragraph (2–3 sentences) for the "Facilities Maintenance" sub-section of General Discussion. ` +
-    `Reference any maintenance-related expense categories if present, and drill completion for safety. ` +
-    `If no maintenance-specific data, say the facility was well-maintained and safety drills were conducted regularly.\n\nDATA:\n${facts}`;
+    `State how many emergency drills were completed. ` +
+    `Do not describe the facility as well-maintained or safe — the board decides that, not you.\n\nDATA:\n${facts}`;
   return await azureChat(BASE_TONE, user, 250, signal, { section: "facilitiesMaintenance", yearLabel: c.yearLabel });
 }
 
 export async function draftChairmanBlock(heading: string, c: YearContext, wantBullets: boolean, signal?: AbortSignal): Promise<string | string[]> {
+  assertEnoughData(c);
+  if (!isChairmanHeadingGrounded(heading)) {
+    throw new UngroundedSectionError(heading.replace(/:$/, ""));
+  }
   const facts = financialFacts(c) + "\n" + staffFacts(c);
   const safeHeading = sanitizePromptString(heading.replace(/:$/, ""));
   const user =
@@ -379,6 +455,8 @@ function sameBlockBody(cur: string | string[], init: string | string[]): boolean
 }
 
 export async function draftEntireMinutes(m: AgmMinutes, c: YearContext, opts: DraftAllOpts = {}): Promise<AgmMinutes> {
+  // Hard gate: refuse the entire operation if the year has almost no data.
+  assertEnoughData(c);
   const next: AgmMinutes = JSON.parse(JSON.stringify(m));
   const init = opts.initial;
   const signal = opts.signal;

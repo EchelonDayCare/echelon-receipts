@@ -598,6 +598,21 @@ export default function Settings() {
             </span>
           </label>
         </div>
+        {s.agm_ai_enabled === "1" && (
+          <div className="field" style={{ marginBottom: 8, paddingLeft: 24, borderLeft: "2px solid var(--border)" }}>
+            <label style={{ display: "flex", alignItems: "center", gap: 8, cursor: "pointer" }}>
+              <input
+                type="checkbox"
+                checked={s.agm_ai_redact !== "0"}
+                onChange={(e) => setS({ ...s, agm_ai_redact: e.target.checked ? "1" : "0" })}
+              />
+              <strong>Redact staff names in AI prompts</strong>&nbsp;
+              <span style={{ color: "var(--muted)", fontWeight: 400 }}>
+                — Replaces individual staff names with <code>Staff #1</code>, <code>Staff #2</code>, etc. before sending prompts to Azure. Roles, credential types and expiry dates still travel. Default on.
+              </span>
+            </label>
+          </div>
+        )}
       </div>
     );
   }

@@ -46,6 +46,21 @@ export default function HealthCheck({ settings }: Props) {
       }
     }
 
+    // 2b. Reports folder (AGM Minutes + other generated reports)
+    if (!settings.reports_folder?.trim()) {
+      out.push({ key: "reports", label: "Reports folder", state: "warn",
+        detail: "Not set — AGM Minutes and other generated reports need a home. Pick one in Settings → Folders." });
+    } else {
+      try {
+        const ok = await exists(settings.reports_folder);
+        out.push({ key: "reports", label: "Reports folder", state: ok ? "ok" : "error",
+          detail: ok ? settings.reports_folder : `Folder not found: ${settings.reports_folder}` });
+      } catch (e: any) {
+        out.push({ key: "reports", label: "Reports folder", state: "error",
+          detail: `Cannot access folder: ${e?.message || e}` });
+      }
+    }
+
     // 3. SMTP credentials
     if (!settings.smtp_host?.trim() || !settings.sender_email?.trim()) {
       out.push({ key: "smtp", label: "Email (SMTP)", state: "error",
@@ -122,6 +137,7 @@ export default function HealthCheck({ settings }: Props) {
     settings.sender_email,
     settings.contact_email,
     settings.pdf_folder,
+    settings.reports_folder,
     settings.subsidies_enabled,
     settings.gross_monthly_fee,
     settings.ccfri_monthly_reduction,
