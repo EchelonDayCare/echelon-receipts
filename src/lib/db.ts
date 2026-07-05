@@ -174,7 +174,7 @@ async function ensureSchema(d: Database): Promise<void> {
     ["smtp_host", "smtp-mail.outlook.com"], ["smtp_port", "587"],
     ["smtp_user", ""], ["bcc_self", "1"],
     ["email_subject", "Receipt #{{receipt_no}} - {{student}} - {{description}}"],
-    ["email_body", "Hi,\n\nPlease find attached the receipt for {{student}} ({{description}}).\n\nAmount: ${{amount}}{{pending_line}}\n\nThank you,\nEchelon Daycare Society\n{{contact_email}} | {{contact_phone}}"],
+    ["email_body", "Hi,\n\nPlease find attached the receipt for {{student}} ({{description}}).\n\n{{amount_label}}: ${{amount}}{{pending_line}}\n\nThank you,\nEchelon Daycare Society\n{{contact_email}} | {{contact_phone}}"],
   ] as const) await setting(k, v);
 
   // Migration 004 — person_id, is_refund, annual_receipts

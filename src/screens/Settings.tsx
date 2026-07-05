@@ -487,7 +487,7 @@ export default function Settings() {
           <label>Email Body Template</label>
           <textarea rows={8} value={s.email_body || ""} onChange={(e) => setS({ ...s, email_body: e.target.value })} />
           <small style={{ color: "var(--muted)" }}>
-            Tokens: {"{{receipt_no}} {{student}} {{description}} {{amount}} {{pending}} {{pending_line}} {{date}} {{daycare_name}} {{contact_email}} {{contact_phone}}"}
+            Tokens: {"{{receipt_no}} {{student}} {{description}} {{amount}} {{amount_label}} {{pending}} {{pending_line}} {{date}} {{daycare_name}} {{contact_email}} {{contact_phone}}"}
           </small>
         </div>
 

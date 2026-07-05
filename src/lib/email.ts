@@ -24,11 +24,20 @@ function fmtAmount(n: number): string {
 
 export function renderTemplate(tpl: string, r: Receipt, s: SettingsMap): string {
   const pendingLine = r.pending_amount > 0 ? `\nPending Fees: CAD ${fmtAmount(r.pending_amount)}` : "";
+  const isRefund = !!r.is_refund;
+  // For refunds, prefer comments (e.g. "overpayment July - refund for 3 sick days") over the
+  // stored description (which is usually the monthly tuition label). Falls back to description
+  // if no comments were entered.
+  const descForEmail = isRefund
+    ? ((r.comments && r.comments.trim()) ? r.comments.trim() : r.description)
+    : r.description;
+  const amountLabel = isRefund ? "Refund Amount" : "Amount";
   const map: Record<string, string> = {
     receipt_no: String(r.receipt_no),
     student: r.student_name_snapshot,
-    description: r.description,
+    description: descForEmail,
     amount: fmtAmount(r.amount),
+    amount_label: amountLabel,
     pending: fmtAmount(r.pending_amount),
     pending_line: pendingLine,
     date: r.date,
@@ -36,7 +45,13 @@ export function renderTemplate(tpl: string, r: Receipt, s: SettingsMap): string 
     contact_phone: s.contact_phone || "",
     daycare_name: s.daycare_name || "",
   };
-  return tpl.replace(/\{\{\s*(\w+)\s*\}\}/g, (_, k) => (map[k] !== undefined ? map[k] : ""));
+  let out = tpl.replace(/\{\{\s*(\w+)\s*\}\}/g, (_, k) => (map[k] !== undefined ? map[k] : ""));
+  // Backwards-compat: existing user templates hardcode "Amount:" — rewrite to "Refund Amount:"
+  // for refund receipts so parents see the correct label without needing to re-save the template.
+  if (isRefund) {
+    out = out.replace(/(^|\n)Amount:\s/g, "$1Refund Amount: ");
+  }
+  return out;
 }
 
 async function renderReceiptPdfBytes(r: Receipt, s: SettingsMap): Promise<Uint8Array> {
