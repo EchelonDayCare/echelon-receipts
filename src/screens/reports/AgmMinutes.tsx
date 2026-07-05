@@ -10,6 +10,11 @@ import {
 } from "../../lib/agmMinutes";
 import { currentFiscalYear } from "../../lib/fiscalYear";
 import { resolveReportPath, NoReportsFolderError } from "../../lib/reportsFolder";
+import {
+  gatherYearContext, draftEntireMinutes,
+  draftFinancialReport, draftStaffingChallenges, draftFacilitiesMaintenance,
+  draftChairmanBlock,
+} from "../../lib/aiDraft";
 
 const RECENT_FY_SPAN = 6;   // show current FY + 5 back in the year picker
 
@@ -19,6 +24,8 @@ export default function AgmMinutesEditor() {
   const [savedYears, setSavedYears] = useState<Array<{ year_label: string; updated_at: string; finalized_at: string | null }>>([]);
   const [dirty, setDirty] = useState(false);
   const [busy, setBusy] = useState(false);
+  const [aiBusy, setAiBusy] = useState<string | null>(null);   // section id being drafted, or "all"
+  const [preAiSnapshot, setPreAiSnapshot] = useState<AgmMinutes | null>(null);
 
   async function refreshList() {
     try { setSavedYears(await listDraftYears()); } catch { /* ignore */ }
@@ -92,6 +99,53 @@ export default function AgmMinutesEditor() {
     } finally { setBusy(false); }
   }
 
+  // ---------- AI drafting ----------
+  async function onDraftAll() {
+    if (!minutes) return;
+    const ok = await showConfirm(
+      "Draft the whole document with AI?\n\n" +
+      "Empty sub-sections in the Chairman's Report and the free-text bodies " +
+      "(Financial Report, Staffing Challenges, Facilities Maintenance) will be " +
+      "replaced with AI-drafted prose based on this year's data. Anything you've " +
+      "already typed is preserved."
+    );
+    if (!ok) return;
+    setAiBusy("all");
+    setPreAiSnapshot(minutes);
+    try {
+      const ctx = await gatherYearContext(fyStart);
+      const next = await draftEntireMinutes(minutes, ctx);
+      setMinutes(next);
+      setDirty(true);
+    } catch (e: any) {
+      await showAlert("AI draft failed: " + (e?.message || e), { kind: "error" });
+    } finally { setAiBusy(null); }
+  }
+
+  function onUndoAi() {
+    if (!preAiSnapshot) return;
+    setMinutes(preAiSnapshot);
+    setPreAiSnapshot(null);
+    setDirty(true);
+  }
+
+  async function draftField(
+    id: string,
+    fetcher: () => Promise<string>,
+    assign: (text: string) => void,
+  ) {
+    if (!minutes) return;
+    setAiBusy(id);
+    setPreAiSnapshot(minutes);
+    try {
+      const text = await fetcher();
+      assign(text);
+      setDirty(true);
+    } catch (e: any) {
+      await showAlert("AI draft failed: " + (e?.message || e), { kind: "error" });
+    } finally { setAiBusy(null); }
+  }
+
   // ---------- Year picker options ----------
   const yearOptions = useMemo(() => {
     const now = currentFiscalYear();
@@ -127,11 +181,20 @@ export default function AgmMinutesEditor() {
               })}
             </select>
           </label>
-          <button className="btn secondary" onClick={onReset} disabled={busy}>Reset from prior year</button>
-          <button className="btn secondary" onClick={onSave} disabled={busy || !dirty}>
+          <button className="btn secondary" onClick={onReset} disabled={busy || !!aiBusy}>Reset from prior year</button>
+          <button className="btn secondary" onClick={onSave} disabled={busy || !!aiBusy || !dirty}>
             {dirty ? "Save Draft" : "Saved"}
           </button>
-          <button className="btn" onClick={onGenerate} disabled={busy || !minutes}>
+          <button className="btn secondary" onClick={onDraftAll} disabled={busy || !!aiBusy || !minutes}
+                  title="Draft empty sections and free-text bodies with AI using this year's data.">
+            {aiBusy === "all" ? "✨ Drafting…" : "✨ Draft with AI"}
+          </button>
+          {preAiSnapshot && !aiBusy && (
+            <button className="btn ghost" onClick={onUndoAi} title="Restore the text before the last AI draft.">
+              ↶ Undo AI
+            </button>
+          )}
+          <button className="btn" onClick={onGenerate} disabled={busy || !!aiBusy || !minutes}>
             📄 Generate
           </button>
         </div>
@@ -141,7 +204,10 @@ export default function AgmMinutesEditor() {
         <div style={{ padding: 40, textAlign: "center", color: "var(--muted)" }}>Loading…</div>
       ) : (
         <div style={{ display: "grid", gridTemplateColumns: "minmax(0, 1fr) minmax(0, 1fr)", gap: 20 }}>
-          <FormPane minutes={minutes} patch={patch} />
+          <FormPane minutes={minutes} patch={patch}
+                    fyStart={fyStart}
+                    aiBusy={aiBusy}
+                    draftField={draftField} />
           <PreviewPane minutes={minutes} />
         </div>
       )}
@@ -156,9 +222,48 @@ export default function AgmMinutesEditor() {
 interface FormProps {
   minutes: AgmMinutes;
   patch: (p: Partial<AgmMinutes>) => void;
+  fyStart: number;
+  aiBusy: string | null;
+  draftField: (id: string, fetcher: () => Promise<string>, assign: (text: string) => void) => Promise<void>;
 }
 
-function FormPane({ minutes, patch }: FormProps) {
+function FormPane({ minutes, patch, fyStart, aiBusy, draftField }: FormProps) {
+  async function aiFin() {
+    await draftField("fin",
+      async () => draftFinancialReport(await gatherYearContext(fyStart)),
+      (text) => patch({ financialReportBody: text }));
+  }
+  async function aiStaffing() {
+    await draftField("staffing",
+      async () => draftStaffingChallenges(await gatherYearContext(fyStart)),
+      (text) => patch({ staffingChallenges: text }));
+  }
+  async function aiFacilities() {
+    await draftField("facilities",
+      async () => draftFacilitiesMaintenance(await gatherYearContext(fyStart)),
+      (text) => patch({ facilitiesMaintenance: text }));
+  }
+  async function aiChairman() {
+    // draftField is designed for text→field assignment; for the multi-block
+    // Chairman's Report we manage the busy state locally via draftField's id
+    // but perform the array patch ourselves inside the fetcher.
+    await draftField("chairman", async () => {
+      const ctx = await gatherYearContext(fyStart);
+      const filled: ChairmanBlock[] = [];
+      for (const b of minutes.chairmanReport) {
+        const isList = Array.isArray(b.body);
+        const isEmpty = isList ? (b.body as string[]).length === 0 : ((b.body as string).trim() === "");
+        if (!isEmpty) { filled.push(b); continue; }
+        try {
+          const body = await draftChairmanBlock(b.heading, ctx, isList);
+          filled.push({ heading: b.heading, body });
+        } catch { filled.push(b); }
+      }
+      patch({ chairmanReport: filled });
+      return "";
+    }, () => { /* patch already applied inside fetcher */ });
+  }
+
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
       {/* ---- Header block ---- */}
@@ -212,7 +317,14 @@ function FormPane({ minutes, patch }: FormProps) {
       </Panel>
 
       {/* ---- 3. Chairman's Report ---- */}
-      <Panel title="3. Chairman's Report">
+      <Panel title="3. Chairman's Report"
+        action={
+          <button className="btn ghost" style={{ fontSize: 12 }}
+                  disabled={!!aiBusy} onClick={aiChairman}
+                  title="Fill empty sub-sections with AI drafts">
+            {aiBusy === "chairman" ? "✨ Drafting…" : "✨ AI fill empty"}
+          </button>
+        }>
         <p style={{ margin: "-4px 0 8px 0", color: "var(--muted)", fontSize: 12 }}>
           Empty sub-sections are skipped in the exported document. Enter one bullet per line for list blocks.
         </p>
@@ -234,7 +346,13 @@ function FormPane({ minutes, patch }: FormProps) {
       </Panel>
 
       {/* ---- 4. Financial Report ---- */}
-      <Panel title="4. Financial Report">
+      <Panel title="4. Financial Report"
+        action={
+          <button className="btn ghost" style={{ fontSize: 12 }} disabled={!!aiBusy} onClick={aiFin}
+                  title="Draft the financial narrative from this year's revenue, subsidies and expenses.">
+            {aiBusy === "fin" ? "✨ Drafting…" : "✨ AI draft"}
+          </button>
+        }>
         <Field label="Presented by">
           <input type="text" value={minutes.financialReportPresenter}
                  onChange={(e) => patch({ financialReportPresenter: e.target.value })} />
@@ -250,10 +368,18 @@ function FormPane({ minutes, patch }: FormProps) {
         <Field label="Staffing Challenges">
           <textarea rows={3} value={minutes.staffingChallenges}
                     onChange={(e) => patch({ staffingChallenges: e.target.value })} />
+          <button className="btn ghost" style={{ fontSize: 12, alignSelf: "flex-start", marginTop: 4 }}
+                  disabled={!!aiBusy} onClick={aiStaffing}>
+            {aiBusy === "staffing" ? "✨ Drafting…" : "✨ AI draft"}
+          </button>
         </Field>
         <Field label="Facilities Maintenance">
           <textarea rows={3} value={minutes.facilitiesMaintenance}
                     onChange={(e) => patch({ facilitiesMaintenance: e.target.value })} />
+          <button className="btn ghost" style={{ fontSize: 12, alignSelf: "flex-start", marginTop: 4 }}
+                  disabled={!!aiBusy} onClick={aiFacilities}>
+            {aiBusy === "facilities" ? "✨ Drafting…" : "✨ AI draft"}
+          </button>
         </Field>
       </Panel>
 
@@ -439,10 +565,13 @@ function PreviewBullets({ items }: { items: string[] }) {
 //                                 SHARED
 // ============================================================================
 
-function Panel({ title, children }: { title: string; children: React.ReactNode }) {
+function Panel({ title, children, action }: { title: string; children: React.ReactNode; action?: React.ReactNode }) {
   return (
     <section style={{ border: "1px solid var(--border)", borderRadius: 8, padding: 14, background: "var(--card, #fff)" }}>
-      <h3 style={{ marginTop: 0, marginBottom: 10, fontSize: 15 }}>{title}</h3>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
+        <h3 style={{ margin: 0, fontSize: 15 }}>{title}</h3>
+        {action}
+      </div>
       <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>{children}</div>
     </section>
   );
