@@ -2,8 +2,11 @@
 // Preview mirrors the .docx output so what you see is what you get in Word.
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import { writeFile } from "@tauri-apps/plugin-fs";
+import { writeFile, exists } from "@tauri-apps/plugin-fs";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import { showAlert, showConfirm } from "../../lib/dialogs";
+import { getSettings } from "../../lib/db";
+import { logError } from "../../lib/errorLog";
 import {
   AgmMinutes, ChairmanBlock, buildInitialDraft, saveDraft,
   generateDocxBlob, listDraftYears, shortYearLabel,
@@ -26,16 +29,52 @@ export default function AgmMinutesEditor() {
   const [busy, setBusy] = useState(false);
   const [aiBusy, setAiBusy] = useState<string | null>(null);   // section id being drafted, or "all"
   const [preAiSnapshot, setPreAiSnapshot] = useState<AgmMinutes | null>(null);
+  const [aiEnabled, setAiEnabled] = useState(false);
 
   // Refs used to make in-flight AI work safe against year switches, unmounts and cancellations.
   const initialRef = useRef<AgmMinutes | null>(null);   // snapshot from buildInitialDraft — used to detect user edits
   const fyStartRef = useRef<number>(fyStart);
   const aiEpochRef = useRef<number>(0);
   const aiAbortRef = useRef<AbortController | null>(null);
+  const dirtyRef = useRef(dirty);
   useEffect(() => { fyStartRef.current = fyStart; }, [fyStart]);
+  useEffect(() => { dirtyRef.current = dirty; }, [dirty]);
+
+  // Unsaved-work guard — Tauri v2 uses onCloseRequested (beforeunload does not
+  // fire reliably in the webview). Prompts the user before losing edits.
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    (async () => {
+      try {
+        unlisten = await getCurrentWindow().onCloseRequested(async (event) => {
+          if (!dirtyRef.current) return;
+          const ok = await showConfirm(
+            "You have unsaved AGM Minutes edits. Close anyway and discard them?"
+          );
+          if (!ok) event.preventDefault();
+        });
+      } catch (e: any) {
+        void logError("WARN", `[AgmMinutes onCloseRequested] ${e?.message || e}`);
+      }
+    })();
+    return () => { try { unlisten?.(); } catch { /* ignore */ } };
+  }, []);
+
+  // Load AI opt-in setting.
+  useEffect(() => {
+    (async () => {
+      try {
+        const s = await getSettings();
+        setAiEnabled(s.agm_ai_enabled === "1" && s.azure_ai_key_set === "1");
+      } catch (e: any) {
+        void logError("WARN", `[AgmMinutes getSettings] ${e?.message || e}`);
+      }
+    })();
+  }, []);
 
   async function refreshList() {
-    try { setSavedYears(await listDraftYears()); } catch { /* ignore */ }
+    try { setSavedYears(await listDraftYears()); }
+    catch (e: any) { void logError("WARN", `[AgmMinutes.refreshList] ${e?.message || e}`); }
   }
 
   useEffect(() => {
@@ -108,6 +147,18 @@ export default function AgmMinutesEditor() {
       return;
     }
 
+    // Soft-confirm before overwriting an existing docx.
+    try {
+      if (await exists(dest)) {
+        const ok = await showConfirm(
+          `A file already exists at:\n${dest}\n\nOverwrite it with the current draft?`
+        );
+        if (!ok) return;
+      }
+    } catch (e: any) {
+      void logError("WARN", `[AgmMinutes exists check] ${e?.message || e}`);
+    }
+
     setBusy(true);
     let wroteOk = false;
     try {
@@ -124,8 +175,10 @@ export default function AgmMinutesEditor() {
     } catch (e: any) {
       if (!wroteOk) {
         // Still persist the current edits as an in-progress draft so nothing is lost.
-        try { await saveDraft(minutes, /* finalized */ false); setDirty(false); await refreshList(); } catch { /* ignore secondary failure */ }
+        try { await saveDraft(minutes, /* finalized */ false); setDirty(false); await refreshList(); }
+        catch (e2: any) { void logError("WARN", `[AgmMinutes onGenerate fallback save] ${e2?.message || e2}`); }
       }
+      void logError("ERROR", `[AgmMinutes onGenerate] ${e?.message || e}`);
       await showAlert("Generate failed: " + (e?.message || e), { kind: "error" });
     } finally { setBusy(false); }
   }
@@ -242,10 +295,12 @@ export default function AgmMinutesEditor() {
           <button className="btn secondary" onClick={onSave} disabled={busy || !!aiBusy || !dirty}>
             {dirty ? "Save Draft" : "Saved"}
           </button>
-          <button className="btn secondary" onClick={onDraftAll} disabled={busy || !!aiBusy || !minutes}
-                  title="Draft empty sections and free-text bodies with AI using this year's data.">
-            {aiBusy === "all" ? "✨ Drafting…" : "✨ Draft with AI"}
-          </button>
+          {aiEnabled && (
+            <button className="btn secondary" onClick={onDraftAll} disabled={busy || !!aiBusy || !minutes}
+                    title="Draft empty sections and free-text bodies with AI using this year's data.">
+              {aiBusy === "all" ? "✨ Drafting…" : "✨ Draft with AI"}
+            </button>
+          )}
           {aiBusy && (
             <button className="btn ghost" onClick={onCancelAi} title="Cancel the in-progress AI draft.">
               ✕ Cancel AI
@@ -269,6 +324,7 @@ export default function AgmMinutesEditor() {
           <FormPane minutes={minutes} patch={patch}
                     fyStart={fyStart}
                     aiBusy={aiBusy}
+                    aiEnabled={aiEnabled}
                     draftField={draftField} />
           <PreviewPane minutes={minutes} />
         </div>
@@ -286,10 +342,11 @@ interface FormProps {
   patch: (p: Partial<AgmMinutes>) => void;
   fyStart: number;
   aiBusy: string | null;
+  aiEnabled: boolean;
   draftField: (id: string, fetcher: (signal: AbortSignal) => Promise<string>, assign: (text: string) => void) => Promise<void>;
 }
 
-function FormPane({ minutes, patch, fyStart, aiBusy, draftField }: FormProps) {
+function FormPane({ minutes, patch, fyStart, aiBusy, aiEnabled, draftField }: FormProps) {
   async function aiFin() {
     await draftField("fin",
       async (signal) => draftFinancialReport(await gatherYearContext(fyStart), signal),
@@ -380,13 +437,13 @@ function FormPane({ minutes, patch, fyStart, aiBusy, draftField }: FormProps) {
 
       {/* ---- 3. Chairman's Report ---- */}
       <Panel title="3. Chairman's Report"
-        action={
+        action={aiEnabled ? (
           <button className="btn ghost" style={{ fontSize: 12 }}
                   disabled={!!aiBusy} onClick={aiChairman}
                   title="Fill empty sub-sections with AI drafts">
             {aiBusy === "chairman" ? "✨ Drafting…" : "✨ AI fill empty"}
           </button>
-        }>
+        ) : undefined}>
         <p style={{ margin: "-4px 0 8px 0", color: "var(--muted)", fontSize: 12 }}>
           Empty sub-sections are skipped in the exported document. Enter one bullet per line for list blocks.
         </p>
@@ -409,12 +466,12 @@ function FormPane({ minutes, patch, fyStart, aiBusy, draftField }: FormProps) {
 
       {/* ---- 4. Financial Report ---- */}
       <Panel title="4. Financial Report"
-        action={
+        action={aiEnabled ? (
           <button className="btn ghost" style={{ fontSize: 12 }} disabled={!!aiBusy} onClick={aiFin}
                   title="Draft the financial narrative from this year's revenue, subsidies and expenses.">
             {aiBusy === "fin" ? "✨ Drafting…" : "✨ AI draft"}
           </button>
-        }>
+        ) : undefined}>
         <Field label="Presented by">
           <input type="text" value={minutes.financialReportPresenter}
                  onChange={(e) => patch({ financialReportPresenter: e.target.value })} />
@@ -430,18 +487,22 @@ function FormPane({ minutes, patch, fyStart, aiBusy, draftField }: FormProps) {
         <Field label="Staffing Challenges">
           <textarea rows={3} value={minutes.staffingChallenges}
                     onChange={(e) => patch({ staffingChallenges: e.target.value })} />
-          <button className="btn ghost" style={{ fontSize: 12, alignSelf: "flex-start", marginTop: 4 }}
-                  disabled={!!aiBusy} onClick={aiStaffing}>
-            {aiBusy === "staffing" ? "✨ Drafting…" : "✨ AI draft"}
-          </button>
+          {aiEnabled && (
+            <button className="btn ghost" style={{ fontSize: 12, alignSelf: "flex-start", marginTop: 4 }}
+                    disabled={!!aiBusy} onClick={aiStaffing}>
+              {aiBusy === "staffing" ? "✨ Drafting…" : "✨ AI draft"}
+            </button>
+          )}
         </Field>
         <Field label="Facilities Maintenance">
           <textarea rows={3} value={minutes.facilitiesMaintenance}
                     onChange={(e) => patch({ facilitiesMaintenance: e.target.value })} />
-          <button className="btn ghost" style={{ fontSize: 12, alignSelf: "flex-start", marginTop: 4 }}
-                  disabled={!!aiBusy} onClick={aiFacilities}>
-            {aiBusy === "facilities" ? "✨ Drafting…" : "✨ AI draft"}
-          </button>
+          {aiEnabled && (
+            <button className="btn ghost" style={{ fontSize: 12, alignSelf: "flex-start", marginTop: 4 }}
+                    disabled={!!aiBusy} onClick={aiFacilities}>
+              {aiBusy === "facilities" ? "✨ Drafting…" : "✨ AI draft"}
+            </button>
+          )}
         </Field>
       </Panel>
 

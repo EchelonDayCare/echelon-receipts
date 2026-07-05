@@ -12,6 +12,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { db, getSettings } from "./db";
 import { fiscalYearBounds, fiscalYearLabel } from "./fiscalYear";
 import type { AgmMinutes, ChairmanBlock } from "./agmMinutes";
+import { logError } from "./errorLog";
 
 // Endpoint constants must match src-tauri/src/ask_echelon.rs
 const AZURE_ENDPOINT = "https://ai-nse.openai.azure.com";
@@ -50,13 +51,19 @@ async function safeSelectOne<T>(sql: string, args: any[] = [], fallback: T): Pro
     const d = await db();
     const rows = await d.select<T[]>(sql, args);
     return rows[0] ?? fallback;
-  } catch { return fallback; }
+  } catch (e: any) {
+    void logError("WARN", `[aiDraft.safeSelectOne] ${e?.message || e}\nSQL: ${sql.slice(0, 200)}`);
+    return fallback;
+  }
 }
 async function safeSelect<T>(sql: string, args: any[] = []): Promise<T[]> {
   try {
     const d = await db();
     return await d.select<T[]>(sql, args);
-  } catch { return []; }
+  } catch (e: any) {
+    void logError("WARN", `[aiDraft.safeSelect] ${e?.message || e}\nSQL: ${sql.slice(0, 200)}`);
+    return [];
+  }
 }
 
 export async function gatherYearContext(fyStart: number): Promise<YearContext> {
@@ -100,16 +107,29 @@ export async function gatherYearContext(fyStart: number): Promise<YearContext> {
     [start, end]
   );
 
+  // Staff active AT ANY POINT during the fiscal year (not just currently active).
+  // Uses staff.created_at (assumed <= start of FY means hired before/during) and
+  // staff.archived_at (NULL = still active). Best-effort — falls back to current
+  // active roster if the timestamps are missing on older rows.
   const staff = await safeSelect<{ name: string; role: string | null }>(
-    "SELECT name, role FROM staff WHERE active=1 ORDER BY name COLLATE NOCASE"
+    `SELECT DISTINCT name, role
+       FROM staff
+      WHERE (created_at IS NULL OR created_at <= ?)
+        AND (archived_at IS NULL OR archived_at >= ?)
+      ORDER BY name COLLATE NOCASE`,
+    [end, start]
   );
 
+  // Credentials whose expiry falls INSIDE the fiscal year (expired during FY)
+  // or within 90 days after FY-end (upcoming renewal risk noted at AGM time).
   const credExp = await safeSelect<{ staff: string; type: string; expiry: string }>(
     `SELECT s.name AS staff, c.type, c.expiry_date AS expiry
        FROM staff_credentials c JOIN staff s ON s.id=c.staff_id
-      WHERE c.expiry_date IS NOT NULL AND c.expiry_date <= date(?, '+90 days') AND c.expiry_date >= ?
+      WHERE c.expiry_date IS NOT NULL
+        AND c.expiry_date >= ?
+        AND c.expiry_date <= date(?, '+90 days')
       ORDER BY c.expiry_date`,
-    [end, start]
+    [start, end]
   );
 
   const drills = await safeSelectOne<{ n: number }>(
@@ -138,7 +158,7 @@ export async function gatherYearContext(fyStart: number): Promise<YearContext> {
     priorGross = pRev.gross || 0;
     priorExp = pExp.total || 0;
     priorActive = pAct.active || 0;
-  } catch { /* ignore */ }
+  } catch (e: any) { void logError("WARN", `[aiDraft prior-year] ${e?.message || e}`); }
 
   return {
     yearLabel: fiscalYearLabel(fyStart),
@@ -187,10 +207,29 @@ function combinedController(external?: AbortSignal): { controller: AbortControll
   };
 }
 
-async function azureChat(system: string, user: string, maxTokens = 400, signal?: AbortSignal): Promise<string> {
+async function recordAiEvent(section: string, prompt: string, response: string, model: string, yearLabel?: string): Promise<void> {
+  try {
+    const d = await db();
+    await d.execute(
+      `INSERT INTO agm_ai_events(year_label, section, model, prompt_text, response_text, created_at)
+       VALUES(?, ?, ?, ?, ?, datetime('now'))`,
+      [yearLabel || null, section, model, prompt, response]
+    );
+  } catch (e: any) {
+    void logError("WARN", `[aiDraft.recordAiEvent] ${e?.message || e}`);
+  }
+}
+
+async function azureChat(
+  system: string, user: string, maxTokens = 400, signal?: AbortSignal,
+  audit?: { section: string; yearLabel?: string },
+): Promise<string> {
   const settings = await getSettings();
   if (settings.azure_ai_key_set !== "1") {
     throw new Error("Azure AI key is not configured. Set it in Configuration → Identity.");
+  }
+  if (settings.agm_ai_enabled === "0") {
+    throw new Error("AGM AI drafting is disabled. Enable it in Settings → AGM AI.");
   }
   const apiKey = await invoke<string | null>("keychain_get", { key: "azure_ai_key" });
   if (!apiKey) throw new Error("Azure AI key not found in keychain.");
@@ -217,11 +256,24 @@ async function azureChat(system: string, user: string, maxTokens = 400, signal?:
       throw new Error(`Azure OpenAI HTTP ${resp.status}: ${t.slice(0, 200)}`);
     }
     const json = await resp.json();
-    const content: string = json?.choices?.[0]?.message?.content ?? "";
-    return content.trim();
+    const content: string = (json?.choices?.[0]?.message?.content ?? "").trim();
+    if (audit) {
+      void recordAiEvent(audit.section, `SYSTEM:\n${system}\n\nUSER:\n${user}`, content, CHAT_DEPLOY, audit.yearLabel);
+    }
+    return content;
   } finally {
     cleanup();
   }
+}
+
+// Neutralise attempts to inject instructions via user-editable strings (headings,
+// chairperson names, etc.). Injection is low-risk here (local, own key) but board
+// audit logs shouldn't show "ignore previous instructions" attacks succeeding.
+function sanitizePromptString(s: string): string {
+  return (s || "")
+    .replace(/[\r\n]+/g, " ")
+    .replace(/["\\]/g, "")
+    .slice(0, 200);
 }
 
 // ─── Section drafters ──────────────────────────────────────────────────
@@ -271,7 +323,7 @@ export async function draftFinancialReport(c: YearContext, signal?: AbortSignal)
     `Write one short paragraph (2–4 sentences) for the "Financial Report" section of the AGM minutes. ` +
     `Summarise the year's financial health at a high level. Mention gross revenue, subsidies received, and total expenses. ` +
     `End with "Note: Financial report is attached." on a new line.\n\nDATA:\n${facts}`;
-  return await azureChat(BASE_TONE, user, 300, signal);
+  return await azureChat(BASE_TONE, user, 300, signal, { section: "financialReport", yearLabel: c.yearLabel });
 }
 
 export async function draftStaffingChallenges(c: YearContext, signal?: AbortSignal): Promise<string> {
@@ -280,7 +332,7 @@ export async function draftStaffingChallenges(c: YearContext, signal?: AbortSign
     `Write one short paragraph (2–3 sentences) for the "Staffing Challenges" sub-section of General Discussion. ` +
     `Focus on staffing continuity, credentials due for renewal (if any), and any workforce risks implied by the data. ` +
     `If nothing notable, say the daycare maintained a stable, qualified team.\n\nDATA:\n${facts}`;
-  return await azureChat(BASE_TONE, user, 250, signal);
+  return await azureChat(BASE_TONE, user, 250, signal, { section: "staffingChallenges", yearLabel: c.yearLabel });
 }
 
 export async function draftFacilitiesMaintenance(c: YearContext, signal?: AbortSignal): Promise<string> {
@@ -289,18 +341,19 @@ export async function draftFacilitiesMaintenance(c: YearContext, signal?: AbortS
     `Write one short paragraph (2–3 sentences) for the "Facilities Maintenance" sub-section of General Discussion. ` +
     `Reference any maintenance-related expense categories if present, and drill completion for safety. ` +
     `If no maintenance-specific data, say the facility was well-maintained and safety drills were conducted regularly.\n\nDATA:\n${facts}`;
-  return await azureChat(BASE_TONE, user, 250, signal);
+  return await azureChat(BASE_TONE, user, 250, signal, { section: "facilitiesMaintenance", yearLabel: c.yearLabel });
 }
 
 export async function draftChairmanBlock(heading: string, c: YearContext, wantBullets: boolean, signal?: AbortSignal): Promise<string | string[]> {
   const facts = financialFacts(c) + "\n" + staffFacts(c);
+  const safeHeading = sanitizePromptString(heading.replace(/:$/, ""));
   const user =
-    `Write the body text for the "${heading.replace(/:$/, "")}" sub-heading of the Chairman's Report in the AGM minutes.\n` +
+    `Write the body text for the "${safeHeading}" sub-heading of the Chairman's Report in the AGM minutes.\n` +
     (wantBullets
       ? `Reply with 3–6 short bullet points. One bullet per line. No leading dashes or bullets — plain lines only.`
       : `Reply with one short paragraph (2–4 sentences).`) +
     `\n\nDATA:\n${facts}`;
-  const raw = await azureChat(BASE_TONE, user, wantBullets ? 350 : 250, signal);
+  const raw = await azureChat(BASE_TONE, user, wantBullets ? 350 : 250, signal, { section: `chairman:${safeHeading}`, yearLabel: c.yearLabel });
   if (wantBullets) {
     return raw.split(/\r?\n/).map((s) => s.replace(/^\s*[-•*]\s*/, "").trim()).filter(Boolean);
   }
@@ -335,13 +388,16 @@ export async function draftEntireMinutes(m: AgmMinutes, c: YearContext, opts: Dr
   const canOverwriteFac = !init || sameStringField(next.facilitiesMaintenance, init.facilitiesMaintenance);
 
   if (canOverwriteFin) {
-    try { next.financialReportBody = await draftFinancialReport(c, signal); } catch (e) { if ((e as any)?.name === "AbortError") throw e; }
+    try { next.financialReportBody = await draftFinancialReport(c, signal); }
+    catch (e: any) { if (e?.name === "AbortError") throw e; void logError("WARN", `[draftEntireMinutes fin] ${e?.message || e}`); }
   }
   if (canOverwriteStaff) {
-    try { next.staffingChallenges = await draftStaffingChallenges(c, signal); } catch (e) { if ((e as any)?.name === "AbortError") throw e; }
+    try { next.staffingChallenges = await draftStaffingChallenges(c, signal); }
+    catch (e: any) { if (e?.name === "AbortError") throw e; void logError("WARN", `[draftEntireMinutes staff] ${e?.message || e}`); }
   }
   if (canOverwriteFac) {
-    try { next.facilitiesMaintenance = await draftFacilitiesMaintenance(c, signal); } catch (e) { if ((e as any)?.name === "AbortError") throw e; }
+    try { next.facilitiesMaintenance = await draftFacilitiesMaintenance(c, signal); }
+    catch (e: any) { if (e?.name === "AbortError") throw e; void logError("WARN", `[draftEntireMinutes fac] ${e?.message || e}`); }
   }
 
   // Chairman's Report — draft blocks whose body is either empty OR unchanged from initial.
@@ -356,8 +412,9 @@ export async function draftEntireMinutes(m: AgmMinutes, c: YearContext, opts: Dr
     try {
       const body = await draftChairmanBlock(b.heading, c, isList, signal);
       filled.push({ heading: b.heading, body });
-    } catch (e) {
-      if ((e as any)?.name === "AbortError") throw e;
+    } catch (e: any) {
+      if (e?.name === "AbortError") throw e;
+      void logError("WARN", `[draftEntireMinutes chairman:${b.heading}] ${e?.message || e}`);
       filled.push(b);
     }
   }

@@ -582,6 +582,22 @@ export default function Settings() {
             <Field s={s} setS={setS} k="staff_cred_alert_days" label="Credential warning window (days)" placeholder="60" hint="Home alerts trigger when a credential expires within this many days. Default 60." tip="How many days before expiry should the Home screen warn you? 60 days is enough time to book a First Aid renewal or order a new Criminal Record Check." />
           </div>
         )}
+
+        <hr style={{ border: 0, borderTop: "1px solid var(--border)", margin: "16px 0" }} />
+
+        <div className="field" style={{ marginBottom: 8 }}>
+          <label style={{ display: "flex", alignItems: "center", gap: 8, cursor: "pointer" }}>
+            <input
+              type="checkbox"
+              checked={s.agm_ai_enabled === "1"}
+              onChange={(e) => setS({ ...s, agm_ai_enabled: e.target.checked ? "1" : "0" })}
+            />
+            <strong>AGM Minutes AI drafting</strong>&nbsp;
+            <span style={{ color: "var(--muted)", fontWeight: 400 }}>
+              — When on, per-section ✨ buttons and "Draft with AI" appear in the AGM Minutes editor. Every prompt + response is logged to <code>agm_ai_events</code> for board audit. Requires the Azure key above.
+            </span>
+          </label>
+        </div>
       </div>
     );
   }
