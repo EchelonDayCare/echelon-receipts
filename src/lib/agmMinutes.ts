@@ -9,8 +9,12 @@
 // helpers where useful) — the base flow works fully offline.
 
 import { db, execRetry, getSettings } from "./db";
-import { Document, Packer, Paragraph, TextRun, AlignmentType, HeadingLevel } from "docx";
+import {
+  Document, Packer, Paragraph, TextRun, AlignmentType, HeadingLevel,
+  Header, ImageRun, ExternalHyperlink,
+} from "docx";
 import { fiscalYearBounds, fiscalYearLabel } from "./fiscalYear";
+import agmLogoUrl from "../assets/agm-header-logo.png";
 
 export interface AgmMinutes {
   // Header
@@ -256,8 +260,9 @@ function formatMeetingDate(d: Date): string {
  */
 export async function generateDocxBlob(m: AgmMinutes): Promise<Blob> {
   const children: Paragraph[] = [];
+  const settings = await getSettings();
 
-  // ---- Header ----
+  // ---- Body header (title + association) — matches original samples ----
   children.push(new Paragraph({
     alignment: AlignmentType.CENTER,
     children: [new TextRun({ text: `Minutes of the Annual General Meeting ${m.yearLabel}`, bold: true, size: 28 })],
@@ -359,6 +364,9 @@ export async function generateDocxBlob(m: AgmMinutes): Promise<Blob> {
   children.push(sectionHeading("8. Adjournment"));
   children.push(plain(`The meeting was adjourned at ${m.adjournmentTime || DEFAULT_ADJOURN}.`));
 
+  // ---- Section header (page-repeating): logo + association + address + contact ----
+  const headerChildren = await buildSectionHeaderParagraphs(m.associationName, settings);
+
   const doc = new Document({
     creator: "Echelon Receipts",
     title: `AGM Minutes ${m.yearLabel}`,
@@ -369,11 +377,107 @@ export async function generateDocxBlob(m: AgmMinutes): Promise<Blob> {
         },
       },
     },
-    sections: [{ properties: {}, children }],
+    sections: [{
+      properties: {},
+      headers: {
+        default: new Header({ children: headerChildren }),
+      },
+      children,
+    }],
   });
 
   const blob = await Packer.toBlob(doc);
   return blob;
+}
+
+/** Build the page-repeating section header that matches AGM-2025_Final.docx:
+ *   [logo]  Echelon Daycare Teachers Association     (TNR bold 18pt, centered)
+ *           <address line>                           (Arial 10pt, centered)
+ *           Tel.: <phone>  Email: <email>            (Arial 10pt, centered)
+ *
+ *  Address/phone/email come from Settings (daycare_address, contact_phone,
+ *  contact_email) with sensible fallbacks matching the original samples so
+ *  a fresh install still produces the right document.
+ */
+async function buildSectionHeaderParagraphs(
+  associationName: string,
+  settings: Record<string, string>,
+): Promise<Paragraph[]> {
+  const address = settings.daycare_address?.trim()
+    || "101 - 575 West 8th Avenue l Vancouver, B.C. l V5Z 1C6 l";
+  const phone   = settings.contact_phone?.trim() || "(604) 874-4010";
+  const email   = settings.contact_email?.trim() || "echelondaycare@hotmail.com";
+
+  // Strip a leading "The " so the header matches the samples ("Echelon Daycare
+  // Teachers Association" — no leading "The" in the header, though the body
+  // title keeps it).
+  const assocForHeader = associationName.replace(/^\s*The\s+/i, "");
+
+  const paragraphs: Paragraph[] = [];
+
+  // Row 1: logo (inline at start) + centered association name.
+  // We insert the ImageRun and the assoc name in the same paragraph so they
+  // sit on the same line; the paragraph itself is centered, which visually
+  // matches the samples where the logo sits in the top-left corner.
+  const logoRuns: (ImageRun | TextRun)[] = [];
+  try {
+    const buf = await loadLogoBytes();
+    if (buf) {
+      logoRuns.push(new ImageRun({
+        // docx types insist on `type` field; PNG is the safe default.
+        type: "png",
+        data: buf,
+        transformation: { width: 72, height: 72 },
+      } as any));
+      // small spacer between logo and title
+      logoRuns.push(new TextRun({ text: "   " }));
+    }
+  } catch { /* no logo, continue without */ }
+
+  logoRuns.push(new TextRun({
+    text: assocForHeader,
+    bold: true,
+    font: "Times New Roman",
+    size: 36, // 18pt
+  }));
+
+  paragraphs.push(new Paragraph({
+    alignment: AlignmentType.CENTER,
+    children: logoRuns,
+  }));
+
+  // Row 2: address (Arial 10pt)
+  paragraphs.push(new Paragraph({
+    alignment: AlignmentType.CENTER,
+    children: [new TextRun({ text: address, font: "Arial", size: 20 })],
+  }));
+
+  // Row 3: Tel + Email hyperlink (Arial 10pt)
+  paragraphs.push(new Paragraph({
+    alignment: AlignmentType.CENTER,
+    children: [
+      new TextRun({ text: `Tel.: ${phone} Email: `, font: "Arial", size: 20 }),
+      new ExternalHyperlink({
+        link: `mailto:${email}`,
+        children: [new TextRun({ text: email, font: "Arial", size: 20, style: "Hyperlink" })],
+      }),
+    ],
+  }));
+
+  return paragraphs;
+}
+
+/** Fetch the bundled AGM logo as a Uint8Array (for docx ImageRun). Returns
+ *  null if the asset can't be loaded (feature still works without a logo). */
+async function loadLogoBytes(): Promise<Uint8Array | null> {
+  try {
+    const res = await fetch(agmLogoUrl);
+    if (!res.ok) return null;
+    const ab = await res.arrayBuffer();
+    return new Uint8Array(ab);
+  } catch {
+    return null;
+  }
 }
 
 // ---------- paragraph helpers (all Times New Roman 11pt via default style) ----------

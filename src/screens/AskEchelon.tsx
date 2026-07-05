@@ -37,6 +37,24 @@ function isEffectivelyEmpty(r: AskResult): boolean {
   );
 }
 
+/** Render a single cell. Columns whose name is/ends with 'json' or whose value
+ *  looks like a JSON blob get masked — showing the raw string would just be
+ *  noise. Anything else long is truncated with a hover-to-see-full tooltip. */
+function renderCell(v: unknown, colName?: string): React.ReactNode {
+  if (v === null || v === undefined) return <span style={{ color: "var(--muted)" }}>—</span>;
+  const s = String(v);
+  const looksJsonName = !!colName && /(^|_)json$/i.test(colName);
+  const looksJsonValue = s.length > 80 && (s.startsWith("{") || s.startsWith("["));
+  if (looksJsonName || looksJsonValue) {
+    return <span style={{ color: "var(--muted)", fontStyle: "italic" }}>[data blob — {s.length} chars]</span>;
+  }
+  if (s.length > 240) {
+    return <span title={s}>{s.slice(0, 240)}…</span>;
+  }
+  return s;
+}
+
+
 type Row = unknown[];
 
 interface HistoryItem {
@@ -324,8 +342,8 @@ export default function AskEchelon() {
                       {sortedRows.map((r, ri) => (
                         <tr key={ri} style={{ borderBottom: "1px solid #f1f5f9", background: ri % 2 === 0 ? "#ffffff" : "#fafbfc" }}>
                           {r.map((v, ci) => (
-                            <td key={ci} style={{ padding: "10px 14px" }}>
-                              {v === null || v === undefined ? <span style={{ color: "var(--muted)" }}>—</span> : String(v)}
+                            <td key={ci} style={{ padding: "10px 14px", maxWidth: 360, wordBreak: "break-word" }}>
+                              {renderCell(v, result.columns[ci])}
                             </td>
                           ))}
                         </tr>
