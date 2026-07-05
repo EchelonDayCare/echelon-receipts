@@ -451,7 +451,7 @@ function Field({ label, children }: { label: string; children: React.ReactNode }
   return (
     <label style={{ display: "flex", flexDirection: "column", gap: 4, fontSize: 12, color: "var(--muted)" }}>
       <span>{label}</span>
-      <div style={{ color: "var(--fg)" }}>{children}</div>
+      <div style={{ color: "var(--fg)", display: "flex", flexDirection: "column" }}>{children}</div>
     </label>
   );
 }
