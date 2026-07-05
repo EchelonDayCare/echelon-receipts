@@ -49,8 +49,20 @@ export default function NewReceipt() {
   useEffect(() => { refresh(); /* eslint-disable-next-line */ }, []);
   useEffect(() => { (async () => setStudents(await listStudents(year)))(); }, [year]);
   useEffect(() => {
-    if (!descTouched) setDescription(`${month} ${feeYear} Tuition Fee`);
-  }, [month, feeYear, descTouched]);
+    if (isRefund) {
+      // Refunds don't belong to a billing period; force a clean description.
+      setDescription("Refund");
+      setDescTouched(true);
+      setPending("0");
+    } else {
+      // Restore auto-description from month/year when refund is turned off.
+      setDescription(`${month} ${feeYear} Tuition Fee`);
+      setDescTouched(false);
+    }
+  }, [isRefund]); // eslint-disable-line
+  useEffect(() => {
+    if (!descTouched && !isRefund) setDescription(`${month} ${feeYear} Tuition Fee`);
+  }, [month, feeYear, descTouched, isRefund]);
 
   const student = useMemo(() => students.find((s) => s.id === studentId) || null, [students, studentId]);
 
@@ -81,6 +93,10 @@ export default function NewReceipt() {
     if (saving || sending) return;
     if (!student) { void showAlert("Pick a student first."); return; }
     if (!description.trim()) { void showAlert("Description is required."); return; }
+    if (isRefund && !comments.trim()) {
+      void showAlert("Please add a reason for the refund in the Comments box — it will appear on the receipt and in the email to the parent.");
+      return;
+    }
     const amt = parseFloat(amount); if (!(amt >= 0)) { void showAlert("Invalid amount."); return; }
     const pen = parseFloat(pending || "0") || 0;
     const bk = (breakdown && !isRefund) ? breakdown : null;
@@ -217,19 +233,20 @@ export default function NewReceipt() {
         <div className="row">
           <div className="field">
             <label>Fee Month</label>
-            <select value={month} onChange={(e) => { setMonth(e.target.value); setDescTouched(false); }}>
+            <select value={month} onChange={(e) => { setMonth(e.target.value); setDescTouched(false); }} disabled={isRefund}>
               {MONTHS.map((m) => <option key={m} value={m}>{m}</option>)}
             </select>
           </div>
           <div className="field">
             <label>Fee Year</label>
-            <input type="number" value={feeYear} onChange={(e) => { setFeeYear(parseInt(e.target.value || "0", 10)); setDescTouched(false); }} />
+            <input type="number" value={feeYear} onChange={(e) => { setFeeYear(parseInt(e.target.value || "0", 10)); setDescTouched(false); }} disabled={isRefund} />
           </div>
         </div>
 
         <div className="field">
           <label>Description</label>
-          <input value={description} onChange={(e) => { setDescription(e.target.value); setDescTouched(true); }} />
+          <input value={description} onChange={(e) => { setDescription(e.target.value); setDescTouched(true); }} disabled={isRefund} />
+          {isRefund && <small style={{ color: "var(--muted)" }}>Refund receipts always show as "Refund" — reason goes in Comments below.</small>}
         </div>
 
         {breakdown && breakdown.gross > 0 && !isRefund && (
@@ -260,12 +277,12 @@ export default function NewReceipt() {
 
         <div className="row">
           <div className="field">
-            <label>Amount Received ($)</label>
+            <label>{isRefund ? "Refund Amount ($)" : "Amount Received ($)"}</label>
             <input value={amount} onChange={(e) => { setAmount(e.target.value); setAmountTouched(true); }} />
           </div>
           <div className="field">
             <label>Pending Fees ($)</label>
-            <input value={pending} onChange={(e) => setPending(e.target.value)} />
+            <input value={pending} onChange={(e) => setPending(e.target.value)} disabled={isRefund} />
           </div>
         </div>
 
@@ -277,8 +294,11 @@ export default function NewReceipt() {
         </div>
 
         <div className="field">
-          <label>Comments</label>
-          <textarea value={comments} onChange={(e) => setComments(e.target.value)} placeholder="Optional notes (e.g., Pending Fees CAD120)" />
+          <label>Comments{isRefund && <span style={{ color: "var(--danger, #c00)" }}> *</span>}</label>
+          <textarea value={comments} onChange={(e) => setComments(e.target.value)}
+            placeholder={isRefund
+              ? "Reason for refund (shown to parent in email) — e.g. Deposit refund, Sick day credit, Overpayment adjustment"
+              : "Optional notes (e.g., Pending Fees CAD120)"} />
         </div>
 
         <div style={{ display: "flex", gap: 10, marginTop: 8 }}>
