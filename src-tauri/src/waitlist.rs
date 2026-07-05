@@ -259,15 +259,21 @@ fn parse_sheets_response(text: &str) -> Result<Vec<Vec<String>>, String> {
 // for us, and the Sheets range/id may contain '!', spaces, etc. We keep it
 // local to avoid pulling `url`/`percent-encoding` as new dependencies.
 mod urlencoding {
+    /// RFC 3986 percent-encode for use inside a URL path segment.
+    /// We deliberately restrict to *unreserved* characters (A-Z a-z 0-9 -_.~)
+    /// and percent-encode EVERYTHING else. In particular `!` and `:` in an A1
+    /// range like `Form_Responses!A:K` become `%21` and `%3A`.
+    ///
+    /// Google Sheets' router is picky about `!` at parse time — leaving it raw
+    /// causes `Unable to parse range: Form_Responses!A:K` even when the tab
+    /// name is correct. Percent-encoding fixes it.
     pub fn encode_path(s: &str) -> String {
         let mut out = String::with_capacity(s.len());
         for b in s.as_bytes() {
             let c = *b;
-            // RFC 3986 pchar minus '?', '#', but we also let ':', '@', A-Z, a-z, 0-9, -_.~ pass.
-            let safe = c.is_ascii_alphanumeric()
-                || matches!(c, b'-' | b'_' | b'.' | b'~' | b'!' | b'$' | b'&' | b'\''
-                    | b'(' | b')' | b'*' | b'+' | b',' | b';' | b'=' | b':' | b'@');
-            if safe {
+            let unreserved = c.is_ascii_alphanumeric()
+                || matches!(c, b'-' | b'_' | b'.' | b'~');
+            if unreserved {
                 out.push(c as char);
             } else {
                 out.push_str(&format!("%{:02X}", c));
@@ -278,7 +284,122 @@ mod urlencoding {
 }
 
 // ─── Keychain helpers ───────────────────────────────────────────────────
+//
+// Windows Credential Manager caps single-blob passwords at 2560 UTF-16 chars
+// (~5120 bytes). Google service-account JSON is ~2.5 KB → borderline; the
+// PEM-embedded private_key varies and often pushes us over. We therefore
+// CHUNK the JSON into 1000-char slices on Windows, storing:
+//   waitlist_sa_chunks   → decimal N (chunk count)
+//   waitlist_sa_1..N     → the chunks in order
+//
+// On macOS / Linux we use the single-entry path (KEY_NAME) — Keychain / Secret
+// Service have no such limit.
+//
+// Legacy single-entry blobs on Windows (from v0.8.0) are still read for
+// backward compatibility, then rewritten as chunks on next save.
 
+const CHUNK_KEY_COUNT: &str = "waitlist_sa_chunks";
+const CHUNK_KEY_PREFIX: &str = "waitlist_sa_";  // followed by 1-based index
+const CHUNK_SIZE: usize = 1000;                 // well under 2560-wide-char cap
+
+#[cfg(target_os = "windows")]
+fn read_key_from_keychain() -> Result<Option<String>, String> {
+    // Prefer chunked layout.
+    let count_entry = keyring::Entry::new(KEYRING_SERVICE, CHUNK_KEY_COUNT)
+        .map_err(|e| format!("keychain open: {e}"))?;
+    match count_entry.get_password() {
+        Ok(s) => {
+            let n: usize = s.trim().parse().map_err(|_| "keychain chunk count parse".to_string())?;
+            let mut out = String::with_capacity(n * CHUNK_SIZE);
+            for i in 1..=n {
+                let name = format!("{}{}", CHUNK_KEY_PREFIX, i);
+                let entry = keyring::Entry::new(KEYRING_SERVICE, &name)
+                    .map_err(|e| format!("keychain open chunk {i}: {e}"))?;
+                let piece = entry.get_password()
+                    .map_err(|e| format!("keychain read chunk {i}: {e}"))?;
+                out.push_str(&piece);
+            }
+            return Ok(Some(out));
+        }
+        Err(keyring::Error::NoEntry) => {}
+        Err(e) => return Err(format!("keychain read chunks: {e}")),
+    }
+    // Legacy single-entry fallback (Mac migrations / old Windows installs).
+    let entry = keyring::Entry::new(KEYRING_SERVICE, KEY_NAME)
+        .map_err(|e| format!("keychain open: {e}"))?;
+    match entry.get_password() {
+        Ok(s) => Ok(Some(s)),
+        Err(keyring::Error::NoEntry) => Ok(None),
+        Err(e) => Err(format!("keychain read: {e}")),
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn write_key_to_keychain(json_text: &str) -> Result<(), String> {
+    // Delete any legacy single-entry blob first so we don't leave stale data.
+    let _ = keyring::Entry::new(KEYRING_SERVICE, KEY_NAME)
+        .and_then(|e| e.delete_credential());
+    // Wipe any prior chunk set (defensive).
+    delete_chunks_windows()?;
+    // Chunk on char boundaries — service-account JSON is ASCII-only, so
+    // byte and char indexing coincide, but be safe with .chars().
+    let chars: Vec<char> = json_text.chars().collect();
+    let n = (chars.len() + CHUNK_SIZE - 1) / CHUNK_SIZE;
+    for i in 0..n {
+        let start = i * CHUNK_SIZE;
+        let end = ((i + 1) * CHUNK_SIZE).min(chars.len());
+        let piece: String = chars[start..end].iter().collect();
+        let name = format!("{}{}", CHUNK_KEY_PREFIX, i + 1);
+        let entry = keyring::Entry::new(KEYRING_SERVICE, &name)
+            .map_err(|e| format!("keychain open chunk {}: {e}", i + 1))?;
+        entry.set_password(&piece)
+            .map_err(|e| format!("keychain write chunk {}: {e}", i + 1))?;
+    }
+    let count_entry = keyring::Entry::new(KEYRING_SERVICE, CHUNK_KEY_COUNT)
+        .map_err(|e| format!("keychain open count: {e}"))?;
+    count_entry.set_password(&n.to_string())
+        .map_err(|e| format!("keychain write count: {e}"))
+}
+
+#[cfg(target_os = "windows")]
+fn delete_key_from_keychain() -> Result<(), String> {
+    // Delete legacy single-entry and any chunks + count.
+    let _ = keyring::Entry::new(KEYRING_SERVICE, KEY_NAME)
+        .and_then(|e| e.delete_credential());
+    delete_chunks_windows()
+}
+
+#[cfg(target_os = "windows")]
+fn delete_chunks_windows() -> Result<(), String> {
+    let count_entry = keyring::Entry::new(KEYRING_SERVICE, CHUNK_KEY_COUNT)
+        .map_err(|e| format!("keychain open count: {e}"))?;
+    let n: Option<usize> = match count_entry.get_password() {
+        Ok(s) => s.trim().parse().ok(),
+        Err(keyring::Error::NoEntry) => None,
+        Err(e) => return Err(format!("keychain read count: {e}")),
+    };
+    if let Some(n) = n {
+        for i in 1..=n {
+            let name = format!("{}{}", CHUNK_KEY_PREFIX, i);
+            if let Ok(entry) = keyring::Entry::new(KEYRING_SERVICE, &name) {
+                let _ = entry.delete_credential();
+            }
+        }
+    }
+    // Also try a few extra indices in case we ever chunked larger before.
+    for i in 1..=16 {
+        let name = format!("{}{}", CHUNK_KEY_PREFIX, i);
+        if let Ok(entry) = keyring::Entry::new(KEYRING_SERVICE, &name) {
+            let _ = entry.delete_credential();
+        }
+    }
+    match count_entry.delete_credential() {
+        Ok(_) | Err(keyring::Error::NoEntry) => Ok(()),
+        Err(e) => Err(format!("keychain delete count: {e}")),
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
 fn read_key_from_keychain() -> Result<Option<String>, String> {
     let entry = keyring::Entry::new(KEYRING_SERVICE, KEY_NAME)
         .map_err(|e| format!("keychain open: {e}"))?;
@@ -289,12 +410,14 @@ fn read_key_from_keychain() -> Result<Option<String>, String> {
     }
 }
 
+#[cfg(not(target_os = "windows"))]
 fn write_key_to_keychain(json_text: &str) -> Result<(), String> {
     let entry = keyring::Entry::new(KEYRING_SERVICE, KEY_NAME)
         .map_err(|e| format!("keychain open: {e}"))?;
     entry.set_password(json_text).map_err(|e| format!("keychain write: {e}"))
 }
 
+#[cfg(not(target_os = "windows"))]
 fn delete_key_from_keychain() -> Result<(), String> {
     let entry = keyring::Entry::new(KEYRING_SERVICE, KEY_NAME)
         .map_err(|e| format!("keychain open: {e}"))?;
