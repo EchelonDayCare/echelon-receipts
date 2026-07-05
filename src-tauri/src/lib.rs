@@ -2,7 +2,7 @@ use tauri_plugin_sql::{Migration, MigrationKind};
 
 mod email;
 mod errlog;
-mod gemini;
+mod azure_ai;
 mod consensus;
 mod inbox;
 mod preprocess;
@@ -106,9 +106,8 @@ pub fn run() {
             email::keychain_delete,
             restore::stage_restore,
             restore::restart_app,
-            gemini::extract_timesheet,
-            gemini::extract_attendance,
-            gemini::extract_visa_statement,
+            azure_ai::extract_attendance,
+            azure_ai::extract_visa_statement,
             consensus::extract_timesheet_consensus,
             inbox::inbox_list_recent,
             preprocess::normalize_sheet,

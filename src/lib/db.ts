@@ -288,7 +288,7 @@ async function ensureSchema(d: Database): Promise<void> {
   }
   for (const [k, v] of [
     ["feature_staff_hours_enabled", ""],
-    ["gemini_api_key_set", ""],
+    ["azure_ai_key_set", ""],
     ["staff_default_hourly_rate", ""],
     ["staff_cred_alert_days", "60"],
   ] as const) await setting(k, v);

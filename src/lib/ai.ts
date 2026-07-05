@@ -1,17 +1,15 @@
-// Gemini OCR wrapper.
+// Azure AI Foundry OCR wrappers — used by child attendance sign-in sheets
+// and Visa / credit-card statement import. Both route through the
+// Mistral Document AI endpoint (see src-tauri/src/azure_ai.rs).
 import { invoke } from "@tauri-apps/api/core";
 
+// Row shape shared with the staff-timesheet consensus flow.
 export interface ExtractedRow {
   staff_name: string;
   work_date: string;
   in_time: string | null;
   out_time: string | null;
   no_lunch?: boolean;
-}
-export interface ExtractResult {
-  rows: ExtractedRow[];
-  raw_text: string;
-  detected_month_year?: string | null;  // "YYYY-MM" read off the sheet itself
 }
 
 function bytesToB64(bytes: Uint8Array): string {
@@ -31,33 +29,13 @@ export function fileToMime(name: string): string {
   return "image/jpeg";
 }
 
-export async function extractTimesheet(opts: {
-  apiKey: string;
-  imageBytes: Uint8Array;
-  mimeType: string;
-  monthYear: string; // "YYYY-MM"
-  knownStaffNames: string[];
-}): Promise<ExtractResult> {
-  const image_b64 = bytesToB64(opts.imageBytes);
-  return await invoke<ExtractResult>("extract_timesheet", {
-    args: {
-      api_key: opts.apiKey,
-      image_b64,
-      mime_type: opts.mimeType,
-      month_year: opts.monthYear,
-      known_staff_names: opts.knownStaffNames,
-    },
-  });
-}
-
-// Child attendance sheet OCR — mirrors extractTimesheet but for daycare
-// sign-in sheets (rows are children, columns may be drop-off / pick-up / signature).
+// ─── Child attendance sign-in sheet ─────────────────────────────────────
 export interface ExtractedAttendanceRow {
   child_name: string;
   work_date: string;
   in_time: string | null;
   out_time: string | null;
-  status: string | null;          // "present" | "absent" | "sick" | "late" | "holiday"
+  status: string | null;
   signed_in_by: string | null;
   signed_out_by: string | null;
 }
@@ -67,16 +45,16 @@ export interface ExtractAttendanceResult {
 }
 
 export async function extractAttendance(opts: {
-  apiKey: string;
+  azureKey: string;
   imageBytes: Uint8Array;
   mimeType: string;
-  targetDate: string; // "YYYY-MM-DD"
+  targetDate: string;
   knownStudentNames: string[];
 }): Promise<ExtractAttendanceResult> {
   const image_b64 = bytesToB64(opts.imageBytes);
   return await invoke<ExtractAttendanceResult>("extract_attendance", {
     args: {
-      api_key: opts.apiKey,
+      azure_ai_key: opts.azureKey,
       image_b64,
       mime_type: opts.mimeType,
       target_date: opts.targetDate,

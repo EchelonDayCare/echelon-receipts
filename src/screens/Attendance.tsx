@@ -9,7 +9,7 @@ import {
   matchStudentByName,
   type DayRosterRow, type AttendanceStatus,
 } from "../lib/attendance";
-import { extractAttendance, fileToMime, type ExtractedAttendanceRow } from "../lib/gemini";
+import { extractAttendance, fileToMime, type ExtractedAttendanceRow } from "../lib/ai";
 import type { SettingsMap } from "../types";
 import { h } from "../lib/html";
 
@@ -45,22 +45,22 @@ export default function Attendance() {
     setTimeout(() => setToast(null), 2500);
   }
 
-  // ---- OCR: read attendance sheet via Gemini ----
+  // ---- OCR: read attendance sheet via Azure Mistral Document AI ----
   async function runAttendanceOcr(picked: string) {
-    if (settings.gemini_api_key_set !== "1") {
-      show("Add your Gemini API key in Settings first.", "err"); return;
+    if (settings.azure_ai_key_set !== "1") {
+      show("Add your Azure AI Foundry key in Settings first.", "err"); return;
     }
     setOcrBusy(true);
     setOcrResult(null);
     let apiKey: string | null = null;
     try {
-      apiKey = await invoke<string | null>("keychain_get", { key: "gemini_api_key" });
-      if (!apiKey) throw new Error("Gemini API key not found in keychain — re-save it in Settings.");
+      apiKey = await invoke<string | null>("keychain_get", { key: "azure_ai_key" });
+      if (!apiKey) throw new Error("Azure AI Foundry key not found in keychain — re-save it in Settings.");
       const bytes = await readFile(picked);
       const mime = fileToMime(picked);
       const studentList = rows.map((r) => ({ id: r.student_id, name: r.student_name }));
       const result = await extractAttendance({
-        apiKey, imageBytes: bytes, mimeType: mime,
+        azureKey: apiKey, imageBytes: bytes, mimeType: mime,
         targetDate: date,
         knownStudentNames: studentList.map((s) => s.name),
       });
@@ -91,8 +91,8 @@ export default function Attendance() {
   }
 
   async function importLatestFromDownloads() {
-    if (settings.gemini_api_key_set !== "1") {
-      show("Add your Gemini API key in Settings first.", "err"); return;
+    if (settings.azure_ai_key_set !== "1") {
+      show("Add your Azure AI Foundry key in Settings first.", "err"); return;
     }
     if (ocrBusy) return;
     try {
@@ -299,19 +299,19 @@ export default function Attendance() {
           <div style={{ flex: 1, minWidth: 240 }}>
             <h3 style={{ margin: "0 0 4px" }}>Upload {date} attendance sheet</h3>
             <p style={{ margin: 0, color: "var(--muted)", fontSize: 13 }}>
-              Snap the daily sign-in sheet. Gemini reads each child's drop-off / pick-up times and signatures; you review and import.
+              Snap the daily sign-in sheet. Azure AI reads each child's drop-off / pick-up times and signatures; you review and import.
             </p>
             {rows.length === 0 && (
               <p style={{ margin: "6px 0 0", color: "var(--danger)", fontSize: 13 }}>Add at least one student to the {year} roster before uploading.</p>
             )}
-            {settings.gemini_api_key_set !== "1" && rows.length > 0 && (
-              <p style={{ margin: "6px 0 0", color: "#b45309", fontSize: 13 }}>⚠ Add your Gemini API key in <strong>Settings → Optional features</strong> first.</p>
+            {settings.azure_ai_key_set !== "1" && rows.length > 0 && (
+              <p style={{ margin: "6px 0 0", color: "#b45309", fontSize: 13 }}>⚠ Add your Azure AI Foundry key in <strong>Settings → Optional features</strong> first.</p>
             )}
           </div>
           <div style={{ display: "flex", flexDirection: "column", gap: 10, alignItems: "stretch" }}>
             <button
               onClick={importLatestFromDownloads}
-              disabled={ocrBusy || rows.length === 0 || settings.gemini_api_key_set !== "1"}
+              disabled={ocrBusy || rows.length === 0 || settings.azure_ai_key_set !== "1"}
               title="Picks the newest image AirDropped or saved to ~/Downloads in the last 10 min"
               style={{
                 position: "relative",
@@ -320,7 +320,7 @@ export default function Attendance() {
                 color: "white", border: "none", borderRadius: 12,
                 cursor: ocrBusy ? "not-allowed" : "pointer",
                 boxShadow: "0 4px 14px rgba(22, 163, 74, 0.35)",
-                opacity: (ocrBusy || rows.length === 0 || settings.gemini_api_key_set !== "1") ? 0.55 : 1,
+                opacity: (ocrBusy || rows.length === 0 || settings.azure_ai_key_set !== "1") ? 0.55 : 1,
                 minWidth: 260,
               }}
             >
@@ -335,7 +335,7 @@ export default function Attendance() {
             <button
               className="btn secondary"
               onClick={pickFile}
-              disabled={ocrBusy || rows.length === 0 || settings.gemini_api_key_set !== "1"}
+              disabled={ocrBusy || rows.length === 0 || settings.azure_ai_key_set !== "1"}
               style={{ fontSize: 13 }}
             >
               {ocrBusy ? "Reading sheet…" : "…or choose file manually"}

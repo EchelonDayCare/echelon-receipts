@@ -51,15 +51,15 @@ export default function ImportStatement() {
     setBusy(true);
     setStatus("Reading file…");
     try {
-      const apiKey = await invoke<string | null>("keychain_get", { key: "gemini_api_key" });
+      const apiKey = await invoke<string | null>("keychain_get", { key: "azure_ai_key" });
       if (!apiKey) {
-        setErr("Gemini API key not found in keychain. Add it in Configuration → Staff (used for staff sign-in sheets too).");
+        setErr("Azure AI Foundry key not found in keychain. Add it in Configuration → Staff (used for staff sign-in sheets too).");
         setBusy(false); return;
       }
       const bytes = await readFile(picked);
       const mime = fileMime(picked);
-      setStatus("Extracting transactions with Gemini… (this can take 30-90s for a full statement)");
-      const result = await extractVisaStatement({ apiKey, fileBytes: bytes, mimeType: mime });
+      setStatus("Extracting transactions with Azure Mistral Document AI… (30-90s for a full statement)");
+      const result = await extractVisaStatement({ azureKey: apiKey, fileBytes: bytes, mimeType: mime });
       setMeta({
         statement_period: result.statement_period,
         card_last4: result.card_last4,

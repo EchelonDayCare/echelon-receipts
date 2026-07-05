@@ -4,11 +4,8 @@
 //   1. Mistral Document AI (image → structured JSON via Azure AI Foundry)
 //   2. Mistral OCR         (image → markdown → parsed per-cell digits)
 //
-// Gemini was removed in v0.2.4 — it consistently scrambled row-alignment
-// (swapped OUT columns between adjacent days) on handwritten sheets, which
-// gave it deciding-vote power on the wrong answer. Doc AI + Mistral OCR
-// digits together are more accurate. Gemini is still used by the Attendance
-// screen via gemini.rs — that path is unchanged.
+// Gemini was removed entirely in v0.4.x — child attendance and Visa import
+// were migrated to Azure Mistral Document AI (see azure_ai.rs).
 
 use base64::Engine;
 use image::ImageDecoder;
@@ -17,7 +14,16 @@ use serde_json::json;
 use std::io::Cursor;
 use std::time::{Duration, Instant};
 
-use crate::gemini::ExtractedRow;
+// Row shape shared with the frontend. Historically lived in gemini.rs.
+#[derive(serde::Serialize, serde::Deserialize, Clone)]
+pub struct ExtractedRow {
+    pub staff_name: String,
+    pub work_date: String,
+    pub in_time: Option<String>,
+    pub out_time: Option<String>,
+    #[serde(default)]
+    pub no_lunch: bool,
+}
 
 const PROVIDER_TIMEOUT_SECS: u64 = 60;
 const PROVIDER_MAX_ATTEMPTS: u32 = 3;

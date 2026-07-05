@@ -11,7 +11,7 @@ import {
   listHoursForMonth, upsertHour, deleteHour, hoursBetween, paidHours,
   assertStaffHoursSchema, countHoursForStaffMonth, deleteHoursForStaffMonth,
 } from "../lib/staff";
-import { fileToMime } from "../lib/gemini";
+import { fileToMime } from "../lib/ai";
 import {
   extractTimesheetConsensus, computeConsensus, editCell, PROVIDER_LABELS,
   type ConsensusAlignment, type ConsensusRow, type Confidence, type ProviderName,

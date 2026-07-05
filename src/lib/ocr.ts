@@ -3,7 +3,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { matchStaffByName } from "./staff";
 import type { Staff } from "../types";
-import type { ExtractedRow } from "./gemini";
+import type { ExtractedRow } from "./ai";
 
 export type ProviderName = "gpt5" | "mistral_ocr" | "azure_di";
 export const PROVIDER_LABELS: Record<ProviderName, string> = {

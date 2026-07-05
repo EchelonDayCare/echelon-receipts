@@ -56,8 +56,6 @@ export default function Settings() {
   const [saving, setSaving] = useState(false);
   const [smtpPassword, setSmtpPassword] = useState<string>("");
   const [hasStoredPassword, setHasStoredPassword] = useState(false);
-  const [geminiKey, setGeminiKey] = useState<string>("");
-  const [hasGeminiKey, setHasGeminiKey] = useState(false);
   const [azureKey, setAzureKey] = useState<string>("");
   const [hasAzureKey, setHasAzureKey] = useState(false);
   const [testing, setTesting] = useState(false);
@@ -70,7 +68,6 @@ export default function Settings() {
       const loaded = await getSettings();
       setS(loaded);
       setHasStoredPassword(loaded.smtp_password_set === "1");
-      setHasGeminiKey(loaded.gemini_api_key_set === "1");
       setHasAzureKey(loaded.azure_ai_key_set === "1");
     })();
   }, []);
@@ -84,12 +81,6 @@ export default function Settings() {
         await setSetting("smtp_password_set", "1");
         setHasStoredPassword(true);
         setSmtpPassword("");
-      }
-      if (geminiKey.trim()) {
-        await invoke("keychain_set", { key: "gemini_api_key", value: geminiKey.trim() });
-        await setSetting("gemini_api_key_set", "1");
-        setHasGeminiKey(true);
-        setGeminiKey("");
       }
       if (azureKey.trim()) {
         await invoke("keychain_set", { key: "azure_ai_key", value: azureKey.trim() });
@@ -112,14 +103,6 @@ export default function Settings() {
     await setSetting("smtp_password_set", "");
     setHasStoredPassword(false);
     void showAlert("Password removed.");
-  }
-
-  async function clearGeminiKey() {
-    if (!await showConfirm("Remove the stored Gemini API key from the OS keychain?")) return;
-    await invoke("keychain_delete", { key: "gemini_api_key" });
-    await setSetting("gemini_api_key_set", "");
-    setHasGeminiKey(false);
-    void showAlert("Gemini key removed.");
   }
 
   async function clearAzureKey() {
@@ -593,23 +576,7 @@ export default function Settings() {
         {s.feature_staff_hours_enabled === "1" && (
           <div style={{ paddingLeft: 24, borderLeft: "2px solid var(--border)", marginBottom: 14 }}>
             <div className="field">
-              <label>Google Gemini API key<HelpTip text="Optional. Only used to read scanned staff sign-in sheets via OCR. Free key at aistudio.google.com/app/apikey. Stored in the macOS keychain — never in the database or any backup email." /></label>
-              <input
-                type="password"
-                placeholder={hasGeminiKey ? "•••••••• (stored in OS keychain) — enter a new key to replace" : "Paste your Gemini API key"}
-                value={geminiKey}
-                onChange={(e) => setGeminiKey(e.target.value)}
-                autoComplete="off"
-              />
-              <small style={{ color: "var(--muted)" }}>
-                Used only to read your monthly sign-in sheets. Get one free at <code>aistudio.google.com/app/apikey</code>. Stored in the OS keychain, never in the database.
-                {hasGeminiKey && (
-                  <> &nbsp;<a href="#" onClick={(e) => { e.preventDefault(); clearGeminiKey(); }} style={{ color: "var(--danger)" }}>Remove stored key</a></>
-                )}
-              </small>
-            </div>
-            <div className="field">
-              <label>Azure AI Foundry key<HelpTip text="Optional but recommended. Powers the 2nd and 3rd OCR opinions (GPT-5.4 vision + Mistral OCR). When all 3 models are configured, sheet uploads use consensus: each cell shows a green / yellow / red badge based on whether the models agree. Stored in the macOS keychain." /></label>
+              <label>Azure AI Foundry key<HelpTip text="Required to read scanned staff sign-in sheets and Visa statements. Powers Azure Mistral Document AI (structured OCR) plus GPT-5.4 vision and Mistral OCR consensus. Stored in the macOS keychain — never in the database or any backup email." /></label>
               <input
                 type="password"
                 placeholder={hasAzureKey ? "•••••••• (stored in OS keychain) — enter a new key to replace" : "Paste your Azure AI Foundry key"}
@@ -618,7 +585,7 @@ export default function Settings() {
                 autoComplete="off"
               />
               <small style={{ color: "var(--muted)" }}>
-                Enables 3-model consensus (Gemini + GPT-5.4 + Mistral OCR). Without this key the app falls back to Gemini alone. Stored in the OS keychain, never in the database.
+                Enables 3-model consensus (Mistral Document AI + GPT-5.4 + Mistral OCR) for staff sign-in sheets, and single-model extraction for Visa statement imports. Stored in the OS keychain, never in the database.
                 {hasAzureKey && (
                   <> &nbsp;<a href="#" onClick={(e) => { e.preventDefault(); clearAzureKey(); }} style={{ color: "var(--danger)" }}>Remove stored key</a></>
                 )}
@@ -661,7 +628,7 @@ export default function Settings() {
         <p className="subtitle" style={{ marginTop: 16, fontSize: 12 }}>
           Built by Echelon Daycare with GitHub Copilot. Your data stays on this computer
           (and in your monthly cloud-backup email) — nothing is sent to a third-party server
-          except optional Gemini OCR for staff sign-in sheets, if enabled.
+          except optional Azure OCR for staff sign-in sheets and Visa statement imports, if enabled.
         </p>
         <div className="field" style={{ marginTop: 16 }}>
           <label>Error log</label>
