@@ -201,8 +201,8 @@ export async function gatherYearContext(fyStart: number, opts: GatherOpts = {}):
 // them what to enter first, instead of the AI hallucinating a "stable and
 // well-managed year" from four data points.
 export class InsufficientDataError extends Error {
-  constructor(public yearLabel: string, public score: number) {
-    super(`Not enough data for FY ${yearLabel} to draft AGM minutes with AI (score ${score}/4). Enter more receipts, expenses, or staff for the year first.`);
+  constructor(public yearLabel: string, public score: number, message?: string) {
+    super(message ?? `Not enough data for FY ${yearLabel} to draft AGM minutes with AI (score ${score}/4). Enter more receipts, expenses, or staff for the year first.`);
     this.name = "InsufficientDataError";
   }
 }
@@ -328,8 +328,15 @@ const BASE_TONE =
 // Sections known to be GROUNDED in on-device data. Everything else is treated
 // as ungrounded — the app refuses to generate prose for it because the model
 // would be making things up. Users still get an empty field to type into.
+//
+// Data sources per heading:
+//   children enrollment    -> auto-filled deterministically (never AI'd in practice)
+//   staffing updates       -> c.activeStaff (roles + names / tokens)
+//   maintenance completed  -> c.drillsCompleted (emergency drills log)
 const GROUNDED_CHAIRMAN_HEADINGS = new Set([
-  "children enrollment",   // exact string, minus trailing colon, lowercased
+  "children enrollment",
+  "staffing updates",
+  "maintenance completed",
 ]);
 export function isChairmanHeadingGrounded(heading: string): boolean {
   const key = heading.replace(/:$/, "").trim().toLowerCase();
@@ -420,6 +427,14 @@ export async function draftChairmanBlock(heading: string, c: YearContext, wantBu
   assertEnoughData(c);
   if (!isChairmanHeadingGrounded(heading)) {
     throw new UngroundedSectionError(heading.replace(/:$/, ""));
+  }
+  // Per-heading data guards — refuse to invent when the specific data feed is empty.
+  const key = heading.replace(/:$/, "").trim().toLowerCase();
+  if (key === "staffing updates" && c.activeStaff.length === 0) {
+    throw new InsufficientDataError(c.yearLabel, 0, "No active staff records on file for this year — add staff before drafting Staffing Updates.");
+  }
+  if (key === "maintenance completed" && c.drillsCompleted === 0) {
+    throw new InsufficientDataError(c.yearLabel, 0, "No emergency drills logged for this year — record drills before drafting Maintenance Completed.");
   }
   const facts = financialFacts(c) + "\n" + staffFacts(c);
   const safeHeading = sanitizePromptString(heading.replace(/:$/, ""));

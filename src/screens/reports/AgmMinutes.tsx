@@ -16,7 +16,7 @@ import { resolveReportPath, NoReportsFolderError } from "../../lib/reportsFolder
 import {
   gatherYearContext, draftEntireMinutes,
   draftFinancialReport, draftStaffingChallenges, draftFacilitiesMaintenance,
-  draftChairmanBlock,
+  draftChairmanBlock, isChairmanHeadingGrounded,
 } from "../../lib/aiDraft";
 
 const RECENT_FY_SPAN = 6;   // show current FY + 5 back in the year picker
@@ -471,15 +471,21 @@ function FormPane({ minutes, patch, fyStart, aiBusy, aiEnabled, aiRedact, draftF
         action={aiEnabled ? (
           <button className="btn ghost" style={{ fontSize: 12 }}
                   disabled={!!aiBusy} onClick={aiChairman}
-                  title="Fill empty sub-sections with AI drafts">
-            {aiBusy === "chairman" ? "✨ Drafting…" : "✨ AI fill empty"}
+                  title="Only sections grounded in on-device data will be drafted: Staffing Updates and Maintenance Completed. Others are left blank for you to write.">
+            {aiBusy === "chairman" ? "✨ Drafting…" : "✨ AI fill grounded"}
           </button>
         ) : undefined}>
         <p style={{ margin: "-4px 0 8px 0", color: "var(--muted)", fontSize: 12 }}>
           Empty sub-sections are skipped in the exported document. Enter one bullet per line for list blocks.
+          {aiEnabled && (
+            <> AI drafts <strong>Staffing Updates</strong> and <strong>Maintenance Completed</strong> from on-device data;
+            other headings must be written by hand.</>
+          )}
         </p>
         {minutes.chairmanReport.map((b, idx) => (
           <ChairmanEditor key={idx} block={b}
+            aiEnabled={aiEnabled}
+            grounded={isChairmanHeadingGrounded(b.heading)}
             onChange={(next) => {
               const copy = [...minutes.chairmanReport];
               copy[idx] = next; patch({ chairmanReport: copy });
@@ -564,10 +570,12 @@ function FormPane({ minutes, patch, fyStart, aiBusy, aiEnabled, aiRedact, draftF
   );
 }
 
-function ChairmanEditor({ block, onChange, onRemove }: {
+function ChairmanEditor({ block, onChange, onRemove, aiEnabled, grounded }: {
   block: ChairmanBlock;
   onChange: (next: ChairmanBlock) => void;
   onRemove: () => void;
+  aiEnabled?: boolean;
+  grounded?: boolean;
 }) {
   const isList = Array.isArray(block.body);
   return (
@@ -576,6 +584,16 @@ function ChairmanEditor({ block, onChange, onRemove }: {
         <input type="text" value={block.heading}
                onChange={(e) => onChange({ ...block, heading: e.target.value })}
                style={{ flex: 1, fontWeight: 600 }} />
+        {aiEnabled && grounded && (
+          <span title="AI can draft this section from on-device data"
+                style={{
+                  fontSize: 10, fontWeight: 600, letterSpacing: 0.3,
+                  padding: "2px 6px", borderRadius: 4,
+                  background: "var(--accent-bg, #eef6ff)",
+                  color: "var(--accent, #1a5fb4)",
+                  border: "1px solid var(--accent, #1a5fb4)",
+                }}>✨ AI-GROUNDED</span>
+        )}
         <label style={{ fontSize: 12, color: "var(--muted)", display: "flex", alignItems: "center", gap: 4 }}>
           <input type="checkbox" checked={isList}
                  onChange={(e) => onChange({
