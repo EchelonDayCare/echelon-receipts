@@ -218,6 +218,7 @@ export default function Settings() {
   const TABS: { key: string; label: string }[] = [
     { key: "identity", label: "Identity" },
     { key: "email", label: "Receipts & Email" },
+    { key: "folders", label: "Folders" },
     { key: "staff", label: "Staff" },
     { key: "backups", label: "Backups" },
     { key: "about", label: "About" },
@@ -307,46 +308,6 @@ export default function Settings() {
           </select>
           <small style={{ color: "var(--muted)" }}>
             Sets the default view on the Reports screen. You can still toggle per-view from the Reports toolbar.
-          </small>
-        </div>
-
-        <hr style={{ border: 0, borderTop: "1px solid var(--border)", margin: "16px 0" }} />
-        <SectionHead title="Reports folder" sub="Root folder where the app files every generated report (AGM Minutes, Attendance, Aging, etc.). Subfolders are created automatically per report type." />
-        <div className="field">
-          <label>Reports Folder</label>
-          <div style={{ display: "flex", gap: 8 }}>
-            <input style={{ flex: 1 }}
-              value={s.reports_folder || ""}
-              onChange={(e) => setS({ ...s, reports_folder: e.target.value })}
-              placeholder="(none — pick a folder to enable one-click report generation)" />
-            <button className="btn secondary" onClick={async () => {
-              const picked = await open({ directory: true, multiple: false });
-              if (picked && !Array.isArray(picked)) setS({ ...s, reports_folder: picked });
-            }}>Choose…</button>
-            {s.reports_folder && <button className="btn ghost" onClick={() => setS({ ...s, reports_folder: "" })}>Clear</button>}
-          </div>
-          <small style={{ color: "var(--muted)" }}>
-            e.g. AGM Minutes go to <code>&lt;folder&gt;/AGM Minutes/AGM-YYYY-YY.docx</code>. Other report types will use their own subfolders.
-          </small>
-        </div>
-
-        <hr style={{ border: 0, borderTop: "1px solid var(--border)", margin: "16px 0" }} />
-        <SectionHead title="PDF archive" sub="Where saved/sent receipt PDFs are filed on this computer." />
-        <div className="field">
-          <label>PDF Archive Folder</label>
-          <div style={{ display: "flex", gap: 8 }}>
-            <input style={{ flex: 1 }}
-              value={s.pdf_folder || ""}
-              onChange={(e) => setS({ ...s, pdf_folder: e.target.value })}
-              placeholder="(none — disable auto-save)" />
-            <button className="btn secondary" onClick={async () => {
-              const picked = await open({ directory: true, multiple: false });
-              if (picked && !Array.isArray(picked)) setS({ ...s, pdf_folder: picked });
-            }}>Choose…</button>
-            {s.pdf_folder && <button className="btn ghost" onClick={() => setS({ ...s, pdf_folder: "" })}>Clear</button>}
-          </div>
-          <small style={{ color: "var(--muted)" }}>
-            PDFs auto-save to <code>&lt;folder&gt;/YYYY/MM/&lt;receipt#&gt;_&lt;date&gt;_&lt;Student&gt;.pdf</code>
           </small>
         </div>
 
@@ -687,6 +648,51 @@ export default function Settings() {
     );
   }
 
+  function renderFolders() {
+    return (
+      <div className="card">
+        <SectionHead title="Reports folder" sub="Root folder where the app files every generated report (AGM Minutes, Attendance, Aging, etc.). Subfolders are created automatically per report type." />
+        <div className="field">
+          <label>Reports Folder</label>
+          <div style={{ display: "flex", gap: 8 }}>
+            <input style={{ flex: 1 }}
+              value={s.reports_folder || ""}
+              onChange={(e) => setS({ ...s, reports_folder: e.target.value })}
+              placeholder="(none — pick a folder to enable one-click report generation)" />
+            <button className="btn secondary" onClick={async () => {
+              const picked = await open({ directory: true, multiple: false });
+              if (picked && !Array.isArray(picked)) setS({ ...s, reports_folder: picked });
+            }}>Choose…</button>
+            {s.reports_folder && <button className="btn ghost" onClick={() => setS({ ...s, reports_folder: "" })}>Clear</button>}
+          </div>
+          <small style={{ color: "var(--muted)" }}>
+            e.g. AGM Minutes go to <code>&lt;folder&gt;/AGM Minutes/AGM-YYYY-YY.docx</code>. Other report types will use their own subfolders.
+          </small>
+        </div>
+
+        <hr style={{ border: 0, borderTop: "1px solid var(--border)", margin: "16px 0" }} />
+        <SectionHead title="PDF archive" sub="Where saved/sent receipt PDFs are filed on this computer." />
+        <div className="field">
+          <label>PDF Archive Folder</label>
+          <div style={{ display: "flex", gap: 8 }}>
+            <input style={{ flex: 1 }}
+              value={s.pdf_folder || ""}
+              onChange={(e) => setS({ ...s, pdf_folder: e.target.value })}
+              placeholder="(none — disable auto-save)" />
+            <button className="btn secondary" onClick={async () => {
+              const picked = await open({ directory: true, multiple: false });
+              if (picked && !Array.isArray(picked)) setS({ ...s, pdf_folder: picked });
+            }}>Choose…</button>
+            {s.pdf_folder && <button className="btn ghost" onClick={() => setS({ ...s, pdf_folder: "" })}>Clear</button>}
+          </div>
+          <small style={{ color: "var(--muted)" }}>
+            PDFs auto-save to <code>&lt;folder&gt;/YYYY/MM/&lt;receipt#&gt;_&lt;date&gt;_&lt;Student&gt;.pdf</code>
+          </small>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div>
       <h1 style={{ marginBottom: 4 }}>Configuration</h1>
@@ -718,6 +724,7 @@ export default function Settings() {
 
       {activeTab === "identity" && renderIdentity()}
       {activeTab === "email" && renderReceiptsEmail()}
+      {activeTab === "folders" && renderFolders()}
       {activeTab === "staff" && renderStaff()}
       {activeTab === "backups" && renderBackups()}
       {activeTab === "about" && renderAbout()}
