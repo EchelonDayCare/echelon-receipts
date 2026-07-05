@@ -6,7 +6,8 @@ import {
 import { showAlert, showConfirm } from "../lib/dialogs";
 import {
   askEchelon, saveQuery, deleteSavedQuery, listSavedQueries, resultToCsv,
-  type AskResult, type SavedQuery,
+  logQuestion, topAskedQuestions,
+  type AskResult, type SavedQuery, type AskedQuestion,
 } from "../lib/askEchelon";
 import { getSettings, setSettings } from "../lib/db";
 import type { SettingsMap } from "../types";
@@ -14,13 +15,27 @@ import type { SettingsMap } from "../types";
 const EXAMPLE_QUESTIONS = [
   "How many kids attended more than 15 days last month?",
   "Show me families with outstanding balances over $500",
-  "What was revenue this quarter vs the same quarter last year?",
+  "What was revenue this quarter vs same quarter last year?",
   "Which staff worked more than 40 hours any week last month?",
   "List credentials expiring in the next 60 days",
   "Total refunds issued this year, grouped by month",
+  "Which parents haven't paid this month?",
+  "Average daily attendance by month this year",
+  "How much did we spend on supplies last quarter?",
+  "Staff whose First Aid certificate expires soon",
 ];
 
 const PIE_COLORS = ["#2563eb", "#0891b2", "#9333ea", "#c2410c", "#047857", "#dc2626", "#ca8a04"];
+
+/** True when the result is 0 rows, or every cell in every row is null/0/"" —
+ *  in which case the summary alone tells the whole story and the table is
+ *  just noise. */
+function isEffectivelyEmpty(r: AskResult): boolean {
+  if (r.rows.length === 0) return true;
+  return r.rows.every((row) =>
+    row.every((v) => v === null || v === undefined || v === "" || v === 0)
+  );
+}
 
 type Row = unknown[];
 
@@ -36,15 +51,23 @@ export default function AskEchelon() {
   const [error, setError] = useState<string | null>(null);
   const [history, setHistory] = useState<HistoryItem[]>([]);
   const [saved, setSaved] = useState<SavedQuery[]>([]);
-  const [showSql, setShowSql] = useState(false);
+  const [topAsked, setTopAsked] = useState<AskedQuestion[]>([]);
   const [sortBy, setSortBy] = useState<{ col: number; dir: "asc" | "desc" } | null>(null);
   const [placeholderIdx, setPlaceholderIdx] = useState(0);
   const [settings, setLocalSettings] = useState<SettingsMap>({});
   const inputRef = useRef<HTMLTextAreaElement>(null);
 
+  const refreshSidebar = async () => {
+    try {
+      const [t, s] = await Promise.all([topAskedQuestions(10), listSavedQueries()]);
+      setTopAsked(t);
+      setSaved(s);
+    } catch { /* ignore */ }
+  };
+
   useEffect(() => {
     getSettings().then(setLocalSettings);
-    listSavedQueries().then(setSaved).catch(() => setSaved([]));
+    refreshSidebar();
     const t = window.setInterval(
       () => setPlaceholderIdx((i) => (i + 1) % EXAMPLE_QUESTIONS.length),
       3500,
@@ -59,7 +82,6 @@ export default function AskEchelon() {
     setError(null);
     setResult(null);
     setSortBy(null);
-    setShowSql(false);
     try {
       const res = await askEchelon({ question: trimmed });
       setResult(res);
@@ -67,6 +89,7 @@ export default function AskEchelon() {
         const filtered = h.filter((it) => it.question !== trimmed);
         return [{ question: trimmed, ts: Date.now() }, ...filtered].slice(0, 20);
       });
+      logQuestion(trimmed).then(refreshSidebar).catch(() => {});
     } catch (e: any) {
       const msg = String(e?.message ?? e ?? "Unknown error");
       // Don't leak raw SQLite errors — the model or user may have crafted a
@@ -139,16 +162,22 @@ export default function AskEchelon() {
   }, [result, sortBy]);
 
   return (
-    <div style={{ padding: 24, maxWidth: 1400, margin: "0 auto" }}>
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 16 }}>
-        <div>
-          <h1 style={{ margin: 0, fontSize: 24 }}>Ask Echelon</h1>
-          <p style={{ margin: "4px 0 0", color: "var(--muted)", fontSize: 13 }}>
-            Ask questions in plain English. Answers come from your daycare data — nothing external.
-          </p>
-        </div>
-        <div style={{ display: "flex", gap: 12, alignItems: "center", fontSize: 12 }}>
-          <label style={{ display: "flex", gap: 6, alignItems: "center", cursor: "pointer" }}>
+    <div style={{ padding: "24px 32px 40px", maxWidth: 1400, margin: "0 auto" }}>
+      {/* Hero header */}
+      <div style={{
+        background: "linear-gradient(135deg, #eff6ff 0%, #f0f9ff 60%, #ecfdf5 100%)",
+        border: "1px solid #dbeafe", borderRadius: 16, padding: "24px 28px", marginBottom: 20,
+      }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 16 }}>
+          <div>
+            <h1 style={{ margin: 0, fontSize: 28, letterSpacing: "-0.02em", display: "flex", alignItems: "center", gap: 10 }}>
+              <span style={{ fontSize: 28 }}>🤖</span> Ask Echelon
+            </h1>
+            <p style={{ margin: "6px 0 0", color: "#475569", fontSize: 14 }}>
+              Ask anything about your daycare — attendance, revenue, staff, credentials, expenses.
+            </p>
+          </div>
+          <label style={{ display: "flex", gap: 8, alignItems: "center", cursor: "pointer", fontSize: 12, color: "#475569", background: "rgba(255,255,255,.7)", padding: "6px 10px", borderRadius: 999, border: "1px solid rgba(255,255,255,.9)" }}>
             <input
               type="checkbox"
               checked={settings.ask_echelon_redact !== "0"}
@@ -159,9 +188,14 @@ export default function AskEchelon() {
         </div>
       </div>
 
-      <div style={{ display: "grid", gridTemplateColumns: "1fr 260px", gap: 20 }}>
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 300px", gap: 24 }}>
         <div>
-          <div style={{ position: "relative", marginBottom: 12 }}>
+          {/* Big search input */}
+          <div style={{
+            position: "relative", marginBottom: 20,
+            background: "#ffffff", borderRadius: 14, border: "1px solid var(--border)",
+            boxShadow: "0 1px 3px rgba(15,23,42,.04), 0 4px 12px rgba(15,23,42,.04)",
+          }}>
             <textarea
               ref={inputRef}
               value={question}
@@ -175,9 +209,10 @@ export default function AskEchelon() {
               placeholder={`e.g. ${EXAMPLE_QUESTIONS[placeholderIdx]}`}
               rows={2}
               style={{
-                width: "100%", padding: "12px 90px 12px 14px", borderRadius: 10,
-                border: "1px solid var(--border)", fontSize: 15, resize: "vertical",
-                fontFamily: "inherit", boxSizing: "border-box",
+                width: "100%", padding: "18px 130px 18px 20px", borderRadius: 14,
+                border: "none", fontSize: 16, resize: "vertical",
+                fontFamily: "inherit", boxSizing: "border-box", outline: "none",
+                background: "transparent", minHeight: 68,
               }}
               disabled={busy}
             />
@@ -185,71 +220,83 @@ export default function AskEchelon() {
               onClick={() => run(question)}
               disabled={busy || !question.trim()}
               style={{
-                position: "absolute", right: 8, top: 8, padding: "8px 16px",
-                borderRadius: 8, border: "none", background: "#2563eb", color: "white",
-                cursor: busy ? "wait" : "pointer", opacity: (!question.trim() || busy) ? 0.5 : 1,
+                position: "absolute", right: 10, top: 10, padding: "10px 22px",
+                borderRadius: 10, border: "none",
+                background: (!question.trim() || busy) ? "#94a3b8" : "linear-gradient(135deg, #2563eb, #1d4ed8)",
+                color: "white", cursor: busy ? "wait" : "pointer",
+                fontSize: 14, fontWeight: 600, boxShadow: "0 2px 6px rgba(37,99,235,.25)",
+                transition: "transform .05s",
               }}
             >
-              {busy ? "Thinking…" : "Ask"}
+              {busy ? "Thinking…" : "Ask →"}
             </button>
           </div>
 
           {!result && !busy && !error && (
             <div>
-              <div style={{ fontSize: 12, color: "var(--muted)", marginBottom: 8 }}>Try one of these:</div>
-              <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
-                {EXAMPLE_QUESTIONS.map((q) => (
+              <div style={{ fontSize: 11, color: "var(--muted)", marginBottom: 10, textTransform: "uppercase", letterSpacing: ".06em", fontWeight: 600 }}>Try one of these</div>
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(280px, 1fr))", gap: 10 }}>
+                {EXAMPLE_QUESTIONS.slice(0, 6).map((q) => (
                   <button
                     key={q}
                     onClick={() => { setQuestion(q); run(q); }}
                     style={{
-                      padding: "8px 12px", borderRadius: 999, border: "1px solid var(--border)",
-                      background: "var(--card, #f8fafc)", cursor: "pointer", fontSize: 13,
+                      padding: "14px 16px", borderRadius: 12, border: "1px solid var(--border)",
+                      background: "#ffffff", cursor: "pointer", fontSize: 13, textAlign: "left",
+                      lineHeight: 1.4, transition: "transform .1s, box-shadow .1s",
                     }}
-                  >{q}</button>
+                    onMouseEnter={(e) => { (e.currentTarget as HTMLButtonElement).style.boxShadow = "0 4px 12px rgba(37,99,235,.08)"; (e.currentTarget as HTMLButtonElement).style.borderColor = "#93c5fd"; }}
+                    onMouseLeave={(e) => { (e.currentTarget as HTMLButtonElement).style.boxShadow = "none"; (e.currentTarget as HTMLButtonElement).style.borderColor = "var(--border)"; }}
+                  >💡 {q}</button>
                 ))}
               </div>
             </div>
           )}
 
           {busy && (
-            <div style={{ padding: 32, textAlign: "center", color: "var(--muted)" }}>
-              <div style={{ fontSize: 32, marginBottom: 8 }}>🤔</div>
-              Reading your data, drafting SQL, running it…
+            <div style={{ padding: 48, textAlign: "center", color: "var(--muted)" }}>
+              <div style={{ fontSize: 40, marginBottom: 10, animation: "pulse 1.4s ease-in-out infinite" }}>🤔</div>
+              <div style={{ fontSize: 14 }}>Thinking…</div>
             </div>
           )}
 
           {error && (
-            <div className="today-item warn" style={{ marginTop: 8, whiteSpace: "pre-wrap" }}>
-              <span className="today-dot">!</span>
-              <span className="today-text">{error}</span>
+            <div style={{
+              padding: "14px 16px", borderRadius: 12, background: "#fef2f2",
+              border: "1px solid #fecaca", color: "#7f1d1d", fontSize: 14, whiteSpace: "pre-wrap",
+            }}>
+              {error}
             </div>
           )}
 
           {result && (
-            <div style={{ marginTop: 16 }}>
+            <div>
               {result.summary && (
                 <div style={{
-                  padding: "14px 16px", borderRadius: 10, background: "#eff6ff",
-                  border: "1px solid #bfdbfe", marginBottom: 16, fontSize: 15, lineHeight: 1.5,
+                  padding: "18px 20px", borderRadius: 14,
+                  background: "linear-gradient(135deg, #eff6ff, #f0f9ff)",
+                  border: "1px solid #bfdbfe", marginBottom: 18, fontSize: 15, lineHeight: 1.55,
+                  color: "#0f172a", display: "flex", gap: 12, alignItems: "flex-start",
                 }}>
-                  {result.summary}
+                  <span style={{ fontSize: 20, flexShrink: 0 }}>✨</span>
+                  <span>{result.summary}</span>
                 </div>
               )}
 
-              <div style={{ display: "flex", gap: 12, marginBottom: 12, alignItems: "center", flexWrap: "wrap" }}>
-                <span style={{ fontSize: 12, color: "var(--muted)" }}>
-                  {result.rows.length} row{result.rows.length === 1 ? "" : "s"}
-                  {result.truncated ? " (capped at 500)" : ""} · {result.elapsed_ms} ms
-                </span>
-                <div style={{ flex: 1 }} />
-                <button className="btn" onClick={onCopyCsv} disabled={result.rows.length === 0}>Copy as CSV</button>
-                <button className="btn" onClick={onSaveReport}>Save as Report</button>
-              </div>
+              {isEffectivelyEmpty(result) ? null : (
+                <>
+                  <div style={{ display: "flex", gap: 12, marginBottom: 12, alignItems: "center", flexWrap: "wrap" }}>
+                    <span style={{ fontSize: 12, color: "var(--muted)" }}>
+                      {result.rows.length} row{result.rows.length === 1 ? "" : "s"}
+                      {result.truncated ? " (showing first 500)" : ""}
+                    </span>
+                    <div style={{ flex: 1 }} />
+                    <button className="btn secondary" onClick={onCopyCsv}>Copy as CSV</button>
+                    <button className="btn" onClick={onSaveReport}>⭐ Save as Report</button>
+                  </div>
 
-              {result.rows.length > 0 && (
-                <div style={{ overflow: "auto", border: "1px solid var(--border)", borderRadius: 8, maxHeight: 480 }}>
-                  <table className="tbl" style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
+                  <div style={{ overflow: "auto", border: "1px solid var(--border)", borderRadius: 12, maxHeight: 480, background: "#ffffff" }}>
+                  <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
                     <thead>
                       <tr>
                         {result.columns.map((c, i) => (
@@ -261,9 +308,11 @@ export default function AskEchelon() {
                                 : { col: i, dir: "asc" }
                             )}
                             style={{
-                              padding: "8px 12px", textAlign: "left", cursor: "pointer",
-                              borderBottom: "1px solid var(--border)", background: "var(--card, #f8fafc)",
+                              padding: "12px 14px", textAlign: "left", cursor: "pointer",
+                              borderBottom: "1px solid var(--border)", background: "#f8fafc",
                               position: "sticky", top: 0, userSelect: "none",
+                              fontSize: 11, textTransform: "uppercase", letterSpacing: ".06em",
+                              color: "#475569", fontWeight: 600,
                             }}
                           >
                             {c}{sortBy?.col === i ? (sortBy.dir === "asc" ? " ▲" : " ▼") : ""}
@@ -273,9 +322,9 @@ export default function AskEchelon() {
                     </thead>
                     <tbody>
                       {sortedRows.map((r, ri) => (
-                        <tr key={ri} style={{ borderBottom: "1px solid var(--border)" }}>
+                        <tr key={ri} style={{ borderBottom: "1px solid #f1f5f9", background: ri % 2 === 0 ? "#ffffff" : "#fafbfc" }}>
                           {r.map((v, ci) => (
-                            <td key={ci} style={{ padding: "6px 12px" }}>
+                            <td key={ci} style={{ padding: "10px 14px" }}>
                               {v === null || v === undefined ? <span style={{ color: "var(--muted)" }}>—</span> : String(v)}
                             </td>
                           ))}
@@ -284,74 +333,115 @@ export default function AskEchelon() {
                     </tbody>
                   </table>
                 </div>
+                </>
               )}
 
               <ChartArea result={result} rows={sortedRows} />
-
-              <div style={{ marginTop: 12 }}>
-                <button
-                  onClick={() => setShowSql((s) => !s)}
-                  style={{ border: "none", background: "transparent", color: "var(--muted)", cursor: "pointer", fontSize: 12, padding: 0 }}
-                >
-                  {showSql ? "▼ Hide SQL" : "▶ Show SQL"}
-                </button>
-                {showSql && (
-                  <pre style={{
-                    background: "#0f172a", color: "#e2e8f0", padding: 12, borderRadius: 8,
-                    fontSize: 12, overflow: "auto", marginTop: 8,
-                  }}>{result.sql}</pre>
-                )}
-              </div>
             </div>
           )}
         </div>
 
-        {/* Sidebar: history + saved */}
-        <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
-          {history.length > 0 && (
-            <div>
-              <div style={{ fontSize: 11, color: "var(--muted)", textTransform: "uppercase", letterSpacing: ".06em", marginBottom: 8 }}>Recent this session</div>
-              <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-                {history.map((h, i) => (
-                  <button
-                    key={i}
-                    onClick={() => { setQuestion(h.question); run(h.question); }}
-                    style={{
-                      textAlign: "left", background: "transparent", border: "none",
-                      cursor: "pointer", padding: "6px 8px", borderRadius: 6, fontSize: 12,
-                    }}
-                  >{h.question}</button>
-                ))}
-              </div>
-            </div>
-          )}
+        {/* Right sidebar: Top asked (or suggestions) + saved reports */}
+        <div style={{ display: "flex", flexDirection: "column", gap: 22 }}>
+          <TopAskedPanel
+            topAsked={topAsked}
+            onPick={(q) => { setQuestion(q); run(q); }}
+          />
 
           {saved.length > 0 && (
-            <div>
-              <div style={{ fontSize: 11, color: "var(--muted)", textTransform: "uppercase", letterSpacing: ".06em", marginBottom: 8 }}>Saved reports</div>
-              <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-                {saved.map((s) => (
-                  <div key={s.id} style={{ display: "flex", gap: 4, alignItems: "flex-start" }}>
-                    <button
-                      onClick={() => { setQuestion(s.question); run(s.question); }}
-                      style={{
-                        flex: 1, textAlign: "left", background: "transparent", border: "none",
-                        cursor: "pointer", padding: "6px 8px", borderRadius: 6, fontSize: 12,
-                      }}
-                    >{s.question}</button>
-                    <button
-                      onClick={() => onDeleteSaved(s.id)}
-                      title="Delete"
-                      style={{ background: "transparent", border: "none", cursor: "pointer", color: "var(--muted)", fontSize: 12 }}
-                    >×</button>
-                  </div>
-                ))}
-              </div>
-            </div>
+            <SidebarPanel title="⭐ Saved reports" accent="#ca8a04">
+              {saved.map((s) => (
+                <div key={s.id} style={{ display: "flex", gap: 4, alignItems: "center" }}>
+                  <button
+                    onClick={() => { setQuestion(s.question); run(s.question); }}
+                    style={sidebarItemStyle}
+                    onMouseEnter={(e) => (e.currentTarget as HTMLButtonElement).style.background = "#fef9c3"}
+                    onMouseLeave={(e) => (e.currentTarget as HTMLButtonElement).style.background = "transparent"}
+                  >{s.question}</button>
+                  <button
+                    onClick={() => onDeleteSaved(s.id)}
+                    title="Delete"
+                    style={{ background: "transparent", border: "none", cursor: "pointer", color: "var(--muted)", fontSize: 14, padding: "0 4px" }}
+                  >×</button>
+                </div>
+              ))}
+            </SidebarPanel>
+          )}
+
+          {history.length > 0 && (
+            <SidebarPanel title="🕘 Recent this session" accent="#64748b">
+              {history.slice(0, 8).map((h, i) => (
+                <button
+                  key={i}
+                  onClick={() => { setQuestion(h.question); run(h.question); }}
+                  style={sidebarItemStyle}
+                  onMouseEnter={(e) => (e.currentTarget as HTMLButtonElement).style.background = "#f1f5f9"}
+                  onMouseLeave={(e) => (e.currentTarget as HTMLButtonElement).style.background = "transparent"}
+                >{h.question}</button>
+              ))}
+            </SidebarPanel>
           )}
         </div>
       </div>
+
+      <style>{`
+        @keyframes pulse { 0%,100% { opacity: 1 } 50% { opacity: .5 } }
+      `}</style>
     </div>
+  );
+}
+
+const sidebarItemStyle: React.CSSProperties = {
+  flex: 1, textAlign: "left", background: "transparent", border: "none",
+  cursor: "pointer", padding: "8px 10px", borderRadius: 8, fontSize: 12.5,
+  lineHeight: 1.35, color: "#334155", transition: "background .1s",
+};
+
+function SidebarPanel({ title, accent, children }: { title: string; accent: string; children: React.ReactNode }) {
+  return (
+    <div style={{ background: "#ffffff", border: "1px solid var(--border)", borderRadius: 12, padding: 14 }}>
+      <div style={{
+        fontSize: 11, color: accent, textTransform: "uppercase",
+        letterSpacing: ".08em", marginBottom: 8, fontWeight: 700,
+      }}>{title}</div>
+      <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>{children}</div>
+    </div>
+  );
+}
+
+function TopAskedPanel({
+  topAsked, onPick,
+}: { topAsked: AskedQuestion[]; onPick: (q: string) => void }) {
+  // Show "top asked" once we have at least 5 recorded questions. Below that,
+  // the ranking isn't meaningful — show 10 suggestions instead.
+  const useTop = topAsked.length >= 5;
+  const items: { text: string; badge?: string }[] = useTop
+    ? topAsked.map((t) => ({ text: t.question, badge: t.ask_count > 1 ? `${t.ask_count}×` : undefined }))
+    : EXAMPLE_QUESTIONS.slice(0, 10).map((q) => ({ text: q }));
+
+  return (
+    <SidebarPanel
+      title={useTop ? "🔥 Top questions asked" : "💡 Suggestions"}
+      accent={useTop ? "#dc2626" : "#2563eb"}
+    >
+      {items.map((it, i) => (
+        <button
+          key={i}
+          onClick={() => onPick(it.text)}
+          style={{ ...sidebarItemStyle, display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 8 }}
+          onMouseEnter={(e) => (e.currentTarget as HTMLButtonElement).style.background = useTop ? "#fef2f2" : "#eff6ff"}
+          onMouseLeave={(e) => (e.currentTarget as HTMLButtonElement).style.background = "transparent"}
+        >
+          <span>{it.text}</span>
+          {it.badge && (
+            <span style={{
+              fontSize: 10, background: "#fee2e2", color: "#991b1b",
+              padding: "2px 6px", borderRadius: 999, whiteSpace: "nowrap", fontWeight: 600, flexShrink: 0,
+            }}>{it.badge}</span>
+          )}
+        </button>
+      ))}
+    </SidebarPanel>
   );
 }
 

@@ -61,17 +61,35 @@ function ModuleSidebar({
         <div className="brand-logo">
           <img src={logo} alt="Logo" />
         </div>
-        <div>
-          <div className="brand-name">{name}</div>
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <div className="brand-name" style={{ whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{name}</div>
           <div className="brand-sub" style={{ color: accent }}>{title}</div>
         </div>
       </div>
       <button
-        className="nav-item"
+        type="button"
         onClick={() => nav("/")}
-        style={{ background: "transparent", border: "none", textAlign: "left", cursor: "pointer", color: "var(--muted)", marginBottom: 8 }}
+        title="Back to Home"
+        style={{
+          margin: "14px 0 6px",
+          background: "rgba(148,163,184,.12)",
+          border: "1px solid rgba(148,163,184,.25)",
+          color: "#e2e8f0", cursor: "pointer",
+          padding: "8px 12px", borderRadius: 8, fontSize: 13,
+          display: "flex", alignItems: "center", gap: 8,
+          transition: "background .1s, border-color .1s",
+        }}
+        onMouseEnter={(e) => {
+          (e.currentTarget as HTMLButtonElement).style.background = "rgba(148,163,184,.22)";
+          (e.currentTarget as HTMLButtonElement).style.borderColor = "rgba(148,163,184,.4)";
+        }}
+        onMouseLeave={(e) => {
+          (e.currentTarget as HTMLButtonElement).style.background = "rgba(148,163,184,.12)";
+          (e.currentTarget as HTMLButtonElement).style.borderColor = "rgba(148,163,184,.25)";
+        }}
       >
-        ← Home
+        <span aria-hidden style={{ fontSize: 15 }}>⌂</span>
+        <span>Home</span>
       </button>
       <nav>
         {items.map((it) => (
@@ -200,6 +218,18 @@ function Shell({ logo, name, staffEnabled }: { logo: string; name: string; staff
           { to: "/expenses/recurring", label: "Recurring Bills" },
           { to: "/expenses/import", label: "Import Statement (AI)" },
           { to: "/expenses/reports", label: "Expense Reports (P&L)" },
+        ]}
+      />
+    );
+  } else if (path.startsWith("/ask")) {
+    sidebar = (
+      <ModuleSidebar
+        title="Ask Echelon"
+        accent="#2563eb"
+        logo={logo}
+        name={name}
+        items={[
+          { to: "/ask", label: "Ask a Question" },
         ]}
       />
     );

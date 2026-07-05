@@ -70,6 +70,38 @@ export async function deleteSavedQuery(id: number): Promise<void> {
   await d.execute("DELETE FROM saved_queries WHERE id = ?", [id]);
 }
 
+// ── Question popularity log ─────────────────────────────────────────────
+
+export interface AskedQuestion {
+  question: string;
+  ask_count: number;
+  last_asked_at: string;
+}
+
+/** Bump the count for a question (case-insensitive), inserting if new. */
+export async function logQuestion(question: string): Promise<void> {
+  const q = question.trim();
+  if (!q) return;
+  const d = await db();
+  // Try to bump first; if 0 rows affected, insert.
+  await d.execute(
+    "UPDATE asked_questions SET ask_count = ask_count + 1, last_asked_at = datetime('now') WHERE question = ? COLLATE NOCASE",
+    [q]
+  );
+  await d.execute(
+    "INSERT OR IGNORE INTO asked_questions (question) VALUES (?)",
+    [q]
+  );
+}
+
+export async function topAskedQuestions(limit = 10): Promise<AskedQuestion[]> {
+  const d = await db();
+  return await d.select<AskedQuestion[]>(
+    "SELECT question, ask_count, last_asked_at FROM asked_questions ORDER BY ask_count DESC, last_asked_at DESC LIMIT ?",
+    [limit]
+  );
+}
+
 /** Convert result rows into a CSV string (RFC-4180-ish, quote if needed). */
 export function resultToCsv(res: AskResult): string {
   const esc = (v: unknown): string => {

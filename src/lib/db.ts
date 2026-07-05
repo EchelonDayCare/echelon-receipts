@@ -535,6 +535,15 @@ async function ensureSchema(d: Database): Promise<void> {
     chart_hint TEXT,
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
   )`);
+  // Migration 016 — Log of every question asked, for a "top asked" panel.
+  await d.execute(`CREATE TABLE IF NOT EXISTS asked_questions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    question TEXT NOT NULL COLLATE NOCASE,
+    ask_count INTEGER NOT NULL DEFAULT 1,
+    last_asked_at TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE(question) ON CONFLICT IGNORE
+  )`);
+  await d.execute("CREATE INDEX IF NOT EXISTS ix_asked_top ON asked_questions(ask_count DESC, last_asked_at DESC)");
   for (const [k, v] of [
     ["ask_echelon_enabled", "1"],
     ["ask_echelon_redact",  "1"],
