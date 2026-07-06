@@ -388,11 +388,47 @@ async function ensureSchema(d: Database): Promise<void> {
       ["Field Trip Notice", "Field trip permission: {{trip_name}} on {{trip_date}}",
         "Hi {{parent_name}},\n\nWe've planned a field trip to {{trip_name}} on {{trip_date}}. Departure: {{depart_time}}, return: {{return_time}}. Transportation: {{transport}}. Additional cost: $ .\n\nPlease sign and return the attached permission form by {{signup_deadline}} so {{student_name}} can join.\n\nThank you,\n{{daycare_name}}",
         "general"],
+      ["Waitlist – Spot Offered", "Great news — a spot is available for {{student_name}} at {{daycare_name}}",
+        "Hi {{parent_name}},\n\nWe're delighted to let you know that a spot has opened up for {{student_name}} at {{daycare_name}}. Based on your application we can offer a start date of {{start_date}}.\n\nTo accept, please reply to this email by {{reply_by}} and we'll send you the enrollment paperwork and first-month invoice. If we don't hear back by that date the spot will be released to the next family on the waitlist.\n\nHappy to answer any questions before you decide — just reply here or call {{contact_phone}}.\n\nWarmly,\n{{daycare_name}}\n{{contact_email}} | {{contact_phone}}",
+        "waitlist"],
+      ["Waitlist – Still Waiting Check-in", "Checking in about {{student_name}}'s waitlist spot",
+        "Hi {{parent_name}},\n\nJust a quick note to let you know {{student_name}} is still on our waitlist at {{daycare_name}}. We don't have an opening yet, but you're still in our list and we wanted to make sure you're still interested.\n\nCould you reply to confirm:\n  1. Yes, please keep {{student_name}} on the waitlist.\n  2. Our situation has changed — please remove us.\n\nAlso let us know if your preferred start date has changed. If we don't hear back within two weeks we'll assume option 2 and archive the application (you can always re-apply).\n\nThank you,\n{{daycare_name}}\n{{contact_email}} | {{contact_phone}}",
+        "waitlist"],
+      ["Waitlist – No Spot Available", "Update on {{student_name}}'s waitlist application",
+        "Hi {{parent_name}},\n\nThank you for your patience while we worked through the waitlist. Unfortunately we don't have a spot for {{student_name}} available at this time and, given our current enrollment, we don't expect one to open in the short term.\n\nIf you'd like we can keep {{student_name}} on the list in case something changes, or archive the application if you've already made other arrangements. Just reply and let us know.\n\nWe wish you the very best in finding great care for {{student_name}}.\n\nWarmly,\n{{daycare_name}}\n{{contact_email}} | {{contact_phone}}",
+        "waitlist"],
     ];
     for (const [name, subject, body, kind] of seeds) {
       await d.execute(
         "INSERT INTO message_templates(name, subject, body, kind, is_builtin) VALUES(?,?,?,?,1)",
         [name, subject, body, kind]
+      );
+    }
+  }
+
+  // Idempotently seed newer built-in templates for existing installs
+  // (name lookup — no UNIQUE constraint on the column). Adds waitlist
+  // starters to DBs created before v1.3.x.
+  const laterBuiltins: Array<[string, string, string, string]> = [
+    ["Waitlist – Spot Offered", "Great news — a spot is available for {{student_name}} at {{daycare_name}}",
+      "Hi {{parent_name}},\n\nWe're delighted to let you know that a spot has opened up for {{student_name}} at {{daycare_name}}. Based on your application we can offer a start date of {{start_date}}.\n\nTo accept, please reply to this email by {{reply_by}} and we'll send you the enrollment paperwork and first-month invoice. If we don't hear back by that date the spot will be released to the next family on the waitlist.\n\nHappy to answer any questions before you decide — just reply here or call {{contact_phone}}.\n\nWarmly,\n{{daycare_name}}\n{{contact_email}} | {{contact_phone}}",
+      "waitlist"],
+    ["Waitlist – Still Waiting Check-in", "Checking in about {{student_name}}'s waitlist spot",
+      "Hi {{parent_name}},\n\nJust a quick note to let you know {{student_name}} is still on our waitlist at {{daycare_name}}. We don't have an opening yet, but you're still in our list and we wanted to make sure you're still interested.\n\nCould you reply to confirm:\n  1. Yes, please keep {{student_name}} on the waitlist.\n  2. Our situation has changed — please remove us.\n\nAlso let us know if your preferred start date has changed. If we don't hear back within two weeks we'll assume option 2 and archive the application (you can always re-apply).\n\nThank you,\n{{daycare_name}}\n{{contact_email}} | {{contact_phone}}",
+      "waitlist"],
+    ["Waitlist – No Spot Available", "Update on {{student_name}}'s waitlist application",
+      "Hi {{parent_name}},\n\nThank you for your patience while we worked through the waitlist. Unfortunately we don't have a spot for {{student_name}} available at this time and, given our current enrollment, we don't expect one to open in the short term.\n\nIf you'd like we can keep {{student_name}} on the list in case something changes, or archive the application if you've already made other arrangements. Just reply and let us know.\n\nWe wish you the very best in finding great care for {{student_name}}.\n\nWarmly,\n{{daycare_name}}\n{{contact_email}} | {{contact_phone}}",
+      "waitlist"],
+  ];
+  for (const [name, subject, body, kind] of laterBuiltins) {
+    const existing = await d.select<{ n: number }[]>(
+      "SELECT COUNT(*) AS n FROM message_templates WHERE name = ?",
+      [name],
+    );
+    if ((existing[0]?.n ?? 0) === 0) {
+      await d.execute(
+        "INSERT INTO message_templates(name, subject, body, kind, is_builtin) VALUES(?,?,?,?,1)",
+        [name, subject, body, kind],
       );
     }
   }
