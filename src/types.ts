@@ -97,6 +97,7 @@ export interface Staff {
   role: string | null;
   hourly_rate: number | null;
   active: number;
+  whatsapp_phone_e164: string | null;
   created_at: string;
   archived_at: string | null;
 }

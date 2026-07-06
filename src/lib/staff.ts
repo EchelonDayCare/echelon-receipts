@@ -33,15 +33,23 @@ export async function listStaff(includeArchived = false): Promise<Staff[]> {
   );
 }
 
-export async function createStaff(name: string, role: string | null, hourlyRate: number | null): Promise<number> {
+export async function createStaff(
+  name: string,
+  role: string | null,
+  hourlyRate: number | null,
+  whatsappPhoneE164: string | null = null,
+): Promise<number> {
   const r = await execRetry(
-    "INSERT INTO staff(name, role, hourly_rate, active) VALUES(?, ?, ?, 1)",
-    [name.trim(), role?.trim() || null, hourlyRate]
+    "INSERT INTO staff(name, role, hourly_rate, whatsapp_phone_e164, active) VALUES(?, ?, ?, ?, 1)",
+    [name.trim(), role?.trim() || null, hourlyRate, whatsappPhoneE164?.trim() || null]
   );
   return Number(r.lastInsertId);
 }
 
-export async function updateStaff(id: number, fields: Partial<Pick<Staff, "name" | "role" | "hourly_rate" | "active">>): Promise<void> {
+export async function updateStaff(
+  id: number,
+  fields: Partial<Pick<Staff, "name" | "role" | "hourly_rate" | "active" | "whatsapp_phone_e164">>,
+): Promise<void> {
   const d = await db();
   const cur = (await d.select<Staff[]>("SELECT * FROM staff WHERE id=?", [id]))[0];
   if (!cur) return;
@@ -51,10 +59,14 @@ export async function updateStaff(id: number, fields: Partial<Pick<Staff, "name"
     role: fields.role !== undefined ? (fields.role?.trim() || null) : cur.role,
     hourly_rate: fields.hourly_rate !== undefined ? fields.hourly_rate : cur.hourly_rate,
     active: fields.active !== undefined ? fields.active : cur.active,
+    whatsapp_phone_e164: fields.whatsapp_phone_e164 !== undefined
+      ? (fields.whatsapp_phone_e164?.trim() || null)
+      : cur.whatsapp_phone_e164,
   };
   await execRetry(
-    "UPDATE staff SET name=?, role=?, hourly_rate=?, active=?, archived_at=? WHERE id=?",
-    [next.name, next.role, next.hourly_rate, next.active, next.active ? null : new Date().toISOString(), id]
+    "UPDATE staff SET name=?, role=?, hourly_rate=?, whatsapp_phone_e164=?, active=?, archived_at=? WHERE id=?",
+    [next.name, next.role, next.hourly_rate, next.whatsapp_phone_e164,
+     next.active, next.active ? null : new Date().toISOString(), id]
   );
 }
 

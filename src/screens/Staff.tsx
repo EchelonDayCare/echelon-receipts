@@ -12,6 +12,7 @@ import {
   assertStaffHoursSchema, countHoursForStaffMonth, deleteHoursForStaffMonth,
 } from "../lib/staff";
 import { fileToMime } from "../lib/ai";
+import { isValidE164 } from "../lib/whatsapp";
 import {
   extractTimesheetConsensus, computeConsensus, editCell, PROVIDER_LABELS,
   type ConsensusAlignment, type ConsensusRow, type Confidence, type ProviderName,
@@ -101,18 +102,24 @@ export default function StaffScreen() {
   // ---- Staff CRUD ----
   function newStaff() {
     const defaultRate = parseFloat(settings.staff_default_hourly_rate || "");
-    setEditing({ name: "", role: "", hourly_rate: Number.isFinite(defaultRate) ? defaultRate : null, active: 1 });
+    setEditing({ name: "", role: "", hourly_rate: Number.isFinite(defaultRate) ? defaultRate : null, active: 1, whatsapp_phone_e164: null });
   }
   async function saveStaff() {
     if (!editing || !editing.name?.trim()) return;
+    const phone = (editing.whatsapp_phone_e164 || "").trim();
+    if (phone && !isValidE164(phone)) {
+      notify("Phone must be in international E.164 format, e.g. +16045551234.", "err");
+      return;
+    }
     try {
       if (editing.id) {
         await updateStaff(editing.id, {
           name: editing.name, role: editing.role ?? null,
           hourly_rate: editing.hourly_rate ?? null, active: editing.active ?? 1,
+          whatsapp_phone_e164: phone || null,
         });
       } else {
-        await createStaff(editing.name, editing.role ?? null, editing.hourly_rate ?? null);
+        await createStaff(editing.name, editing.role ?? null, editing.hourly_rate ?? null, phone || null);
       }
       setEditing(null);
       await refresh();
@@ -1052,6 +1059,18 @@ export default function StaffScreen() {
                 onChange={(e) => setEditing({ ...editing, hourly_rate: e.target.value === "" ? null : parseFloat(e.target.value) })}
                 placeholder="e.g. 28.50"
               />
+            </div>
+            <div className="field">
+              <label>WhatsApp phone (optional)</label>
+              <input
+                type="tel"
+                value={editing.whatsapp_phone_e164 ?? ""}
+                onChange={(e) => setEditing({ ...editing, whatsapp_phone_e164: e.target.value })}
+                placeholder="+16045551234"
+              />
+              <div style={{ fontSize: 11, color: "var(--muted)", marginTop: 4 }}>
+                International format with country code (E.164). Used for schedule confirmations via WhatsApp.
+              </div>
             </div>
             {editing.id != null && (
               <div className="field">
