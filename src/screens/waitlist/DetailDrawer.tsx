@@ -101,11 +101,16 @@ export default function DetailDrawer({
 
   const sendEmail = () => {
     if (!entry.parent_email) return;
-    // Use the OS mail handler — the app's group Compose screen expects a
-    // Student roster selection, not a one-off parent email. mailto opens the
-    // owner's default mail client (Apple Mail / Outlook / etc.) pre-filled.
-    const subject = encodeURIComponent(`Regarding ${entry.child_name}'s waitlist application`);
-    window.location.href = `mailto:${entry.parent_email}?subject=${subject}`;
+    // Route through the Communications module so the message is logged in
+    // Message History (and future scheduled/templated flows can reach a
+    // waitlist parent too). Compose reads these query params on mount.
+    const params = new URLSearchParams({
+      to: entry.parent_email,
+      name: entry.parent_name || "",
+      child: entry.child_name || "",
+    });
+    nav(`/communications/compose?${params.toString()}`);
+    onClose();
   };
 
   const band = ageBand(entry.birthday);

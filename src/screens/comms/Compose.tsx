@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
+import { useSearchParams } from "react-router-dom";
 import { getSettings, listStudents, listYears } from "../../lib/db";
 import type { Student, SettingsMap } from "../../types";
 import {
@@ -9,7 +10,9 @@ import {
 import { parseRecipients } from "../../lib/email";
 import { showAlert, showConfirm } from "../../lib/dialogs";
 
-type Mode = "all_active" | "year" | "students";
+type Mode = "all_active" | "year" | "students" | "adhoc";
+
+type AdhocRecipient = { name: string; email: string; label?: string };
 
 export default function Compose() {
   const [settings, setSettings] = useState<SettingsMap>({});
@@ -25,6 +28,9 @@ export default function Compose() {
   const [body, setBody] = useState("");
   const [attachments, setAttachments] = useState<CommAttachment[]>([]);
   const [bccSelf, setBccSelf] = useState(true);
+  const [adhoc, setAdhoc] = useState<AdhocRecipient[]>([]);
+
+  const [searchParams, setSearchParams] = useSearchParams();
 
   const [busy, setBusy] = useState(false);
   const [progress, setProgress] = useState<GroupSendProgress[]>([]);
@@ -39,6 +45,25 @@ export default function Compose() {
       if (ys.length) setYear(ys[0]);
       setBccSelf(s.bcc_self === "1");
     })();
+  }, []);
+
+  // Ad-hoc entry: /communications/compose?to=<email>&name=<parent>&child=<childName>&subject=...
+  // Used by the Waitlist detail drawer so a message to a not-yet-a-Student
+  // parent still flows through Comms and gets logged in Message History.
+  useEffect(() => {
+    const to = searchParams.get("to");
+    if (!to) return;
+    const name = searchParams.get("name") || "";
+    const child = searchParams.get("child") || "";
+    const subj = searchParams.get("subject") || (child ? `Regarding ${child}'s waitlist application` : "");
+    setMode("adhoc");
+    setAdhoc([{ name: name || "Parent", email: to, label: child || name || "Recipient" }]);
+    if (subj) setSubject(subj);
+    // Clear the params so a refresh doesn't re-trigger.
+    const nx = new URLSearchParams(searchParams);
+    ["to", "name", "child", "subject"].forEach((k) => nx.delete(k));
+    setSearchParams(nx, { replace: true });
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   useEffect(() => {
@@ -62,8 +87,9 @@ export default function Compose() {
   const filter: RecipientFilter = useMemo(() => {
     if (mode === "all_active") return { mode: "all_active" };
     if (mode === "year") return { mode: "year", year };
+    if (mode === "adhoc") return { mode: "adhoc", recipients: adhoc };
     return { mode: "students", studentIds: Array.from(selectedIds) };
-  }, [mode, year, selectedIds]);
+  }, [mode, year, selectedIds, adhoc]);
 
   const [recipientCount, setRecipientCount] = useState<{ withEmail: number; total: number }>({ withEmail: 0, total: 0 });
   useEffect(() => {
@@ -72,10 +98,11 @@ export default function Compose() {
       let total = 0;
       if (mode === "all_active") total = (await listStudents(undefined, true)).length;
       else if (mode === "year") total = students.length;
+      else if (mode === "adhoc") total = adhoc.length;
       else total = selectedIds.size;
       setRecipientCount({ withEmail: resolved.length, total });
     })();
-  }, [filter, mode, year, students.length, selectedIds]);
+  }, [filter, mode, year, students.length, selectedIds, adhoc]);
 
   function useTemplate(tId: string) {
     if (!tId) return;
@@ -145,6 +172,7 @@ export default function Compose() {
             <option value="all_active">All active parents</option>
             <option value="year">Roster year…</option>
             <option value="students">Selected students…</option>
+            {adhoc.length > 0 && <option value="adhoc">Ad-hoc recipient(s)</option>}
           </select>
           {mode === "year" && (
             <select value={year} onChange={(e) => setYear(Number(e.target.value))}>
@@ -155,6 +183,21 @@ export default function Compose() {
             {recipientCount.withEmail} of {recipientCount.total} have email on file
           </div>
         </div>
+
+        {mode === "adhoc" && (
+          <div style={{ marginTop: 12, padding: 10, background: "rgba(37,99,235,.08)", borderRadius: 6, border: "1px solid rgba(37,99,235,.25)" }}>
+            <div style={{ fontSize: 12, color: "var(--muted)", marginBottom: 6 }}>
+              Sending to individual recipient{adhoc.length === 1 ? "" : "s"} (not from the student roster). Message will still be logged in Message History.
+            </div>
+            {adhoc.map((r, i) => (
+              <div key={i} style={{ display: "flex", gap: 8, alignItems: "center", padding: "4px 0" }}>
+                <b style={{ minWidth: 140 }}>{r.name}</b>
+                <span style={{ color: "var(--muted)" }}>{r.email}</span>
+                {r.label && <span style={{ marginLeft: "auto", fontSize: 11, color: "var(--muted)" }}>Re: {r.label}</span>}
+              </div>
+            ))}
+          </div>
+        )}
 
         {mode === "students" && (
           <div style={{ marginTop: 12 }}>

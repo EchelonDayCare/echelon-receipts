@@ -45,7 +45,8 @@ export interface ScheduledMessage {
 export type RecipientFilter =
   | { mode: "all_active" }
   | { mode: "year"; year: number }
-  | { mode: "students"; studentIds: number[] };
+  | { mode: "students"; studentIds: number[] }
+  | { mode: "adhoc"; recipients: { name: string; email: string; label?: string }[] };
 
 // ---------------- Templates ----------------
 export async function listTemplates(): Promise<MessageTemplate[]> {
@@ -213,6 +214,25 @@ export interface ResolvedRecipient {
 }
 
 export async function resolveRecipients(f: RecipientFilter, activeYear?: number): Promise<ResolvedRecipient[]> {
+  if (f.mode === "adhoc") {
+    // Ad-hoc recipient (e.g. a waitlist parent who isn't a Student yet).
+    // Synthesize a minimal Student shim so downstream code (merge context,
+    // scheduled_deliveries) has a stable shape. student.id = -1 signals
+    // "not a real Student row" — never used as a FK.
+    return f.recipients
+      .filter((r) => !!r.email)
+      .map((r) => {
+        const shim: Student = {
+          id: -1, name: r.label || r.name || "Recipient",
+          father_name: null, mother_name: null, email: r.email,
+          year: new Date().getFullYear(), active: 1,
+          created_at: new Date().toISOString(),
+          person_id: null, gross_override: null,
+        };
+        return { student: shim, parentName: r.name || "Parent", emails: parseRecipients(r.email) };
+      })
+      .filter((r) => r.emails.length > 0);
+  }
   let students: Student[] = [];
   if (f.mode === "all_active") {
     students = await listStudents(activeYear, true);

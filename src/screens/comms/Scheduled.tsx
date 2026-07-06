@@ -134,6 +134,7 @@ export default function Scheduled() {
             try { rf = JSON.parse(m.recipient_filter); } catch { rf = { mode: "all_active" }; }
             const rfLabel = rf.mode === "all_active" ? "All active"
               : rf.mode === "year" ? `Year ${rf.year}`
+              : rf.mode === "adhoc" ? `${rf.recipients.length} ad-hoc`
               : `${rf.studentIds.length} students`;
             return (
               <tr key={m.id} style={{ borderTop: "1px solid var(--border)" }}>
