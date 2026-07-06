@@ -7,14 +7,6 @@ use tauri::Manager;
 
 const SQLITE_HEADER: &[u8; 16] = b"SQLite format 3\0";
 
-fn read_header(path: &Path) -> Result<[u8; 16], String> {
-    use std::io::Read;
-    let mut f = fs::File::open(path).map_err(|e| format!("open: {e}"))?;
-    let mut buf = [0u8; 16];
-    f.read_exact(&mut buf).map_err(|e| format!("read header: {e}"))?;
-    Ok(buf)
-}
-
 fn app_db_paths(app: &tauri::AppHandle) -> Result<(PathBuf, PathBuf, PathBuf), String> {
     let dir = app.path().app_data_dir().map_err(|e| format!("app_data_dir: {e}"))?;
     fs::create_dir_all(&dir).map_err(|e| format!("mkdir app_data_dir: {e}"))?;
@@ -25,19 +17,38 @@ fn app_db_paths(app: &tauri::AppHandle) -> Result<(PathBuf, PathBuf, PathBuf), S
 }
 
 #[tauri::command]
-pub fn stage_restore(src_path: String, app: tauri::AppHandle) -> Result<String, String> {
+pub fn stage_restore(
+    src_path: String,
+    app: tauri::AppHandle,
+    passphrase: Option<String>,
+) -> Result<String, String> {
     // H-8: don't trust an arbitrary caller-supplied path — constrain reads
     // to the app data dir / Documents / Downloads and reject symlinks.
     let src = crate::path_guard::validate_existing_file(&app, &src_path)?;
-    let header = read_header(&src)?;
-    if &header != SQLITE_HEADER {
+    let raw = fs::read(&src).map_err(|e| format!("read backup file: {e}"))?;
+
+    // C-1: backups made after the encryption migration start with our
+    // envelope magic. Decrypt them here; anything else is treated as a
+    // legacy pre-migration plaintext `.db` dump (still supported so older
+    // backups remain restorable).
+    let db_bytes: Vec<u8> = if crate::backup_crypto::is_encrypted(&raw) {
+        let pass = passphrase
+            .filter(|p| !p.is_empty())
+            .ok_or_else(|| "This backup is encrypted — a passphrase is required to restore it.".to_string())?;
+        crate::backup_crypto::decrypt(&pass, &raw)?
+    } else {
+        raw
+    };
+
+    if db_bytes.len() < 16 || &db_bytes[..16] != SQLITE_HEADER {
         return Err("Not a valid SQLite database (header mismatch). Refusing to restore.".into());
     }
+
     let (_live, pending, _backups) = app_db_paths(&app)?;
     if let Some(parent) = pending.parent() {
         fs::create_dir_all(parent).map_err(|e| format!("mkdir: {e}"))?;
     }
-    fs::copy(&src, &pending).map_err(|e| format!("copy to pending: {e}"))?;
+    fs::write(&pending, &db_bytes).map_err(|e| format!("write pending: {e}"))?;
 
     // C-7: a header match alone doesn't rule out a truncated/corrupted or
     // referentially-broken dump. Run SQLite's own integrity checks on the

@@ -365,6 +365,11 @@ async function ensureSchema(d: Database): Promise<void> {
     ["backup_recipient_email", ""],
     // PIPEDA / consent: default OFF so cloud backup is opt-in.
     ["backup_cloud_enabled", "0"],
+    // C-1: encrypted cloud backup passphrase. The passphrase itself lives
+    // in the OS keychain (see backup_crypto.rs) — only a non-secret
+    // presence flag and an Argon2id verification hash are stored here.
+    ["backup_passphrase_set", "0"],
+    ["backup_passphrase_hash", ""],
   ] as const) await setting(k, v);
 
   // Migration 010 — Communications module (group email, templates, history, scheduled)

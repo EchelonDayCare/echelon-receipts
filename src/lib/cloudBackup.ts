@@ -59,6 +59,14 @@ export async function sendCloudBackup(forMonthKey: string): Promise<CloudBackupR
   if (s.smtp_password_set !== "1") {
     return { ok: false, monthKey: forMonthKey, recipient, bytes: 0, error: "SMTP password not set." };
   }
+  // C-1: cloud backups are always encrypted now — a raw .db dump is never
+  // emailed. Require a backup passphrase to be configured before we'll send.
+  if (s.backup_passphrase_set !== "1") {
+    return {
+      ok: false, monthKey: forMonthKey, recipient, bytes: 0,
+      error: "Backup passphrase not set. Open Settings → Backups and set one before cloud backup can run.",
+    };
+  }
 
   // Flush the WAL into the main .db file before reading, otherwise recent
   // commits live only in echelon.db-wal and the email backup is incomplete.
@@ -67,7 +75,10 @@ export async function sendCloudBackup(forMonthKey: string): Promise<CloudBackupR
 
   const dbPath = await join(await appDataDir(), "echelon.db");
   const bytes = await readFile(dbPath);
-  const b64 = bytesToBase64(bytes);
+  const plaintextB64 = bytesToBase64(bytes);
+  const { encrypted_b64: encryptedB64 } = await invoke<{ encrypted_b64: string }>("encrypt_backup", {
+    args: { plaintext_b64: plaintextB64 },
+  });
   const stamp = new Date().toISOString().slice(0, 19).replace(/[:T]/g, "-");
   const daycare = s.daycare_name || "Echelon Daycare";
   const sender = (s.sender_email || s.contact_email || "").trim();
@@ -84,14 +95,15 @@ export async function sendCloudBackup(forMonthKey: string): Promise<CloudBackupR
       bcc: [],
       subject: `[Echelon Backup] ${monthLabel(forMonthKey)} — ${daycare}`,
       body_text:
-        `Automatic monthly backup of the Echelon Receipts database.\n\n` +
+        `Automatic monthly backup of the Echelon Receipts database (encrypted).\n\n` +
         `Covers data up to: ${new Date().toISOString().slice(0, 10)}\n` +
         `Backup month tag: ${forMonthKey}\n` +
-        `File: echelon-${forMonthKey}.db (${(bytes.length / 1024).toFixed(1)} KB)\n\n` +
-        `To restore: save the attached .db file into the app data folder, ` +
-        `replacing echelon.db (close the app first). Keep this email — it is your safety net.`,
-      attachment_b64: b64,
-      attachment_filename: `echelon-${forMonthKey}-${stamp}.db`,
+        `File: echelon-${forMonthKey}.db.enc (${(bytes.length / 1024).toFixed(1)} KB, encrypted)\n\n` +
+        `To restore: use Settings → Backups → "Restore from backup file…" and select this ` +
+        `attachment — you will be prompted for your backup passphrase. Keep this email AND your ` +
+        `backup passphrase safe; without the passphrase this backup cannot be decrypted.`,
+      attachment_b64: encryptedB64,
+      attachment_filename: `echelon-${forMonthKey}-${stamp}.db.enc`,
       attachment_mime: "application/octet-stream",
     },
   });
@@ -113,6 +125,16 @@ export async function runCloudBackupIfDue(): Promise<CloudBackupResult | null> {
     if (!recipientFor(s)) return null; // not configured yet — silent
     if (!s.smtp_host || !s.smtp_user) return null;
     if (s.smtp_password_set !== "1") return null; // no password stored — don't prompt keychain
+    if (s.backup_passphrase_set !== "1") {
+      // Cloud backup is on but the encryption passphrase migration hasn't
+      // been completed yet — surface it instead of silently skipping so
+      // the owner notices they're unprotected.
+      await setSetting(
+        "last_backup_error",
+        "Cloud backup is enabled but no backup passphrase is set. Open Settings → Backups to set one."
+      );
+      return null;
+    }
 
     const now = new Date();
     const thisMonth = monthKey(now);

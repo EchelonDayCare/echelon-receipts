@@ -1,9 +1,9 @@
-import { showAlert, showConfirm } from "../lib/dialogs";
+import { showAlert, showConfirm, showPrompt } from "../lib/dialogs";
 import { useEffect, useState } from "react";
 import { useParams, useNavigate, NavLink } from "react-router-dom";
 import { open } from "@tauri-apps/plugin-dialog";
 import { invoke } from "@tauri-apps/api/core";
-import { copyFile, mkdir, exists } from "@tauri-apps/plugin-fs";
+import { copyFile, mkdir, exists, readFile } from "@tauri-apps/plugin-fs";
 import { appDataDir, join } from "@tauri-apps/api/path";
 import { getVersion } from "@tauri-apps/api/app";
 import { getSettings, setSetting, setSettings as setSettingsBulk, checkpointWal } from "../lib/db";
@@ -65,6 +65,9 @@ export default function Settings() {
   const [errorLogPathStr, setErrorLogPathStr] = useState<string>("");
   const [showErrorLog, setShowErrorLog] = useState(false);
   const [appVersion, setAppVersion] = useState<string>("");
+  const [backupPassphrase, setBackupPassphrase] = useState<string>("");
+  const [backupPassphraseConfirm, setBackupPassphraseConfirm] = useState<string>("");
+  const [hasBackupPassphrase, setHasBackupPassphrase] = useState(false);
 
   useEffect(() => {
     (async () => {
@@ -72,6 +75,7 @@ export default function Settings() {
       setS(loaded);
       setHasStoredPassword(loaded.smtp_password_set === "1");
       setHasAzureKey(loaded.azure_ai_key_set === "1");
+      setHasBackupPassphrase(loaded.backup_passphrase_set === "1");
       try { setAppVersion(await getVersion()); } catch { /* fine */ }
     })();
   }, []);
@@ -115,6 +119,61 @@ export default function Settings() {
     await setSetting("azure_ai_key_set", "");
     setHasAzureKey(false);
     void showAlert("Azure AI key removed.");
+  }
+
+  // ── C-1: encrypted cloud backup passphrase ──────────────────────────
+  async function saveBackupPassphrase() {
+    const p = backupPassphrase.trim();
+    if (p.length < 8) {
+      void showAlert("Passphrase must be at least 8 characters."); return;
+    }
+    if (p !== backupPassphraseConfirm.trim()) {
+      void showAlert("Passphrase and confirmation don't match."); return;
+    }
+    try {
+      const hash = await invoke<string>("backup_set_passphrase", { args: { passphrase: p } });
+      await setSetting("backup_passphrase_hash", hash);
+      await setSetting("backup_passphrase_set", "1");
+      setHasBackupPassphrase(true);
+      setBackupPassphrase(""); setBackupPassphraseConfirm("");
+      void showAlert("✅ Backup passphrase set. Cloud backups will now be encrypted with it.");
+    } catch (e: any) {
+      void showAlert("❌ Failed to set passphrase:\n" + (e?.message || e));
+    }
+  }
+
+  async function clearBackupPassphraseHandler() {
+    const ok = await showConfirm(
+      "Remove the backup passphrase? Automatic cloud backups will stop until a new one is set. " +
+      "Existing encrypted backups will still need the OLD passphrase to restore — write it down first!"
+    );
+    if (!ok) return;
+    await invoke("backup_clear_passphrase");
+    await setSetting("backup_passphrase_set", "");
+    await setSetting("backup_passphrase_hash", "");
+    setHasBackupPassphrase(false);
+    void showAlert("Backup passphrase removed.");
+  }
+
+  async function testDecryptLastBackup() {
+    try {
+      if (!s.last_cloud_backup_at) { void showAlert("No cloud backup has been sent yet."); return; }
+      const dbPath = await join(await appDataDir(), "echelon.db");
+      await checkpointWal();
+      const bytes = await readFile(dbPath);
+      let b64 = "";
+      for (let i = 0; i < bytes.length; i += 8192) b64 += String.fromCharCode(...bytes.subarray(i, i + 8192));
+      const plaintextB64 = btoa(b64);
+      const { encrypted_b64: encB64 } = await invoke<{ encrypted_b64: string }>("encrypt_backup", { args: { plaintext_b64: plaintextB64 } });
+      const { was_encrypted } = await invoke<{ plaintext_b64: string; was_encrypted: boolean }>(
+        "decrypt_backup", { args: { encrypted_b64: encB64 } }
+      );
+      void showAlert(was_encrypted
+        ? "✅ Encrypt → decrypt round-trip succeeded using the current backup passphrase."
+        : "⚠️ Unexpected: archive was not recognised as encrypted.");
+    } catch (e: any) {
+      void showAlert("❌ Test decrypt failed:\n" + (e?.message || e));
+    }
   }
 
   async function runTest() {
@@ -183,16 +242,32 @@ export default function Settings() {
       const picked = await open({
         multiple: false,
         directory: false,
-        filters: [{ name: "SQLite database", extensions: ["db", "sqlite", "sqlite3"] }],
+        filters: [{ name: "SQLite database / encrypted backup", extensions: ["db", "sqlite", "sqlite3", "enc"] }],
       });
       if (!picked || Array.isArray(picked)) return;
+      const isEncrypted = picked.toLowerCase().endsWith(".enc");
+      let passphrase: string | undefined;
+      if (isEncrypted) {
+        const entered = await showPrompt(
+          "This looks like an encrypted backup (.enc). Enter the backup passphrase to decrypt it:"
+        );
+        if (entered == null) return; // user cancelled
+        passphrase = entered.trim();
+      } else {
+        void showAlert(
+          "⚠️ This file is not an encrypted (.enc) backup. If it's a pre-v1.6 cloud backup email " +
+          "attachment (plaintext .db), it will still be restored as-is, but new cloud backups are " +
+          "encrypted — set a backup passphrase in this tab to protect future backups.",
+          { kind: "warning" }
+        );
+      }
       const ok = await showConfirm(
         `⚠️  This will REPLACE your current database with:\n\n${picked}\n\n` +
         `A safety copy of your current data will be saved to the Backups folder first. ` +
         `The app will close and reopen automatically.\n\nProceed?`
       );
       if (!ok) return;
-      const pending = await invoke<string>("stage_restore", { srcPath: picked });
+      const pending = await invoke<string>("stage_restore", { srcPath: picked, passphrase });
       void showAlert(`✅ Restore staged.\n${pending}\n\nThe app will now restart to apply the restore.`);
       await invoke("restart_app");
     } catch (e: any) {
@@ -511,11 +586,46 @@ export default function Settings() {
         </div>
 
         <hr style={{ border: 0, borderTop: "1px solid var(--border)", margin: "20px 0" }} />
+        <h3 style={{ margin: "0 0 4px" }}>
+          Backup encryption {hasBackupPassphrase && <span className="badge ok" style={{ marginLeft: 8 }}>Set</span>}
+        </h3>
+        <p className="subtitle" style={{ marginBottom: 14 }}>
+          Cloud backups are encrypted with a passphrase before they're emailed — the plaintext database
+          never leaves this computer. Set a passphrase here; it's stored securely in this computer's OS
+          keychain (not emailed, not in the database). <strong>Write it down somewhere safe</strong> — if you
+          lose it, encrypted backups cannot be recovered.
+        </p>
+        <div className="row">
+          <div className="field">
+            <label>{hasBackupPassphrase ? "New passphrase (leave blank to keep current)" : "Backup passphrase"}</label>
+            <input type="password" value={backupPassphrase} onChange={(e) => setBackupPassphrase(e.target.value)}
+              placeholder="At least 8 characters" />
+          </div>
+          <div className="field">
+            <label>Confirm passphrase</label>
+            <input type="password" value={backupPassphraseConfirm} onChange={(e) => setBackupPassphraseConfirm(e.target.value)}
+              placeholder="Re-type to confirm" />
+          </div>
+        </div>
+        <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
+          <button className="btn" onClick={saveBackupPassphrase}>
+            {hasBackupPassphrase ? "Change passphrase" : "Set passphrase"}
+          </button>
+          {hasBackupPassphrase && (
+            <>
+              <button className="btn secondary" onClick={testDecryptLastBackup}>Test decrypt with current DB</button>
+              <button className="btn danger" onClick={clearBackupPassphraseHandler}>Remove passphrase</button>
+            </>
+          )}
+        </div>
+
+        <hr style={{ border: 0, borderTop: "1px solid var(--border)", margin: "20px 0" }} />
         <h3 style={{ margin: "0 0 4px" }}>Restore from a backup</h3>
         <p className="subtitle" style={{ marginBottom: 14 }}>
-          Replace this computer's data with a backup <code>.db</code> file — for example, an attachment
-          downloaded from your cloud backup email, or a file from the local <code>Backups/</code> folder.
-          A safety copy of the current database is saved first, and the app restarts to apply the restore.
+          Replace this computer's data with a backup file — an encrypted <code>.db.enc</code> attachment
+          from a cloud backup email (v1.6+), or a legacy plaintext <code>.db</code> file from an older backup
+          or the local <code>Backups/</code> folder. A safety copy of the current database is saved first,
+          and the app restarts to apply the restore.
         </p>
         <div style={{ display: "flex", gap: 10 }}>
           <button className="btn danger" onClick={restoreFromFile}>Restore from backup file…</button>

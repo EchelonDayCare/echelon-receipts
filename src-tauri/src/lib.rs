@@ -12,6 +12,7 @@ mod waitlist;
 mod documents;
 mod path_guard;
 mod secrets;
+mod backup_crypto;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -127,6 +128,11 @@ pub fn run() {
             waitlist::waitlist_get_status,
             waitlist::waitlist_fetch_rows,
             documents::documents_export_zip,
+            backup_crypto::backup_set_passphrase,
+            backup_crypto::backup_clear_passphrase,
+            backup_crypto::backup_verify_passphrase,
+            backup_crypto::encrypt_backup,
+            backup_crypto::decrypt_backup,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
