@@ -41,7 +41,9 @@ export default function Templates() {
         <button className="btn" onClick={() => setEditing({ id: 0 as any, name: "", subject: "", body: "", kind: "general", is_builtin: 0, created_at: "", updated_at: "" })}>+ New template</button>
       </div>
       <p style={{ color: "var(--muted)", marginTop: -8 }}>
-        Reusable subject + body for group emails. Built-in starters are always available. Templates support the same merge tokens as Compose.
+        Reusable subject + body for group emails.
+        <br />
+        Built-in starters are always available. Templates support the same merge tokens as Compose.
       </p>
 
       <table style={{ width: "100%", borderCollapse: "collapse", marginTop: 16 }}>
