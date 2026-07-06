@@ -1,5 +1,7 @@
-// Document Vault — Library screen. Filter panel + table + bulk actions.
-import { useEffect, useMemo, useState } from "react";
+// Document Vault — Library screen.
+// v1.4.1 UX pass: horizontal filter bar (was 260px sidebar), popover for
+// less-used filters, friendly empty states (no-docs-yet vs no-matches).
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import { invoke } from "@tauri-apps/api/core";
 import { save as saveDialog } from "@tauri-apps/plugin-dialog";
@@ -21,6 +23,10 @@ export default function VaultLibrary() {
   const [intent, setIntent] = useState<UploadIntent | null>(null);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
+  const [moreOpen, setMoreOpen] = useState(false);
+  const moreRef = useRef<HTMLDivElement>(null);
+  // "Ever-had-docs?" — distinguishes empty-because-filtered from empty-because-first-use.
+  const [totalDocs, setTotalDocs] = useState<number | null>(null);
 
   const initialExpiring = params.get("expiring");
   const initialCategory = params.get("category") as DocCategory | null;
@@ -47,16 +53,40 @@ export default function VaultLibrary() {
     return f;
   }, [category, linkedKind, preset, search, tagFilter, includeOldVersions, showDeleted]);
 
+  const filtersActive =
+    !!category || !!linkedKind || preset !== "all" ||
+    !!search.trim() || tagFilter.length > 0 || includeOldVersions || showDeleted;
+
+  const clearFilters = () => {
+    setCategory(""); setLinkedKind(""); setPreset("all"); setSearch("");
+    setTagFilter([]); setIncludeOldVersions(false); setShowDeleted(false);
+  };
+
   const refresh = async () => {
     try {
       const [list, allTags] = await Promise.all([listDocuments(filter), listAllTags()]);
       setDocs(list);
       setTags(allTags);
       setSelected((cur) => new Set([...cur].filter((id) => list.some((d) => d.id === id))));
+      // Cache the ever-had-docs flag once (cheap: totalDocs stays truthy once ≥1 doc exists).
+      if (totalDocs == null || (totalDocs === 0 && list.length > 0)) {
+        const all = await listDocuments({ includeOldVersions: true });
+        setTotalDocs(all.length);
+      }
     } catch (e: any) { setErr(String(e?.message ?? e)); }
   };
 
   useEffect(() => { void refresh(); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, [filter]);
+
+  // Close "More filters" popover on outside click.
+  useEffect(() => {
+    if (!moreOpen) return;
+    const onClick = (e: MouseEvent) => {
+      if (moreRef.current && !moreRef.current.contains(e.target as Node)) setMoreOpen(false);
+    };
+    window.addEventListener("mousedown", onClick);
+    return () => window.removeEventListener("mousedown", onClick);
+  }, [moreOpen]);
 
   const toggleTag = (t: string) => setTagFilter((cur) => cur.includes(t) ? cur.filter((x) => x !== t) : [...cur, t]);
   const toggleSelected = (id: string) => setSelected((cur) => {
@@ -83,10 +113,13 @@ export default function VaultLibrary() {
   }
 
   const today = new Date().toISOString().slice(0, 10);
+  const activeChipCount =
+    (category ? 1 : 0) + (linkedKind ? 1 : 0) + (preset !== "all" ? 1 : 0) +
+    (search.trim() ? 1 : 0) + tagFilter.length + (includeOldVersions ? 1 : 0) + (showDeleted ? 1 : 0);
 
   return (
     <div style={{ padding: 24 }}>
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 4 }}>
         <h1 style={{ margin: 0 }}>Document Vault</h1>
         <div style={{ display: "flex", gap: 8 }}>
           {selected.size > 0 && (
@@ -97,116 +130,136 @@ export default function VaultLibrary() {
           <button className="btn primary" onClick={() => setIntent({ mode: "new" })}>+ Upload</button>
         </div>
       </div>
+      <p className="subtitle" style={{ marginTop: 4 }}>
+        Licenses, insurance, staff records, board minutes — hashed, versioned, and
+        searchable in one place.
+      </p>
 
       {err && <div style={errorBoxStyle}>{err}</div>}
 
-      <div style={{ display: "grid", gridTemplateColumns: "260px 1fr", gap: 20 }}>
-        <aside style={{ display: "flex", flexDirection: "column", gap: 14 }}>
-          <div>
-            <div style={panelLabelStyle}>Search</div>
-            <input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Title, issuer, notes…" style={{ width: "100%" }} />
-          </div>
-          <div>
-            <div style={panelLabelStyle}>Category</div>
-            <div style={{ display: "flex", flexWrap: "wrap", gap: 4 }}>
-              <ChipButton active={!category} onClick={() => setCategory("")}>All</ChipButton>
-              {DOC_CATEGORIES.map((c) => (
-                <ChipButton key={c.value} active={category === c.value} onClick={() => setCategory(c.value)}>{c.label}</ChipButton>
-              ))}
-            </div>
-          </div>
-          <div>
-            <div style={panelLabelStyle}>Linked to</div>
-            <select value={linkedKind} onChange={(e) => setLinkedKind(e.target.value as LinkedKind | "")} style={{ width: "100%" }}>
-              <option value="">All</option>
-              <option value="student">Student</option>
-              <option value="staff">Staff</option>
-              <option value="vendor">Vendor</option>
-            </select>
-          </div>
-          <div>
-            <div style={panelLabelStyle}>Expiring within</div>
-            <select value={preset} onChange={(e) => setPreset(e.target.value as Preset)} style={{ width: "100%" }}>
-              <option value="all">Any time</option>
-              <option value="30">30 days</option>
-              <option value="60">60 days</option>
-              <option value="90">90 days</option>
-              <option value="expired">Already expired</option>
-            </select>
-          </div>
-          {tags.length > 0 && (
-            <div>
-              <div style={panelLabelStyle}>Tags</div>
-              <div style={{ display: "flex", flexWrap: "wrap", gap: 4 }}>
-                {tags.map((t) => (
-                  <ChipButton key={t} active={tagFilter.includes(t)} onClick={() => toggleTag(t)}>{t}</ChipButton>
-                ))}
+      {/* Compact filter bar — single row, wraps only on very narrow windows. */}
+      <div className="card" style={{ padding: 12, marginBottom: 16 }}>
+        <div style={{ display: "flex", flexWrap: "wrap", gap: 10, alignItems: "center" }}>
+          <input
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            placeholder="Search title, issuer, notes…"
+            style={{ flex: "1 1 240px", minWidth: 200 }}
+          />
+          <select value={category} onChange={(e) => setCategory(e.target.value as DocCategory | "")} style={selStyle} title="Category">
+            <option value="">All categories</option>
+            {DOC_CATEGORIES.map((c) => (<option key={c.value} value={c.value}>{c.label}</option>))}
+          </select>
+          <select value={linkedKind} onChange={(e) => setLinkedKind(e.target.value as LinkedKind | "")} style={selStyle} title="Linked to">
+            <option value="">Any link</option>
+            <option value="student">Student</option>
+            <option value="staff">Staff</option>
+            <option value="vendor">Vendor</option>
+          </select>
+          <select value={preset} onChange={(e) => setPreset(e.target.value as Preset)} style={selStyle} title="Expiring within">
+            <option value="all">Any expiry</option>
+            <option value="30">Expires ≤ 30 d</option>
+            <option value="60">Expires ≤ 60 d</option>
+            <option value="90">Expires ≤ 90 d</option>
+            <option value="expired">Already expired</option>
+          </select>
+          <div ref={moreRef} style={{ position: "relative" }}>
+            <button
+              className="btn"
+              onClick={() => setMoreOpen((v) => !v)}
+              style={{ position: "relative" }}
+              title="More filters"
+            >
+              More filters
+              {(tagFilter.length + (includeOldVersions ? 1 : 0) + (showDeleted ? 1 : 0)) > 0 && (
+                <span style={badgeStyle}>{tagFilter.length + (includeOldVersions ? 1 : 0) + (showDeleted ? 1 : 0)}</span>
+              )}
+            </button>
+            {moreOpen && (
+              <div style={popoverStyle}>
+                <label style={cbStyle}>
+                  <input type="checkbox" checked={includeOldVersions} onChange={(e) => setIncludeOldVersions(e.target.checked)} />
+                  Show older versions
+                </label>
+                <label style={cbStyle}>
+                  <input type="checkbox" checked={showDeleted} onChange={(e) => setShowDeleted(e.target.checked)} />
+                  Show deleted (restore within 30 d)
+                </label>
+                {tags.length > 0 && (
+                  <div style={{ marginTop: 10, borderTop: "1px solid var(--border)", paddingTop: 10 }}>
+                    <div style={panelLabelStyle}>Tags</div>
+                    <div style={{ display: "flex", flexWrap: "wrap", gap: 4 }}>
+                      {tags.map((t) => (
+                        <ChipButton key={t} active={tagFilter.includes(t)} onClick={() => toggleTag(t)}>{t}</ChipButton>
+                      ))}
+                    </div>
+                  </div>
+                )}
               </div>
-            </div>
+            )}
+          </div>
+          {filtersActive && (
+            <button className="btn ghost" onClick={clearFilters} style={{ fontSize: 12 }} title="Reset all filters">
+              ✕ Clear ({activeChipCount})
+            </button>
           )}
-          <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 13 }}>
-            <input type="checkbox" checked={includeOldVersions} onChange={(e) => setIncludeOldVersions(e.target.checked)} />
-            Show older versions
-          </label>
-          <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 13 }}>
-            <input type="checkbox" checked={showDeleted} onChange={(e) => setShowDeleted(e.target.checked)} />
-            Show deleted (restore within 30 days)
-          </label>
-        </aside>
-
-        <div>
-          {docs.length === 0 ? (
-            <div style={{ padding: 40, textAlign: "center", border: "1px dashed var(--border, #334155)", borderRadius: 8, color: "var(--muted)" }}>
-              No documents match. {docs.length === 0 && !search && !category && "Upload your first."}
-            </div>
-          ) : (
-            <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
-              <thead>
-                <tr style={{ textAlign: "left", color: "var(--muted)", fontWeight: 500 }}>
-                  <th style={{ padding: 8, width: 32 }}>
-                    <input type="checkbox"
-                      checked={selected.size === docs.length && docs.length > 0}
-                      onChange={(e) => setSelected(e.target.checked ? new Set(docs.map((d) => d.id)) : new Set())}
-                    />
-                  </th>
-                  <th style={{ padding: 8 }}>Title</th>
-                  <th style={{ padding: 8 }}>Category</th>
-                  <th style={{ padding: 8 }}>Linked</th>
-                  <th style={{ padding: 8 }}>Issued</th>
-                  <th style={{ padding: 8 }}>Expires</th>
-                  <th style={{ padding: 8, textAlign: "right" }}>Size</th>
-                </tr>
-              </thead>
-              <tbody>
-                {docs.map((doc) => {
-                  const expired = doc.expiryDate && doc.expiryDate < today;
-                  const soon = doc.expiryDate && !expired && Date.parse(doc.expiryDate + "T00:00:00") - Date.now() < 60 * 86400000;
-                  const rowColor = expired ? "rgba(220,38,38,.08)" : soon ? "rgba(217, 119, 6, .08)" : undefined;
-                  return (
-                    <tr key={doc.id}
-                      style={{ borderTop: "1px solid var(--border, #1e293b)", background: rowColor, cursor: "pointer" }}
-                      onClick={() => setOpenId(doc.id)}
-                    >
-                      <td style={{ padding: 8 }} onClick={(e) => { e.stopPropagation(); toggleSelected(doc.id); }}>
-                        <input type="checkbox" checked={selected.has(doc.id)} onChange={() => toggleSelected(doc.id)} />
-                      </td>
-                      <td style={{ padding: 8 }}>
-                        <div><b>{doc.title}</b>{!doc.isCurrent && <span style={{ color: "var(--muted)", marginLeft: 6, fontSize: 11 }}>v{doc.versionNo} (old)</span>}</div>
-                        <div style={{ fontSize: 11, color: "var(--muted)" }}>{doc.fileName}</div>
-                      </td>
-                      <td style={{ padding: 8 }}>{doc.category}</td>
-                      <td style={{ padding: 8 }}>{doc.linkedKind ? `${doc.linkedKind} #${doc.linkedId}` : "—"}</td>
-                      <td style={{ padding: 8 }}>{doc.issuedDate || "—"}</td>
-                      <td style={{ padding: 8, color: expired ? "#dc2626" : soon ? "#d97706" : undefined }}>{doc.expiryDate || "—"}</td>
-                      <td style={{ padding: 8, textAlign: "right" }}>{(doc.sizeBytes / 1024).toFixed(1)} KB</td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
-          )}
+          <div style={{ marginLeft: "auto", fontSize: 12, color: "var(--muted)" }}>
+            {docs.length} document{docs.length === 1 ? "" : "s"}
+          </div>
         </div>
       </div>
+
+      {docs.length === 0 ? (
+        totalDocs === 0 ? <FirstRunEmpty onUpload={() => setIntent({ mode: "new" })} />
+                       : <NoMatchesEmpty onClear={clearFilters} onUpload={() => setIntent({ mode: "new" })} filtersActive={filtersActive} />
+      ) : (
+        <div className="card" style={{ padding: 0, overflow: "hidden" }}>
+          <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
+            <thead>
+              <tr style={{ background: "#f8fafc", textAlign: "left", color: "var(--muted)", fontWeight: 500 }}>
+                <th style={{ padding: 10, width: 32 }}>
+                  <input type="checkbox"
+                    checked={selected.size === docs.length && docs.length > 0}
+                    onChange={(e) => setSelected(e.target.checked ? new Set(docs.map((d) => d.id)) : new Set())}
+                  />
+                </th>
+                <th style={{ padding: 10 }}>Title</th>
+                <th style={{ padding: 10 }}>Category</th>
+                <th style={{ padding: 10 }}>Linked</th>
+                <th style={{ padding: 10 }}>Issued</th>
+                <th style={{ padding: 10 }}>Expires</th>
+                <th style={{ padding: 10, textAlign: "right" }}>Size</th>
+              </tr>
+            </thead>
+            <tbody>
+              {docs.map((doc) => {
+                const expired = doc.expiryDate && doc.expiryDate < today;
+                const soon = doc.expiryDate && !expired && Date.parse(doc.expiryDate + "T00:00:00") - Date.now() < 60 * 86400000;
+                const rowColor = expired ? "rgba(220,38,38,.08)" : soon ? "rgba(217, 119, 6, .08)" : undefined;
+                return (
+                  <tr key={doc.id}
+                    style={{ borderTop: "1px solid var(--border)", background: rowColor, cursor: "pointer" }}
+                    onClick={() => setOpenId(doc.id)}
+                  >
+                    <td style={{ padding: 10 }} onClick={(e) => { e.stopPropagation(); toggleSelected(doc.id); }}>
+                      <input type="checkbox" checked={selected.has(doc.id)} onChange={() => toggleSelected(doc.id)} />
+                    </td>
+                    <td style={{ padding: 10 }}>
+                      <div><b>{doc.title}</b>{!doc.isCurrent && <span style={{ color: "var(--muted)", marginLeft: 6, fontSize: 11 }}>v{doc.versionNo} (old)</span>}</div>
+                      <div style={{ fontSize: 11, color: "var(--muted)" }}>{doc.fileName}</div>
+                    </td>
+                    <td style={{ padding: 10 }}>{doc.category}</td>
+                    <td style={{ padding: 10 }}>{doc.linkedKind ? `${doc.linkedKind} #${doc.linkedId}` : "—"}</td>
+                    <td style={{ padding: 10 }}>{doc.issuedDate || "—"}</td>
+                    <td style={{ padding: 10, color: expired ? "#dc2626" : soon ? "#d97706" : undefined }}>{doc.expiryDate || "—"}</td>
+                    <td style={{ padding: 10, textAlign: "right" }}>{(doc.sizeBytes / 1024).toFixed(1)} KB</td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      )}
 
       {intent && (
         <UploadModal
@@ -227,14 +280,52 @@ export default function VaultLibrary() {
   );
 }
 
+function FirstRunEmpty({ onUpload }: { onUpload: () => void }) {
+  return (
+    <div className="card" style={{ padding: "48px 24px", textAlign: "center" }}>
+      <div style={{ fontSize: 42, marginBottom: 10 }}>🗂️</div>
+      <h2 style={{ margin: "0 0 6px", fontSize: 18 }}>Your vault is empty</h2>
+      <div style={{ color: "var(--muted)", fontSize: 14, maxWidth: 480, margin: "0 auto 18px" }}>
+        Upload licences, insurance policies, staff records, incident reports, board minutes,
+        vendor contracts. Files are content-hashed so re-uploads dedupe automatically, and
+        expiry dates surface on the Home dashboard.
+      </div>
+      <button className="btn primary" onClick={onUpload} style={{ padding: "10px 20px", fontSize: 14 }}>
+        + Upload your first document
+      </button>
+      <div style={{ fontSize: 11, color: "var(--muted)", marginTop: 14 }}>
+        Accepts PDF, PNG, JPG, DOCX, XLSX and anything else — no format lock-in.
+      </div>
+    </div>
+  );
+}
+
+function NoMatchesEmpty({ onClear, onUpload, filtersActive }: {
+  onClear: () => void; onUpload: () => void; filtersActive: boolean;
+}) {
+  return (
+    <div className="card" style={{ padding: "40px 24px", textAlign: "center" }}>
+      <div style={{ fontSize: 30, marginBottom: 8 }}>🔍</div>
+      <h2 style={{ margin: "0 0 6px", fontSize: 16 }}>No documents match these filters</h2>
+      <div style={{ color: "var(--muted)", fontSize: 13, marginBottom: 16 }}>
+        Try broadening the category, expiry range, or search text.
+      </div>
+      <div style={{ display: "flex", gap: 8, justifyContent: "center" }}>
+        {filtersActive && <button className="btn" onClick={onClear}>✕ Clear filters</button>}
+        <button className="btn primary" onClick={onUpload}>+ Upload</button>
+      </div>
+    </div>
+  );
+}
+
 function ChipButton({ active, onClick, children }: { active: boolean; onClick: () => void; children: React.ReactNode }) {
   return (
     <button onClick={onClick}
       style={{
         padding: "4px 10px", borderRadius: 999, fontSize: 12,
-        border: "1px solid " + (active ? "#2563eb" : "var(--border, #334155)"),
+        border: "1px solid " + (active ? "var(--accent)" : "var(--border)"),
         background: active ? "rgba(37,99,235,.15)" : "transparent",
-        color: active ? "#60a5fa" : "inherit",
+        color: active ? "var(--accent)" : "inherit",
         cursor: "pointer",
       }}
     >{children}</button>
@@ -243,6 +334,20 @@ function ChipButton({ active, onClick, children }: { active: boolean; onClick: (
 
 const panelLabelStyle: React.CSSProperties = { fontSize: 11, color: "var(--muted)", textTransform: "uppercase", letterSpacing: 0.5, marginBottom: 6 };
 const errorBoxStyle: React.CSSProperties = {
-  padding: 10, borderRadius: 8, background: "rgba(220,38,38,.1)", color: "#fca5a5",
+  padding: 10, borderRadius: 8, background: "rgba(220,38,38,.1)", color: "#991b1b",
   border: "1px solid rgba(220,38,38,.35)", marginBottom: 12,
+};
+const selStyle: React.CSSProperties = { minWidth: 150, fontSize: 13 };
+const cbStyle: React.CSSProperties = {
+  display: "flex", alignItems: "center", gap: 6, fontSize: 13,
+  padding: "4px 0", cursor: "pointer",
+};
+const popoverStyle: React.CSSProperties = {
+  position: "absolute", top: "calc(100% + 6px)", right: 0, zIndex: 20,
+  minWidth: 260, background: "var(--panel)", border: "1px solid var(--border)",
+  borderRadius: 8, boxShadow: "0 8px 24px rgba(15,23,42,.15)", padding: 12,
+};
+const badgeStyle: React.CSSProperties = {
+  marginLeft: 6, background: "var(--accent)", color: "#fff",
+  fontSize: 10, fontWeight: 700, padding: "1px 6px", borderRadius: 999,
 };

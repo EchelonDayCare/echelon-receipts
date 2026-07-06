@@ -112,7 +112,10 @@ function ModuleSidebar({
               key={it.to}
               to={it.to}
               end
-              className={"nav-item" + (isActive ? " active" : "")}
+              // Function form disables react-router's built-in `active` class,
+              // which would otherwise also mark siblings with the same pathname
+              // active (e.g. /vault and /vault?expiring=60).
+              className={() => "nav-item" + (isActive ? " active" : "")}
             >
               {it.label}
             </NavLink>
