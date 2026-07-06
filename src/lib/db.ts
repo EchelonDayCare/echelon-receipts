@@ -3,6 +3,7 @@ import type { Student, Receipt, SettingsMap, AnnualReceipt, AccbEntry, FeeBreakd
 
 let _db: Database | null = null;
 let _schemaChecked = false;
+let _schemaPromise: Promise<void> | null = null;
 let _pragmasApplied = false;
 
 // ---------- Concurrency & error-handling primitives ----------
@@ -84,15 +85,37 @@ export async function db(): Promise<Database> {
     } catch (e) { console.warn("[db] pragma setup:", e); }
   }
   if (!_schemaChecked) {
-    // Only mark schema as checked after a successful run so a transient
-    // failure (locked DB, disk I/O) is retried on the next db() call
-    // instead of silently leaving the process on a stale schema.
-    try {
-      await ensureSchema(_db);
-      _schemaChecked = true;
-    } catch (e) {
-      console.error("[ensureSchema] failed:", e);
+    // Gate on an in-flight promise so N concurrent db() callers all AWAIT the
+    // SAME ensureSchema run instead of each firing their own. Parallel DDL
+    // (CREATE TABLE, ALTER TABLE) on tauri-plugin-sql's pooled connections
+    // deadlocks; the H-9 fix moved `_schemaChecked=true` to after success,
+    // which correctly retries on transient failure but reopened the door
+    // to concurrent runs. The promise gate closes it: only one ensureSchema
+    // actually runs; every other caller awaits the same result and then
+    // sees `_schemaChecked=true` on their next pass.
+    //
+    // IMPORTANT: helpers called from *inside* `ensureSchema` MUST NOT call
+    // `db()` — that would await the very promise their own async ancestor
+    // owns and self-deadlock. Pass `d: Database` explicitly to any helper
+    // reachable from ensureSchema (see `backfillIssuerSnapshot(d)` and the
+    // in-scope `execWithRetry` helper).
+    if (!_schemaPromise) {
+      _schemaPromise = (async () => {
+        try {
+          await ensureSchema(_db!);
+          _schemaChecked = true;
+        } catch (e) {
+          console.error("[ensureSchema] failed:", e);
+          _schemaPromise = null;
+          throw e;
+        }
+      })();
     }
+    // Re-throw schema failure to callers so they don't proceed against an
+    // un-checked / partial DB. Retry semantics still hold: `_schemaChecked`
+    // stayed false and `_schemaPromise` was cleared on failure, so the next
+    // `db()` call becomes a fresh leader and re-runs ensureSchema.
+    await _schemaPromise;
   }
   return _db;
 }
@@ -102,6 +125,25 @@ export async function db(): Promise<Database> {
 // migrations on pre-existing DBs. This idempotently patches anything missing so
 // the app self-heals on startup. Add new expectations as schema evolves.
 async function ensureSchema(d: Database): Promise<void> {
+  // In-scope replacement for `execRetry` for use *inside* ensureSchema. Uses
+  // the passed-in `d` directly instead of calling the top-level `execRetry`
+  // (which calls `db()` — a re-entrant path that would await our own schema
+  // promise and self-deadlock). Retries on SQLITE_BUSY/LOCKED, matching
+  // `execRetry`'s behavior for the callers below that used to use it.
+  const execWithRetry = async (sql: string, args: any[] = []): Promise<void> => {
+    let lastErr: any = null;
+    for (let attempt = 0; attempt < 5; attempt++) {
+      try { await d.execute(sql, args); return; }
+      catch (e: any) {
+        lastErr = e;
+        const msg = String(e?.message || e);
+        if (!/locked|busy|code: 5|code: 6/i.test(msg)) throw e;
+        await new Promise((r) => setTimeout(r, 100 + attempt * 150));
+      }
+    }
+    throw lastErr;
+  };
+
   // Cache table and column lookups so we don't pay PRAGMA round-trips repeatedly.
   const _tableCache = new Map<string, boolean>();
   const _colCache = new Map<string, Set<string>>();
@@ -264,7 +306,7 @@ async function ensureSchema(d: Database): Promise<void> {
   // Backfill: any pre-existing receipt without a snapshot gets the *current*
   // settings stamped on it. Best-effort — better than letting the PDF re-render
   // with future settings changes.
-  await backfillIssuerSnapshot();
+  await backfillIssuerSnapshot(d);
 
   // Migration 008 — Staff Hours (optional feature)
   if (!(await tableExists("staff"))) {
@@ -553,7 +595,7 @@ async function ensureSchema(d: Database): Promise<void> {
   // clicks could bypass, leaving multiple expenses for the same recurring bill
   // in the same month. Creating the UNIQUE index against that data would throw
   // and block app startup — so we scrub duplicates first, keeping the earliest.
-  await execRetry(
+  await execWithRetry(
     `DELETE FROM expenses
       WHERE recurring_id IS NOT NULL
         AND id NOT IN (
@@ -565,7 +607,7 @@ async function ensureSchema(d: Database): Promise<void> {
   await d.execute("CREATE UNIQUE INDEX IF NOT EXISTS ix_expenses_recurring_period ON expenses(recurring_id, substr(date,1,7)) WHERE recurring_id IS NOT NULL");
 
   // Remove obsolete Gemini setting seed (Migration 013 — see azure_ai refactor).
-  await execRetry("DELETE FROM settings WHERE key='gemini_api_key_set'").catch(() => {});
+  await execWithRetry("DELETE FROM settings WHERE key='gemini_api_key_set'").catch(() => {});
 
   // Migration 014 — Per-recipient scheduled-message delivery ledger. Prevents
   // duplicate sends on retry after a partial failure: successful recipients get
@@ -1364,11 +1406,14 @@ export function issuerViewFor(receipt: Pick<Receipt, "issuer_snapshot_json"> | {
   }
 }
 
-async function backfillIssuerSnapshot(): Promise<void> {
-  const d = await db();
-  const settings = await getSettings();
+async function backfillIssuerSnapshot(d: Database): Promise<void> {
+  // Read settings inline via `d` (do NOT call getSettings/db() — this runs
+  // from inside ensureSchema, and re-entering db() deadlocks on the schema
+  // promise gate).
+  const rows = await d.select<{ key: string; value: string }[]>("SELECT key, value FROM settings");
+  const settings: SettingsMap = {};
+  for (const r of rows) settings[r.key] = r.value ?? "";
   const snap = JSON.stringify(buildIssuerSnapshot(settings));
-  // Only fill rows that have no snapshot yet.
   await d.execute("UPDATE receipts SET issuer_snapshot_json=? WHERE issuer_snapshot_json IS NULL OR issuer_snapshot_json=''", [snap]);
   await d.execute("UPDATE annual_receipts SET issuer_snapshot_json=? WHERE issuer_snapshot_json IS NULL OR issuer_snapshot_json=''", [snap]);
 }
