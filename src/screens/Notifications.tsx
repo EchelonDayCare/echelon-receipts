@@ -29,7 +29,6 @@ const ALL_CATEGORIES = [
   "ccfri_claim_due",
   "backup_stale",
   "backup_failed",
-  "system_update_available",
   "system_error",
 ];
 

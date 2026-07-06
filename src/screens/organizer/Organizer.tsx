@@ -8,17 +8,23 @@ import { Link } from "react-router-dom";
 import { listUpcoming, type UpcomingItem, type UpcomingSource } from "../../repo/organizerRepo";
 import { listRecentMeetings, type Meeting } from "../../repo/meetingsRepo";
 import {
-  listOpenFollowups, createFollowup, toggleFollowupDone, softDeleteFollowup,
+  listOpenFollowups, listRecentDoneFollowups, createFollowup, toggleFollowupDone, softDeleteFollowup,
   type Followup, type Priority,
 } from "../../repo/followupsRepo";
 import MeetingDrawer, { type MeetingDrawerState } from "./MeetingDrawer";
 
+// H-13: "All" wasn't offered even though it's in spec-3-organizer.md's
+// filter bar (`Today | Next 7 days | Next 30 days | Next 90 days | All`).
+// Modelled as a very large window rather than a separate code path since
+// listUpcoming/daysAway comparisons already just work with `<= windowDays`.
+const ALL_WINDOW_DAYS = 36_500;
 const WINDOWS = [
   { label: "Today", days: 0 },
   { label: "7 days", days: 7 },
   { label: "30 days", days: 30 },
   { label: "60 days", days: 60 },
   { label: "90 days", days: 90 },
+  { label: "All", days: ALL_WINDOW_DAYS },
 ];
 
 const SOURCE_LABELS: Record<UpcomingSource, string> = {
@@ -32,6 +38,8 @@ export default function Organizer() {
   const [upcoming, setUpcoming] = useState<UpcomingItem[]>([]);
   const [meetings, setMeetings] = useState<Meeting[]>([]);
   const [followups, setFollowups] = useState<Followup[]>([]);
+  const [doneFollowups, setDoneFollowups] = useState<Followup[]>([]);
+  const [fuFilter, setFuFilter] = useState<"open" | "done" | "all">("open");
   const [enabledSources, setEnabledSources] = useState<Set<UpcomingSource>>(new Set(Object.keys(SOURCE_LABELS) as UpcomingSource[]));
   const [err, setErr] = useState<string | null>(null);
   const [drawer, setDrawer] = useState<MeetingDrawerState>({ mode: "closed" });
@@ -40,10 +48,10 @@ export default function Organizer() {
 
   const refresh = async () => {
     try {
-      const [up, mt, fu] = await Promise.all([
-        listUpcoming(windowDays), listRecentMeetings(5), listOpenFollowups(),
+      const [up, mt, fu, doneFu] = await Promise.all([
+        listUpcoming(windowDays), listRecentMeetings(5), listOpenFollowups(), listRecentDoneFollowups(20),
       ]);
-      setUpcoming(up); setMeetings(mt); setFollowups(fu);
+      setUpcoming(up); setMeetings(mt); setFollowups(fu); setDoneFollowups(doneFu);
     } catch (e: any) { setErr(String(e?.message ?? e)); }
   };
   useEffect(() => { void refresh(); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, [windowDays]);
@@ -151,7 +159,16 @@ export default function Organizer() {
       {/* ── Follow-ups sidebar ───────────────────────────────────────── */}
       <div>
         <section style={panel}>
-          <h2 style={{ marginTop: 0 }}>Follow-ups</h2>
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 8, flexWrap: "wrap", gap: 8 }}>
+            <h2 style={{ margin: 0 }}>Follow-ups</h2>
+            <div style={{ display: "flex", gap: 4 }}>
+              {(["open", "done", "all"] as const).map((f) => (
+                <button key={f} className={"btn" + (fuFilter === f ? " primary" : "")} style={{ fontSize: 11 }} onClick={() => setFuFilter(f)}>
+                  {f === "open" ? "Open" : f === "done" ? "Done" : "All"}
+                </button>
+              ))}
+            </div>
+          </div>
           <div style={{ display: "grid", gap: 6, marginBottom: 12 }}>
             <input placeholder="New follow-up…" value={newFu.title} onChange={(e) => setNewFu((v) => ({ ...v, title: e.target.value }))} onKeyDown={(e) => { if (e.key === "Enter") addFu(); }} />
             <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr auto", gap: 6 }}>
@@ -164,24 +181,48 @@ export default function Organizer() {
               <button className="btn primary" onClick={addFu} disabled={!newFu.title.trim()}>Add</button>
             </div>
           </div>
-          {followups.length === 0 ? (
-            <div style={emptyBox}>No open follow-ups.</div>
-          ) : (
-            <ul style={{ listStyle: "none", padding: 0, margin: 0 }}>
-              {followups.map((f) => (
-                <li key={f.id} style={{ display: "flex", gap: 8, alignItems: "flex-start", padding: 8, borderTop: "1px solid var(--border, #1e293b)" }}>
-                  <input type="checkbox" checked={!!f.doneAt} onChange={async () => { await toggleFollowupDone(f.id, f.version); await refresh(); }} />
-                  <div style={{ flex: 1, fontSize: 13 }}>
-                    <div style={{ textDecoration: f.doneAt ? "line-through" : "none" }}>
-                      <b>{f.title}</b>
-                      {f.priority === "high" && <span style={{ marginLeft: 6, color: "#dc2626", fontSize: 10 }}>HIGH</span>}
+          {(fuFilter === "open" || fuFilter === "all") && (
+            followups.length === 0 ? (
+              <div style={emptyBox}>No open follow-ups.</div>
+            ) : (
+              <ul style={{ listStyle: "none", padding: 0, margin: 0 }}>
+                {followups.map((f) => (
+                  <li key={f.id} style={{ display: "flex", gap: 8, alignItems: "flex-start", padding: 8, borderTop: "1px solid var(--border, #1e293b)" }}>
+                    <input type="checkbox" checked={!!f.doneAt} onChange={async () => { await toggleFollowupDone(f.id, f.version); await refresh(); }} />
+                    <div style={{ flex: 1, fontSize: 13 }}>
+                      <div style={{ textDecoration: f.doneAt ? "line-through" : "none" }}>
+                        <b>{f.title}</b>
+                        {f.priority === "high" && <span style={{ marginLeft: 6, color: "#dc2626", fontSize: 10 }}>HIGH</span>}
+                      </div>
+                      {f.dueDate && <div style={{ fontSize: 11, color: "var(--muted)" }}>due {f.dueDate}</div>}
                     </div>
-                    {f.dueDate && <div style={{ fontSize: 11, color: "var(--muted)" }}>due {f.dueDate}</div>}
-                  </div>
-                  <button className="btn" onClick={async () => { if (confirm("Delete?")) { await softDeleteFollowup(f.id, f.version); await refresh(); } }} style={{ fontSize: 10, padding: "2px 6px" }}>✕</button>
-                </li>
-              ))}
-            </ul>
+                    <button className="btn" onClick={async () => { if (confirm("Delete?")) { await softDeleteFollowup(f.id, f.version); await refresh(); } }} style={{ fontSize: 10, padding: "2px 6px" }}>✕</button>
+                  </li>
+                ))}
+              </ul>
+            )
+          )}
+          {(fuFilter === "done" || fuFilter === "all") && (
+            <>
+              {fuFilter === "all" && <h3 style={{ fontSize: 12, color: "var(--muted)", margin: "14px 0 4px" }}>Done</h3>}
+              {doneFollowups.length === 0 ? (
+                <div style={emptyBox}>No completed follow-ups yet.</div>
+              ) : (
+                <ul style={{ listStyle: "none", padding: 0, margin: 0 }}>
+                  {doneFollowups.map((f) => (
+                    <li key={f.id} style={{ display: "flex", gap: 8, alignItems: "flex-start", padding: 8, borderTop: "1px solid var(--border, #1e293b)", opacity: 0.7 }}>
+                      <input type="checkbox" checked={!!f.doneAt} onChange={async () => { await toggleFollowupDone(f.id, f.version); await refresh(); }} />
+                      <div style={{ flex: 1, fontSize: 13 }}>
+                        <div style={{ textDecoration: "line-through" }}>
+                          <b>{f.title}</b>
+                        </div>
+                        {f.doneAt && <div style={{ fontSize: 11, color: "var(--muted)" }}>done {f.doneAt.slice(0, 10)}</div>}
+                      </div>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </>
           )}
         </section>
       </div>

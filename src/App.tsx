@@ -210,9 +210,7 @@ function Shell({ logo, name, staffEnabled }: { logo: string; name: string; staff
         name={name}
         items={[
           { to: "/staff/hours", label: "Hours" },
-          { to: "/staff/schedule", label: "Schedule" },
-          { to: "/staff/schedule/audit", label: "Schedule Audit" },
-          { to: "/staff/schedule/confirmations", label: "Confirmations" },
+          { to: "/staff/schedule", label: "Schedule", match: (p) => p.startsWith("/staff/schedule") },
           { to: "/staff/credentials", label: "Credentials" },
         ]}
       />

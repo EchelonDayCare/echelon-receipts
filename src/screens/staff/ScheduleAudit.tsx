@@ -1,6 +1,7 @@
 // Chronological audit trail for a week of shifts.
 import { useEffect, useMemo, useState } from "react";
 import { addDays, listAuditForWeek, mondayOf, type ShiftEvent } from "../../repo/scheduleRepo";
+import ScheduleSubNav from "./ScheduleSubNav";
 
 export default function ScheduleAudit() {
   const [weekStart, setWeekStart] = useState<string>(() => mondayOf(new Date()));
@@ -18,6 +19,7 @@ export default function ScheduleAudit() {
   }, [weekStart]);
   return (
     <div style={{ padding: 24 }}>
+      <ScheduleSubNav />
       <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 16 }}>
         <button className="btn" onClick={() => setWeekStart(addDays(weekStart, -7))}>‹</button>
         <h1 style={{ margin: 0 }}>Schedule audit · {range}</h1>

@@ -11,6 +11,7 @@ import {
 import { buildWaMeUrl, renderTemplate } from "../../lib/whatsapp";
 import { getSettings } from "../../lib/db";
 import ShiftDrawer, { loadActiveStaff, type DrawerState } from "./ShiftDrawer";
+import ScheduleSubNav from "./ScheduleSubNav";
 
 type StaffLite = { id: number; name: string; whatsapp_phone_e164: string | null };
 
@@ -81,6 +82,7 @@ export default function StaffSchedule() {
 
   return (
     <div style={{ padding: 24 }}>
+      <ScheduleSubNav />
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16, gap: 12, flexWrap: "wrap" }}>
         <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
           <button className="btn" onClick={() => setWeekStart(addDays(weekStart, -7))}>‹</button>

@@ -2,6 +2,7 @@
 import { useEffect, useState } from "react";
 import { listRecentPublishes, markPublishAcknowledged, type PublishRow } from "../../repo/scheduleRepo";
 import { db } from "../../lib/db";
+import ScheduleSubNav from "./ScheduleSubNav";
 
 export default function ScheduleConfirmations() {
   const [rows, setRows] = useState<(PublishRow & { staffName: string })[]>([]);
@@ -31,6 +32,7 @@ export default function ScheduleConfirmations() {
 
   return (
     <div style={{ padding: 24 }}>
+      <ScheduleSubNav />
       <h1 style={{ marginTop: 0 }}>Schedule confirmations</h1>
       {err && <div style={{ padding: 10, borderRadius: 8, background: "rgba(220,38,38,.1)", color: "#fca5a5", border: "1px solid rgba(220,38,38,.35)", marginBottom: 12 }}>{err}</div>}
       {rows.length === 0 ? (

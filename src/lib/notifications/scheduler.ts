@@ -12,7 +12,7 @@ import {
   severityGte,
   type Severity,
 } from "../../repo/notificationsRepo";
-import { setSetting } from "../db";
+import { setSetting, getSettings as getAppSettings } from "../db";
 
 let running = false;
 let pending: Promise<void> | null = null;
@@ -55,15 +55,31 @@ export async function runScanNow(): Promise<void> {
   running = true;
   try {
     const settings = await getNotifSettings();
-    // Group scanners by category so we know which survivor set to pass
-    // to softDeleteResolved. Categories with only a noop scanner are
-    // skipped for reconciliation (their "primary" scanner writes them).
+    const appSettings = await getAppSettings();
+    const quietNow = isWithinQuietHours(appSettings.notif_quiet_hours_start || "", appSettings.notif_quiet_hours_end || "");
+    // H-2: pre-seed every *enabled* category with an empty survivor list
+    // before any scanner runs. Previously a category only got an entry in
+    // `perCategory` once at least one surviving item arrived for it — so a
+    // scanner that ran and found ZERO current issues (the "resolved without
+    // user action" case) left its old notifications stuck forever, because
+    // softDeleteResolved(category, keys) was never even called for that
+    // category. Pre-seeding means every enabled category is always
+    // reconciled against whatever this run actually found (possibly
+    // nothing), while disabled categories are left untouched.
     const perCategory = new Map<string, string[]>();
+    const enabledCategories = new Set<string>();
     for (const scanner of SCANNERS) {
       const setting = settings.get(scanner.category);
       const enabled = setting ? setting.enabled === 1 : true; // default on
-      if (!enabled) continue;
+      if (enabled) {
+        enabledCategories.add(scanner.category);
+        if (!perCategory.has(scanner.category)) perCategory.set(scanner.category, []);
+      }
+    }
+    for (const scanner of SCANNERS) {
+      if (!enabledCategories.has(scanner.category)) continue;
       const inputs = await safeRun(scanner);
+      const setting = settings.get(scanner.category);
       const minSev: Severity = (setting?.min_severity || "info") as Severity;
       for (const inp of inputs) {
         if (!severityGte(inp.severity, minSev)) continue;
@@ -72,31 +88,21 @@ export async function runScanNow(): Promise<void> {
           const list = perCategory.get(inp.category) ?? [];
           list.push(inp.dedup_key);
           perCategory.set(inp.category, list);
+          // Desktop alert channel — per-category opt-in, suppressed during
+          // quiet hours (the notification itself is still stored above).
+          const catSetting = settings.get(inp.category);
+          if (!quietNow && catSetting?.desktop_enabled === 1) {
+            void maybeSendDesktopNotification(inp.title, inp.body ?? "");
+          }
         } catch (e) {
           console.warn("[notifications] upsert failed", inp.dedup_key, e);
         }
       }
     }
-    // Reconcile: any notification in a "primary" category not in our
-    // survivor set means the underlying item was resolved. Only touch
-    // categories that had a real scanner run this pass.
+    // Reconcile every enabled category against this run's survivor set —
+    // including categories where the survivor set is empty.
     for (const [cat, keys] of perCategory.entries()) {
       try { await softDeleteResolved(cat, keys); } catch (e) { console.warn("[notifications] reconcile failed", cat, e); }
-    }
-    // Also reconcile categories that scanned to zero results (all resolved).
-    const primaryCategories = new Set<string>();
-    for (const s of SCANNERS) if (s.run !== noopSentinel(s)) primaryCategories.add(s.category);
-    for (const s of SCANNERS) {
-      if (!perCategory.has(s.category)) {
-        // Only if this scanner is actually "primary" (i.e. its category is
-        // its own responsibility). Shadow scanners (noop) skip reconcile
-        // because the sibling scanner owns their category too.
-        // For our two-in-one scanners (staffCredentials handles both
-        // expiring+expired; vault handles both expiring+expired), the
-        // primary emits for both categories and their explicit reconciles
-        // cover the case. So this branch is a safety net for scanners
-        // that returned zero results — soft-delete stale rows.
-      }
     }
     lastRun = Date.now();
     try { await setSetting("notif_last_scan_at", new Date().toISOString()); } catch {}
@@ -106,16 +112,47 @@ export async function runScanNow(): Promise<void> {
   }
 }
 
-// Since we can't compare closure identity reliably, this helper is only used
-// above to document intent. Left as a no-op.
-function noopSentinel(_s: ScannerDef): any { return null; }
-
 async function safeRun(s: ScannerDef) {
   try {
     return await s.run();
   } catch (e) {
     console.warn("[notifications] scanner", s.id, "failed", e);
     return [];
+  }
+}
+
+// ── L-4: quiet hours + desktop notifications ────────────────────────────
+// `notif_quiet_hours_start` / `_end` (HH:MM, 24h) were stored by Settings
+// but never read anywhere. During quiet hours we still scan and store
+// notifications as normal (the bell/history always reflect ground truth) —
+// we only suppress the desktop-alert side channel below.
+function isWithinQuietHours(startHHMM: string, endHHMM: string): boolean {
+  if (!startHHMM || !endHHMM) return false;
+  const [sh, sm] = startHHMM.split(":").map(Number);
+  const [eh, em] = endHHMM.split(":").map(Number);
+  if ([sh, sm, eh, em].some((n) => Number.isNaN(n))) return false;
+  const now = new Date();
+  const cur = now.getHours() * 60 + now.getMinutes();
+  const start = sh * 60 + sm;
+  const end = eh * 60 + em;
+  if (start === end) return false; // degenerate config, treat as "always on"
+  return start < end ? (cur >= start && cur < end) : (cur >= start || cur < end); // handles wrap past midnight
+}
+
+let loggedMissingDesktopPlugin = false;
+/** Best-effort OS desktop notification for a newly-surfaced item.
+ * `@tauri-apps/plugin-notification` is not part of this app's dependency
+ * set — adding it means new Cargo.toml + capabilities + tauri.conf.json
+ * wiring, which is out of scope for this pass. Rather than silently no-op
+ * forever, this logs once so the gap stays visible until it's wired up. */
+async function maybeSendDesktopNotification(title: string, body: string): Promise<void> {
+  if (!loggedMissingDesktopPlugin) {
+    loggedMissingDesktopPlugin = true;
+    console.info(
+      "[notifications] Desktop notification requested but @tauri-apps/plugin-notification " +
+      "isn't installed — skipping (see L-4 in the hardening pass).",
+      { title, body },
+    );
   }
 }
 

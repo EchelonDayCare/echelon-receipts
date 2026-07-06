@@ -216,29 +216,37 @@ export async function scanSchedulePublish(): Promise<NotificationInput[]> {
   const staff = await d.select<{ id: number; name: string }[]>(
     "SELECT id, name FROM staff WHERE active = 1",
   );
+  const daysUntil = daysBetween(nextMonday);
+  if (daysUntil == null || daysUntil > 3 || staff.length === 0) return [];
+
+  // M-13: this used to run 2 SELECT COUNT(*) queries per active staff member
+  // (a classic N+1). Replaced with two bulk queries — one shift-count
+  // GROUP BY, one set of already-published staff — so the whole scan is a
+  // fixed 3 queries regardless of headcount.
+  const shiftCounts = await d.select<{ staff_id: string; n: number }[]>(
+    `SELECT staff_id, COUNT(*) AS n FROM staff_shifts
+      WHERE deleted_at IS NULL AND shift_date >= ? AND shift_date < date(?, '+7 days')
+      GROUP BY staff_id`,
+    [nextMonday, nextMonday],
+  );
+  const shiftCountByStaff = new Map(shiftCounts.map((r) => [r.staff_id, r.n]));
+  const published = await d.select<{ staff_id: string }[]>(
+    `SELECT staff_id FROM staff_weekly_publish WHERE deleted_at IS NULL AND week_start_date = ?`,
+    [nextMonday],
+  );
+  const publishedStaffIds = new Set(published.map((r) => r.staff_id));
+
   const out: NotificationInput[] = [];
+  const t = daysUntil <= 0 ? "0d" : (daysUntil <= 3 ? "3d" : "7d");
   for (const st of staff) {
-    const shifts = await d.select<{ n: number }[]>(
-      `SELECT COUNT(*) AS n FROM staff_shifts
-        WHERE deleted_at IS NULL AND staff_id = ?
-          AND shift_date >= ? AND shift_date < date(?, '+7 days')`,
-      [String(st.id), nextMonday, nextMonday],
-    );
-    if (!shifts[0]?.n) continue;
-    const pub = await d.select<{ n: number }[]>(
-      `SELECT COUNT(*) AS n FROM staff_weekly_publish
-        WHERE deleted_at IS NULL AND staff_id = ? AND week_start_date = ?`,
-      [String(st.id), nextMonday],
-    );
-    if (pub[0]?.n) continue;
-    const daysUntil = daysBetween(nextMonday);
-    if (daysUntil == null || daysUntil > 3) continue;
-    const t = daysUntil <= 0 ? "0d" : (daysUntil <= 3 ? "3d" : "7d");
+    const shiftCount = shiftCountByStaff.get(String(st.id)) ?? 0;
+    if (!shiftCount) continue;
+    if (publishedStaffIds.has(String(st.id))) continue;
     out.push({
       category: "schedule_not_published",
       severity: daysUntil <= 0 ? "critical" : "warning",
       title: `Publish schedule for ${st.name}`,
-      body: `Week of ${nextMonday} — ${shifts[0].n} shift(s) unpublished`,
+      body: `Week of ${nextMonday} — ${shiftCount} shift(s) unpublished`,
       source_kind: "staff_weekly",
       source_id: `${st.id}:${nextMonday}`,
       action_route: "/staff/schedule",
@@ -494,11 +502,12 @@ export async function scanBackup(): Promise<NotificationInput[]> {
   return out;
 }
 
-// ─── Scanner: system update (stub — updater not wired) ────────────────
-export async function scanSystemUpdate(): Promise<NotificationInput[]> {
-  // TODO: wire to Tauri updater when the update pipeline is set up.
-  return [];
-}
+// M-12: scanSystemUpdate was a permanent stub (never wired to a real
+// updater) that always returned []. Rather than ship a Settings toggle that
+// visibly does nothing, the scanner and its registry entry are removed.
+// Wiring `@tauri-apps/plugin-updater` is tracked as a follow-up — see the
+// "system update" notification category kept in NotificationCategory for
+// forward-compatibility, just with no scanner currently producing it.
 
 // ─── Registry ─────────────────────────────────────────────────────────
 // Note: some scanners cover multiple categories (e.g. scanStaffCredentials
@@ -531,5 +540,4 @@ export const SCANNERS: ScannerDef[] = [
   { id: "ccfri",             category: "ccfri_claim_due",            label: "CCFRI monthly claim",       run: scanCcfriClaim },
   { id: "backupStale",       category: "backup_stale",               label: "Cloud backup stale",        run: scanBackup },
   { id: "backupFailed",      category: "backup_failed",              label: "Cloud backup failed",       run: noop },
-  { id: "systemUpdate",      category: "system_update_available",    label: "App update available",      run: scanSystemUpdate },
 ];
