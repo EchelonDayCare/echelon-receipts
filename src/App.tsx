@@ -225,8 +225,10 @@ function Shell({ logo, name, staffEnabled }: { logo: string; name: string; staff
         items={[
           { to: "/config/identity", label: "Identity" },
           { to: "/config/email", label: "Receipts & Email" },
+          { to: "/config/folders", label: "Folders" },
           { to: "/config/staff", label: "Staff" },
           { to: "/config/backups", label: "Backups" },
+          { to: "/config/notifications", label: "Notifications" },
           { to: "/config/about", label: "About" },
         ]}
       />
