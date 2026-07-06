@@ -136,7 +136,7 @@ export async function scanStaffDrills(): Promise<NotificationInput[]> {
         : `Never logged — cadence ${days}d`,
       source_kind: "drill_type",
       source_id: type,
-      action_route: "/staff-credentials",
+      action_route: "/staff/credentials",
       dedup_key: `drill_overdue:drill_type:${type}:${t}`,
     });
   }
@@ -198,7 +198,7 @@ export async function scanReceiptsAging(): Promise<NotificationInput[]> {
       body: `$${r.pending_amount.toFixed(2)} pending · ${ageDays}d old`,
       source_kind: "receipt",
       source_id: String(r.id),
-      action_route: "/receipts",
+      action_route: "/students/history",
       dedup_key: `receipt_aging:receipt:${r.id}:${bucket}`,
     });
   }
@@ -241,7 +241,7 @@ export async function scanSchedulePublish(): Promise<NotificationInput[]> {
       body: `Week of ${nextMonday} — ${shifts[0].n} shift(s) unpublished`,
       source_kind: "staff_weekly",
       source_id: `${st.id}:${nextMonday}`,
-      action_route: "/staff-schedule",
+      action_route: "/staff/schedule",
       dedup_key: `schedule_not_published:staff_weekly:${st.id}:${nextMonday}:${t}`,
     });
   }
@@ -271,7 +271,7 @@ export async function scanScheduleConfirmations(): Promise<NotificationInput[]> 
       body: `Week of ${r.week_start_date} · published ${ageHrs}h ago`,
       source_kind: "staff_weekly",
       source_id: r.id,
-      action_route: "/staff-schedule",
+      action_route: "/staff/schedule",
       dedup_key: `schedule_change_ack_missing:staff_weekly:${r.id}:${tier}`,
     });
   }
@@ -405,7 +405,7 @@ export async function scanAgmDeadline(): Promise<NotificationInput[]> {
     body: `${tierLabel(t, iso)} (${iso})`,
     source_kind: "agm",
     source_id: iso,
-    action_route: "/agm-package",
+    action_route: "/reports/agm",
     dedup_key: `agm_deadline:agm:${iso}:${t}`,
   }];
 }
@@ -426,7 +426,7 @@ export async function scanTslipDeadline(): Promise<NotificationInput[]> {
     body: `${tierLabel(t, iso)} (${iso})`,
     source_kind: "tslip",
     source_id: iso,
-    action_route: "/annual-tax",
+    action_route: "/students/annual",
     dedup_key: `tslip_deadline:tslip:${iso}:${t}`,
   }];
 }
@@ -448,7 +448,7 @@ export async function scanCcfriClaim(): Promise<NotificationInput[]> {
     body: `${tierLabel(t, iso)} (${iso})`,
     source_kind: "ccfri",
     source_id: iso,
-    action_route: "/subsidy-statement",
+    action_route: "/reports/subsidy",
     dedup_key: `ccfri_claim_due:ccfri:${iso}:${t}`,
   }];
 }

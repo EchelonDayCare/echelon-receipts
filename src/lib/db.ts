@@ -84,8 +84,15 @@ export async function db(): Promise<Database> {
     } catch (e) { console.warn("[db] pragma setup:", e); }
   }
   if (!_schemaChecked) {
-    _schemaChecked = true;
-    try { await ensureSchema(_db); } catch (e) { console.error("[ensureSchema] failed:", e); }
+    // Only mark schema as checked after a successful run so a transient
+    // failure (locked DB, disk I/O) is retried on the next db() call
+    // instead of silently leaving the process on a stale schema.
+    try {
+      await ensureSchema(_db);
+      _schemaChecked = true;
+    } catch (e) {
+      console.error("[ensureSchema] failed:", e);
+    }
   }
   return _db;
 }
@@ -352,7 +359,8 @@ async function ensureSchema(d: Database): Promise<void> {
     ["last_cloud_backup_month", ""],
     ["last_cloud_backup_recipient", ""],
     ["backup_recipient_email", ""],
-    ["backup_cloud_enabled", "1"],
+    // PIPEDA / consent: default OFF so cloud backup is opt-in.
+    ["backup_cloud_enabled", "0"],
   ] as const) await setting(k, v);
 
   // Migration 010 — Communications module (group email, templates, history, scheduled)
@@ -661,7 +669,8 @@ async function ensureSchema(d: Database): Promise<void> {
   await d.execute("INSERT OR IGNORE INTO waitlist_sync_state (id) VALUES (1)");
 
   for (const [k, v] of [
-    ["waitlist_sheet_id", "10TlzA6Zea3TXai6eNQTKjbWF-Hf-6nBt7jf3mRohsS0"],
+    // Deployment-specific; blank by default. Set via Settings → Waitlist.
+    ["waitlist_sheet_id", ""],
     ["waitlist_sheet_range", "FormResponse!A:K"],
     ["waitlist_sync_enabled", "1"],
     ["waitlist_sync_interval_min", "720"],

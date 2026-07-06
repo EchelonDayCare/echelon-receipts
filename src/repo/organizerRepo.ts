@@ -125,9 +125,10 @@ export async function listUpcoming(windowDays: number): Promise<UpcomingItem[]> 
       `SELECT COUNT(*) AS n, COALESCE(SUM(balance), 0) AS total
          FROM (
            SELECT student_id,
-                  COALESCE(SUM(amount_owed), 0) - COALESCE(SUM(amount_paid), 0) AS balance
+                  COALESCE(SUM(pending_amount), 0) AS balance
              FROM receipts
             WHERE COALESCE(voided, 0) = 0
+              AND date <= date('now', '-60 days')
             GROUP BY student_id
          ) t
          WHERE balance > 250`,
