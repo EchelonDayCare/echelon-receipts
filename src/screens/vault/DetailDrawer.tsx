@@ -41,8 +41,17 @@ export default function DetailDrawer({
         if (d.mimeType === "application/pdf" || d.mimeType.startsWith("image/")) {
           const blob = await getBlob(d.blobKey);
           if (blob) {
-            const url = URL.createObjectURL(new Blob([new Uint8Array(blob.bytes)], { type: blob.mimeType || d.mimeType }));
-            setPreview({ url, mime: blob.mimeType || d.mimeType });
+            const mime = blob.mimeType || d.mimeType;
+            // PDFs: use a data: URL because Windows PDF handlers (Edge) reject
+            // blob: URLs in Tauri webviews with "We can't open this file".
+            // Images: blob: is fine and cheaper — browser renders them directly.
+            let url: string;
+            if (mime === "application/pdf") {
+              url = `data:${mime};base64,${bytesToBase64(blob.bytes)}`;
+            } else {
+              url = URL.createObjectURL(new Blob([new Uint8Array(blob.bytes)], { type: mime }));
+            }
+            setPreview({ url, mime });
           }
         } else {
           setPreview(null);
@@ -51,9 +60,10 @@ export default function DetailDrawer({
     })().catch((e) => setErr(String(e?.message ?? e)));
 
     return () => {
-      // Free blob URL when the drawer closes or switches docs.
+      // Free blob URL when the drawer closes or switches docs. data: URLs
+      // are garbage-collected with the string ref, no revoke needed.
       setPreview((cur) => {
-        if (cur) URL.revokeObjectURL(cur.url);
+        if (cur && cur.url.startsWith("blob:")) URL.revokeObjectURL(cur.url);
         return null;
       });
     };
@@ -210,6 +220,18 @@ function daysUntil(dateStr: string): number {
 }
 function isDeleted(doc: Document): boolean {
   return doc.deletedAt != null;
+}
+
+// Chunked base64 encoding — btoa() alone chokes on long binary strings and
+// String.fromCharCode(...array) blows the arg-list limit for big PDFs.
+function bytesToBase64(bytes: number[] | Uint8Array): string {
+  const u8 = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
+  const CHUNK = 0x8000; // 32 KB per fromCharCode call
+  let bin = "";
+  for (let i = 0; i < u8.length; i += CHUNK) {
+    bin += String.fromCharCode.apply(null, Array.from(u8.subarray(i, i + CHUNK)));
+  }
+  return btoa(bin);
 }
 
 function catColor(cat: string): string {
