@@ -945,6 +945,73 @@ Thanks,
     ["waitlist_weight_wait_day",             "0.1"],
     ["waitlist_weight_days_per_week",        "3"],
   ] as const) await setting(k, v);
+
+  // ─── Migration 023 — Notification Bell (v1.5.0) ───────────────────────
+  // Global notification centre. See prompt file in the session folder for
+  // the full contract. Dedup_key = deterministic composite so a notification
+  // for the same source at the same tier is upserted, but escalation to a
+  // stricter tier produces a NEW row (user sees the reminder ratchet up).
+  if (!(await tableExists("notifications"))) {
+    console.warn("[ensureSchema] creating notifications");
+    await d.execute(`CREATE TABLE notifications (
+      id             TEXT PRIMARY KEY,
+      category       TEXT NOT NULL,
+      severity       TEXT NOT NULL,
+      title          TEXT NOT NULL,
+      body           TEXT,
+      source_kind    TEXT,
+      source_id      TEXT,
+      action_route   TEXT,
+      dedup_key      TEXT NOT NULL,
+      created_at     TEXT NOT NULL,
+      read_at        TEXT,
+      dismissed_at   TEXT,
+      snoozed_until  TEXT,
+      version        INTEGER NOT NULL DEFAULT 1,
+      deleted_at     TEXT
+    )`);
+    await d.execute("CREATE UNIQUE INDEX ux_notifications_dedup ON notifications(dedup_key) WHERE deleted_at IS NULL");
+    await d.execute("CREATE INDEX ix_notifications_unread ON notifications(created_at DESC) WHERE deleted_at IS NULL AND read_at IS NULL AND dismissed_at IS NULL");
+    await d.execute("CREATE INDEX ix_notifications_category ON notifications(category) WHERE deleted_at IS NULL");
+  }
+  if (!(await tableExists("notification_settings"))) {
+    console.warn("[ensureSchema] creating notification_settings");
+    await d.execute(`CREATE TABLE notification_settings (
+      category           TEXT PRIMARY KEY,
+      enabled            INTEGER NOT NULL DEFAULT 1,
+      desktop_enabled    INTEGER NOT NULL DEFAULT 0,
+      min_severity       TEXT NOT NULL DEFAULT 'info',
+      updated_at         TEXT NOT NULL
+    )`);
+  }
+  if (!(await tableExists("notification_events"))) {
+    console.warn("[ensureSchema] creating notification_events");
+    await d.execute(`CREATE TABLE notification_events (
+      id           TEXT PRIMARY KEY,
+      entity_id    TEXT NOT NULL,
+      event_type   TEXT NOT NULL,
+      payload_json TEXT,
+      actor        TEXT NOT NULL DEFAULT 'owner',
+      channel      TEXT,
+      message_ref  TEXT,
+      created_at   TEXT NOT NULL
+    )`);
+    await d.execute("CREATE INDEX ix_notification_events_entity ON notification_events(entity_id, created_at)");
+  }
+  // Reminder-date settings: stored as MM-DD (no year) so they auto-repeat
+  // annually. Empty string means "not configured yet" and the scanner skips.
+  // ccfri_claim_day_of_month is 1-28 (day-of-month only, monthly cadence).
+  // quiet_hours_start / _end are HH:MM 24h, empty = always on.
+  // last_backup_error is written by cloudBackup on failure, cleared on success.
+  for (const [k, v] of [
+    ["notif_agm_reminder_mmdd",       ""],
+    ["notif_tslip_reminder_mmdd",     "02-28"],
+    ["notif_ccfri_claim_day_of_month","15"],
+    ["notif_quiet_hours_start",       ""],
+    ["notif_quiet_hours_end",         ""],
+    ["notif_last_scan_at",            ""],
+    ["last_backup_error",             ""],
+  ] as const) await setting(k, v);
 }
 
 // ---------- Person identity ----------

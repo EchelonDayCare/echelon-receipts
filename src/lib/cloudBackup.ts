@@ -102,6 +102,7 @@ export async function sendCloudBackup(forMonthKey: string): Promise<CloudBackupR
   await setSetting("last_cloud_backup_month", forMonthKey);
   await setSetting("last_cloud_backup_at", nowIso);
   await setSetting("last_cloud_backup_recipient", recipient);
+  await setSetting("last_backup_error", ""); // clear stale failure flag
   return { ok: true, monthKey: forMonthKey, recipient, bytes: bytes.length };
 }
 
@@ -126,8 +127,10 @@ export async function runCloudBackupIfDue(): Promise<CloudBackupResult | null> {
     void thisMonth;
     return await sendCloudBackup(targetMonth);
   } catch (e: any) {
-    // Never crash startup on backup failure.
+    // Never crash startup on backup failure — but do surface it via
+    // the Notification Bell so the owner isn't silently unprotected.
     console.warn("Cloud backup check failed:", e?.message || e);
+    try { await setSetting("last_backup_error", String(e?.message || e)); } catch {}
     return { ok: false, monthKey: "", recipient: "", bytes: 0, error: String(e?.message || e) };
   }
 }

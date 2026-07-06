@@ -4,6 +4,51 @@ All notable changes shipped as a DMG. Only entries the owner has approved
 for release are listed here — "code-complete, awaiting ship approval" work
 lives in the session plan.md until it ships.
 
+## v1.5.0 — Notification Bell (code-complete, awaiting ship approval)
+
+Single header bell that surfaces every actionable item across the app.
+Replaces the ad-hoc "check every screen" workflow with one always-visible
+badge and a grouped dropdown, so nothing important gets missed.
+
+### Added
+- **Header bell** on every non-Home screen with unread badge (1–9, then "10+").
+  Red badge when any critical item is unread, blue otherwise.
+- **Dropdown panel** with per-row Open / Snooze (1h, 4h, tomorrow, next week) /
+  Dismiss, Undo-dismiss footer, and "Mark all as read". ESC or outside-click
+  closes; batches 3+ same-category unread items within an hour into a single
+  collapsed row.
+- **Full-page history** at `#/notifications` (accessible from the bell footer
+  only — not the sidebar). Filters by category, severity, read/unread, date
+  window; bulk mark-read and dismiss; CSV export.
+- **Notifications tab** in Configuration with per-category enable + minimum
+  severity, quiet hours, and MM-DD date pickers for AGM date, T-slip deadline
+  (default Feb 28), and CCFRI monthly claim day. All reminders repeat yearly
+  automatically — no year in the picker. Test-notification button.
+- **17 scanners** covering staff credential expiry (60/30/14/7/3/0d/overdue),
+  emergency drill cadence, vault document expiry, receipt aging (30/60/90d),
+  schedule not yet published for next Monday, staff schedule confirmations
+  missing (4/24/48h after publish), meeting action items due, follow-ups,
+  waitlist offers pending 5/7/10d, new waitlist applications (last 7d), AGM
+  and T-slip reminders, CCFRI monthly claim, cloud backup stale (35/45/60d)
+  and failed. System-update scanner stubbed until the updater is wired.
+
+### Changed
+- Cloud backup now surfaces failures via the bell (writes `last_backup_error`
+  setting on catch, clears it on success).
+
+### Data
+- Migration 023 adds `notifications`, `notification_settings`,
+  `notification_events` tables. UUID PKs, soft delete, optimistic concurrency,
+  per-entity event log — same Data Contract as Vault / Schedule / Organizer.
+- Dedup key format `{category}:{source_kind}:{source_id}:{tier}` — same item
+  advancing to a stricter tier (e.g. 30d → 7d) produces a new row so the
+  escalation is visible; resolved items are soft-deleted on the next scan.
+
+### Scheduler
+- First scan 100ms after mount, then every 10 minutes; also on window focus
+  and on bell open (30s debounce). Scanners run in isolation — one failure
+  doesn't take down the others.
+
 ## v1.4.0 — Waitlist Prioritization (code-complete, awaiting ship approval)
 
 Turn a raw sync'd waitlist into a ranked, defensible queue. Owner still makes

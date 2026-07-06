@@ -13,6 +13,7 @@ import { DEFAULT_LOGO_DATA_URL, DEFAULT_SIGNATURE_DATA_URL } from "../lib/defaul
 import { readErrorLog, errorLogPath, clearErrorLog } from "../lib/errorLog";
 import type { SettingsMap } from "../types";
 import HealthCheck from "../components/HealthCheck";
+import NotificationsSettingsSection from "../components/NotificationsSettingsSection";
 
 function HelpTip({ text }: { text: string }) {
   return (
@@ -221,6 +222,7 @@ export default function Settings() {
     { key: "folders", label: "Folders" },
     { key: "staff", label: "Staff" },
     { key: "backups", label: "Backups" },
+    { key: "notifications", label: "Notifications" },
     { key: "about", label: "About" },
   ];
 
@@ -758,9 +760,10 @@ export default function Settings() {
       {activeTab === "folders" && renderFolders()}
       {activeTab === "staff" && renderStaff()}
       {activeTab === "backups" && renderBackups()}
+      {activeTab === "notifications" && <NotificationsSettingsSection />}
       {activeTab === "about" && renderAbout()}
 
-      {activeTab !== "about" && SaveBar}
+      {activeTab !== "about" && activeTab !== "notifications" && SaveBar}
     </div>
   );
 }

@@ -42,11 +42,14 @@ const StaffSchedule = lazy(() => import("./screens/staff/Schedule"));
 const StaffScheduleAudit = lazy(() => import("./screens/staff/ScheduleAudit"));
 const StaffScheduleConfirmations = lazy(() => import("./screens/staff/ScheduleConfirmations"));
 const OrganizerScreen = lazy(() => import("./screens/organizer/Organizer"));
+const NotificationsHistory = lazy(() => import("./screens/Notifications"));
 import { runCloudBackupIfDue } from "./lib/cloudBackup";
 import { getSettings } from "./lib/db";
 import { getVersion } from "@tauri-apps/api/app";
 import { DEFAULT_LOGO_DATA_URL } from "./lib/defaults";
 import PromptHost from "./components/PromptHost";
+import NotificationBell from "./components/NotificationBell";
+import { startScheduler, runScanSoon } from "./lib/notifications/scheduler";
 import "./App.css";
 
 function ModuleSidebar({
@@ -303,6 +306,9 @@ function Shell({ logo, name, staffEnabled }: { logo: string; name: string; staff
     <div className="app">
       {sidebar}
       <main className="content">
+        <div style={{ position: "absolute", top: 12, right: 20, zIndex: 900 }}>
+          <NotificationBell />
+        </div>
         <Suspense fallback={<div style={{ padding: 24, color: "var(--muted)" }}>Loading…</div>}>
           <Routes>
           {/* Students module */}
@@ -375,6 +381,9 @@ function Shell({ logo, name, staffEnabled }: { logo: string; name: string; staff
           {/* Organizer */}
           <Route path="/organizer" element={<OrganizerScreen />} />
 
+          {/* Notifications history — accessible only via the bell footer */}
+          <Route path="/notifications" element={<NotificationsHistory />} />
+
           {/* Redirects for old Students routes now moved to Reports module */}
           <Route path="/students/reports" element={<Navigate to="/reports/monthly" replace />} />
           <Route path="/students/aging" element={<Navigate to="/reports/aging" replace />} />
@@ -419,6 +428,13 @@ export default function App() {
       }
     });
 
+    // Notification Bell (v1.5.0) — 10-minute scan loop + first scan shortly
+    // after mount. Also re-scan on tab focus so the badge reflects reality
+    // when the owner returns after a break.
+    startScheduler();
+    const onFocus = () => { void runScanSoon(); };
+    window.addEventListener("focus", onFocus);
+
     // Fire any due scheduled messages on app launch and every 15 min thereafter,
     // so a session that stays open through the scheduled time still delivers.
     (async () => {
@@ -447,6 +463,7 @@ export default function App() {
 
     return () => {
       window.removeEventListener("settings-saved", onSaved);
+      window.removeEventListener("focus", onFocus);
       window.clearInterval(schedTimer);
     };
   }, []);
