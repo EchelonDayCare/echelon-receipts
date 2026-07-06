@@ -4,6 +4,62 @@ All notable changes shipped as a DMG. Only entries the owner has approved
 for release are listed here — "code-complete, awaiting ship approval" work
 lives in the session plan.md until it ships.
 
+## v1.8.0 — Organizer Voice Capture (code-complete, awaiting ship approval)
+
+One-tap dictation for the Organizer. Instead of clicking through "New
+meeting → Kind → Date → Time → Attendees…", say _"Meeting with Daisy
+tomorrow at 11 for 30 minutes"_ and Whisper + GPT-4.1 turn it into a
+pre-filled draft you confirm and save.
+
+### Added
+- **🎤 Voice add button** in the Organizer header (next to _Print PDF_).
+  Modal state machine: idle → recording → transcribing → understanding →
+  review → save. Cancel at any stage. Pulsing red mic while recording;
+  live timer.
+- **Whisper transcription** via the user's Azure Whisper deployment.
+  Endpoint URL stored in `settings.azure_whisper_endpoint` (not secret);
+  API key stored in the OS keychain under `azure_whisper_key`.
+- **GPT-4.1 event extraction** with a strict JSON schema:
+  `{ kind: meeting|followup|action_item, title, date, time,
+  duration_min, participants, notes, priority, confidence }`. Reuses the
+  existing `azure_ai_key` — one key, one Settings tab.
+- **Editable draft card** — every field pre-filled, all editable. Low
+  confidence (<70%) surfaces a warning banner. Meeting kind is guessed
+  from title/attendees keywords (board / parent / staff / vendor /
+  inspection / other).
+- **Voice section** in _Settings → AI_ — endpoint URL, keychain-stored
+  key, per-user enable toggle, transcript-retention toggle.
+
+### Security
+- New **`azure_url_guard`** module — every endpoint URL passed over IPC
+  is validated: https-only, no userinfo, host must end in
+  `.cognitiveservices.azure.com` / `.openai.azure.com` /
+  `.services.ai.azure.com`, path must start with `/openai/deployments/`.
+  13 Rust unit tests cover the allowlist edge cases.
+- **Audio limits** enforced server-side: 25 MiB decoded cap (Whisper's
+  own per-request limit); MIME allowlist
+  (`audio/webm | audio/wav | audio/mp4 | audio/mpeg | audio/ogg`).
+- API keys never leave the keychain — the frontend passes only the
+  endpoint URL over IPC (Phase-4b H-7 pattern).
+
+### Data
+- Migration 025 (`db.ts::ensureSchema`, not the Rust list) adds
+  `organizer_ai_events(id, created_at, kind, prompt_hash, prompt_text,
+  response_text, latency_ms, error)` with a 180-day rolling purge —
+  mirrors the `agm_ai_events` retention.
+- Transcripts are **hashed by default** (sha256); raw text only kept
+  when `organizer_ai_store_transcripts=1`. Auto-purged after 180 days
+  either way.
+- New settings: `azure_whisper_endpoint`, `azure_whisper_key_set`,
+  `voice_organizer_enabled` (default on), `organizer_ai_store_transcripts`.
+
+### Tests
+- Vitest `src/lib/voice.test.ts` — `toLocalIso` shape/zero-padding,
+  `isVoiceConfigured` truth table.
+- Rust `#[cfg(test)]` in `azure_url_guard.rs` — 13 allowlist cases
+  including homoglyph attack (`openai.azure.com.evil.com`) and
+  wrong-path rejection.
+
 ## v1.5.0 — Notification Bell (code-complete, awaiting ship approval)
 
 Single header bell that surfaces every actionable item across the app.

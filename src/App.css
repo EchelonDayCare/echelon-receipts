@@ -363,3 +363,13 @@ table.data tr.voided td { color: #9ca3af; text-decoration: line-through; }
 .home-foot {
   text-align: center; color: var(--muted); font-size: 12px; margin-top: 24px;
 }
+
+/* Voice-capture animations (v1.8.0) */
+@keyframes pulse {
+  0%, 100% { box-shadow: 0 0 0 8px rgba(220,38,38,.18); }
+  50%       { box-shadow: 0 0 0 14px rgba(220,38,38,.28); }
+}
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+

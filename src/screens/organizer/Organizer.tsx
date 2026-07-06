@@ -12,6 +12,7 @@ import {
   type Followup, type Priority,
 } from "../../repo/followupsRepo";
 import MeetingDrawer, { type MeetingDrawerState } from "./MeetingDrawer";
+import VoiceCaptureModal from "../../components/VoiceCaptureModal";
 
 // H-13: "All" wasn't offered even though it's in spec-3-organizer.md's
 // filter bar (`Today | Next 7 days | Next 30 days | Next 90 days | All`).
@@ -43,6 +44,7 @@ export default function Organizer() {
   const [enabledSources, setEnabledSources] = useState<Set<UpcomingSource>>(new Set(Object.keys(SOURCE_LABELS) as UpcomingSource[]));
   const [err, setErr] = useState<string | null>(null);
   const [drawer, setDrawer] = useState<MeetingDrawerState>({ mode: "closed" });
+  const [voiceOpen, setVoiceOpen] = useState(false);
 
   const [newFu, setNewFu] = useState({ title: "", due: "", priority: "normal" as Priority });
 
@@ -79,7 +81,18 @@ export default function Organizer() {
       <div>
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12, flexWrap: "wrap", gap: 8 }}>
           <h1 style={{ margin: 0 }}>Organizer</h1>
-          <button className="btn" onClick={() => window.print()}>Print PDF</button>
+          <div style={{ display: "flex", gap: 8 }}>
+            <button
+              className="btn primary"
+              onClick={() => setVoiceOpen(true)}
+              title="Dictate a meeting, follow-up or action"
+              style={{ display: "flex", alignItems: "center", gap: 6 }}
+            >
+              <span aria-hidden style={{ fontSize: 15 }}>🎤</span>
+              <span>Voice add</span>
+            </button>
+            <button className="btn" onClick={() => window.print()}>Print PDF</button>
+          </div>
         </div>
 
         {err && <div style={errBox}>{err}</div>}
@@ -228,6 +241,7 @@ export default function Organizer() {
       </div>
 
       <MeetingDrawer state={drawer} onClose={() => setDrawer({ mode: "closed" })} onSaved={() => { void refresh(); }} />
+      <VoiceCaptureModal open={voiceOpen} onClose={() => setVoiceOpen(false)} onSaved={() => { void refresh(); }} />
     </div>
   );
 }

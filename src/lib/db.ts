@@ -1146,6 +1146,37 @@ Thanks,
   await addCol("receipts", "deposit_id",   "INTEGER REFERENCES deposits(id)");
   await d.execute("CREATE INDEX IF NOT EXISTS ix_receipts_deposit ON receipts(deposit_id)");
 
+  // ─── Migration 025 — Organizer Voice Capture (v1.8.0) ─────────────────
+  // Voice-dictated meetings/followups/action items. The transcript+parse
+  // round-trip is audited to organizer_ai_events so the owner can review
+  // what the model heard/inferred. Transcripts are hashed by default
+  // (sha256); the raw text is only kept when
+  // organizer_ai_store_transcripts=1. 180-day rolling purge, same as
+  // agm_ai_events.
+  if (!(await tableExists("organizer_ai_events"))) {
+    console.warn("[ensureSchema] creating organizer_ai_events");
+    await d.execute(`CREATE TABLE organizer_ai_events (
+      id             INTEGER PRIMARY KEY AUTOINCREMENT,
+      created_at     TEXT NOT NULL DEFAULT (datetime('now')),
+      kind           TEXT NOT NULL,
+      prompt_hash    TEXT,
+      prompt_text    TEXT,
+      response_text  TEXT,
+      latency_ms     INTEGER,
+      error          TEXT
+    )`);
+    await d.execute("CREATE INDEX ix_organizer_ai_events_created ON organizer_ai_events(created_at DESC)");
+  }
+  // 180-day rolling purge — matches the agm_ai_events retention.
+  await d.execute("DELETE FROM organizer_ai_events WHERE created_at < datetime('now', '-180 days')");
+
+  for (const [k, v] of [
+    ["azure_whisper_endpoint",           ""],
+    ["azure_whisper_key_set",            ""],
+    ["voice_organizer_enabled",          "1"],
+    ["organizer_ai_store_transcripts",   ""],
+  ] as const) await setting(k, v);
+
   await logIntegrityWarnings(d);
 }
 

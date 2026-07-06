@@ -14,6 +14,8 @@ mod path_guard;
 mod secrets;
 mod backup_crypto;
 mod migration_heal;
+mod azure_url_guard;
+mod voice;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -143,6 +145,8 @@ pub fn run() {
             backup_crypto::backup_verify_passphrase,
             backup_crypto::encrypt_backup,
             backup_crypto::decrypt_backup,
+            voice::transcribe_audio,
+            voice::parse_organizer_event,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -60,6 +60,8 @@ export default function Settings() {
   const [hasStoredPassword, setHasStoredPassword] = useState(false);
   const [azureKey, setAzureKey] = useState<string>("");
   const [hasAzureKey, setHasAzureKey] = useState(false);
+  const [whisperKey, setWhisperKey] = useState<string>("");
+  const [hasWhisperKey, setHasWhisperKey] = useState(false);
   const [testing, setTesting] = useState(false);
   const [errorLogText, setErrorLogText] = useState<string>("");
   const [errorLogPathStr, setErrorLogPathStr] = useState<string>("");
@@ -75,6 +77,7 @@ export default function Settings() {
       setS(loaded);
       setHasStoredPassword(loaded.smtp_password_set === "1");
       setHasAzureKey(loaded.azure_ai_key_set === "1");
+      setHasWhisperKey(loaded.azure_whisper_key_set === "1");
       setHasBackupPassphrase(loaded.backup_passphrase_set === "1");
       try { setAppVersion(await getVersion()); } catch { /* fine */ }
     })();
@@ -95,6 +98,12 @@ export default function Settings() {
         await setSetting("azure_ai_key_set", "1");
         setHasAzureKey(true);
         setAzureKey("");
+      }
+      if (whisperKey.trim()) {
+        await invoke("keychain_set", { key: "azure_whisper_key", value: whisperKey.trim() });
+        await setSetting("azure_whisper_key_set", "1");
+        setHasWhisperKey(true);
+        setWhisperKey("");
       }
       void showAlert("Settings saved.");
       window.dispatchEvent(new Event("settings-saved"));
@@ -119,6 +128,14 @@ export default function Settings() {
     await setSetting("azure_ai_key_set", "");
     setHasAzureKey(false);
     void showAlert("Azure AI key removed.");
+  }
+
+  async function clearWhisperKey() {
+    if (!await showConfirm("Remove the stored Azure Whisper key from the OS keychain?")) return;
+    await invoke("keychain_delete", { key: "azure_whisper_key" });
+    await setSetting("azure_whisper_key_set", "");
+    setHasWhisperKey(false);
+    void showAlert("Whisper key removed.");
   }
 
   // ── C-1: encrypted cloud backup passphrase ──────────────────────────
@@ -687,6 +704,68 @@ export default function Settings() {
             )}
           </small>
         </div>
+
+        {/* ── Voice capture (Whisper) — v1.8.0 ─────────────────────────── */}
+        <hr style={{ border: 0, borderTop: "1px solid var(--border)", margin: "16px 0" }} />
+        <div className="field" style={{ marginBottom: 8 }}>
+          <label style={{ display: "flex", alignItems: "center", gap: 8, cursor: "pointer" }}>
+            <input
+              type="checkbox"
+              checked={s.voice_organizer_enabled !== "0"}
+              onChange={(e) => setS({ ...s, voice_organizer_enabled: e.target.checked ? "1" : "0" })}
+            />
+            <strong>Voice capture in Organizer</strong>&nbsp;
+            <span style={{ color: "var(--muted)", fontWeight: 400 }}>
+              — Tap the mic in Organizer and dictate a meeting, follow-up, or action item. Whisper transcribes, GPT-4.1 parses; you confirm the draft before it saves.
+            </span>
+          </label>
+        </div>
+
+        {s.voice_organizer_enabled !== "0" && (
+          <div style={{ paddingLeft: 24, borderLeft: "2px solid var(--border)", marginBottom: 14 }}>
+            <div className="field" style={{ marginBottom: 10 }}>
+              <label>Azure Whisper endpoint URL<HelpTip text="Full deployment URL from Azure OpenAI Studio, including api-version. Example: https://<resource>.cognitiveservices.azure.com/openai/deployments/whisper/audio/translations?api-version=2024-06-01" /></label>
+              <input
+                type="text"
+                placeholder="https://<resource>.cognitiveservices.azure.com/openai/deployments/whisper/audio/translations?api-version=2024-06-01"
+                value={s.azure_whisper_endpoint || ""}
+                onChange={(e) => setS({ ...s, azure_whisper_endpoint: e.target.value })}
+              />
+              <small style={{ color: "var(--muted)" }}>
+                Stored in the settings table. Endpoint URLs aren't secrets — the API key below is.
+              </small>
+            </div>
+            <div className="field" style={{ marginBottom: 10 }}>
+              <label>Azure Whisper key</label>
+              <input
+                type="password"
+                placeholder={hasWhisperKey ? "•••••••• (stored in OS keychain) — enter a new key to replace" : "Paste your Whisper API key"}
+                value={whisperKey}
+                onChange={(e) => setWhisperKey(e.target.value)}
+                autoComplete="off"
+              />
+              <small style={{ color: "var(--muted)" }}>
+                Stored in the OS keychain, never in the database or backups. Same tenant as your Azure OpenAI resource — the parse step piggy-backs on the Azure AI Foundry key above.
+                {hasWhisperKey && (
+                  <> &nbsp;<a href="#" onClick={(e) => { e.preventDefault(); clearWhisperKey(); }} style={{ color: "var(--danger)" }}>Remove stored key</a></>
+                )}
+              </small>
+            </div>
+            <div className="field" style={{ marginBottom: 6 }}>
+              <label style={{ display: "flex", alignItems: "center", gap: 8, cursor: "pointer" }}>
+                <input
+                  type="checkbox"
+                  checked={s.organizer_ai_store_transcripts === "1"}
+                  onChange={(e) => setS({ ...s, organizer_ai_store_transcripts: e.target.checked ? "1" : "" })}
+                />
+                <strong>Store full transcripts in the audit log</strong>&nbsp;
+                <span style={{ color: "var(--muted)", fontWeight: 400 }}>
+                  — By default only a sha256 hash of the transcript is kept in <code>organizer_ai_events</code>. Enable this to retain raw text for review; auto-purged after 180 days regardless.
+                </span>
+              </label>
+            </div>
+          </div>
+        )}
 
         {s.feature_staff_hours_enabled === "1" && (
           <div style={{ paddingLeft: 24, borderLeft: "2px solid var(--border)", marginBottom: 14 }}>
