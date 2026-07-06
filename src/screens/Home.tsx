@@ -134,6 +134,33 @@ export default function Home() {
         }
       } catch {}
 
+      // Vault: documents expiring within 60 days (v1.1.0). Silent if the
+      // module tables haven't been provisioned yet (fresh installs before
+      // migration 019 lands).
+      try {
+        const { expiringSoon } = await import("../repo/documentsRepo");
+        const soon = await expiringSoon(60);
+        if (soon.length > 0) {
+          const today = new Date().toISOString().slice(0, 10);
+          const overdue = soon.filter((d) => d.expiryDate && d.expiryDate < today).length;
+          const upcoming = soon.length - overdue;
+          if (overdue > 0) {
+            list.push({
+              tone: "danger",
+              text: `${overdue} vault document${overdue === 1 ? " has" : "s have"} expired.`,
+              cta: { label: "Open Vault", to: "/vault?expiring=60" },
+            });
+          }
+          if (upcoming > 0) {
+            list.push({
+              tone: "warn",
+              text: `${upcoming} vault document${upcoming === 1 ? "" : "s"} expir${upcoming === 1 ? "es" : "e"} within 60 days.`,
+              cta: { label: "Open Vault", to: "/vault?expiring=60" },
+            });
+          }
+        }
+      } catch { /* silent — table may not exist yet on fresh installs */ }
+
       setAlerts(list);
     })();
 
@@ -214,6 +241,12 @@ export default function Home() {
           <div className="home-tile-icon">🤖</div>
           <h2>Ask Echelon</h2>
           <p>Plain-English questions about your data — attendance, revenue, staff, credentials</p>
+        </button>
+
+        <button className="home-tile" onClick={() => nav("/vault")} style={{ background: "linear-gradient(135deg, #f0fdfa, #ccfbf1)" }}>
+          <div className="home-tile-icon">🗂️</div>
+          <h2>Document Vault</h2>
+          <p>Licences, insurance, policies, staff & child records — with expiry alerts</p>
         </button>
       </div>
 

@@ -9,6 +9,7 @@ mod inbox;
 mod preprocess;
 mod restore;
 mod waitlist;
+mod documents;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -123,6 +124,7 @@ pub fn run() {
             waitlist::waitlist_clear_credentials,
             waitlist::waitlist_get_status,
             waitlist::waitlist_fetch_rows,
+            documents::documents_export_zip,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

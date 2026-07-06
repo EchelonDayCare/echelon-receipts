@@ -37,6 +37,7 @@ const WaitlistList = lazy(() => import("./screens/waitlist/List"));
 const WaitlistEnrolled = lazy(() => import("./screens/waitlist/Enrolled"));
 const WaitlistArchived = lazy(() => import("./screens/waitlist/Archived"));
 const WaitlistSettings = lazy(() => import("./screens/waitlist/Settings"));
+const VaultLibrary = lazy(() => import("./screens/vault/Library"));
 import { runCloudBackupIfDue } from "./lib/cloudBackup";
 import { getSettings } from "./lib/db";
 import { getVersion } from "@tauri-apps/api/app";
@@ -255,6 +256,19 @@ function Shell({ logo, name, staffEnabled }: { logo: string; name: string; staff
         ]}
       />
     );
+  } else if (path.startsWith("/vault")) {
+    sidebar = (
+      <ModuleSidebar
+        title="Document Vault"
+        accent="#0d9488"
+        logo={logo}
+        name={name}
+        items={[
+          { to: "/vault", label: "Library" },
+          { to: "/vault?expiring=60", label: "Expiring soon" },
+        ]}
+      />
+    );
   }
 
   return (
@@ -323,6 +337,9 @@ function Shell({ logo, name, staffEnabled }: { logo: string; name: string; staff
           <Route path="/waitlist/enrolled" element={<WaitlistEnrolled />} />
           <Route path="/waitlist/archived" element={<WaitlistArchived />} />
           <Route path="/waitlist/settings" element={<WaitlistSettings />} />
+
+          {/* Document Vault module (v1.1.0) */}
+          <Route path="/vault" element={<VaultLibrary />} />
 
           {/* Redirects for old Students routes now moved to Reports module */}
           <Route path="/students/reports" element={<Navigate to="/reports/monthly" replace />} />
