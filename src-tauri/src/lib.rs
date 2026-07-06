@@ -13,6 +13,7 @@ mod documents;
 mod path_guard;
 mod secrets;
 mod backup_crypto;
+mod migration_heal;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -93,6 +94,15 @@ pub fn run() {
         .setup(|app| {
             // Install panic hook + error log file before anything else can crash.
             errlog::init(&app.handle());
+            // Heal migration checksums BEFORE the SQL plugin opens the DB.
+            // Any user upgrading to a build that has edits to previously-shipped
+            // migration files would otherwise get "migration X previously
+            // applied but has been modified" and every Database.load() would
+            // throw. This rewrites stored checksums to match embedded SQL; it
+            // never re-runs a migration and never touches user data.
+            if let Err(e) = migration_heal::heal(&app.handle()) {
+                eprintln!("[migration_heal] {e}");
+            }
             // Apply any pending DB restore BEFORE the SQL plugin opens a connection.
             // The frontend invokes Database.load(...) lazily, so this runs first.
             if let Err(e) = restore::apply_pending_restore(&app.handle()) {
