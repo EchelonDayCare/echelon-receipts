@@ -638,6 +638,72 @@ async function ensureSchema(d: Database): Promise<void> {
   await d.execute(
     "UPDATE settings SET value = 'FormResponse!A:K' WHERE key = 'waitlist_sheet_range' AND value = 'Form_Responses!A:K'"
   );
+
+  // ─── Migration 019 — Document Vault (v1.1.0) ──────────────────────────
+  // First module built on the Phase-2 Data Contract: UUID PKs, UTC ISO
+  // timestamps, soft delete + optimistic concurrency + per-entity event
+  // log. Blob content is content-addressed (SHA-256) so re-uploads
+  // dedupe automatically; entity rows only reference blob_key.
+  if (!(await tableExists("blobs"))) {
+    console.warn("[ensureSchema] creating blobs");
+    await d.execute(`CREATE TABLE blobs (
+      blob_key    TEXT PRIMARY KEY,
+      content     BLOB NOT NULL,
+      size_bytes  INTEGER NOT NULL,
+      mime_type   TEXT,
+      ref_count   INTEGER NOT NULL DEFAULT 0,
+      created_at  TEXT NOT NULL
+    )`);
+  }
+  if (!(await tableExists("documents"))) {
+    console.warn("[ensureSchema] creating documents");
+    await d.execute(`CREATE TABLE documents (
+      id                 TEXT PRIMARY KEY,
+      title              TEXT NOT NULL,
+      category           TEXT NOT NULL,
+      linked_kind        TEXT,
+      linked_id          TEXT,
+      blob_key           TEXT NOT NULL,
+      file_name          TEXT NOT NULL,
+      mime_type          TEXT NOT NULL,
+      size_bytes         INTEGER NOT NULL,
+      issued_date        TEXT,
+      expiry_date        TEXT,
+      issuer             TEXT,
+      reference_no       TEXT,
+      notes              TEXT,
+      tags_json          TEXT NOT NULL DEFAULT '[]',
+      parent_document_id TEXT,
+      version_no         INTEGER NOT NULL DEFAULT 1,
+      is_current         INTEGER NOT NULL DEFAULT 1,
+      created_at         TEXT NOT NULL,
+      updated_at         TEXT NOT NULL,
+      updated_by         TEXT NOT NULL DEFAULT 'owner',
+      version            INTEGER NOT NULL DEFAULT 1,
+      deleted_at         TEXT
+    )`);
+    await d.execute("CREATE INDEX ix_documents_category ON documents(category) WHERE deleted_at IS NULL");
+    await d.execute("CREATE INDEX ix_documents_expiry   ON documents(expiry_date) WHERE deleted_at IS NULL AND is_current = 1");
+    await d.execute("CREATE INDEX ix_documents_linked   ON documents(linked_kind, linked_id) WHERE deleted_at IS NULL");
+    await d.execute("CREATE INDEX ix_documents_current  ON documents(parent_document_id, version_no)");
+  }
+  if (!(await tableExists("document_events"))) {
+    console.warn("[ensureSchema] creating document_events");
+    await d.execute(`CREATE TABLE document_events (
+      id           TEXT PRIMARY KEY,
+      entity_id    TEXT NOT NULL,
+      event_type   TEXT NOT NULL,
+      payload_json TEXT,
+      actor        TEXT NOT NULL,
+      channel      TEXT,
+      message_ref  TEXT,
+      created_at   TEXT NOT NULL
+    )`);
+    await d.execute("CREATE INDEX ix_document_events_entity ON document_events(entity_id, created_at)");
+  }
+  // Link column on existing staff_credentials so a credential can point at
+  // its source PDF in the Vault (integration hook — see StaffCredentials.tsx).
+  await addCol("staff_credentials", "document_id", "TEXT");
 }
 
 // ---------- Person identity ----------
