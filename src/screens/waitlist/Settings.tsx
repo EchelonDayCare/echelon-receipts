@@ -238,7 +238,6 @@ export default function WaitlistSettings() {
         <div className="field" style={{ maxWidth: 240 }}>
           <label>Frequency</label>
           <select value={intervalMin} onChange={(e) => changeInterval(e.target.value)}>
-            <option value="5">Every 5 minutes</option>
             <option value="10">Every 10 minutes</option>
             <option value="30">Every 30 minutes</option>
             <option value="60">Every hour</option>

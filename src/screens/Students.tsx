@@ -1,6 +1,6 @@
 import { showAlert, showConfirm, showPrompt } from "../lib/dialogs";
 import { useEffect, useState } from "react";
-import { useSearchParams } from "react-router-dom";
+import { useNavigate, useSearchParams } from "react-router-dom";
 import { open } from "@tauri-apps/plugin-dialog";
 import { readFile } from "@tauri-apps/plugin-fs";
 import { listStudents, listYears, upsertStudent, deleteStudent, reactivateStudent, hardDeleteStudent, getSettings,
@@ -10,6 +10,7 @@ import type { Student, AccbEntry, SettingsMap } from "../types";
 
 export default function Students() {
   const now = new Date().getFullYear();
+  const nav = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
   const [years, setYears] = useState<number[]>([now]);
   const [year, setYear] = useState<number>(now);
@@ -22,12 +23,38 @@ export default function Students() {
     { year: new Date().getFullYear(), month: new Date().getMonth() + 1, amount: "", notes: "" }
   );
 
+  // Track a pending waitlist conversion. When the user saves the pre-filled
+  // student, we call markConverted so the waitlist entry links to the new
+  // student and moves to 'enrolled'. Cleared by the save handler.
+  const [pendingWaitlistId, setPendingWaitlistId] = useState<number | null>(null);
+
   // Auto-open the Add Student modal when arriving with ?new=1 (from Today's
-  // "+ New Student" quick action).
+  // "+ New Student" quick action) OR with waitlist pre-fill params from the
+  // Waitlist detail drawer's "Convert to Student" button.
   useEffect(() => {
     if (searchParams.get("new") === "1") {
       setEditing({ year, active: 1 });
       searchParams.delete("new");
+      setSearchParams(searchParams, { replace: true });
+      return;
+    }
+    // Waitlist pre-fill. Accepts: name, father_name, mother_name, email,
+    // fromWaitlist=<id>. Everything else on the waitlist entry (phone, notes,
+    // birthday) has no home on the students table, so we drop it silently.
+    const fromWaitlist = searchParams.get("fromWaitlist");
+    const name = searchParams.get("name");
+    if (fromWaitlist && name) {
+      setEditing({
+        year,
+        active: 1,
+        name,
+        father_name: searchParams.get("father_name") || null,
+        mother_name: searchParams.get("mother_name") || null,
+        email: searchParams.get("email") || null,
+      });
+      setPendingWaitlistId(Number(fromWaitlist) || null);
+      // Strip the params so a refresh doesn't re-open the modal.
+      ["fromWaitlist", "name", "father_name", "mother_name", "email"].forEach((k) => searchParams.delete(k));
       setSearchParams(searchParams, { replace: true });
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -277,7 +304,7 @@ export default function Students() {
           <div style={{ display: "flex", gap: 10 }}>
             <button className="btn" onClick={async () => {
               if (!editing.name?.trim()) { void showAlert("Name required."); return; }
-              await upsertStudent({
+              const saved = await upsertStudent({
                 id: editing.id, name: editing.name.trim(),
                 father_name: editing.father_name || null,
                 mother_name: editing.mother_name || null,
@@ -285,6 +312,21 @@ export default function Students() {
                 year: editing.year || year, active: editing.active ?? 1,
                 gross_override: editing.gross_override ?? null,
               });
+              // If this save was launched from the Waitlist "Convert to Student"
+              // flow, link the waitlist entry to the new student and jump back
+              // to the waitlist so the operator sees the enrolled row.
+              if (pendingWaitlistId && saved.id) {
+                try {
+                  const { markConverted } = await import("../lib/waitlist");
+                  await markConverted(pendingWaitlistId, saved.id);
+                  setPendingWaitlistId(null);
+                  setEditing(null);
+                  nav("/waitlist/enrolled");
+                  return;
+                } catch (e) {
+                  console.warn("[waitlist] markConverted failed:", e);
+                }
+              }
               setEditing(null); refresh();
             }}>Save</button>
             <button className="btn secondary" onClick={() => setEditing(null)}>Cancel</button>

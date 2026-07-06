@@ -385,9 +385,12 @@ export async function generateDocxBlob(m: AgmMinutes): Promise<Blob> {
       },
     },
     sections: [{
-      properties: {},
+      properties: { titlePage: true },
       headers: {
-        default: new Header({ children: headerChildren }),
+        // Title-page header: full logo + association block. Only page 1.
+        first: new Header({ children: headerChildren }),
+        // Subsequent pages: no header (empty paragraph avoids docx quirks).
+        default: new Header({ children: [new Paragraph({ children: [] })] }),
       },
       children,
     }],

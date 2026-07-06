@@ -754,7 +754,7 @@ export async function listYears(): Promise<number[]> {
   );
   return rows.map((r) => r.year);
 }
-export async function upsertStudent(s: Partial<Student> & { name: string; year: number }) {
+export async function upsertStudent(s: Partial<Student> & { name: string; year: number }): Promise<{ id: number }> {
   const pid = s.person_id || personIdFor(s.name, s.father_name, s.mother_name);
   const grossOv = s.gross_override === undefined ? null : (s.gross_override == null ? null : roundMoney(Number(s.gross_override)));
   if (s.id) {
@@ -762,12 +762,21 @@ export async function upsertStudent(s: Partial<Student> & { name: string; year: 
       "UPDATE students SET name=?, father_name=?, mother_name=?, email=?, year=?, active=?, person_id=?, gross_override=? WHERE id=?",
       [s.name, s.father_name ?? null, s.mother_name ?? null, s.email ?? null, s.year, s.active ?? 1, pid, grossOv, s.id]
     );
-  } else {
-    await execRetry(
-      "INSERT INTO students(name,father_name,mother_name,email,year,active,person_id,gross_override) VALUES(?,?,?,?,?,1,?,?)",
-      [s.name, s.father_name ?? null, s.mother_name ?? null, s.email ?? null, s.year, pid, grossOv]
-    );
+    return { id: s.id };
   }
+  const res = await execRetry(
+    "INSERT INTO students(name,father_name,mother_name,email,year,active,person_id,gross_override) VALUES(?,?,?,?,?,1,?,?)",
+    [s.name, s.father_name ?? null, s.mother_name ?? null, s.email ?? null, s.year, pid, grossOv]
+  );
+  // Tauri SQL plugin returns { lastInsertId, rowsAffected }. Fall back to
+  // person_id lookup if the runtime doesn't expose lastInsertId for some reason.
+  const inserted = (res as any)?.lastInsertId;
+  if (typeof inserted === "number" && inserted > 0) return { id: inserted };
+  const rows = await (await db()).select<{ id: number }[]>(
+    "SELECT id FROM students WHERE person_id=? AND year=? ORDER BY id DESC LIMIT 1",
+    [pid, s.year],
+  );
+  return { id: rows[0]?.id ?? 0 };
 }
 export async function deleteStudent(id: number) {
   await execRetry("UPDATE students SET active=0 WHERE id=?", [id]);

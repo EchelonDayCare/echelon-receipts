@@ -15,7 +15,7 @@ import {
 } from "../../lib/waitlist";
 import { db } from "../../lib/db";
 
-type Student = { id: number; name: string; year: number };
+type Student = { id: number; name: string; year: number; father_name: string | null; mother_name: string | null };
 
 export default function DetailDrawer({
   id, onClose,
@@ -44,7 +44,7 @@ export default function DetailDrawer({
     (async () => {
       const d = await db();
       const rows = await d.select<Student[]>(
-        "SELECT id, name, year FROM students WHERE active = 1 ORDER BY year DESC, name",
+        "SELECT id, name, year, father_name, mother_name FROM students WHERE active = 1 ORDER BY year DESC, name",
       );
       setStudents(rows);
     })();
@@ -52,8 +52,11 @@ export default function DetailDrawer({
 
   const filteredStudents = useMemo(() => {
     const q = studentSearch.trim().toLowerCase();
-    if (!q) return students.slice(0, 50);
-    return students.filter((s) => s.name.toLowerCase().includes(q)).slice(0, 50);
+    const src = q
+      ? students.filter((s) =>
+          [s.name, s.father_name, s.mother_name].filter(Boolean).join(" ").toLowerCase().includes(q))
+      : students;
+    return src.slice(0, 50);
   }, [students, studentSearch]);
 
   if (id == null || !entry) return null;
@@ -83,30 +86,26 @@ export default function DetailDrawer({
   };
 
   const convertToStudent = () => {
-    // Split child_name on last space so "Jane Ann Doe" → first="Jane Ann", last="Doe".
-    const parts = entry.child_name.trim().split(/\s+/);
-    const last = parts.length > 1 ? parts.pop()! : "";
-    const first = parts.join(" ");
+    // Waitlist parent_name is one field; map to father_name by default so it
+    // shows up in the guardian column. The user can move it to mother_name on
+    // the pre-filled form if needed. See Students.tsx useEffect for the reader.
     const params = new URLSearchParams({
-      waitlist_id: String(entry.id),
-      firstName: first,
-      lastName: last,
-      guardian_1: entry.parent_name || "",
-      guardian_1_phone: entry.phone || "",
-      guardian_1_email: entry.parent_email || "",
-      intake_notes: entry.notes || "",
-      start_date: entry.target_start || "",
+      fromWaitlist: String(entry.id),
+      name: entry.child_name.trim(),
+      father_name: entry.parent_name || "",
+      mother_name: "",
+      email: entry.parent_email || "",
     });
     nav(`/students/roster?${params.toString()}`);
   };
 
   const sendEmail = () => {
     if (!entry.parent_email) return;
-    const params = new URLSearchParams({
-      to: entry.parent_email,
-      subject: "Regarding your waitlist application",
-    });
-    nav(`/communications/compose?${params.toString()}`);
+    // Use the OS mail handler — the app's group Compose screen expects a
+    // Student roster selection, not a one-off parent email. mailto opens the
+    // owner's default mail client (Apple Mail / Outlook / etc.) pre-filled.
+    const subject = encodeURIComponent(`Regarding ${entry.child_name}'s waitlist application`);
+    window.location.href = `mailto:${entry.parent_email}?subject=${subject}`;
   };
 
   const band = ageBand(entry.birthday);
@@ -215,16 +214,19 @@ export default function DetailDrawer({
               style={{ width: "100%", marginBottom: 8 }}
             />
             <div style={{ maxHeight: 240, overflowY: "auto" }}>
-              {filteredStudents.map((s) => (
-                <button
-                  key={s.id}
-                  className="btn link"
-                  style={{ display: "block", textAlign: "left", padding: "6px 4px" }}
-                  onClick={() => linkToStudent(s.id)}
-                >
-                  {s.name} <span style={{ color: "var(--muted)" }}>· {s.year}</span>
-                </button>
-              ))}
+              {filteredStudents.map((s) => {
+                const parents = [s.father_name, s.mother_name].filter(Boolean).join(" / ");
+                return (
+                  <button
+                    key={s.id}
+                    className="btn link"
+                    style={{ display: "block", textAlign: "left", padding: "6px 4px" }}
+                    onClick={() => linkToStudent(s.id)}
+                  >
+                    {s.name} <span style={{ color: "var(--muted)" }}>· {s.year}{parents ? ` · ${parents}` : ""}</span>
+                  </button>
+                );
+              })}
               {filteredStudents.length === 0 && (
                 <div style={{ color: "var(--muted)", fontSize: 13, padding: 6 }}>No matches.</div>
               )}

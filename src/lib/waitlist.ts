@@ -336,6 +336,27 @@ export async function syncWaitlist(opts: { force?: boolean } = {}): Promise<Sync
         [syncStartedAt, syncStartedAt, graceThreshold],
       );
 
+      // Aged-out archive: kids over 60 months (5 yrs) as of today. Runs on
+      // every sync so records self-clean over time. Applies regardless of
+      // current status (per owner preference — historical enrolled/withdrawn
+      // over-age records also get archived to keep active views clean).
+      // The status_note is set so the reason is visible in the Archived tab.
+      const agedOutCutoff = new Date();
+      agedOutCutoff.setMonth(agedOutCutoff.getMonth() - 60);
+      const agedOutIso = agedOutCutoff.toISOString().slice(0, 10);
+      const agedRes = await execRetry(
+        `UPDATE waitlist_entries
+            SET status = 'archived',
+                status_note = COALESCE(NULLIF(status_note, ''), 'Aged out — over daycare age (>5 yrs)'),
+                status_changed_at = COALESCE(status_changed_at, ?),
+                updated_at = ?
+          WHERE status != 'archived'
+            AND birthday IS NOT NULL
+            AND birthday != ''
+            AND birthday < ?`,
+        [syncStartedAt, syncStartedAt, agedOutIso],
+      );
+
       await writeSyncState({
         last_synced_at: syncStartedAt,
         last_success_at: syncStartedAt,
@@ -355,7 +376,7 @@ export async function syncWaitlist(opts: { force?: boolean } = {}): Promise<Sync
         fetched: seenDedupeKeys.length,
         inserted,
         updated,
-        archived: archivedRes.rowsAffected,
+        archived: archivedRes.rowsAffected + agedRes.rowsAffected,
       };
     } catch (e: any) {
       const msg = String(e?.message || e);
