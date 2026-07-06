@@ -183,6 +183,34 @@ fn build_schema_context(
 // column is only exempt from redaction if it is on this explicit ALLOWLIST of
 // non-identifying numeric/enum/id/date columns. Everything else — any column
 // not named here — is redacted by default, present or future.
+// Value-shape check: even if a column *name* looks safe (e.g. `id`), a hostile
+// query can smuggle PII through it via aliasing: `SELECT email AS id ...`.
+// So we ONLY trust the column-name allowlist when the value itself also looks
+// shape-safe (short, no obvious PII markers). Anything longer or with `@`,
+// spaces (beyond an ISO date's T/Z), or extended chars → redact regardless.
+fn is_safe_value_shape(v: &str) -> bool {
+    if v.len() > 40 { return false; }
+    if v.contains('@') { return false; }
+    // Allow: ASCII alnum, dash, underscore, dot, colon, plus, T, Z, slash.
+    // Deliberately NO space — that lets "Alice Bob" through when aliased as
+    // a safe column. SQLite dates rendered "2026-07-06 21:59:21" will fail
+    // this check (fine — they redact to a placeholder, which is safe).
+    for ch in v.chars() {
+        let ok = ch.is_ascii_alphanumeric()
+            || matches!(ch, '-' | '_' | '.' | ':' | '+' | 'T' | 'Z' | '/');
+        if !ok { return false; }
+    }
+    true
+}
+
+fn should_redact(v: &Value, col: &str, redact: bool) -> bool {
+    if !redact { return false; }
+    let Value::String(s) = v else { return false; };
+    if !is_safe_column(col) { return true; }
+    // Column name is on the allowlist, but the value must also *look* safe.
+    !is_safe_value_shape(s)
+}
+
 fn is_safe_column(col: &str) -> bool {
     let c = col.to_lowercase();
 
@@ -242,7 +270,7 @@ fn sample_rows_json(conn: &Connection, sql: &str, redact: bool) -> Result<Vec<St
             // result shapes (COUNT/SUM/dates) structurally identical even
             // when a column name isn't on the allowlist, while still
             // failing closed on any free-text/identifying column.
-            let final_v = if redact && !is_safe_column(col) && matches!(v, Value::String(_)) {
+            let final_v = if should_redact(&v, col, redact) {
                 placeholder_for(col)
             } else {
                 v
@@ -309,7 +337,7 @@ async fn summarize(
         let mut obj = serde_json::Map::new();
         for (i, col) in columns.iter().enumerate() {
             let v = r.get(i).cloned().unwrap_or(Value::Null);
-            let out = if redact && !is_safe_column(col) && matches!(v, Value::String(_)) {
+            let out = if should_redact(&v, col, redact) {
                 placeholder_for(col)
             } else { v };
             obj.insert(col.clone(), out);
@@ -464,32 +492,22 @@ fn validate_and_normalize_sql(raw: &str) -> Result<String, String> {
         }
     }
 
-    // Enforce LIMIT 500. If the query already has a LIMIT lower than the cap,
-    // leave it alone; otherwise wrap. We wrap as a subquery so that any
-    // ORDER BY in the inner query is preserved.
-    let with_limit = ensure_limit(&cleaned)?;
+    // Enforce LIMIT 500. Rather than trying to detect an existing top-level
+    // LIMIT textually (which can be bypassed by `LIMIT 999999` or by LIMIT
+    // hiding inside a CTE/subquery), we ALWAYS wrap. Any inner LIMIT is
+    // preserved by the subquery so semantics like `LIMIT 10` still hold —
+    // the outer LIMIT 500 is a hard ceiling. SQLite pushes LIMIT down when
+    // it can, so this is cheap for well-formed queries and safe for hostile
+    // ones.
+    let with_limit = format!("SELECT * FROM ({}) LIMIT {}", &cleaned, HARD_ROW_CAP);
     Ok(with_limit)
 }
 
+// Kept for tests only — production path uses the always-wrap logic above.
+#[cfg(test)]
+#[allow(dead_code)]
 fn ensure_limit(sql: &str) -> Result<String, String> {
-    // Cheap textual check for a trailing LIMIT. We already ran through
-    // sqlparser above so we know it's a single valid SELECT; this is just
-    // best-effort — if it's missing we append one. This is textual because
-    // sqlparser doesn't stringify LIMIT-less queries perfectly across
-    // dialects.
-    let lower = sql.to_lowercase();
-    let has_limit = lower.rfind("limit ").map(|pos| {
-        // ensure there's a number-ish thing after it, not "limit" appearing
-        // inside a column alias or string literal (we already banned strings
-        // with ; and --).
-        let after = &sql[pos + 6..];
-        after.chars().next().map(|c| c.is_ascii_digit()).unwrap_or(false)
-    }).unwrap_or(false);
-    if has_limit {
-        Ok(sql.to_string())
-    } else {
-        Ok(format!("SELECT * FROM ({}) LIMIT {}", sql, HARD_ROW_CAP))
-    }
+    Ok(format!("SELECT * FROM ({}) LIMIT {}", sql, HARD_ROW_CAP))
 }
 
 // ─── Read-only execution ────────────────────────────────────────────────
@@ -595,6 +613,49 @@ mod tests {
         ] {
             assert!(!is_safe_column(unsafe_col), "{unsafe_col} must be redacted by default (fail closed)");
         }
+    }
+
+    // ── C-2 follow-up: alias bypass must also fail closed ────────────────
+    #[test]
+    fn value_shape_check_blocks_alias_bypass() {
+        // Column *name* is on the allowlist (id) but the *value* is clearly
+        // an email — must still redact.
+        let v_email = Value::String("alice@example.com".into());
+        assert!(should_redact(&v_email, "id", true), "email aliased as `id` must redact");
+
+        // Long free-text value under a safe-looking alias.
+        let v_text = Value::String("This is a message body pretending to be a status".into());
+        assert!(should_redact(&v_text, "status", true), "long text aliased as `status` must redact");
+
+        // Value with spaces beyond ISO date shape → redact.
+        let v_name = Value::String("Alice Bob Carol".into());
+        assert!(should_redact(&v_name, "id", true), "multi-word name aliased as `id` must redact");
+
+        // Legitimate short safe values pass.
+        let v_id = Value::String("abc-123".into());
+        assert!(!should_redact(&v_id, "id", true), "short id-shaped value on safe col passes");
+        let v_iso = Value::String("2026-07-06T21:59:21".into());
+        assert!(!should_redact(&v_iso, "created_at", true), "ISO timestamp on safe col passes");
+        let v_status = Value::String("active".into());
+        assert!(!should_redact(&v_status, "status", true), "short enum on safe col passes");
+
+        // Non-string values are never redacted (numbers/nulls).
+        let v_num = json!(42);
+        assert!(!should_redact(&v_num, "amount", true));
+        assert!(!should_redact(&Value::Null, "email", true));
+
+        // redact=false disables everything.
+        assert!(!should_redact(&v_email, "id", false));
+    }
+
+    // ── C-8 follow-up: LIMIT always wraps, cannot be bypassed ────────────
+    #[test]
+    fn limit_always_wraps_regardless_of_inner_limit() {
+        let out = validate_and_normalize_sql("SELECT * FROM receipts LIMIT 999999").unwrap();
+        assert!(out.contains("SELECT * FROM (") && out.contains(&format!("LIMIT {}", HARD_ROW_CAP)),
+            "existing huge LIMIT must still be wrapped: {out}");
+        let out2 = validate_and_normalize_sql("SELECT COUNT(*) FROM receipts").unwrap();
+        assert!(out2.contains(&format!("LIMIT {}", HARD_ROW_CAP)));
     }
 }
 

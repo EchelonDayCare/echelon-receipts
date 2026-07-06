@@ -123,6 +123,12 @@ pub fn apply_pending_restore(app: &tauri::AppHandle) -> Result<Option<String>, S
             }
         }
     }
+    // On Windows, fs::rename fails if the target already exists. Remove the
+    // live file first (we already copied it into Backups above) so the swap
+    // is atomic-enough for both platforms.
+    if live.exists() {
+        fs::remove_file(&live).map_err(|e| format!("remove live before swap: {e}"))?;
+    }
     fs::rename(&pending, &live).map_err(|e| format!("swap: {e}"))?;
     Ok(Some(stamp))
 }

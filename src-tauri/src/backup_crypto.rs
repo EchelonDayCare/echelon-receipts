@@ -25,7 +25,7 @@
 //                        as AEAD associated data, so tampering is additionally
 //                        caught (hard failure) by the cipher's auth tag.
 use argon2::password_hash::{rand_core::OsRng as PhOsRng, SaltString};
-use argon2::{Argon2, PasswordHash, PasswordHasher, PasswordVerifier};
+use argon2::{Algorithm, Argon2, Params, PasswordHash, PasswordHasher, PasswordVerifier, Version};
 use base64::Engine;
 use chacha20poly1305::aead::{Aead, Payload};
 use chacha20poly1305::{KeyInit, XChaCha20Poly1305, XNonce};
@@ -48,9 +48,26 @@ fn sha256_12(data: &[u8]) -> [u8; AAD_HASH_LEN] {
     out
 }
 
+// Argon2id parameters, pinned so that future crate defaults can never
+// prevent old backups from decrypting. Aligned with OWASP 2024 guidance:
+// m=19 MiB, t=2, p=1, output 32 bytes.
+const ARGON2_M_COST_KIB: u32 = 19_456;
+const ARGON2_T_COST: u32 = 2;
+const ARGON2_P_COST: u32 = 1;
+
+fn argon2_pinned() -> Argon2<'static> {
+    let params = Params::new(
+        ARGON2_M_COST_KIB,
+        ARGON2_T_COST,
+        ARGON2_P_COST,
+        Some(32),
+    ).expect("static Argon2 params must be valid");
+    Argon2::new(Algorithm::Argon2id, Version::V0x13, params)
+}
+
 fn derive_key(passphrase: &str, salt: &[u8]) -> Result<[u8; 32], String> {
     let mut key = [0u8; 32];
-    Argon2::default()
+    argon2_pinned()
         .hash_password_into(passphrase.as_bytes(), salt, &mut key)
         .map_err(|e| format!("key derivation failed: {e}"))?;
     Ok(key)
@@ -59,9 +76,11 @@ fn derive_key(passphrase: &str, salt: &[u8]) -> Result<[u8; 32], String> {
 /// Argon2id PHC hash for passphrase *verification only* — this is never
 /// used to derive the encryption key (that always uses the per-archive
 /// random salt above); it just confirms the user typed the right passphrase.
+/// The PHC-encoded string embeds the m/t/p params inline, so this hash is
+/// naturally self-describing even if pinned params change later.
 pub fn hash_passphrase_for_verification(passphrase: &str) -> Result<String, String> {
     let salt = SaltString::generate(&mut PhOsRng);
-    Argon2::default()
+    argon2_pinned()
         .hash_password(passphrase.as_bytes(), &salt)
         .map(|h| h.to_string())
         .map_err(|e| format!("hash failed: {e}"))
