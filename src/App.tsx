@@ -60,10 +60,11 @@ function ModuleSidebar({
   accent: string;
   logo: string;
   name: string;
-  items: { to: string; label: string }[];
+  items: { to: string; label: string; match?: (path: string, search: string) => boolean }[];
 }) {
   const nav = useNavigate();
   const [ver, setVer] = useState("");
+  const loc = useLocation();
   useEffect(() => { getVersion().then(setVer).catch(() => setVer("")); }, []);
   return (
     <aside className="sidebar">
@@ -102,16 +103,21 @@ function ModuleSidebar({
         <span>Home</span>
       </button>
       <nav>
-        {items.map((it) => (
-          <NavLink
-            key={it.to}
-            to={it.to}
-            end
-            className={({ isActive }) => "nav-item" + (isActive ? " active" : "")}
-          >
-            {it.label}
-          </NavLink>
-        ))}
+        {items.map((it) => {
+          const isActive = it.match
+            ? it.match(loc.pathname, loc.search)
+            : loc.pathname === it.to.split("?")[0] && loc.search === (it.to.includes("?") ? "?" + it.to.split("?")[1] : "");
+          return (
+            <NavLink
+              key={it.to}
+              to={it.to}
+              end
+              className={"nav-item" + (isActive ? " active" : "")}
+            >
+              {it.label}
+            </NavLink>
+          );
+        })}
       </nav>
       <div className="sidebar-foot">{ver ? `v${ver}` : ""}</div>
     </aside>
@@ -283,8 +289,8 @@ function Shell({ logo, name, staffEnabled }: { logo: string; name: string; staff
         logo={logo}
         name={name}
         items={[
-          { to: "/vault", label: "Library" },
-          { to: "/vault?expiring=60", label: "Expiring soon" },
+          { to: "/vault", label: "Library", match: (p, s) => p === "/vault" && !s.includes("expiring=") },
+          { to: "/vault?expiring=60", label: "Expiring soon", match: (p, s) => p === "/vault" && s.includes("expiring=") },
         ]}
       />
     );
