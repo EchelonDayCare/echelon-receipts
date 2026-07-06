@@ -93,6 +93,10 @@ export default function Compose() {
 
   const [recipientCount, setRecipientCount] = useState<{ withEmail: number; total: number }>({ withEmail: 0, total: 0 });
   useEffect(() => {
+    // Guard against stale-response races: if the deps change (mode /
+    // filter / adhoc) while the previous resolveRecipients call is still
+    // in flight, the stale reply must not overwrite fresh state.
+    let cancelled = false;
     (async () => {
       const resolved = await resolveRecipients(filter);
       let total = 0;
@@ -100,8 +104,10 @@ export default function Compose() {
       else if (mode === "year") total = students.length;
       else if (mode === "adhoc") total = adhoc.length;
       else total = selectedIds.size;
+      if (cancelled) return;
       setRecipientCount({ withEmail: resolved.length, total });
     })();
+    return () => { cancelled = true; };
   }, [filter, mode, year, students.length, selectedIds, adhoc]);
 
   function useTemplate(tId: string) {
