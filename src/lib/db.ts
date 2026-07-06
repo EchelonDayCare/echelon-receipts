@@ -1,5 +1,5 @@
 import Database from "@tauri-apps/plugin-sql";
-import type { Student, Receipt, SettingsMap, AnnualReceipt, AccbEntry, FeeBreakdown } from "../types";
+import type { Student, Receipt, SettingsMap, AnnualReceipt, AccbEntry, FeeBreakdown, Deposit } from "../types";
 
 let _db: Database | null = null;
 let _schemaChecked = false;
@@ -1122,6 +1122,30 @@ Thanks,
   // orphan check plus the built-in one, and just log — this is a startup
   // diagnostic, not an enforcement mechanism (out of scope to migrate
   // existing rows here).
+  // ─── Migration 024 — Deposit Slips (v1.7.0) ───────────────────────────
+  // Tracks which cheque/cash receipts have been physically deposited at the
+  // bank so a printable TD-style deposit slip can be produced. Deposits are
+  // append-only from the app's perspective; voiding is a status flip, not
+  // a delete (rule: never delete data).
+  if (!(await tableExists("deposits"))) {
+    console.warn("[ensureSchema] creating deposits");
+    await d.execute(`CREATE TABLE deposits (
+      id            INTEGER PRIMARY KEY AUTOINCREMENT,
+      deposit_date  TEXT NOT NULL,
+      cheque_count  INTEGER NOT NULL DEFAULT 0,
+      total_amount  REAL NOT NULL DEFAULT 0,
+      notes         TEXT,
+      voided        INTEGER NOT NULL DEFAULT 0,
+      voided_at     TEXT,
+      void_reason   TEXT,
+      created_at    TEXT NOT NULL DEFAULT (datetime('now'))
+    )`);
+    await d.execute("CREATE INDEX ix_deposits_date ON deposits(deposit_date DESC)");
+  }
+  await addCol("receipts", "deposited_at", "TEXT");
+  await addCol("receipts", "deposit_id",   "INTEGER REFERENCES deposits(id)");
+  await d.execute("CREATE INDEX IF NOT EXISTS ix_receipts_deposit ON receipts(deposit_id)");
+
   await logIntegrityWarnings(d);
 }
 
@@ -1576,6 +1600,83 @@ export async function markEmailed(id: number, recipients: string[]) {
   await execRetry(
     "UPDATE receipts SET emailed_at=datetime('now'), emailed_to=? WHERE id=?",
     [recipients.join(", "), id]
+  );
+}
+
+// ---------- Deposit Slips ----------
+// Receipts eligible for a bank deposit: not voided and not already deposited.
+// Ordered oldest-first so the printed slip matches collection order.
+export async function listUndepositedReceipts(): Promise<Receipt[]> {
+  return await (await db()).select<Receipt[]>(
+    "SELECT * FROM receipts WHERE voided=0 AND deposited_at IS NULL AND is_refund=0 ORDER BY date ASC, id ASC"
+  );
+}
+
+export async function createDeposit(
+  receiptIds: number[],
+  depositDate: string,
+  notes: string | null
+): Promise<number> {
+  if (receiptIds.length === 0) throw new Error("Deposit must include at least one receipt");
+  const d = await db();
+  // Compute totals from the receipts themselves so the deposit header is
+  // guaranteed to match the sum of its members.
+  const placeholders = receiptIds.map(() => "?").join(",");
+  const rows = await d.select<{ n: number; total: number }[]>(
+    `SELECT COUNT(*) AS n, COALESCE(SUM(amount), 0) AS total
+     FROM receipts
+     WHERE id IN (${placeholders}) AND voided=0 AND deposited_at IS NULL AND is_refund=0`,
+    receiptIds
+  );
+  const { n, total } = rows[0] ?? { n: 0, total: 0 };
+  if (n !== receiptIds.length) {
+    throw new Error(
+      `One or more selected receipts are no longer eligible (voided, refunded, or already deposited). Refresh the list and try again.`
+    );
+  }
+  const ins = await execRetry(
+    "INSERT INTO deposits (deposit_date, cheque_count, total_amount, notes) VALUES (?, ?, ?, ?)",
+    [depositDate, n, roundMoney(total), notes]
+  );
+  const depositId = ins.lastInsertId;
+  await execRetry(
+    `UPDATE receipts SET deposit_id=?, deposited_at=datetime('now')
+     WHERE id IN (${placeholders})`,
+    [depositId, ...receiptIds]
+  );
+  return depositId;
+}
+
+export async function listDeposits(): Promise<Deposit[]> {
+  return await (await db()).select<Deposit[]>(
+    "SELECT * FROM deposits ORDER BY deposit_date DESC, id DESC"
+  );
+}
+
+export async function getDepositWithReceipts(
+  id: number
+): Promise<{ deposit: Deposit; receipts: Receipt[] } | null> {
+  const d = await db();
+  const drows = await d.select<Deposit[]>("SELECT * FROM deposits WHERE id=?", [id]);
+  if (drows.length === 0) return null;
+  const rrows = await d.select<Receipt[]>(
+    "SELECT * FROM receipts WHERE deposit_id=? ORDER BY date ASC, id ASC",
+    [id]
+  );
+  return { deposit: drows[0], receipts: rrows };
+}
+
+// Reverse a deposit — clears the deposit_id/deposited_at on member receipts so
+// they reappear in the undeposited list, and flags the deposit voided (never
+// deleted, per data-retention rule).
+export async function voidDeposit(id: number, reason?: string): Promise<void> {
+  await execRetry(
+    "UPDATE receipts SET deposit_id=NULL, deposited_at=NULL WHERE deposit_id=?",
+    [id]
+  );
+  await execRetry(
+    "UPDATE deposits SET voided=1, voided_at=datetime('now'), void_reason=? WHERE id=?",
+    [reason ?? null, id]
   );
 }
 

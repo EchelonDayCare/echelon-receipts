@@ -43,6 +43,7 @@ const StaffScheduleAudit = lazy(() => import("./screens/staff/ScheduleAudit"));
 const StaffScheduleConfirmations = lazy(() => import("./screens/staff/ScheduleConfirmations"));
 const OrganizerScreen = lazy(() => import("./screens/organizer/Organizer"));
 const NotificationsHistory = lazy(() => import("./screens/Notifications"));
+const Deposits = lazy(() => import("./screens/Deposits"));
 import { runCloudBackupIfDue } from "./lib/cloudBackup";
 import { getSettings } from "./lib/db";
 import { getVersion } from "@tauri-apps/api/app";
@@ -198,6 +199,7 @@ function Shell({ logo, name, staffEnabled }: { logo: string; name: string; staff
           { to: "/students/history", label: "Receipt History" },
           { to: "/students/roster", label: "Roster" },
           { to: "/students/annual", label: "Annual Tax Receipts" },
+          { to: "/students/deposits", label: "Bank Deposits" },
         ]}
       />
     );
@@ -358,6 +360,7 @@ function Shell({ logo, name, staffEnabled }: { logo: string; name: string; staff
           <Route path="/students/reports" element={<Reports />} />
           <Route path="/students/aging" element={<AgingReport />} />
           <Route path="/students/annual" element={<AnnualReceipts />} />
+          <Route path="/students/deposits" element={<Deposits />} />
 
           {/* Staff module */}
           <Route path="/staff" element={<Navigate to={staffEnabled ? "/staff/hours" : "/config/staff"} replace />} />

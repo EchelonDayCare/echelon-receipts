@@ -34,6 +34,20 @@ export interface Receipt {
   void_reason: string | null;
   voided_at: string | null;
   issuer_snapshot_json: string | null;
+  deposited_at?: string | null;
+  deposit_id?: number | null;
+}
+
+export interface Deposit {
+  id: number;
+  deposit_date: string;
+  cheque_count: number;
+  total_amount: number;
+  notes: string | null;
+  voided: number;
+  voided_at: string | null;
+  void_reason: string | null;
+  created_at: string;
 }
 
 export interface AccbEntry {
