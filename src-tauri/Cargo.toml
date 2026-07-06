@@ -13,7 +13,11 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-tauri = { version = "2", features = ["devtools"] }
+# C-4: the "devtools" Cargo feature *force-enables* the WebView inspector even
+# in release builds. Debug builds (`cargo tauri dev`) already get devtools
+# for free without this feature — only omit it here to keep release builds
+# from shipping an always-on inspector.
+tauri = { version = "2", features = [] }
 tauri-plugin-opener = "2"
 tauri-plugin-sql = { version = "2", features = ["sqlite"] }
 tauri-plugin-dialog = "2"

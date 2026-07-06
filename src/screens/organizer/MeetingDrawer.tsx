@@ -1,6 +1,7 @@
 // Meeting create/edit drawer with a mini action-items table.
 import { useEffect, useState } from "react";
 import { marked } from "marked";
+import DOMPurify from "dompurify";
 import {
   createMeeting, updateMeeting, softDeleteMeeting,
   listActions, createAction, toggleActionDone, softDeleteAction,
@@ -109,7 +110,9 @@ export default function MeetingDrawer({ state, onClose, onSaved }: {
 
   if (state.mode === "closed") return null;
 
-  const notesHtml = previewNotes ? marked.parse(notes || "", { async: false }) as string : "";
+  const notesHtml = previewNotes
+    ? DOMPurify.sanitize(marked.parse(notes || "", { async: false }) as string, { USE_PROFILES: { html: true } })
+    : "";
 
   return (
     <div style={backdrop} onClick={onClose}>

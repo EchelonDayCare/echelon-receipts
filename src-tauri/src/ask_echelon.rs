@@ -176,38 +176,56 @@ fn build_schema_context(
     Ok(out)
 }
 
-fn is_pii_column(col: &str) -> bool {
-    // Case-insensitive heuristic. Anything that could identify a family gets
-    // redacted before we send sample rows to the LLM.
-    //
-    // Waitlist columns (v0.8.0) are covered by these substring rules:
-    //   parent_email → matches "email" and "parent"
-    //   phone        → matches "phone"
-    //   parent_name  → matches "parent" and "name"
-    //   child_name   → matches "child_name" and "name"
-    // No new patterns required, but keep this in mind when adding tables.
+// C-2: this used to be a PII *blocklist* — redact only columns whose name
+// matched a known-bad pattern. Blocklists silently miss new columns (e.g.
+// `recipients`, `body`, `recipient_label`, `message_body`, `wa_me_url`,
+// `attendees_text`, `status_note`, `email_to`, `email_body`, `phone` variants,
+// `wa_number` were all sent to the LLM in plaintext). We now fail CLOSED: a
+// column is only exempt from redaction if it is on this explicit ALLOWLIST of
+// non-identifying numeric/enum/id/date columns. Everything else — any column
+// not named here — is redacted by default, present or future.
+fn is_safe_column(col: &str) -> bool {
     let c = col.to_lowercase();
-    let hits = [
-        "child_name", "student_name", "name",
-        "father", "mother", "parent",
-        "email", "phone", "mobile",
-        "address", "postal",
-        "sin", "birth", "dob",
-        "emergency_contact",
-        "notes",
+
+    const SAFE_EXACT: &[&str] = &[
+        "id", "uuid", "version", "status", "state", "kind", "type",
+        "category", "priority", "role", "channel", "event_type",
+        "chart_hint", "deleted_at", "created_at", "updated_at",
+        "updated_by", "start_time", "end_time", "published",
+        "confirmed", "cancelled", "acknowledged_at", "published_at",
+        "dedup_key", "entity_type", "entity_id", "sequence",
+        "order_index", "grade", "band", "score", "weight",
+        "mime_type", "size_bytes", "ref_count", "blob_key",
+        "legacy_id", "fiscal_year", "school_year", "term",
+        "currency", "voided", "is_refund", "auto_cleared_at",
+        "read_at", "snoozed_until", "dismissed_at", "date", "amount",
+        "pending_amount", "hourly_rate", "count", "total", "sum", "avg",
+        "chart", "elapsed_ms", "truncated",
     ];
-    hits.iter().any(|h| c == *h || c.contains(h))
+    if SAFE_EXACT.contains(&c.as_str()) {
+        return true;
+    }
+
+    // Suffix rules for generated / derived / audit columns.
+    c.ends_with("_id")
+        || c.ends_with("_at")
+        || c.ends_with("_cents")
+        || c.ends_with("_count")
+        || c.ends_with("_index")
+        || c.ends_with("_ms")
+        || c.ends_with("_date")
 }
 
 fn placeholder_for(col: &str) -> Value {
     let c = col.to_lowercase();
     if c.contains("email") { Value::String("<email>".into()) }
-    else if c.contains("phone") || c.contains("mobile") { Value::String("<phone>".into()) }
+    else if c.contains("phone") || c.contains("mobile") || c.contains("wa_number") { Value::String("<phone>".into()) }
     else if c.contains("address") || c.contains("postal") { Value::String("<address>".into()) }
     else if c.contains("sin") { Value::String("<sin>".into()) }
     else if c.contains("birth") || c.contains("dob") { Value::String("<dob>".into()) }
     else if c.contains("father") || c.contains("mother") || c.contains("parent") { Value::String("<parent>".into()) }
-    else { Value::String("<name>".into()) }
+    else if c.contains("name") { Value::String("<name>".into()) }
+    else { Value::String("<redacted>".into()) }
 }
 
 fn sample_rows_json(conn: &Connection, sql: &str, redact: bool) -> Result<Vec<String>, String> {
@@ -221,7 +239,11 @@ fn sample_rows_json(conn: &Connection, sql: &str, redact: bool) -> Result<Vec<St
         for i in 0..col_count {
             let col = &col_names[i];
             let v = value_from_row(row, i);
-            let final_v = if redact && is_pii_column(col) && !matches!(v, Value::Null) {
+            // Only string-valued cells are redacted — this keeps aggregate
+            // result shapes (COUNT/SUM/dates) structurally identical even
+            // when a column name isn't on the allowlist, while still
+            // failing closed on any free-text/identifying column.
+            let final_v = if redact && !is_safe_column(col) && matches!(v, Value::String(_)) {
                 placeholder_for(col)
             } else {
                 v
@@ -288,7 +310,7 @@ async fn summarize(
         let mut obj = serde_json::Map::new();
         for (i, col) in columns.iter().enumerate() {
             let v = r.get(i).cloned().unwrap_or(Value::Null);
-            let out = if redact && is_pii_column(col) && !matches!(v, Value::Null) {
+            let out = if redact && !is_safe_column(col) && matches!(v, Value::String(_)) {
                 placeholder_for(col)
             } else { v };
             obj.insert(col.clone(), out);
