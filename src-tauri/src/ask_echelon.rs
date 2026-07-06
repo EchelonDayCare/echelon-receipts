@@ -526,6 +526,78 @@ fn execute_readonly(
     Ok((col_names, out, truncated))
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── C-8: SQL validation must survive adversarial inputs ──────────────
+    #[test]
+    fn rejects_multiple_statements() {
+        assert!(validate_and_normalize_sql("SELECT 1; SELECT 2").is_err());
+        assert!(validate_and_normalize_sql("SELECT 1;DROP TABLE receipts").is_err());
+    }
+
+    #[test]
+    fn rejects_comments_used_to_smuggle_or_hide_a_limit_bypass() {
+        assert!(validate_and_normalize_sql("SELECT * FROM receipts -- LIMIT 1").is_err());
+        assert!(validate_and_normalize_sql("SELECT * FROM receipts /* LIMIT 1000000 */").is_err());
+        assert!(validate_and_normalize_sql("/* comment */ SELECT * FROM receipts").is_err());
+    }
+
+    #[test]
+    fn rejects_non_select_statements() {
+        assert!(validate_and_normalize_sql("DROP TABLE receipts").is_err());
+        assert!(validate_and_normalize_sql("DELETE FROM receipts").is_err());
+        assert!(validate_and_normalize_sql("UPDATE receipts SET amount = 0").is_err());
+        assert!(validate_and_normalize_sql("PRAGMA table_info(receipts)").is_err());
+        assert!(validate_and_normalize_sql("ATTACH DATABASE 'x' AS y").is_err());
+        assert!(validate_and_normalize_sql("INSERT INTO receipts (id) VALUES (1)").is_err());
+    }
+
+    #[test]
+    fn accepts_benign_union_of_two_selects() {
+        assert!(validate_and_normalize_sql("SELECT * FROM receipts UNION SELECT * FROM receipts").is_ok());
+    }
+
+    #[test]
+    fn accepts_plain_select_and_with_cte() {
+        assert!(validate_and_normalize_sql("SELECT id, amount FROM receipts WHERE voided = 0").is_ok());
+        assert!(validate_and_normalize_sql(
+            "WITH recent AS (SELECT * FROM receipts) SELECT * FROM recent"
+        ).is_ok());
+    }
+
+    #[test]
+    fn appends_limit_when_missing_and_preserves_an_existing_lower_limit() {
+        let with_added = validate_and_normalize_sql("SELECT * FROM receipts").unwrap();
+        assert!(with_added.contains("LIMIT 500"));
+
+        let with_existing = validate_and_normalize_sql("SELECT * FROM receipts LIMIT 10").unwrap();
+        assert!(with_existing.contains("LIMIT 10"));
+    }
+
+    #[test]
+    fn strips_code_fences_from_llm_output_before_validating() {
+        let fenced = "```sql\nSELECT * FROM receipts\n```";
+        assert!(validate_and_normalize_sql(fenced).is_ok());
+    }
+
+    // ── C-2: PII allowlist must fail closed ──────────────────────────────
+    #[test]
+    fn allowlist_covers_ids_dates_and_enums_but_not_free_text() {
+        for safe in ["id", "student_id", "created_at", "updated_at", "status", "version", "amount", "amount_cents"] {
+            assert!(is_safe_column(safe), "{safe} should be on the allowlist");
+        }
+        for unsafe_col in [
+            "recipients", "body", "recipient_label", "message_body", "wa_me_url",
+            "attendees_text", "status_note", "email_to", "email_body", "phone",
+            "wa_number", "name", "notes", "address", "some_new_column_nobody_thought_of",
+        ] {
+            assert!(!is_safe_column(unsafe_col), "{unsafe_col} must be redacted by default (fail closed)");
+        }
+    }
+}
+
 // ─── Save a query as a report ───────────────────────────────────────────
 // Frontend does this via tauri-plugin-sql; kept here as a stub for future
 // server-side operations (audit log, share, etc.).

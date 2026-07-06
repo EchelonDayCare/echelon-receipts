@@ -231,8 +231,10 @@ async fn call_azure_openai(
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(PROVIDER_TIMEOUT_SECS))
         .build().map_err(|e| format!("http client: {e}"))?;
+    // L-1: the "Authorization: Bearer" header here was redundant — this
+    // endpoint authenticates via "api-key" only (see azure_ai.rs's
+    // call_mistral_doc_ai, which hits the same URL with just that header).
     let resp = client.post(url)
-        .header("Authorization", format!("Bearer {api_key}"))
         .header("api-key", api_key)
         .header("Content-Type", "application/json")
         .json(&body)
@@ -837,7 +839,6 @@ async fn call_mistral_ocr(
         .timeout(Duration::from_secs(PROVIDER_TIMEOUT_SECS))
         .build().map_err(|e| format!("http client: {e}"))?;
     let resp = client.post(url)
-        .header("Authorization", format!("Bearer {api_key}"))
         .header("api-key", api_key)
         .header("Content-Type", "application/json")
         .json(&body)

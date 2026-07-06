@@ -136,7 +136,17 @@ async fn exchange_token(sak: &ServiceAccountKey) -> Result<(String, SystemTime),
 }
 
 fn truncate(s: &str, n: usize) -> String {
-    if s.len() <= n { s.to_string() } else { format!("{}…", &s[..n]) }
+    // L-2: `&s[..n]` panics if byte index `n` doesn't land on a UTF-8 char
+    // boundary — a real risk here since this truncates arbitrary
+    // API/error response text that can contain multi-byte characters.
+    // Char-count based truncation is always safe.
+    if s.chars().count() <= n {
+        s.to_string()
+    } else {
+        let mut out: String = s.chars().take(n).collect();
+        out.push('…');
+        out
+    }
 }
 
 // ─── Token cache ────────────────────────────────────────────────────────

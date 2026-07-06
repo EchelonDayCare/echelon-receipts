@@ -252,3 +252,76 @@ pub fn decrypt_backup(args: DecryptBackupArgs) -> Result<DecryptBackupResult, St
         was_encrypted: true,
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn encrypt_decrypt_round_trip_preserves_bytes() {
+        let plaintext = b"SQLite format 3\0-- pretend this is a whole database file --";
+        let passphrase = "correct horse battery staple";
+        let archive = encrypt(passphrase, plaintext).expect("encrypt should succeed");
+
+        assert!(is_encrypted(&archive), "archive should carry the EDCBK1 magic header");
+        assert!(archive.len() > plaintext.len(), "archive must be larger than plaintext (header + auth tag)");
+
+        let decrypted = decrypt(passphrase, &archive).expect("decrypt with correct passphrase should succeed");
+        assert_eq!(decrypted, plaintext);
+    }
+
+    #[test]
+    fn decrypt_fails_with_wrong_passphrase() {
+        let archive = encrypt("right-passphrase", b"top secret db bytes").unwrap();
+        let err = decrypt("wrong-passphrase", &archive).unwrap_err();
+        assert!(err.to_lowercase().contains("decryption failed") || err.to_lowercase().contains("wrong passphrase"));
+    }
+
+    #[test]
+    fn decrypt_detects_ciphertext_tampering() {
+        let mut archive = encrypt("passphrase123", b"some database bytes here").unwrap();
+        // Flip a byte in the ciphertext (well past the 64-byte header) — the
+        // AEAD auth tag must catch this rather than silently returning
+        // corrupted plaintext.
+        let last = archive.len() - 1;
+        archive[last] ^= 0xFF;
+        let result = decrypt("passphrase123", &archive);
+        assert!(result.is_err(), "tampered ciphertext must fail to decrypt");
+    }
+
+    #[test]
+    fn decrypt_detects_header_corruption() {
+        let mut archive = encrypt("passphrase123", b"some database bytes here").unwrap();
+        // Flip a byte inside the header (the salt region) — this changes the
+        // derived key silently unless the header checksum catches it first.
+        archive[12] ^= 0xFF;
+        let result = decrypt("passphrase123", &archive);
+        assert!(result.is_err(), "corrupted header must be rejected");
+    }
+
+    #[test]
+    fn is_encrypted_rejects_plain_sqlite_and_short_files() {
+        assert!(!is_encrypted(b"SQLite format 3\0rest of a normal db file..."));
+        assert!(!is_encrypted(b"short"));
+        assert!(!is_encrypted(b""));
+    }
+
+    #[test]
+    fn passphrase_hash_verification_round_trip() {
+        let hash = hash_passphrase_for_verification("my-backup-passphrase").unwrap();
+        assert!(verify_passphrase("my-backup-passphrase", &hash));
+        assert!(!verify_passphrase("wrong-guess", &hash));
+    }
+
+    #[test]
+    fn each_encryption_uses_a_fresh_salt_and_nonce() {
+        // Same plaintext + passphrase encrypted twice must not produce
+        // identical archives (random salt/nonce per call) — otherwise two
+        // identical backups would leak that they're identical via ciphertext
+        // comparison, and (worse) nonce reuse would break XChaCha20-Poly1305's
+        // security guarantees entirely.
+        let a = encrypt("same-passphrase", b"identical plaintext").unwrap();
+        let b = encrypt("same-passphrase", b"identical plaintext").unwrap();
+        assert_ne!(a, b);
+    }
+}

@@ -126,7 +126,7 @@ async function safeRun(s: ScannerDef) {
 // but never read anywhere. During quiet hours we still scan and store
 // notifications as normal (the bell/history always reflect ground truth) —
 // we only suppress the desktop-alert side channel below.
-function isWithinQuietHours(startHHMM: string, endHHMM: string): boolean {
+export function isWithinQuietHours(startHHMM: string, endHHMM: string): boolean {
   if (!startHHMM || !endHHMM) return false;
   const [sh, sm] = startHHMM.split(":").map(Number);
   const [eh, em] = endHHMM.split(":").map(Number);
