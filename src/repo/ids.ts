@@ -24,3 +24,14 @@ export async function sha256Hex(bytes: Uint8Array): Promise<string> {
   const buf = await crypto.subtle.digest("SHA-256", view as unknown as ArrayBuffer);
   return Array.from(new Uint8Array(buf)).map((b) => b.toString(16).padStart(2, "0")).join("");
 }
+
+// H-1: thrown by every optimistic-concurrency UPDATE (WHERE id = ? AND
+// version = ?) when rowsAffected is 0 — i.e. someone else wrote first.
+// Callers should catch this and prompt the user to reload/refetch rather
+// than silently discarding the write or retrying blindly.
+export class StaleWriteError extends Error {
+  constructor(entity: string) {
+    super(`${entity} was changed by another writer. Please reload and try again.`);
+    this.name = "StaleWriteError";
+  }
+}

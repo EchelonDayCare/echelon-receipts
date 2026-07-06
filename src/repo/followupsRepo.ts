@@ -1,6 +1,6 @@
 // Follow-ups repo (v1.3.0) — simple TODO list panel on the Organizer.
 import { db, execRetry } from "../lib/db";
-import { uuidv4, nowIso } from "./ids";
+import { uuidv4, nowIso, StaleWriteError } from "./ids";
 
 export type Priority = "low" | "normal" | "high";
 export type FollowupLinkedKind = "student" | "staff" | "waitlist" | "meeting" | "document" | null;
@@ -61,6 +61,13 @@ export async function listRecentDoneFollowups(limit = 20): Promise<Followup[]> {
   return rows.map(rowToObj);
 }
 
+async function writeEvent(entityId: string, eventType: string, payload?: unknown) {
+  await execRetry(
+    "INSERT INTO followup_events (id, entity_id, event_type, payload_json, actor, created_at) VALUES (?, ?, ?, ?, 'owner', ?)",
+    [uuidv4(), entityId, eventType, payload === undefined ? null : JSON.stringify(payload), nowIso()],
+  );
+}
+
 export async function createFollowup(f: NewFollowup): Promise<Followup> {
   const id = uuidv4();
   const now = nowIso();
@@ -69,26 +76,34 @@ export async function createFollowup(f: NewFollowup): Promise<Followup> {
      VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, 'owner', 1, NULL)`,
     [id, f.title, f.notes ?? null, f.dueDate ?? null, f.priority ?? "normal", f.linkedKind ?? null, f.linkedId ?? null, now, now],
   );
+  await writeEvent(id, "created", { title: f.title, priority: f.priority ?? "normal" });
   const d = await db();
   const rows = await d.select<Row[]>("SELECT * FROM followups WHERE id = ?", [id]);
   return rowToObj(rows[0]);
 }
 
-export async function toggleFollowupDone(id: string): Promise<void> {
+export async function toggleFollowupDone(id: string, expectedVersion: number): Promise<void> {
   const d = await db();
   const rows = await d.select<Row[]>("SELECT * FROM followups WHERE id = ?", [id]);
   if (!rows.length) return;
   const now = nowIso();
   const nx = rows[0].done_at ? null : now;
-  await execRetry(
-    "UPDATE followups SET done_at = ?, updated_at = ?, version = version + 1 WHERE id = ?",
-    [nx, now, id],
+  const res = await execRetry(
+    "UPDATE followups SET done_at = ?, updated_at = ?, version = version + 1 WHERE id = ? AND version = ?",
+    [nx, now, id, expectedVersion],
   );
+  if (res.rowsAffected === 0) throw new StaleWriteError("Follow-up");
+  await writeEvent(id, nx ? "completed" : "reopened", {});
 }
 
-export async function softDeleteFollowup(id: string): Promise<void> {
+export async function softDeleteFollowup(id: string, expectedVersion: number): Promise<void> {
   const now = nowIso();
-  await execRetry("UPDATE followups SET deleted_at = ?, updated_at = ? WHERE id = ?", [now, now, id]);
+  const res = await execRetry(
+    "UPDATE followups SET deleted_at = ?, updated_at = ?, version = version + 1 WHERE id = ? AND deleted_at IS NULL AND version = ?",
+    [now, now, id, expectedVersion],
+  );
+  if (res.rowsAffected === 0) throw new StaleWriteError("Follow-up");
+  await writeEvent(id, "deleted", {});
 }
 
 export async function countOpenDueWithin(days: number): Promise<number> {

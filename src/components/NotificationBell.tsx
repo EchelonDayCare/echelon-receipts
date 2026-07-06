@@ -139,7 +139,7 @@ function NotificationPanel({
   }
 
   async function onMarkAll() {
-    await markAllRead(rows.filter(r => !r.read_at).map(r => r.id));
+    await markAllRead(rows.filter(r => !r.read_at).map(r => ({ id: r.id, version: r.version })));
     await refresh();
   }
 
@@ -190,7 +190,7 @@ function NotificationPanel({
       </div>
       <footer style={{ padding: "8px 14px", borderTop: "1px solid var(--border)", display: "flex", justifyContent: "space-between", alignItems: "center", fontSize: 12 }}>
         {lastDismissed
-          ? <button className="btn ghost" onClick={async () => { await undoDismiss(lastDismissed.id); setLastDismissed(null); await refresh(); }}>Undo dismiss</button>
+          ? <button className="btn ghost" onClick={async () => { await undoDismiss(lastDismissed.id, lastDismissed.version + 1); setLastDismissed(null); await refresh(); }}>Undo dismiss</button>
           : <span style={{ color: "var(--muted)" }}>{rows.length} total</span>}
         <button className="btn ghost" onClick={() => { nav("/notifications"); onClose(); }}>
           View all →

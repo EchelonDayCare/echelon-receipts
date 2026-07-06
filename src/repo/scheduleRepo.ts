@@ -2,7 +2,7 @@
 // keeping. Data-Contract compliant (UUID PKs, ISO UTC timestamps, soft
 // delete, optimistic concurrency, per-entity event log).
 import { db, execRetry, serializeWrite } from "../lib/db";
-import { uuidv4, nowIso } from "./ids";
+import { uuidv4, nowIso, StaleWriteError } from "./ids";
 
 export type ShiftStatus = "planned" | "confirmed" | "cancelled" | "swapped";
 
@@ -157,49 +157,82 @@ export async function updateShift(id: string, patch: ShiftPatch, expectedVersion
       WHERE id = ? AND version = ?`,
     [next.shiftDate, next.startTime, next.endTime, next.room, next.breakMinutes, next.notes, next.status, now, id, expectedVersion],
   );
-  if (res.rowsAffected === 0) throw new Error("Shift was changed by another writer. Please reload.");
+  if (res.rowsAffected === 0) throw new StaleWriteError("Shift");
   await writeEvent(id, "updated", { before: cur, after: next });
   const after = await getShift(id);
   return after!;
 }
 
-export async function cancelShift(id: string, reason?: string): Promise<void> {
+export async function cancelShift(id: string, expectedVersion: number, reason?: string): Promise<void> {
   const cur = await getShift(id);
   if (!cur) return;
   const now = nowIso();
-  await execRetry(
-    "UPDATE staff_shifts SET status = 'cancelled', updated_at = ?, version = version + 1 WHERE id = ?",
-    [now, id],
+  const res = await execRetry(
+    "UPDATE staff_shifts SET status = 'cancelled', updated_at = ?, version = version + 1 WHERE id = ? AND version = ?",
+    [now, id, expectedVersion],
   );
+  if (res.rowsAffected === 0) throw new StaleWriteError("Shift");
   await writeEvent(id, "cancelled", { reason: reason ?? null, was: { start: cur.startTime, end: cur.endTime, room: cur.room } });
 }
 
-export async function softDeleteShift(id: string): Promise<void> {
+export async function softDeleteShift(id: string, expectedVersion: number): Promise<void> {
   const now = nowIso();
-  await execRetry(
-    "UPDATE staff_shifts SET deleted_at = ?, updated_at = ?, version = version + 1 WHERE id = ? AND deleted_at IS NULL",
-    [now, now, id],
+  const res = await execRetry(
+    "UPDATE staff_shifts SET deleted_at = ?, updated_at = ?, version = version + 1 WHERE id = ? AND deleted_at IS NULL AND version = ?",
+    [now, now, id, expectedVersion],
   );
+  if (res.rowsAffected === 0) throw new StaleWriteError("Shift");
   await writeEvent(id, "deleted", {});
 }
 
 // Reassign: cancels the old shift + inserts a mirror on the new staff.
 // Returns both rows so the UI can prompt WhatsApp for both people.
+//
+// H-5: the cancel + insert (+ revision_of link, folded directly into the
+// INSERT below) run as one serialized unit so no other writer's statements
+// land in between. We can't use a literal SQL BEGIN/COMMIT here —
+// tauri-plugin-sql's sqlx pool may hand subsequent statements to a
+// different physical connection (see the serializeWrite doc comment at the
+// top of lib/db.ts) — so true crash-atomicity isn't available. Instead we
+// do the closest practical thing: if the insert fails after the cancel
+// already committed, we attempt a best-effort compensating rollback of the
+// cancel before rethrowing, so a failed reassignment doesn't silently
+// strand the original shift as cancelled with no replacement.
 export async function reassignShift(id: string, newStaffId: string): Promise<{ cancelled: StaffShift; created: StaffShift }> {
   const cur = await getShift(id);
   if (!cur) throw new Error("Shift not found");
-  await cancelShift(id, `Reassigned to staff ${newStaffId}`);
-  const created = await createShift({
-    staffId: newStaffId, shiftDate: cur.shiftDate,
-    startTime: cur.startTime, endTime: cur.endTime,
-    room: cur.room, breakMinutes: cur.breakMinutes, notes: cur.notes,
-    status: "planned",
+  const newId = uuidv4();
+  const now = nowIso();
+  const reason = `Reassigned to staff ${newStaffId}`;
+
+  await serializeWrite(async () => {
+    const d = await db();
+    const cancelRes = await d.execute(
+      "UPDATE staff_shifts SET status = 'cancelled', updated_at = ?, version = version + 1 WHERE id = ? AND version = ?",
+      [now, id, cur.version],
+    );
+    if (cancelRes.rowsAffected === 0) throw new StaleWriteError("Shift");
+    try {
+      await d.execute(
+        `INSERT INTO staff_shifts (
+          id, staff_id, shift_date, start_time, end_time, room, break_minutes,
+          notes, status, revision_of, created_at, updated_at, updated_by, version, deleted_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'planned', ?, ?, ?, 'owner', 1, NULL)`,
+        [newId, newStaffId, cur.shiftDate, cur.startTime, cur.endTime, cur.room, cur.breakMinutes, cur.notes, id, now, now],
+      );
+    } catch (insertErr) {
+      await d.execute(
+        "UPDATE staff_shifts SET status = ?, updated_at = ?, version = version + 1 WHERE id = ?",
+        [cur.status, nowIso(), id],
+      ).catch(() => { /* best-effort compensation only */ });
+      throw insertErr;
+    }
   });
-  // Link the new shift back to the source for auditing.
-  await execRetry("UPDATE staff_shifts SET revision_of = ? WHERE id = ?", [id, created.id]);
-  await writeEvent(created.id, "reassigned", { fromShift: id, fromStaff: cur.staffId, toStaff: newStaffId });
+
+  await writeEvent(id, "cancelled", { reason, was: { start: cur.startTime, end: cur.endTime, room: cur.room } });
+  await writeEvent(newId, "reassigned", { fromShift: id, fromStaff: cur.staffId, toStaff: newStaffId });
   const cancelled = await getShift(id);
-  const newShift = await getShift(created.id);
+  const newShift = await getShift(newId);
   return { cancelled: cancelled!, created: newShift! };
 }
 
@@ -246,12 +279,14 @@ export type PublishRow = {
   id: string; staffId: string; weekStartDate: string;
   shiftIds: string[]; messageBody: string; waMeUrl: string;
   publishedAt: string; acknowledgedAt: string | null; ackNotes: string | null;
+  version: number;
 };
 
 type PublishRawRow = {
   id: string; staff_id: string; week_start_date: string;
   shift_ids_json: string; message_body: string; wa_me_url: string;
   published_at: string; acknowledged_at: string | null; ack_notes: string | null;
+  version: number;
 };
 
 function pubRowToObj(r: PublishRawRow): PublishRow {
@@ -261,7 +296,7 @@ function pubRowToObj(r: PublishRawRow): PublishRow {
     id: r.id, staffId: r.staff_id, weekStartDate: r.week_start_date,
     shiftIds: ids, messageBody: r.message_body, waMeUrl: r.wa_me_url,
     publishedAt: r.published_at, acknowledgedAt: r.acknowledged_at,
-    ackNotes: r.ack_notes,
+    ackNotes: r.ack_notes, version: r.version,
   };
 }
 
@@ -325,12 +360,13 @@ export async function listRecentPublishes(limit = 40): Promise<PublishRow[]> {
   return rows.map(pubRowToObj);
 }
 
-export async function markPublishAcknowledged(publishId: string, notes?: string): Promise<void> {
+export async function markPublishAcknowledged(publishId: string, expectedVersion: number, notes?: string): Promise<void> {
   const now = nowIso();
-  await execRetry(
-    "UPDATE staff_weekly_publish SET acknowledged_at = ?, ack_notes = ?, updated_at = ?, version = version + 1 WHERE id = ?",
-    [now, notes ?? null, now, publishId],
+  const res = await execRetry(
+    "UPDATE staff_weekly_publish SET acknowledged_at = ?, ack_notes = ?, updated_at = ?, version = version + 1 WHERE id = ? AND version = ?",
+    [now, notes ?? null, now, publishId, expectedVersion],
   );
+  if (res.rowsAffected === 0) throw new StaleWriteError("Weekly publish record");
 }
 
 // ─── Events (audit) ─────────────────────────────────────────────────────

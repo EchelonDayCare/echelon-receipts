@@ -19,11 +19,11 @@ export default function ScheduleConfirmations() {
   };
   useEffect(() => { void refresh(); }, []);
 
-  async function ack(id: string) {
+  async function ack(id: string, version: number) {
     setBusy(true);
     try {
       const notes = prompt("Ack notes (optional):", "") ?? "";
-      await markPublishAcknowledged(id, notes);
+      await markPublishAcknowledged(id, version, notes);
       await refresh();
     } catch (e: any) { setErr(String(e?.message ?? e)); }
     finally { setBusy(false); }
@@ -59,7 +59,7 @@ export default function ScheduleConfirmations() {
                 <td style={{ padding: 8 }}>{r.ackNotes ?? "—"}</td>
                 <td style={{ padding: 8 }}>
                   {!r.acknowledgedAt && (
-                    <button className="btn" onClick={() => ack(r.id)} disabled={busy}>Mark ack</button>
+                    <button className="btn" onClick={() => ack(r.id, r.version)} disabled={busy}>Mark ack</button>
                   )}
                 </td>
               </tr>

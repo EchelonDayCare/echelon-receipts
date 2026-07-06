@@ -40,6 +40,16 @@ export default function UploadModal({
   const [err, setErr] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
+  // C-6: the modal's *effective* save mode. Starts from the `intent` prop,
+  // but the duplicate-detected step can switch it to "edit-metadata"
+  // against the existing document — without this, clicking "Update
+  // metadata" re-ran createDocument() against the same blob and silently
+  // created a duplicate document row instead of editing the existing one.
+  const [effectiveMode, setEffectiveMode] = useState<UploadIntent["mode"]>(intent.mode);
+  const [editTarget, setEditTarget] = useState<Document | null>(
+    intent.mode === "edit-metadata" ? intent.doc : null,
+  );
+
   // Metadata form state — seeded from the edit-metadata doc when relevant.
   const seed = intent.mode === "edit-metadata" ? intent.doc : null;
   const [title, setTitle] = useState(seed?.title ?? "");
@@ -126,8 +136,11 @@ export default function UploadModal({
     else { setStep("meta"); }
   }
 
+  const dateOrderInvalid = !!issuedDate && !!expiryDate && issuedDate > expiryDate;
+
   async function save() {
     if (busy) return;   // double-submit guard
+    if (dateOrderInvalid) { setErr("Issued date must be on or before the expiry date."); return; }
     setBusy(true); setErr(null);
     try {
       const tags = tagsInput.split(",").map((s) => s.trim()).filter(Boolean);
@@ -143,13 +156,15 @@ export default function UploadModal({
         tags,
       };
 
-      if (intent.mode === "edit-metadata") {
-        const updated = await updateDocumentMetadata(intent.doc.id, commonPatch, intent.doc.version);
+      if (effectiveMode === "edit-metadata") {
+        if (!editTarget) throw new Error("No document selected to edit.");
+        const updated = await updateDocumentMetadata(editTarget.id, commonPatch, editTarget.version);
         onSaved(updated); return;
       }
 
-      if (intent.mode === "new-version") {
+      if (effectiveMode === "new-version") {
         if (!bytes) { setErr("Pick a file first."); return; }
+        if (intent.mode !== "new-version") throw new Error("Invalid state for new-version save.");
         const nv = await uploadNewVersion(intent.docId, bytes, fileName, mimeType);
         // Also apply metadata patch on the new version if the user changed anything.
         const patched = await updateDocumentMetadata(nv.id, commonPatch, nv.version);
@@ -169,14 +184,14 @@ export default function UploadModal({
     } finally { setBusy(false); }
   }
 
-  const canSave = title.trim().length > 0 && (intent.mode === "edit-metadata" || bytes != null);
+  const canSave = title.trim().length > 0 && (effectiveMode === "edit-metadata" || bytes != null) && !dateOrderInvalid;
 
   return (
     <div style={backdropStyle} onClick={onClose}>
       <div style={modalStyle} onClick={(e) => e.stopPropagation()}>
         <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 16 }}>
           <h2 style={{ margin: 0 }}>
-            {intent.mode === "edit-metadata" ? "Edit document"
+            {effectiveMode === "edit-metadata" ? "Edit document"
               : intent.mode === "new-version" ? `New version of "${intent.existingTitle}"`
               : "Upload document"}
           </h2>
@@ -216,7 +231,9 @@ export default function UploadModal({
             </p>
             <div style={{ display: "flex", gap: 8, marginTop: 12 }}>
               <button className="btn primary" onClick={() => {
-                // Update-metadata flow: re-enter meta step with duplicate seeded.
+                // Update-metadata flow: re-enter meta step with duplicate
+                // seeded, and switch save() over to the edit-metadata path
+                // targeting the existing document (not a fresh createDocument).
                 setTitle(duplicate.title); setCategory(duplicate.category);
                 setLinkedKind(duplicate.linkedKind ?? "");
                 setLinkedId(duplicate.linkedId ?? "");
@@ -224,9 +241,8 @@ export default function UploadModal({
                 setExpiryDate(duplicate.expiryDate ?? "");
                 setIssuer(duplicate.issuer ?? ""); setReferenceNo(duplicate.referenceNo ?? "");
                 setNotes(duplicate.notes ?? ""); setTagsInput(duplicate.tags.join(", "));
-                // Mutate the intent locally by swapping the modal's state to
-                // an "edit-metadata" path without unmounting.
-                (window as any).__vault_edit_id = duplicate.id;
+                setEditTarget(duplicate);
+                setEffectiveMode("edit-metadata");
                 setStep("meta");
               }}>Update metadata</button>
               <button className="btn" onClick={() => { setDuplicate(null); setStep("meta"); }}>
@@ -285,6 +301,11 @@ export default function UploadModal({
                 <input type="date" value={expiryDate} onChange={(e) => setExpiryDate(e.target.value)} />
               </label>
             </div>
+            {dateOrderInvalid && (
+              <div style={{ fontSize: 12, color: "#fca5a5" }}>
+                ⚠️ Issued date ({issuedDate}) is after expiry date ({expiryDate}).
+              </div>
+            )}
             <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
               <label style={labelStyle}>
                 Issuer
@@ -311,7 +332,7 @@ export default function UploadModal({
             <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 10 }}>
               <button className="btn" onClick={onClose} disabled={busy}>Cancel</button>
               <button className="btn primary" onClick={save} disabled={!canSave || busy}>
-                {busy ? "Saving…" : intent.mode === "edit-metadata" ? "Save changes" : "Save document"}
+                {busy ? "Saving…" : effectiveMode === "edit-metadata" ? "Save changes" : "Save document"}
               </button>
             </div>
           </div>

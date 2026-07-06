@@ -1030,6 +1030,68 @@ Thanks,
     ["notif_last_scan_at",            ""],
     ["last_backup_error",             ""],
   ] as const) await setting(k, v);
+
+  // H-12: notifications gained soft-delete/version columns at creation but
+  // never got the `updated_at`/`updated_by` pair every other Data-Contract
+  // table has — self-heal them in rather than a new migration number.
+  await addCol("notifications", "updated_at", "TEXT");
+  await addCol("notifications", "updated_by", "TEXT NOT NULL DEFAULT 'owner'");
+
+  // H-1: follow-ups had no audit trail table at all. Data Contract §5 —
+  // every state-changing mutation on a user-facing entity needs one.
+  if (!(await tableExists("followup_events"))) {
+    console.warn("[ensureSchema] creating followup_events");
+    await d.execute(`CREATE TABLE followup_events (
+      id           TEXT PRIMARY KEY,
+      entity_id    TEXT NOT NULL,
+      event_type   TEXT NOT NULL,
+      payload_json TEXT,
+      actor        TEXT NOT NULL DEFAULT 'owner',
+      channel      TEXT,
+      message_ref  TEXT,
+      created_at   TEXT NOT NULL
+    )`);
+    await d.execute("CREATE INDEX ix_followup_events_entity ON followup_events(entity_id, created_at)");
+  }
+
+  // M-11: meeting_events had no lookup index (unlike every sibling
+  // <entity>_events table), making "audit trail for this meeting" scans a
+  // full table scan as the log grows.
+  await d.execute("CREATE INDEX IF NOT EXISTS ix_meeting_events_entity ON meeting_events(entity_id, created_at)");
+
+  // M-10: SQLite can't ALTER TABLE ADD CONSTRAINT, so `documents.blob_key`
+  // and `meeting_actions.meeting_id` (added before either referenced table
+  // existed, in the case of documents/blobs) have no declared FK — and
+  // PRAGMA foreign_key_check only inspects *declared* FKs. Run our own
+  // orphan check plus the built-in one, and just log — this is a startup
+  // diagnostic, not an enforcement mechanism (out of scope to migrate
+  // existing rows here).
+  await logIntegrityWarnings(d);
+}
+
+async function logIntegrityWarnings(d: Database): Promise<void> {
+  try {
+    const orphanBlobs = await d.select<{ n: number }[]>(
+      `SELECT COUNT(*) AS n FROM documents WHERE deleted_at IS NULL AND blob_key NOT IN (SELECT blob_key FROM blobs)`
+    );
+    if ((orphanBlobs[0]?.n ?? 0) > 0) {
+      console.warn(`[ensureSchema] integrity: ${orphanBlobs[0].n} live document(s) reference a missing blob_key`);
+    }
+  } catch (e) { console.warn("[ensureSchema] documents/blobs orphan check failed:", e); }
+  try {
+    const orphanActions = await d.select<{ n: number }[]>(
+      `SELECT COUNT(*) AS n FROM meeting_actions WHERE deleted_at IS NULL AND meeting_id NOT IN (SELECT id FROM meetings)`
+    );
+    if ((orphanActions[0]?.n ?? 0) > 0) {
+      console.warn(`[ensureSchema] integrity: ${orphanActions[0].n} live meeting_action(s) reference a missing meeting_id`);
+    }
+  } catch (e) { console.warn("[ensureSchema] meeting_actions/meetings orphan check failed:", e); }
+  try {
+    const violations = await d.select<Record<string, unknown>[]>("PRAGMA foreign_key_check");
+    if (violations.length > 0) {
+      console.warn(`[ensureSchema] PRAGMA foreign_key_check found ${violations.length} violation(s):`, violations);
+    }
+  } catch (e) { console.warn("[ensureSchema] foreign_key_check failed:", e); }
 }
 
 // ---------- Person identity ----------

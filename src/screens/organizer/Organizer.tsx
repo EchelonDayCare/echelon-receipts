@@ -170,7 +170,7 @@ export default function Organizer() {
             <ul style={{ listStyle: "none", padding: 0, margin: 0 }}>
               {followups.map((f) => (
                 <li key={f.id} style={{ display: "flex", gap: 8, alignItems: "flex-start", padding: 8, borderTop: "1px solid var(--border, #1e293b)" }}>
-                  <input type="checkbox" checked={!!f.doneAt} onChange={async () => { await toggleFollowupDone(f.id); await refresh(); }} />
+                  <input type="checkbox" checked={!!f.doneAt} onChange={async () => { await toggleFollowupDone(f.id, f.version); await refresh(); }} />
                   <div style={{ flex: 1, fontSize: 13 }}>
                     <div style={{ textDecoration: f.doneAt ? "line-through" : "none" }}>
                       <b>{f.title}</b>
@@ -178,7 +178,7 @@ export default function Organizer() {
                     </div>
                     {f.dueDate && <div style={{ fontSize: 11, color: "var(--muted)" }}>due {f.dueDate}</div>}
                   </div>
-                  <button className="btn" onClick={async () => { if (confirm("Delete?")) { await softDeleteFollowup(f.id); await refresh(); } }} style={{ fontSize: 10, padding: "2px 6px" }}>✕</button>
+                  <button className="btn" onClick={async () => { if (confirm("Delete?")) { await softDeleteFollowup(f.id, f.version); await refresh(); } }} style={{ fontSize: 10, padding: "2px 6px" }}>✕</button>
                 </li>
               ))}
             </ul>

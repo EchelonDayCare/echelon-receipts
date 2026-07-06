@@ -89,7 +89,11 @@ export default function NotificationsHistory() {
   }
 
   async function bulkMarkRead() {
-    await markAllRead(Array.from(selected));
+    const items = Array.from(selected)
+      .map((id) => rows.find((r) => r.id === id))
+      .filter((r): r is Notification => !!r)
+      .map((r) => ({ id: r.id, version: r.version }));
+    await markAllRead(items);
     await refresh();
   }
   async function bulkDismiss() {

@@ -1,6 +1,6 @@
 // Meetings repo (v1.3.0) — Organizer's meeting log + action items.
 import { db, execRetry } from "../lib/db";
-import { uuidv4, nowIso } from "./ids";
+import { uuidv4, nowIso, StaleWriteError } from "./ids";
 
 export type MeetingKind = "board" | "parent" | "staff" | "vendor" | "inspection" | "other";
 export type LinkedKind = "student" | "staff" | "waitlist" | "document" | null;
@@ -114,14 +114,18 @@ export async function updateMeeting(id: string, patch: Partial<NewMeeting>, expe
       WHERE id = ? AND version = ?`,
     [nx.meetingDate, nx.meetingTime, nx.kind, nx.subject, nx.attendeesText, nx.linkedKind, nx.linkedId, nx.notesMd, now, id, expectedVersion],
   );
-  if (res.rowsAffected === 0) throw new Error("Meeting was changed by another writer. Please reload.");
+  if (res.rowsAffected === 0) throw new StaleWriteError("Meeting");
   await writeEvent(id, "updated", { subject: nx.subject });
   return (await getMeeting(id))!;
 }
 
-export async function softDeleteMeeting(id: string): Promise<void> {
+export async function softDeleteMeeting(id: string, expectedVersion: number): Promise<void> {
   const now = nowIso();
-  await execRetry("UPDATE meetings SET deleted_at = ?, updated_at = ? WHERE id = ? AND deleted_at IS NULL", [now, now, id]);
+  const res = await execRetry(
+    "UPDATE meetings SET deleted_at = ?, updated_at = ?, version = version + 1 WHERE id = ? AND deleted_at IS NULL AND version = ?",
+    [now, now, id, expectedVersion],
+  );
+  if (res.rowsAffected === 0) throw new StaleWriteError("Meeting");
   await writeEvent(id, "deleted", {});
 }
 
@@ -157,24 +161,29 @@ export async function createAction(meetingId: string, description: string, owner
   return rowToAct(rows[0]);
 }
 
-export async function toggleActionDone(id: string): Promise<void> {
+export async function toggleActionDone(id: string, expectedVersion: number): Promise<void> {
   const d = await db();
   const rows = await d.select<ActRow[]>("SELECT * FROM meeting_actions WHERE id = ?", [id]);
   if (!rows.length) return;
   const cur = rows[0];
   const now = nowIso();
   const newDone = cur.done_at ? null : now;
-  await execRetry(
-    "UPDATE meeting_actions SET done_at = ?, updated_at = ?, version = version + 1 WHERE id = ?",
-    [newDone, now, id],
+  const res = await execRetry(
+    "UPDATE meeting_actions SET done_at = ?, updated_at = ?, version = version + 1 WHERE id = ? AND version = ?",
+    [newDone, now, id, expectedVersion],
   );
+  if (res.rowsAffected === 0) throw new StaleWriteError("Meeting action");
   await writeEvent(cur.meeting_id, newDone ? "action_completed" : "action_reopened", { actionId: id });
 }
 
-export async function softDeleteAction(id: string): Promise<void> {
+export async function softDeleteAction(id: string, expectedVersion: number): Promise<void> {
   const d = await db();
   const rows = await d.select<ActRow[]>("SELECT meeting_id FROM meeting_actions WHERE id = ?", [id]);
   const now = nowIso();
-  await execRetry("UPDATE meeting_actions SET deleted_at = ?, updated_at = ? WHERE id = ?", [now, now, id]);
+  const res = await execRetry(
+    "UPDATE meeting_actions SET deleted_at = ?, updated_at = ?, version = version + 1 WHERE id = ? AND deleted_at IS NULL AND version = ?",
+    [now, now, id, expectedVersion],
+  );
+  if (res.rowsAffected === 0) throw new StaleWriteError("Meeting action");
   if (rows.length) await writeEvent(rows[0].meeting_id, "action_deleted", { actionId: id });
 }

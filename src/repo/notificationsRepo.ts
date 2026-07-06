@@ -5,7 +5,7 @@
 // new tier produces a new key which naturally creates a new row.
 
 import { db, execRetry } from "../lib/db";
-import { uuidv4, nowIso } from "./ids";
+import { uuidv4, nowIso, StaleWriteError } from "./ids";
 
 export type Severity = "critical" | "warning" | "info";
 
@@ -46,6 +46,8 @@ export interface Notification {
   snoozed_until: string | null;
   version: number;
   deleted_at: string | null;
+  updated_at: string | null;
+  updated_by: string | null;
 }
 
 export interface NotificationInput {
@@ -88,25 +90,35 @@ export async function upsertByDedupKey(input: NotificationInput): Promise<Notifi
   if (existing.length > 0) {
     // Refresh title/body/severity in case source drifted (e.g. new expiry date).
     const row = existing[0];
-    await execRetry(
+    const now = nowIso();
+    const res = await execRetry(
       `UPDATE notifications
           SET title = ?, body = ?, severity = ?, action_route = ?,
-              version = version + 1
+              updated_at = ?, version = version + 1
         WHERE id = ? AND version = ?`,
-      [input.title, input.body ?? null, input.severity, input.action_route ?? null, row.id, row.version],
+      [input.title, input.body ?? null, input.severity, input.action_route ?? null, now, row.id, row.version],
     );
-    return { ...row, title: input.title, body: input.body ?? null, severity: input.severity, action_route: input.action_route ?? null, version: row.version + 1 };
+    if (res.rowsAffected === 0) {
+      // Someone else touched it between our SELECT and UPDATE (e.g. the user
+      // dismissed/read it concurrently) — refetch rather than return a
+      // guessed object built from stale data.
+      const fresh = await d.select<Notification[]>("SELECT * FROM notifications WHERE id = ?", [row.id]);
+      if (fresh.length) return fresh[0];
+      throw new StaleWriteError("Notification");
+    }
+    await logEvent(row.id, "updated", { category: input.category, severity: input.severity });
+    return { ...row, title: input.title, body: input.body ?? null, severity: input.severity, action_route: input.action_route ?? null, updated_at: now, version: row.version + 1 };
   }
   const id = uuidv4();
   const now = nowIso();
   await execRetry(
     `INSERT INTO notifications
-      (id, category, severity, title, body, source_kind, source_id, action_route, dedup_key, created_at, version)
-     VALUES (?,?,?,?,?,?,?,?,?,?,1)`,
+      (id, category, severity, title, body, source_kind, source_id, action_route, dedup_key, created_at, updated_at, updated_by, version)
+     VALUES (?,?,?,?,?,?,?,?,?,?,?,'owner',1)`,
     [
       id, input.category, input.severity, input.title, input.body ?? null,
       input.source_kind ?? null, input.source_id ?? null, input.action_route ?? null,
-      input.dedup_key, now,
+      input.dedup_key, now, now,
     ],
   );
   await logEvent(id, "created", { category: input.category, severity: input.severity });
@@ -114,7 +126,7 @@ export async function upsertByDedupKey(input: NotificationInput): Promise<Notifi
     id, category: input.category, severity: input.severity, title: input.title, body: input.body ?? null,
     source_kind: input.source_kind ?? null, source_id: input.source_id ?? null, action_route: input.action_route ?? null,
     dedup_key: input.dedup_key, created_at: now, read_at: null, dismissed_at: null, snoozed_until: null,
-    version: 1, deleted_at: null,
+    version: 1, deleted_at: null, updated_at: now, updated_by: "owner",
   };
 }
 
@@ -175,46 +187,53 @@ export async function countUnread(): Promise<{ total: number; critical: number }
 export async function markRead(id: string, expectedVersion: number): Promise<void> {
   const now = nowIso();
   const res = await execRetry(
-    "UPDATE notifications SET read_at = ?, version = version + 1 WHERE id = ? AND version = ? AND read_at IS NULL",
-    [now, id, expectedVersion],
+    "UPDATE notifications SET read_at = ?, updated_at = ?, version = version + 1 WHERE id = ? AND version = ? AND read_at IS NULL",
+    [now, now, id, expectedVersion],
   );
   if ((res as any).rowsAffected === 0) return; // idempotent: already read or version mismatch
   await logEvent(id, "read");
 }
 
-export async function markAllRead(ids: string[]): Promise<void> {
-  if (ids.length === 0) return;
+export async function markAllRead(items: Array<{ id: string; version: number }>): Promise<void> {
+  if (items.length === 0) return;
   const now = nowIso();
-  const placeholders = ids.map(() => "?").join(",");
-  await execRetry(
-    `UPDATE notifications SET read_at = ?, version = version + 1 WHERE id IN (${placeholders}) AND read_at IS NULL`,
-    [now, ...ids],
-  );
-  for (const id of ids) await logEvent(id, "read");
+  // H-1: each row is version-checked individually — a bulk `WHERE id IN
+  // (...)` can't express a per-row expected version, and any row that's
+  // moved on (stale) is simply skipped rather than silently overwritten.
+  for (const { id, version } of items) {
+    const res = await execRetry(
+      "UPDATE notifications SET read_at = ?, updated_at = ?, version = version + 1 WHERE id = ? AND version = ? AND read_at IS NULL",
+      [now, now, id, version],
+    );
+    if ((res as any).rowsAffected > 0) await logEvent(id, "read");
+  }
 }
 
 export async function dismiss(id: string, expectedVersion: number): Promise<void> {
   const now = nowIso();
   const res = await execRetry(
-    "UPDATE notifications SET dismissed_at = ?, version = version + 1 WHERE id = ? AND version = ? AND dismissed_at IS NULL",
-    [now, id, expectedVersion],
+    "UPDATE notifications SET dismissed_at = ?, updated_at = ?, version = version + 1 WHERE id = ? AND version = ? AND dismissed_at IS NULL",
+    [now, now, id, expectedVersion],
   );
   if ((res as any).rowsAffected === 0) return;
   await logEvent(id, "dismissed");
 }
 
-export async function undoDismiss(id: string): Promise<void> {
-  await execRetry(
-    "UPDATE notifications SET dismissed_at = NULL, version = version + 1 WHERE id = ?",
-    [id],
+export async function undoDismiss(id: string, expectedVersion: number): Promise<void> {
+  const now = nowIso();
+  const res = await execRetry(
+    "UPDATE notifications SET dismissed_at = NULL, updated_at = ?, version = version + 1 WHERE id = ? AND version = ?",
+    [now, id, expectedVersion],
   );
+  if ((res as any).rowsAffected === 0) throw new StaleWriteError("Notification");
   await logEvent(id, "undo_dismiss");
 }
 
 export async function snooze(id: string, until: string, expectedVersion: number): Promise<void> {
+  const now = nowIso();
   const res = await execRetry(
-    "UPDATE notifications SET snoozed_until = ?, version = version + 1 WHERE id = ? AND version = ?",
-    [until, id, expectedVersion],
+    "UPDATE notifications SET snoozed_until = ?, updated_at = ?, version = version + 1 WHERE id = ? AND version = ?",
+    [until, now, id, expectedVersion],
   );
   if ((res as any).rowsAffected === 0) return;
   await logEvent(id, "snoozed", { until });

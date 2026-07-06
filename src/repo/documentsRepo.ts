@@ -2,7 +2,7 @@
 // here — UI never issues raw SQL against documents/blobs. See
 // C:/…/session-state/…/spec-1-document-vault.md for the full contract.
 import { db, execRetry, serializeWrite } from "../lib/db";
-import { uuidv4, nowIso, sha256Hex } from "./ids";
+import { uuidv4, nowIso, sha256Hex, StaleWriteError } from "./ids";
 
 export type DocCategory =
   | "license" | "insurance" | "policy" | "staff" | "child"
@@ -157,14 +157,39 @@ export async function getBlob(blobKey: string): Promise<{ bytes: Uint8Array; mim
   return { bytes: new Uint8Array(rows[0].content), mimeType: rows[0].mime_type };
 }
 
-async function bumpRefCount(blobKey: string, delta: number) {
-  await execRetry("UPDATE blobs SET ref_count = ref_count + ? WHERE blob_key = ?", [delta, blobKey]);
+async function bumpRefCount(blobKey: string, delta: number): Promise<void> {
+  // C-5: single atomic UPDATE instead of a SELECT-then-UPDATE pair — this
+  // eliminates the read-modify-write race between two concurrent callers
+  // adjusting the same blob's ref_count. Guarded so a double-decrement bug
+  // elsewhere can't drive the count negative (fails closed: 0 rows affected,
+  // logged, and left alone rather than corrupting the count silently).
+  //
+  // We deliberately do NOT delete the blob row when the count reaches 0
+  // here: a soft-deleted document can still be restored within the undo
+  // window and needs its blob content intact. Permanent blob cleanup
+  // belongs in a future hard-delete/purge job (data-contract.md §3), not in
+  // this per-mutation helper.
+  const res = await execRetry(
+    "UPDATE blobs SET ref_count = ref_count + ? WHERE blob_key = ? AND ref_count + ? >= 0",
+    [delta, blobKey, delta],
+  );
+  if (res.rowsAffected === 0) {
+    console.warn(`[documentsRepo] bumpRefCount(${blobKey}, ${delta}) affected 0 rows (missing blob, or count would go negative).`);
+  }
 }
 
 export async function createDocument(doc: NewDocument): Promise<Document> {
   const id = uuidv4();
   const now = nowIso();
   const tags = JSON.stringify(doc.tags ?? []);
+  const eventId = uuidv4();
+  // M-4: insert + blob ref-count bump + audit event run as one serialized
+  // unit so no other writer's statements can interleave between them. We
+  // use serializeWrite (not a literal SQL BEGIN/COMMIT) because
+  // tauri-plugin-sql's sqlx pool may hand subsequent statements to a
+  // different physical connection — see the serializeWrite doc comment at
+  // the top of lib/db.ts for why a raw multi-statement transaction here is
+  // unsafe on this stack.
   await serializeWrite(async () => {
     const d = await db();
     await d.execute(
@@ -183,9 +208,15 @@ export async function createDocument(doc: NewDocument): Promise<Document> {
         now, now,
       ],
     );
+    await d.execute(
+      "UPDATE blobs SET ref_count = ref_count + 1 WHERE blob_key = ?",
+      [doc.blobKey],
+    );
+    await d.execute(
+      "INSERT INTO document_events (id, entity_id, event_type, payload_json, actor, created_at) VALUES (?, ?, ?, ?, 'owner', ?)",
+      [eventId, id, "created", JSON.stringify({ title: doc.title, category: doc.category, blobKey: doc.blobKey }), now],
+    );
   });
-  await bumpRefCount(doc.blobKey, +1);
-  await writeEvent(id, "created", { title: doc.title, category: doc.category, blobKey: doc.blobKey });
   const created = await getDocument(id);
   if (!created) throw new Error("createDocument: row disappeared after insert");
   return created;
@@ -283,7 +314,7 @@ export async function updateDocumentMetadata(id: string, patch: DocPatch, expect
       id, expectedVersion,
     ],
   );
-  if (res.rowsAffected === 0) throw new Error("Document was changed by another writer. Please reload.");
+  if (res.rowsAffected === 0) throw new StaleWriteError("Document");
   await writeEvent(id, "updated", { patch });
   const after = await getDocument(id);
   if (!after) throw new Error("Document disappeared after update");

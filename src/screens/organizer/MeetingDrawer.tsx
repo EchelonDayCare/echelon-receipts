@@ -89,21 +89,21 @@ export default function MeetingDrawer({ state, onClose, onSaved }: {
     } catch (e: any) { setErr(String(e?.message ?? e)); }
   }
 
-  async function toggleAct(id: string) {
-    await toggleActionDone(id);
+  async function toggleAct(id: string, version: number) {
+    await toggleActionDone(id, version);
     if (current) setActions(await listActions(current.id));
     onSaved();
   }
-  async function delAct(id: string) {
+  async function delAct(id: string, version: number) {
     if (!confirm("Delete this action item?")) return;
-    await softDeleteAction(id);
+    await softDeleteAction(id, version);
     if (current) setActions(await listActions(current.id));
     onSaved();
   }
   async function deleteThis() {
     if (!current) return;
     if (!confirm("Delete this meeting? Action items are also removed from view.")) return;
-    await softDeleteMeeting(current.id);
+    await softDeleteMeeting(current.id, current.version);
     onSaved();
     onClose();
   }
@@ -177,13 +177,13 @@ export default function MeetingDrawer({ state, onClose, onSaved }: {
                       {actions.map((a) => (
                         <tr key={a.id} style={{ borderTop: "1px solid var(--border, #1e293b)" }}>
                           <td style={{ padding: 4, width: 24 }}>
-                            <input type="checkbox" checked={!!a.doneAt} onChange={() => toggleAct(a.id)} />
+                            <input type="checkbox" checked={!!a.doneAt} onChange={() => toggleAct(a.id, a.version)} />
                           </td>
                           <td style={{ padding: 4, textDecoration: a.doneAt ? "line-through" : "none" }}>{a.description}</td>
                           <td style={{ padding: 4, color: "var(--muted)" }}>{a.ownerText ?? "—"}</td>
                           <td style={{ padding: 4, color: "var(--muted)" }}>{a.dueDate ?? "—"}</td>
                           <td style={{ padding: 4, width: 24 }}>
-                            <button className="btn" onClick={() => delAct(a.id)} style={{ fontSize: 10, padding: "2px 6px" }}>✕</button>
+                            <button className="btn" onClick={() => delAct(a.id, a.version)} style={{ fontSize: 10, padding: "2px 6px" }}>✕</button>
                           </td>
                         </tr>
                       ))}

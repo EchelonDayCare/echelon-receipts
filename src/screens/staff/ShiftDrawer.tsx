@@ -127,7 +127,7 @@ export default function ShiftDrawer({
     const reason = prompt("Reason (optional):", "") ?? "";
     setBusy(true);
     try {
-      await cancelShift(state.shift.id, reason);
+      await cancelShift(state.shift.id, state.shift.version, reason);
       onSaved();
       await promptNotify("cancel", staffId, {
         shift_date_pretty: prettyDate(shiftDate),
