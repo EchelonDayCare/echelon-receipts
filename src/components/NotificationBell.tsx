@@ -13,7 +13,7 @@ import {
 import { runScanSoon, subscribeUnread } from "../lib/notifications/scheduler";
 
 // ─── Bell (icon + badge) ──────────────────────────────────────────────
-export default function NotificationBell() {
+export default function NotificationBell({ size = 20 }: { size?: number }) {
   const [open, setOpen] = useState(false);
   const [count, setCount] = useState<{ total: number; critical: number }>({ total: 0, critical: 0 });
   const btnRef = useRef<HTMLButtonElement | null>(null);
@@ -23,8 +23,11 @@ export default function NotificationBell() {
     return () => unsub();
   }, []);
 
-  // Kick a scan whenever the bell is opened — the debouncer prevents spam.
   useEffect(() => { if (open) void runScanSoon(); }, [open]);
+
+  const padding = Math.max(8, Math.round(size * 0.55));
+  const badgeSize = Math.max(18, Math.round(size * 0.9));
+  const badgeFont = Math.max(11, Math.round(size * 0.55));
 
   return (
     <div style={{ position: "relative" }}>
@@ -37,10 +40,10 @@ export default function NotificationBell() {
           position: "relative",
           background: "transparent",
           border: "1px solid var(--border)",
-          borderRadius: 8,
-          padding: "6px 10px",
+          borderRadius: 12,
+          padding: `${padding}px ${padding + 2}px`,
           cursor: "pointer",
-          fontSize: 18,
+          fontSize: size,
           lineHeight: 1,
         }}
       >
@@ -50,15 +53,15 @@ export default function NotificationBell() {
             aria-hidden
             style={{
               position: "absolute",
-              top: -4,
-              right: -4,
-              minWidth: 18,
-              height: 18,
-              padding: "0 4px",
-              borderRadius: 9,
+              top: -6,
+              right: -6,
+              minWidth: badgeSize,
+              height: badgeSize,
+              padding: "0 6px",
+              borderRadius: badgeSize / 2,
               background: count.critical > 0 ? "#dc2626" : "#2563eb",
               color: "#fff",
-              fontSize: 11,
+              fontSize: badgeFont,
               fontWeight: 700,
               display: "inline-flex",
               alignItems: "center",
@@ -89,10 +92,16 @@ function NotificationPanel({
 
   async function refresh() {
     setLoading(true);
-    const list = await listVisible({ limit: 100 });
-    setRows(list);
-    setLoading(false);
-    onCount(await countUnread());
+    try {
+      const list = await listVisible({ limit: 100 });
+      setRows(list);
+      onCount(await countUnread());
+    } catch (e) {
+      console.warn("[bell:refresh] failed:", e);
+      setRows([]);
+    } finally {
+      setLoading(false);
+    }
   }
   useEffect(() => { void refresh(); }, []);
 
@@ -195,6 +204,19 @@ function Row({
   n, onOpen, onDismiss, onSnooze,
 }: { n: Notification; onOpen: (n: Notification) => void; onDismiss: (n: Notification) => void; onSnooze: (n: Notification, hours: number) => void }) {
   const [snoozeOpen, setSnoozeOpen] = useState(false);
+  const snoozeRef = useRef<HTMLDivElement | null>(null);
+
+  // Close snooze dropdown when clicking outside it (M-17).
+  useEffect(() => {
+    if (!snoozeOpen) return;
+    const onDoc = (e: MouseEvent) => {
+      if (snoozeRef.current && !snoozeRef.current.contains(e.target as Node)) {
+        setSnoozeOpen(false);
+      }
+    };
+    const t = window.setTimeout(() => document.addEventListener("mousedown", onDoc), 0);
+    return () => { clearTimeout(t); document.removeEventListener("mousedown", onDoc); };
+  }, [snoozeOpen]);
   return (
     <div
       style={{
@@ -216,7 +238,7 @@ function Row({
         {n.body && <div style={{ fontSize: 12, color: "var(--muted)", marginTop: 2 }}>{n.body}</div>}
         <div style={{ display: "flex", gap: 6, marginTop: 6 }} onClick={e => e.stopPropagation()}>
           <button className="btn ghost" style={{ fontSize: 11, padding: "2px 6px" }} onClick={() => onOpen(n)}>Open</button>
-          <div style={{ position: "relative" }}>
+          <div ref={snoozeRef} style={{ position: "relative" }}>
             <button className="btn ghost" style={{ fontSize: 11, padding: "2px 6px" }} onClick={() => setSnoozeOpen(v => !v)}>Snooze ▾</button>
             {snoozeOpen && (
               <div style={{ position: "absolute", top: "100%", left: 0, background: "var(--panel,#fff)", border: "1px solid var(--border)", borderRadius: 8, boxShadow: "0 4px 14px rgba(0,0,0,0.12)", zIndex: 20, minWidth: 120 }}>

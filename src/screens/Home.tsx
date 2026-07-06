@@ -62,7 +62,7 @@ export default function Home() {
             cta: { label: "Issue receipts", to: "/students/month" },
           });
         }
-      } catch {}
+      } catch (e) { console.warn("[home:issued] failed:", e); }
 
       // Cloud backup overdue
       const sinceCloud = daysSince(settings.last_cloud_backup_at);
@@ -116,7 +116,7 @@ export default function Home() {
               cta: { label: "Review credentials", to: "/staff/credentials" },
             });
           }
-        } catch {}
+        } catch (e) { console.warn("[home:credentials] failed:", e); }
       }
 
       // Staff cert tracker placeholder (Phase 1 not built yet — skip until built)
@@ -132,7 +132,7 @@ export default function Home() {
             cta: { label: "Review & send", to: "/communications/scheduled" },
           });
         }
-      } catch {}
+      } catch (e) { console.warn("[home:scheduled] failed:", e); }
 
       // Vault: documents expiring within 60 days (v1.1.0). Silent if the
       // module tables haven't been provisioned yet (fresh installs before
@@ -232,6 +232,18 @@ export default function Home() {
         </div>
       </header>
 
+      {/* Ask Echelon — hero banner. This is the most powerful feature; used to
+          be tile #8 in the grid where it disappeared visually. */}
+      <button className="home-hero" onClick={() => nav("/ask")}>
+        <div className="home-hero-icon" aria-hidden>🤖</div>
+        <div className="home-hero-copy">
+          <div className="home-hero-eyebrow">AI Assistant</div>
+          <h2>Ask Echelon</h2>
+          <p>Plain-English answers from your own data — "how many kids attended last week?", "which staff credentials expire this month?", "revenue by month for 2026".</p>
+        </div>
+        <div className="home-hero-cta" aria-hidden>→</div>
+      </button>
+
       <div className="home-tiles">
         <button className="home-tile students" onClick={() => nav("/students/today")}>
           <div className="home-tile-icon">👶</div>
@@ -251,6 +263,12 @@ export default function Home() {
           <p>Group email, templates, message history, contact directory</p>
         </button>
 
+        <button className="home-tile waitlist" onClick={() => nav("/waitlist")}>
+          <div className="home-tile-icon">📝</div>
+          <h2>Waitlist</h2>
+          <p>Google Form applications, follow-ups, conversions to enrolled students</p>
+        </button>
+
         <button className="home-tile expenses" onClick={() => nav("/expenses/dashboard")}>
           <div className="home-tile-icon">💵</div>
           <h2>Expenses</h2>
@@ -263,34 +281,22 @@ export default function Home() {
           <p>Revenue, aging, subsidies, licensing rosters, credentials, drills, AGM</p>
         </button>
 
-        <button className="home-tile config" onClick={() => nav("/config/identity")}>
-          <div className="home-tile-icon">⚙️</div>
-          <h2>Configuration</h2>
-          <p>Daycare identity, email, backups, optional features</p>
+        <button className="home-tile vault" onClick={() => nav("/vault")}>
+          <div className="home-tile-icon">🗂️</div>
+          <h2>Document Vault</h2>
+          <p>Licences, insurance, policies, staff & child records — with expiry alerts</p>
         </button>
 
-        <button className="home-tile waitlist" onClick={() => nav("/waitlist")} style={{ background: "linear-gradient(135deg, #f5f3ff, #ede9fe)" }}>
-          <div className="home-tile-icon">📝</div>
-          <h2>Waitlist</h2>
-          <p>Google Form applications, follow-ups, conversions to enrolled students</p>
-        </button>
-
-        <button className="home-tile" onClick={() => nav("/ask")} style={{ background: "linear-gradient(135deg, #eff6ff, #dbeafe)" }}>
-          <div className="home-tile-icon">🤖</div>
-          <h2>Ask Echelon</h2>
-          <p>Plain-English questions about your data — attendance, revenue, staff, credentials</p>
-        </button>
-
-        <button className="home-tile" onClick={() => nav("/organizer")} style={{ background: "linear-gradient(135deg, #fff1f2, #ffe4e6)" }}>
+        <button className="home-tile organizer" onClick={() => nav("/organizer")}>
           <div className="home-tile-icon">🗓️</div>
           <h2>Organizer</h2>
           <p>Upcoming deadlines, meeting log, follow-ups — one calm dashboard</p>
         </button>
 
-        <button className="home-tile" onClick={() => nav("/vault")} style={{ background: "linear-gradient(135deg, #f0fdfa, #ccfbf1)" }}>
-          <div className="home-tile-icon">🗂️</div>
-          <h2>Document Vault</h2>
-          <p>Licences, insurance, policies, staff & child records — with expiry alerts</p>
+        <button className="home-tile config" onClick={() => nav("/config/identity")}>
+          <div className="home-tile-icon">⚙️</div>
+          <h2>Configuration</h2>
+          <p>Daycare identity, email, backups, optional features</p>
         </button>
       </div>
 
@@ -324,7 +330,7 @@ export default function Home() {
       )}
 
       <footer className="home-foot">
-        <span>{appVersion ? `v${appVersion} · ` : ""}Echelon Receipts</span>
+        <span>{appVersion ? `v${appVersion} · ` : ""}Echelon Daycare</span>
       </footer>
     </div>
   );

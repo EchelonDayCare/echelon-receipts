@@ -49,7 +49,7 @@ import { getVersion } from "@tauri-apps/api/app";
 import { DEFAULT_LOGO_DATA_URL } from "./lib/defaults";
 import PromptHost from "./components/PromptHost";
 import NotificationBell from "./components/NotificationBell";
-import { startScheduler, runScanSoon } from "./lib/notifications/scheduler";
+import { startScheduler, stopScheduler, runScanSoon } from "./lib/notifications/scheduler";
 import "./App.css";
 
 function ModuleSidebar({
@@ -137,9 +137,48 @@ function Shell({ logo, name, staffEnabled }: { logo: string; name: string; staff
 
   if (isHome) {
     return (
-      <main className="content content-home">
-        <Home />
-      </main>
+      <>
+        <div style={{ position: "fixed", top: 20, right: 28, zIndex: 900 }}>
+          <NotificationBell size={40} />
+        </div>
+        <main className="content content-home">
+          <Home />
+        </main>
+      </>
+    );
+  }
+
+  // Notifications history: give it its own ModuleSidebar so it matches
+  // the rest of the app visually. We still don't put it in the Home grid;
+  // the bell footer is the only way in.
+  if (path === "/notifications" || path.startsWith("/notifications/")) {
+    return (
+      <div className="app">
+        <ModuleSidebar
+          title="Notifications"
+          accent="#7c3aed"
+          logo={logo}
+          name={name}
+          items={[
+            { to: "/notifications", label: "All", match: (p, s) => p === "/notifications" && !s.includes("category=") },
+            { to: "/notifications?category=staff_credential_expiring", label: "Staff credentials", match: (p, s) => p === "/notifications" && s.includes("category=staff_credential") },
+            { to: "/notifications?category=drill_overdue", label: "Drills", match: (p, s) => p === "/notifications" && s.includes("category=drill_overdue") },
+            { to: "/notifications?category=document_expiring", label: "Vault documents", match: (p, s) => p === "/notifications" && s.includes("category=document_") },
+            { to: "/notifications?category=receipt_aging", label: "Receipts", match: (p, s) => p === "/notifications" && s.includes("category=receipt_aging") },
+            { to: "/notifications?category=schedule_not_published", label: "Schedule", match: (p, s) => p === "/notifications" && s.includes("category=schedule_") },
+            { to: "/notifications?category=meeting_action_due", label: "Meetings & follow-ups", match: (p, s) => p === "/notifications" && (s.includes("category=meeting_") || s.includes("category=followup_")) },
+            { to: "/notifications?category=waitlist_new_application", label: "Waitlist", match: (p, s) => p === "/notifications" && s.includes("category=waitlist_") },
+            { to: "/notifications?category=backup_stale", label: "Backups", match: (p, s) => p === "/notifications" && s.includes("category=backup_") },
+          ]}
+        />
+        <main className="content">
+          <Suspense fallback={<div style={{ padding: 24, color: "var(--muted)" }}>Loading…</div>}>
+            <Routes>
+              <Route path="/notifications" element={<NotificationsHistory />} />
+            </Routes>
+          </Suspense>
+        </main>
+      </div>
     );
   }
 
@@ -306,9 +345,6 @@ function Shell({ logo, name, staffEnabled }: { logo: string; name: string; staff
     <div className="app">
       {sidebar}
       <main className="content">
-        <div style={{ position: "absolute", top: 12, right: 20, zIndex: 900 }}>
-          <NotificationBell />
-        </div>
         <Suspense fallback={<div style={{ padding: 24, color: "var(--muted)" }}>Loading…</div>}>
           <Routes>
           {/* Students module */}
@@ -465,6 +501,7 @@ export default function App() {
       window.removeEventListener("settings-saved", onSaved);
       window.removeEventListener("focus", onFocus);
       window.clearInterval(schedTimer);
+      stopScheduler();
     };
   }, []);
 

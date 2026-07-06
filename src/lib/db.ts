@@ -118,6 +118,10 @@ async function ensureSchema(d: Database): Promise<void> {
     if (!(await tableExists(table))) return false;
     let cols = _colCache.get(table);
     if (!cols) {
+      // Validate identifier before interpolating into PRAGMA (defense-in-depth).
+      if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(table)) {
+        throw new Error(`ensureSchema: invalid table identifier: ${table}`);
+      }
       const rows = await d.select<{ name: string }[]>(`PRAGMA table_info(${table})`);
       cols = new Set(rows.map((r) => r.name));
       _colCache.set(table, cols);

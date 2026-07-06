@@ -47,21 +47,33 @@ export default function NotificationsHistory() {
 
   async function refresh() {
     setLoading(true);
-    const list = await listVisible({
-      category: category ? [category] : undefined,
-      severity: severity ? [severity as Severity] : undefined,
-      unreadOnly: readState === "unread",
-      hideSnoozed: false,
-      hideDismissed: false,
-      sinceDays,
-      limit: 500,
-    });
-    const filtered = readState === "read" ? list.filter(r => r.read_at) : list;
-    setRows(filtered);
-    setLoading(false);
-    setSelected(new Set());
+    try {
+      const list = await listVisible({
+        category: category ? [category] : undefined,
+        severity: severity ? [severity as Severity] : undefined,
+        unreadOnly: readState === "unread",
+        hideSnoozed: false,
+        hideDismissed: false,
+        sinceDays,
+        limit: 500,
+      });
+      const filtered = readState === "read" ? list.filter(r => r.read_at) : list;
+      setRows(filtered);
+    } catch (e) {
+      console.warn("[notifications:list] failed:", e);
+      setRows([]);
+    } finally {
+      setLoading(false);
+      setSelected(new Set());
+    }
   }
   useEffect(() => { void refresh(); }, [category, severity, readState, sinceDays]);
+
+  // Sync `category` state from URL on every param change (sidebar nav doesn't remount).
+  useEffect(() => {
+    const urlCat = params.get("category") || "";
+    setCategory((prev) => (prev === urlCat ? prev : urlCat));
+  }, [params]);
 
   useEffect(() => {
     // Keep URL in sync (for deep links from the panel).

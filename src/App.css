@@ -238,21 +238,57 @@ table.data tr.voided td { color: #9ca3af; text-decoration: line-through; }
 
 /* --- Home landing page --- */
 .content-home {
-  max-width: 1080px;
+  max-width: 1180px;
   margin: 0 auto;
   padding: 56px 32px 32px;
 }
 .home-head {
-  display: flex; align-items: center; gap: 18px; margin-bottom: 36px;
+  display: flex; align-items: center; gap: 18px; margin-bottom: 28px;
 }
 .home-logo {
   width: 72px; height: 72px; border-radius: 50%; object-fit: cover;
   border: 1px solid var(--border); background: #fff;
 }
+
+/* Ask Echelon hero — full-width, gradient, prominent CTA. */
+.home-hero {
+  display: flex; align-items: center; gap: 20px;
+  width: 100%; padding: 22px 26px;
+  margin-bottom: 28px;
+  background: linear-gradient(135deg, #1e3a8a 0%, #2563eb 50%, #7c3aed 100%);
+  color: #fff; border: 0; border-radius: 18px;
+  cursor: pointer; text-align: left; font: inherit;
+  box-shadow: 0 6px 20px rgba(37, 99, 235, .18);
+  transition: transform .12s ease, box-shadow .12s ease;
+}
+.home-hero:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 10px 28px rgba(37, 99, 235, .28);
+}
+.home-hero-icon {
+  font-size: 44px; line-height: 1;
+  width: 68px; height: 68px; flex-shrink: 0;
+  display: flex; align-items: center; justify-content: center;
+  background: rgba(255, 255, 255, .18); border-radius: 16px;
+  backdrop-filter: blur(2px);
+}
+.home-hero-copy { flex: 1; min-width: 0; }
+.home-hero-eyebrow {
+  font-size: 11px; text-transform: uppercase; letter-spacing: .1em;
+  opacity: .8; margin-bottom: 2px; font-weight: 600;
+}
+.home-hero h2 { margin: 0 0 4px; font-size: 22px; font-weight: 700; }
+.home-hero p { margin: 0; font-size: 13px; opacity: .9; line-height: 1.5; }
+.home-hero-cta {
+  font-size: 28px; opacity: .8; flex-shrink: 0;
+  transition: transform .12s ease, opacity .12s ease;
+}
+.home-hero:hover .home-hero-cta { transform: translateX(4px); opacity: 1; }
+
 .home-tiles {
   display: grid;
   grid-template-columns: repeat(3, 1fr);
-  gap: 18px;
+  gap: 16px;
   margin-bottom: 28px;
 }
 @media (max-width: 900px) {
@@ -261,29 +297,48 @@ table.data tr.voided td { color: #9ca3af; text-decoration: line-through; }
 .home-tile {
   display: flex; flex-direction: column; align-items: flex-start; gap: 6px;
   text-align: left;
-  padding: 28px 24px;
+  padding: 22px 20px;
   background: #fff;
   border: 1px solid var(--border);
-  border-radius: 16px;
+  border-radius: 14px;
   cursor: pointer;
   transition: transform .12s ease, box-shadow .12s ease, border-color .12s ease;
   font: inherit;
   color: inherit;
+  position: relative;
+  overflow: hidden;
+}
+/* Left accent bar — colored per module, subtle. */
+.home-tile::before {
+  content: "";
+  position: absolute; left: 0; top: 0; bottom: 0;
+  width: 4px; background: currentColor; opacity: .55;
 }
 .home-tile:hover {
   transform: translateY(-2px);
-  box-shadow: 0 8px 24px rgba(15, 23, 42, .08);
+  box-shadow: 0 8px 24px rgba(15, 23, 42, .1);
 }
-.home-tile.students:hover { border-color: #2563eb; }
-.home-tile.staff:hover    { border-color: #9333ea; }
-.home-tile.config:hover   { border-color: #0f766e; }
-.home-tile.comms:hover    { border-color: #c2410c; }
-.home-tile.reports:hover  { border-color: #0369a1; }
-.home-tile.expenses:hover { border-color: #047857; }
-.home-tile.waitlist:hover { border-color: #7c3aed; }
-.home-tile-icon { font-size: 36px; line-height: 1; margin-bottom: 6px; }
-.home-tile h2 { margin: 0; font-size: 20px; }
-.home-tile p { margin: 0; color: var(--muted); font-size: 13px; }
+.home-tile.students  { color: #2563eb; background: linear-gradient(180deg, #eff6ff 0%, #ffffff 45%); }
+.home-tile.staff     { color: #9333ea; background: linear-gradient(180deg, #faf5ff 0%, #ffffff 45%); }
+.home-tile.comms     { color: #c2410c; background: linear-gradient(180deg, #fff7ed 0%, #ffffff 45%); }
+.home-tile.waitlist  { color: #7c3aed; background: linear-gradient(180deg, #f5f3ff 0%, #ffffff 45%); }
+.home-tile.expenses  { color: #047857; background: linear-gradient(180deg, #ecfdf5 0%, #ffffff 45%); }
+.home-tile.reports   { color: #0369a1; background: linear-gradient(180deg, #f0f9ff 0%, #ffffff 45%); }
+.home-tile.vault     { color: #0d9488; background: linear-gradient(180deg, #f0fdfa 0%, #ffffff 45%); }
+.home-tile.organizer { color: #e11d48; background: linear-gradient(180deg, #fff1f2 0%, #ffffff 45%); }
+.home-tile.config    { color: #475569; background: linear-gradient(180deg, #f8fafc 0%, #ffffff 45%); }
+.home-tile.students:hover  { border-color: #2563eb; }
+.home-tile.staff:hover     { border-color: #9333ea; }
+.home-tile.comms:hover     { border-color: #c2410c; }
+.home-tile.waitlist:hover  { border-color: #7c3aed; }
+.home-tile.expenses:hover  { border-color: #047857; }
+.home-tile.reports:hover   { border-color: #0369a1; }
+.home-tile.vault:hover     { border-color: #0d9488; }
+.home-tile.organizer:hover { border-color: #e11d48; }
+.home-tile.config:hover    { border-color: #475569; }
+.home-tile-icon { font-size: 32px; line-height: 1; margin-bottom: 4px; }
+.home-tile h2 { margin: 0; font-size: 18px; color: #0f172a; }
+.home-tile p { margin: 0; color: var(--muted); font-size: 13px; line-height: 1.45; }
 
 .home-alerts {
   background: #fff;

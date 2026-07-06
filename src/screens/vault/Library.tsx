@@ -78,6 +78,21 @@ export default function VaultLibrary() {
 
   useEffect(() => { void refresh(); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, [filter]);
 
+  // Keep state in sync with URL params so sidebar links (which change the
+  // URL but don't remount this component) actually apply their filter.
+  useEffect(() => {
+    const exp = params.get("expiring");
+    const nextPreset: Preset =
+      exp === "30" ? "30" :
+      exp === "60" ? "60" :
+      exp === "90" ? "90" :
+      exp === "expired" || exp === "0" ? "expired" :
+      "all";
+    setPreset(nextPreset);
+    const cat = params.get("category") as DocCategory | null;
+    setCategory(cat ?? "");
+  }, [params]);
+
   // Close "More filters" popover on outside click.
   useEffect(() => {
     if (!moreOpen) return;
