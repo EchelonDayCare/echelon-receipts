@@ -6,6 +6,14 @@ lives in the session plan.md until it ships.
 
 ## v1.8.0 — Organizer Voice Capture (code-complete, awaiting ship approval)
 
+**Also in this batch (unreleased, awaiting same ship):**
+- **Deposit slip preview now in-app on macOS.** `depositSlip.ts` switched
+  from `iframe.contentWindow.print()` (which on WKWebView deferred to
+  Preview.app) to the shared `pdfPreview.ts` helper: `html2pdf` → Blob URL
+  → in-app `<iframe>` modal with Print / Save-as-PDF / Close buttons.
+  Same UX on Windows WebView2 and macOS WKWebView. Added
+  `src/lib/pdfPreview.ts` — reusable for any future in-app PDF preview.
+
 One-tap dictation for the Organizer. Instead of clicking through "New
 meeting → Kind → Date → Time → Attendees…", say _"Meeting with Daisy
 tomorrow at 11 for 30 minutes"_ and Whisper + GPT-4.1 turn it into a

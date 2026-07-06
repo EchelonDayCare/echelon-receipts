@@ -4,7 +4,7 @@
 // the cheque list on the left and the cash-count / totals block on the right.
 // Bank fields (date, branch #, account #) are intentionally left blank — she
 // pen-fills them at the teller.
-import { showAlert } from "./dialogs";
+import { showPdfPreview } from "./pdfPreview";
 import type { Receipt, Deposit, SettingsMap } from "../types";
 import { h } from "./html";
 
@@ -163,35 +163,11 @@ export function buildDepositSlipHtml(
 
 export function printDepositSlip(deposit: Deposit, receipts: Receipt[], settings: SettingsMap) {
   const html = buildDepositSlipHtml(deposit, receipts, settings);
-  const existing = document.getElementById("__print_frame");
-  if (existing) existing.remove();
-  const iframe = document.createElement("iframe");
-  iframe.id = "__print_frame";
-  iframe.style.position = "fixed";
-  iframe.style.right = "0";
-  iframe.style.bottom = "0";
-  iframe.style.width = "0";
-  iframe.style.height = "0";
-  iframe.style.border = "0";
-  document.body.appendChild(iframe);
-  const doc = iframe.contentDocument || iframe.contentWindow?.document;
-  if (!doc) { void showAlert("Print failed: could not open iframe."); return; }
-  doc.open();
-  doc.write(html);
-  doc.close();
-  setTimeout(() => {
-    try {
-      // Blank the parent title so browsers that fall back to using the host
-      // window title in the print header (e.g. some WebKit builds) don't
-      // print "Tauri + React + Typescript" across the top of the slip.
-      const parentTitle = document.title;
-      document.title = "";
-      if (iframe.contentDocument) iframe.contentDocument.title = "";
-      iframe.contentWindow?.focus();
-      iframe.contentWindow?.print();
-      setTimeout(() => { document.title = parentTitle; }, 1000);
-    } catch (e) {
-      void showAlert("Print failed: " + e);
-    }
-  }, 350);
+  void showPdfPreview({
+    html,
+    title: `Deposit slip #${deposit.id} — ${deposit.deposit_date}`,
+    filename: `Deposit_${deposit.id}_${deposit.deposit_date}.pdf`,
+    format: "letter",
+    margin: 0.4,
+  });
 }
