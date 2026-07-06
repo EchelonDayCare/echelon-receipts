@@ -10,8 +10,11 @@
 import { useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import {
-  getWaitlistEntry, updateWaitlistStatus, markConverted,
-  ageBand, waitDays, WAITLIST_STATUSES, type WaitlistEntry, type WaitlistStatus,
+  getWaitlistEntry, updateWaitlistStatus, markConverted, updateWaitlistPriority,
+  loadPriorityWeights, loadActiveStudentMap, scoreBreakdown,
+  DEFAULT_PRIORITY_WEIGHTS,
+  ageBand, waitDays, WAITLIST_STATUSES,
+  type WaitlistEntry, type WaitlistStatus, type PriorityWeights,
 } from "../../lib/waitlist";
 import { db } from "../../lib/db";
 
@@ -28,36 +31,71 @@ export default function DetailDrawer({
   const [students, setStudents] = useState<Student[]>([]);
   const [studentSearch, setStudentSearch] = useState("");
   const [busy, setBusy] = useState(false);
+  // v1.4.0 prioritization
+  const [weights, setWeights] = useState<PriorityWeights>(DEFAULT_PRIORITY_WEIGHTS);
+  const [activeMap, setActiveMap] = useState<Map<number, number>>(new Map());
+  const [fullTime, setFullTime] = useState<"" | "yes" | "no">("");
+  const [daysPerWeek, setDaysPerWeek] = useState<string>("");
+  const [siblingStudentId, setSiblingStudentId] = useState<string>("");
+  const [priorityNotes, setPriorityNotes] = useState<string>("");
 
   useEffect(() => {
     if (id == null) { setEntry(null); return; }
     (async () => {
-      const e = await getWaitlistEntry(id);
+      const [e, w, am] = await Promise.all([
+        getWaitlistEntry(id),
+        loadPriorityWeights(),
+        loadActiveStudentMap(),
+      ]);
       setEntry(e);
       setStatus((e?.status ?? "new") as WaitlistStatus);
       setNote(e?.status_note ?? "");
+      setWeights(w);
+      setActiveMap(am);
+      setFullTime(e?.full_time === 1 ? "yes" : e?.full_time === 0 ? "no" : "");
+      setDaysPerWeek(e?.days_per_week != null ? String(e.days_per_week) : "");
+      setSiblingStudentId(e?.sibling_student_id != null ? String(e.sibling_student_id) : "");
+      setPriorityNotes(e?.priority_notes ?? "");
     })();
   }, [id]);
 
+  // Load student roster for both the "link to existing" picker and the sibling dropdown.
   useEffect(() => {
-    if (!studentPickerOpen) return;
     (async () => {
       const d = await db();
       const rows = await d.select<Student[]>(
-        "SELECT id, name, year, father_name, mother_name FROM students WHERE active = 1 ORDER BY year DESC, name",
+        "SELECT id, name, year, father_name, mother_name FROM students ORDER BY year DESC, name",
       );
       setStudents(rows);
     })();
-  }, [studentPickerOpen]);
+  }, [id]);
 
   const filteredStudents = useMemo(() => {
     const q = studentSearch.trim().toLowerCase();
+    const activeOnly = students.filter((s) => activeMap.get(s.id) !== 0);
     const src = q
-      ? students.filter((s) =>
+      ? activeOnly.filter((s) =>
           [s.name, s.father_name, s.mother_name].filter(Boolean).join(" ").toLowerCase().includes(q))
-      : students;
+      : activeOnly;
     return src.slice(0, 50);
-  }, [students, studentSearch]);
+  }, [students, studentSearch, activeMap]);
+
+  const savePriority = async () => {
+    if (!entry) return;
+    setBusy(true);
+    try {
+      await updateWaitlistPriority(entry.id, {
+        full_time: fullTime === "yes" ? 1 : fullTime === "no" ? 0 : null,
+        days_per_week: daysPerWeek === "" ? null : Number(daysPerWeek),
+        sibling_student_id: siblingStudentId === "" ? null : Number(siblingStudentId),
+        priority_notes: priorityNotes.trim() || null,
+      });
+      const fresh = await getWaitlistEntry(entry.id);
+      setEntry(fresh);
+    } finally {
+      setBusy(false);
+    }
+  };
 
   if (id == null || !entry) return null;
 
@@ -194,6 +232,89 @@ export default function DetailDrawer({
           </div>
           <button className="btn primary" disabled={busy} onClick={saveStatus}>
             Save status
+          </button>
+        </div>
+
+        {/* Prioritization (v1.4.0) */}
+        <div className="card" style={{ marginBottom: 16 }}>
+          <h3 style={{ margin: "0 0 4px", fontSize: 14 }}>Prioritization</h3>
+          <div style={{ color: "var(--muted)", fontSize: 12, marginBottom: 12 }}>
+            Owner-editable signals that feed the priority score. Weights are configurable
+            in Waitlist → Settings.
+          </div>
+
+          {(() => {
+            // Live score preview from the in-drawer edits.
+            const preview: WaitlistEntry = {
+              ...entry,
+              full_time: fullTime === "yes" ? 1 : fullTime === "no" ? 0 : null,
+              days_per_week: daysPerWeek === "" ? null : Number(daysPerWeek),
+              sibling_student_id: siblingStudentId === "" ? null : Number(siblingStudentId),
+            };
+            const lines = scoreBreakdown(preview, weights, { siblingStudentActive: activeMap });
+            const total = lines.reduce((s, l) => s + l.points, 0);
+            return (
+              <div style={{
+                padding: "8px 10px", background: "#f8fafc", borderRadius: 6, marginBottom: 12,
+                border: "1px solid var(--border)",
+              }}>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                  <strong style={{ fontSize: 13 }}>Score: {total.toFixed(1)}</strong>
+                  <span style={{ fontSize: 11, color: "var(--muted)" }}>{lines.length} signal(s)</span>
+                </div>
+                {lines.length > 0 && (
+                  <ul style={{ margin: "6px 0 0", paddingLeft: 18, fontSize: 12, color: "var(--muted)" }}>
+                    {lines.map((l, i) => (
+                      <li key={i}>
+                        <strong style={{ color: "var(--text)" }}>+{l.points}</strong> {l.label}
+                        {l.note && <span> — {l.note}</span>}
+                      </li>
+                    ))}
+                  </ul>
+                )}
+              </div>
+            );
+          })()}
+
+          <div className="field">
+            <label>Days per week (0–5)</label>
+            <input
+              type="number" min={0} max={5}
+              value={daysPerWeek}
+              onChange={(e) => setDaysPerWeek(e.target.value)}
+              placeholder="e.g. 5"
+              style={{ width: 100 }}
+            />
+          </div>
+          <div className="field">
+            <label>Full-time (fallback if days/wk blank)</label>
+            <select value={fullTime} onChange={(e) => setFullTime(e.target.value as "" | "yes" | "no")}>
+              <option value="">— not specified —</option>
+              <option value="yes">Yes</option>
+              <option value="no">No</option>
+            </select>
+          </div>
+          <div className="field">
+            <label>Sibling of existing student</label>
+            <select value={siblingStudentId} onChange={(e) => setSiblingStudentId(e.target.value)}>
+              <option value="">— none —</option>
+              {students.map((s) => {
+                const status = activeMap.get(s.id) === 1 ? "current" : "alumni";
+                return (
+                  <option key={s.id} value={s.id}>
+                    {s.name} ({s.year}, {status})
+                  </option>
+                );
+              })}
+            </select>
+          </div>
+          <div className="field">
+            <label>Priority notes (private)</label>
+            <textarea rows={2} value={priorityNotes} onChange={(e) => setPriorityNotes(e.target.value)}
+                      placeholder="Why you ranked this family higher/lower — audit trail." />
+          </div>
+          <button className="btn primary" disabled={busy} onClick={savePriority}>
+            Save priority
           </button>
         </div>
 

@@ -3,8 +3,12 @@
 
 import { useEffect, useMemo, useState } from "react";
 import {
-  listWaitlist, syncOnScreenOpen, ageBand, waitDays, priorityScore,
-  WAITLIST_STATUSES, type WaitlistEntry, type WaitlistStatus, type AgeBand,
+  listWaitlist, syncOnScreenOpen, ageBand, waitDays, priorityScore, scoreBreakdown,
+  loadPriorityWeights, loadActiveStudentMap,
+  DEFAULT_PRIORITY_WEIGHTS,
+  WAITLIST_STATUSES,
+  type WaitlistEntry, type WaitlistStatus, type AgeBand,
+  type PriorityWeights,
 } from "../../lib/waitlist";
 import DetailDrawer from "./DetailDrawer";
 
@@ -30,10 +34,18 @@ export default function WaitlistList() {
   const [inBuildingOnly, setInBuildingOnly] = useState(false);
   const [search, setSearch] = useState("");
   const [openId, setOpenId] = useState<number | null>(null);
+  const [weights, setWeights] = useState<PriorityWeights>(DEFAULT_PRIORITY_WEIGHTS);
+  const [siblingActive, setSiblingActive] = useState<Map<number, number>>(new Map());
 
   const refresh = async () => {
-    const r = await listWaitlist({ statuses: [...statuses], search });
+    const [r, w, sm] = await Promise.all([
+      listWaitlist({ statuses: [...statuses], search }),
+      loadPriorityWeights(),
+      loadActiveStudentMap(),
+    ]);
     setRows(r);
+    setWeights(w);
+    setSiblingActive(sm);
   };
 
   useEffect(() => {
@@ -46,11 +58,12 @@ export default function WaitlistList() {
   useEffect(() => { void refresh(); /* eslint-disable-next-line */ }, [statuses, search]);
 
   const filtered = useMemo(() => {
+    const ctx = { siblingStudentActive: siblingActive };
     let r = rows;
     if (bands.size > 0) r = r.filter((e) => bands.has(ageBand(e.birthday)));
     if (inBuildingOnly) r = r.filter((e) => e.in_building === 1);
-    return [...r].sort((a, b) => priorityScore(b) - priorityScore(a));
-  }, [rows, bands, inBuildingOnly]);
+    return [...r].sort((a, b) => priorityScore(b, weights, ctx) - priorityScore(a, weights, ctx));
+  }, [rows, bands, inBuildingOnly, weights, siblingActive]);
 
   const defaultStatusSet =
     statuses.size === DEFAULT_STATUSES.length &&
@@ -166,6 +179,7 @@ export default function WaitlistList() {
         <table style={{ width: "100%", borderCollapse: "collapse" }}>
           <thead>
             <tr style={{ background: "#f8fafc" }}>
+              <Th>Score</Th>
               <Th>Child</Th>
               <Th>Age band</Th>
               <Th>Parent / Email</Th>
@@ -177,27 +191,41 @@ export default function WaitlistList() {
             </tr>
           </thead>
           <tbody>
-            {filtered.map((e) => (
-              <tr key={e.id} style={{ cursor: "pointer", borderTop: "1px solid var(--border)" }}
-                  onClick={() => setOpenId(e.id)}
-                  onMouseEnter={(ev) => (ev.currentTarget as HTMLTableRowElement).style.background = "#f8fafc"}
-                  onMouseLeave={(ev) => (ev.currentTarget as HTMLTableRowElement).style.background = ""}
-              >
-                <Td><strong>{e.child_name}</strong></Td>
-                <Td><span style={bandChipStyle(ageBand(e.birthday))}>{ageBand(e.birthday)}</span></Td>
-                <Td>
-                  <div>{e.parent_name || "—"}</div>
-                  <div style={{ fontSize: 12, color: "var(--muted)" }}>{e.parent_email || ""}</div>
-                </Td>
-                <Td>{e.phone || "—"}</Td>
-                <Td>{waitDays(e.submitted_at)}d ago</Td>
-                <Td>{e.target_start || "—"}</Td>
-                <Td>{e.in_building === 1 ? "✓" : e.in_building === 0 ? "—" : "?"}</Td>
-                <Td><span style={statusChipStyle(e.status)}>{e.status}</span></Td>
-              </tr>
-            ))}
+            {filtered.map((e) => {
+              const ctx = { siblingStudentActive: siblingActive };
+              const lines = scoreBreakdown(e, weights, ctx);
+              const total = lines.reduce((s, l) => s + l.points, 0);
+              const tip = lines.length
+                ? lines.map((l) => `+${l.points}  ${l.label}${l.note ? " (" + l.note + ")" : ""}`).join("\n")
+                : "No scored signals yet — add priority signals in the detail drawer.";
+              return (
+                <tr key={e.id} style={{ cursor: "pointer", borderTop: "1px solid var(--border)" }}
+                    onClick={() => setOpenId(e.id)}
+                    onMouseEnter={(ev) => (ev.currentTarget as HTMLTableRowElement).style.background = "#f8fafc"}
+                    onMouseLeave={(ev) => (ev.currentTarget as HTMLTableRowElement).style.background = ""}
+                >
+                  <Td>
+                    <span title={`Priority score: ${total.toFixed(1)}\n\n${tip}\n\nEdit weights in Waitlist → Settings.`}
+                          style={scoreChipStyle(total)}>
+                      {total.toFixed(1)}
+                    </span>
+                  </Td>
+                  <Td><strong>{e.child_name}</strong></Td>
+                  <Td><span style={bandChipStyle(ageBand(e.birthday))}>{ageBand(e.birthday)}</span></Td>
+                  <Td>
+                    <div>{e.parent_name || "—"}</div>
+                    <div style={{ fontSize: 12, color: "var(--muted)" }}>{e.parent_email || ""}</div>
+                  </Td>
+                  <Td>{e.phone || "—"}</Td>
+                  <Td>{waitDays(e.submitted_at)}d ago</Td>
+                  <Td>{e.target_start || "—"}</Td>
+                  <Td>{e.in_building === 1 ? "✓" : e.in_building === 0 ? "—" : "?"}</Td>
+                  <Td><span style={statusChipStyle(e.status)}>{e.status}</span></Td>
+                </tr>
+              );
+            })}
             {filtered.length === 0 && (
-              <tr><td colSpan={8} style={{ padding: 24, textAlign: "center", color: "var(--muted)" }}>No entries match these filters.</td></tr>
+              <tr><td colSpan={9} style={{ padding: 24, textAlign: "center", color: "var(--muted)" }}>No entries match these filters.</td></tr>
             )}
           </tbody>
         </table>
@@ -257,4 +285,17 @@ function statusChipStyle(status: string): React.CSSProperties {
   };
   const [bg, fg] = colors[status] || ["#f3f4f6", "#374151"];
   return { background: bg, color: fg, padding: "2px 8px", borderRadius: 8, fontSize: 12, fontWeight: 600, textTransform: "capitalize" };
+}
+
+function scoreChipStyle(total: number): React.CSSProperties {
+  // Bucketed color: green for high-priority (≥80), amber (40-80), grey (<40)
+  const bucket = total >= 80 ? ["#dcfce7", "#166534"]
+              : total >= 40 ? ["#fef3c7", "#92400e"]
+              :               ["#f1f5f9", "#475569"];
+  return {
+    background: bucket[0], color: bucket[1],
+    padding: "3px 10px", borderRadius: 8,
+    fontSize: 13, fontWeight: 700, cursor: "help",
+    fontVariantNumeric: "tabular-nums",
+  };
 }

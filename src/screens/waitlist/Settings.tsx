@@ -17,7 +17,11 @@
 import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { getSettings, setSetting } from "../../lib/db";
-import { syncWaitlist, readSyncState, type SyncStateRow } from "../../lib/waitlist";
+import {
+  syncWaitlist, readSyncState,
+  loadPriorityWeights, savePriorityWeights, DEFAULT_PRIORITY_WEIGHTS,
+  type SyncStateRow, type PriorityWeights,
+} from "../../lib/waitlist";
 import { showAlert, showConfirm } from "../../lib/dialogs";
 
 const SHEET_URL_RE = /\/spreadsheets\/d\/([a-zA-Z0-9-_]+)/;
@@ -35,6 +39,8 @@ export default function WaitlistSettings() {
   const [syncState, setSyncState] = useState<SyncStateRow | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [testResult, setTestResult] = useState<{ ok: boolean; msg: string } | null>(null);
+  const [weights, setWeights] = useState<PriorityWeights>(DEFAULT_PRIORITY_WEIGHTS);
+  const [weightsSaved, setWeightsSaved] = useState<null | "ok" | "err">(null);
 
   const loadAll = async () => {
     const s = await getSettings();
@@ -46,6 +52,7 @@ export default function WaitlistSettings() {
     setCredsLoaded(st.credentials_loaded);
     setMaskedEmail(st.client_email_masked);
     setSyncState(await readSyncState());
+    setWeights(await loadPriorityWeights());
   };
 
   useEffect(() => { void loadAll(); }, []);
@@ -247,6 +254,62 @@ export default function WaitlistSettings() {
           </select>
         </div>
         <button className="btn" disabled={busy === "sync" || !credsLoaded} onClick={syncNow}>Sync now</button>
+      </div>
+
+      <div className="card" style={{ marginBottom: 16 }}>
+        <h3 style={{ margin: "0 0 4px", fontSize: 14 }}>Priority weights</h3>
+        <div style={{ color: "var(--muted)", fontSize: 12, marginBottom: 12 }}>
+          Tune how strongly each signal influences the priority score. Set a weight to 0 to
+          disable a signal entirely. Reset to defaults if the ranking feels off.
+        </div>
+        {(
+          [
+            ["retention_per_month", "Retention runway (per month, capped 24)", "Higher = favor kids who will stay longer before BC kindergarten."],
+            ["toilet_trained",      "Toilet trained (flat bonus)",             "Big time-saver for the 3-5 room."],
+            ["in_building",         "In-building family (flat bonus)",         "Same-building families → foot traffic + easy pickup."],
+            ["sibling_current",     "Sibling of current student (flat)",       "Retention & word-of-mouth."],
+            ["sibling_alumni",      "Sibling of alumni (flat)",                "Returning family loyalty."],
+            ["wait_day",            "Wait time (per day, capped 365 d)",       "Small trickle-up so long-waiters don't get stuck."],
+            ["days_per_week",       "Enrollment intensity (per day, 0-5)",     "5-day family scores 5× this weight; full-time falls back to 5 if days/wk blank."],
+          ] as [keyof PriorityWeights, string, string][]
+        ).map(([key, label, help]) => (
+          <div key={key} className="field" style={{ display: "grid", gridTemplateColumns: "1fr 120px", gap: 12, alignItems: "center" }}>
+            <div>
+              <label style={{ display: "block", fontSize: 13 }}>{label}</label>
+              <div style={{ color: "var(--muted)", fontSize: 11 }}>{help}</div>
+            </div>
+            <input
+              type="number" step="0.1" min="0"
+              value={String(weights[key])}
+              onChange={(e) => {
+                const n = Number(e.target.value);
+                setWeights({ ...weights, [key]: Number.isFinite(n) ? n : 0 });
+                setWeightsSaved(null);
+              }}
+            />
+          </div>
+        ))}
+        <div style={{ display: "flex", gap: 8, marginTop: 8, alignItems: "center" }}>
+          <button
+            className="btn primary"
+            disabled={busy === "weights"}
+            onClick={async () => {
+              setBusy("weights");
+              try {
+                await savePriorityWeights(weights);
+                setWeightsSaved("ok");
+              } catch {
+                setWeightsSaved("err");
+              } finally { setBusy(null); }
+            }}
+          >Save weights</button>
+          <button
+            className="btn"
+            onClick={() => { setWeights(DEFAULT_PRIORITY_WEIGHTS); setWeightsSaved(null); }}
+          >Reset to defaults</button>
+          {weightsSaved === "ok" && <span style={{ color: "var(--success, #166534)", fontSize: 13 }}>✓ Saved</span>}
+          {weightsSaved === "err" && <span style={{ color: "var(--danger)", fontSize: 13 }}>Save failed</span>}
+        </div>
       </div>
 
       <div className="card">

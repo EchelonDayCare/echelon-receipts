@@ -47,6 +47,11 @@ export interface WaitlistEntry {
   created_at: string;
   updated_at: string;
   converted_student_id: number | null;
+  // v1.4.0 prioritization signals (all nullable — absence = no bonus)
+  full_time: number | null;
+  days_per_week: number | null;
+  sibling_student_id: number | null;
+  priority_notes: string | null;
 }
 
 export type AgeBand = "Infant" | "Toddler" | "3-5yr" | "School-age" | "Unknown";
@@ -146,8 +151,175 @@ export function waitDays(submittedAt: string | null | undefined): number {
   return Math.max(0, Math.floor((Date.now() - t) / 86_400_000));
 }
 
-export function priorityScore(e: Pick<WaitlistEntry, "in_building" | "submitted_at">): number {
-  return (e.in_building === 1 ? 100 : 0) + waitDays(e.submitted_at);
+export function priorityScore(
+  e: WaitlistEntry,
+  weights: PriorityWeights = DEFAULT_PRIORITY_WEIGHTS,
+  ctx: PriorityCtx = {},
+): number {
+  return scoreBreakdown(e, weights, ctx).reduce((sum, l) => sum + l.points, 0);
+}
+
+// ─── v1.4.0 Prioritization ────────────────────────────────────────────
+// A weighted linear score so the owner can rank a busy waitlist without
+// staring at every row. All weights are user-editable in Settings; the
+// breakdown is exposed to the UI so a parent asking "why not us?" gets a
+// defensible answer.
+
+export interface PriorityWeights {
+  retention_per_month: number;   // × min(months_until_kindergarten, 24)
+  toilet_trained:      number;   // flat if toilet_trained = 1
+  in_building:         number;   // flat if in_building = 1
+  sibling_current:     number;   // flat if sibling_student_id → active student
+  sibling_alumni:      number;   // flat if sibling_student_id → inactive student
+  wait_day:            number;   // × min(days_since_submitted, 365)
+  days_per_week:       number;   // × (days_per_week ?? full_time?5:0), capped 5
+}
+
+export const DEFAULT_PRIORITY_WEIGHTS: PriorityWeights = {
+  retention_per_month: 3,
+  toilet_trained:      15,
+  in_building:         20,
+  sibling_current:     30,
+  sibling_alumni:      10,
+  wait_day:            0.1,
+  days_per_week:       3,
+};
+
+const WEIGHT_KEYS: Record<keyof PriorityWeights, string> = {
+  retention_per_month: "waitlist_weight_retention_per_month",
+  toilet_trained:      "waitlist_weight_toilet_trained",
+  in_building:         "waitlist_weight_in_building",
+  sibling_current:     "waitlist_weight_sibling_current",
+  sibling_alumni:      "waitlist_weight_sibling_alumni",
+  wait_day:            "waitlist_weight_wait_day",
+  days_per_week:       "waitlist_weight_days_per_week",
+};
+
+export async function loadPriorityWeights(): Promise<PriorityWeights> {
+  // Import lazily to avoid a static cycle (db.ts ← waitlist.ts).
+  const { getSettings } = await import("./db");
+  const s = await getSettings();
+  const out = { ...DEFAULT_PRIORITY_WEIGHTS };
+  (Object.keys(WEIGHT_KEYS) as (keyof PriorityWeights)[]).forEach((k) => {
+    const raw = s[WEIGHT_KEYS[k]];
+    const n = raw == null ? NaN : Number(raw);
+    if (Number.isFinite(n)) out[k] = n;
+  });
+  return out;
+}
+
+export async function savePriorityWeights(w: PriorityWeights): Promise<void> {
+  const { setSetting } = await import("./db");
+  await Promise.all(
+    (Object.keys(WEIGHT_KEYS) as (keyof PriorityWeights)[]).map((k) =>
+      setSetting(WEIGHT_KEYS[k], String(w[k])),
+    ),
+  );
+}
+
+export interface PriorityCtx {
+  /** Map from student.id → active flag (1|0). Enables sibling scoring. */
+  siblingStudentActive?: Map<number, number>;
+  /** Injectable clock for tests. Defaults to now(). */
+  today?: Date;
+}
+
+export interface ScoreLine {
+  label: string;
+  points: number;
+  note?: string;
+}
+
+// BC kindergarten cutoff: Sep 1 of the calendar year the child turns 5 by Dec 31.
+// (School Act — school-age is age-5-by-Dec-31.)
+export function kindergartenStartFor(birthdayISO: string): Date | null {
+  const bd = new Date(birthdayISO);
+  if (isNaN(bd.getTime())) return null;
+  return new Date(bd.getUTCFullYear() + 5, 8, 1); // month 8 = September
+}
+
+export function retentionMonths(
+  e: Pick<WaitlistEntry, "birthday" | "target_start">,
+  today: Date = new Date(),
+): number {
+  if (!e.birthday) return 0;
+  const kStart = kindergartenStartFor(e.birthday);
+  if (!kStart) return 0;
+  const targetStart = e.target_start ? new Date(e.target_start) : today;
+  const from = isNaN(targetStart.getTime()) || targetStart < today ? today : targetStart;
+  const months = (kStart.getTime() - from.getTime()) / (1000 * 60 * 60 * 24 * 30.44);
+  return Math.max(0, Math.min(24, months));
+}
+
+export function scoreBreakdown(
+  e: WaitlistEntry,
+  weights: PriorityWeights = DEFAULT_PRIORITY_WEIGHTS,
+  ctx: PriorityCtx = {},
+): ScoreLine[] {
+  const today = ctx.today ?? new Date();
+  const lines: ScoreLine[] = [];
+
+  // Retention: capped 24 months, rounded for display
+  const months = retentionMonths(e, today);
+  if (months > 0 && weights.retention_per_month > 0) {
+    lines.push({
+      label: "Retention runway",
+      points: round1(months * weights.retention_per_month),
+      note: `${months.toFixed(1)} mo until BC kindergarten`,
+    });
+  }
+
+  if (e.toilet_trained === 1 && weights.toilet_trained > 0) {
+    lines.push({ label: "Toilet trained", points: weights.toilet_trained });
+  }
+
+  if (e.in_building === 1 && weights.in_building > 0) {
+    lines.push({ label: "In-building family", points: weights.in_building });
+  }
+
+  if (e.sibling_student_id != null) {
+    const active = ctx.siblingStudentActive?.get(e.sibling_student_id);
+    if (active === 1 && weights.sibling_current > 0) {
+      lines.push({
+        label: "Sibling of current student",
+        points: weights.sibling_current,
+        note: `Student #${e.sibling_student_id}`,
+      });
+    } else if (active === 0 && weights.sibling_alumni > 0) {
+      lines.push({
+        label: "Sibling of alumni",
+        points: weights.sibling_alumni,
+        note: `Student #${e.sibling_student_id}`,
+      });
+    }
+  }
+
+  const waited = Math.min(waitDays(e.submitted_at), 365);
+  if (waited > 0 && weights.wait_day > 0) {
+    lines.push({
+      label: "Wait time",
+      points: round1(waited * weights.wait_day),
+      note: `${waited} d on list`,
+    });
+  }
+
+  // days_per_week wins if set; else fall back to full_time as 5-day proxy
+  let dpw = e.days_per_week ?? null;
+  if (dpw == null && e.full_time === 1) dpw = 5;
+  if (dpw != null && dpw > 0 && weights.days_per_week > 0) {
+    const capped = Math.min(5, Math.max(0, dpw));
+    lines.push({
+      label: "Enrollment intensity",
+      points: round1(capped * weights.days_per_week),
+      note: `${capped} d/wk`,
+    });
+  }
+
+  return lines;
+}
+
+function round1(n: number): number {
+  return Math.round(n * 10) / 10;
 }
 
 // SHA-256 → hex string via SubtleCrypto (available in Tauri webview).
@@ -515,6 +687,34 @@ export async function markConverted(id: number, studentId: number): Promise<void
       WHERE id = ?`,
     [studentId, nowIso, nowIso, id],
   );
+}
+
+export interface PriorityFields {
+  full_time: number | null;
+  days_per_week: number | null;
+  sibling_student_id: number | null;
+  priority_notes: string | null;
+}
+
+export async function updateWaitlistPriority(id: number, p: PriorityFields): Promise<void> {
+  const nowIso = new Date().toISOString();
+  await execRetry(
+    `UPDATE waitlist_entries
+        SET full_time = ?, days_per_week = ?, sibling_student_id = ?,
+            priority_notes = ?, updated_at = ?
+      WHERE id = ?`,
+    [p.full_time, p.days_per_week, p.sibling_student_id, p.priority_notes, nowIso, id],
+  );
+}
+
+export async function loadActiveStudentMap(): Promise<Map<number, number>> {
+  const d = await db();
+  const rows = await d.select<{ id: number; active: number }[]>(
+    "SELECT id, active FROM students",
+  );
+  const m = new Map<number, number>();
+  for (const r of rows) m.set(r.id, r.active);
+  return m;
 }
 
 // Convenience for KPIs.

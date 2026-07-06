@@ -918,6 +918,33 @@ Thanks,
     ["drill_cadence_lockdown_days", "90"],
     ["drill_cadence_evacuation_days", "180"],
   ] as const) await setting(k, v);
+
+  // ─── Migration 022 — Waitlist Prioritization (v1.4.0) ─────────────────
+  // Additive columns on waitlist_entries capturing owner-editable operational
+  // signals used by the priority score (see src/lib/waitlist.ts). All nullable;
+  // absence just means "no bonus for that signal" — safe on existing rows.
+  //   full_time            1 if the family wants full-time, 0 for part-time
+  //   days_per_week        0–5 (dominant signal — overrides full_time if set)
+  //   sibling_student_id   FK-lite into students(id); enables sibling bonus
+  //   priority_notes       owner memo about the priority call (audit)
+  await addCol("waitlist_entries", "full_time", "INTEGER");
+  await addCol("waitlist_entries", "days_per_week", "INTEGER");
+  await addCol("waitlist_entries", "sibling_student_id", "INTEGER");
+  await addCol("waitlist_entries", "priority_notes", "TEXT");
+
+  // Weight settings — owner-tunable via /waitlist/settings. Stored as strings
+  // (settings table is TEXT-typed), parsed as Number() in loadPriorityWeights.
+  // Defaults are chosen so an in-building, toilet-trained 3-yr-old with a
+  // current-family sibling comfortably outranks a fresh unrelated applicant.
+  for (const [k, v] of [
+    ["waitlist_weight_retention_per_month", "3"],
+    ["waitlist_weight_toilet_trained",       "15"],
+    ["waitlist_weight_in_building",          "20"],
+    ["waitlist_weight_sibling_current",      "30"],
+    ["waitlist_weight_sibling_alumni",       "10"],
+    ["waitlist_weight_wait_day",             "0.1"],
+    ["waitlist_weight_days_per_week",        "3"],
+  ] as const) await setting(k, v);
 }
 
 // ---------- Person identity ----------

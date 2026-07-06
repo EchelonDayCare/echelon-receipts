@@ -4,6 +4,34 @@ All notable changes shipped as a DMG. Only entries the owner has approved
 for release are listed here — "code-complete, awaiting ship approval" work
 lives in the session plan.md until it ships.
 
+## v1.4.0 — Waitlist Prioritization (code-complete, awaiting ship approval)
+
+Turn a raw sync'd waitlist into a ranked, defensible queue. Owner still makes
+the call, but the list surfaces the strongest candidates first with a
+transparent breakdown.
+
+### Added
+- **Weighted priority score** on every waitlist entry. Signals:
+  retention runway (months until BC kindergarten, capped 24),
+  toilet-trained, in-building family, sibling of current/alumni student,
+  wait time (capped 365d), enrollment intensity (days/wk or full-time).
+- **Score column** on `Waitlist → All` with hover tooltip showing each
+  signal's contribution ("+30 sibling of current student", "+15 toilet
+  trained"…). Sort defaults to score descending.
+- **Prioritization card** in the waitlist detail drawer with editors for
+  days/week, full-time, sibling-of, and private priority notes. Live
+  score preview updates as you edit.
+- **Priority weights panel** in `Waitlist → Settings`. Every weight is
+  tunable, defaults are restorable, and setting a weight to 0 disables
+  that signal entirely.
+
+### Data
+- Migration 022: additive columns on `waitlist_entries`
+  (`full_time`, `days_per_week`, `sibling_student_id`, `priority_notes`)
+  and 7 new `waitlist_weight_*` settings rows.
+- Fully backward compatible with v1.3.x DBs — all new columns nullable,
+  new settings idempotent.
+
 ## v1.3.0 — Organizer / Ops Dashboard (code-complete, awaiting ship approval)
 
 Third module in the Phase-2 wave. A single "what needs my attention?" page
