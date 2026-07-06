@@ -29,12 +29,11 @@ export async function askEchelon(opts: AskOptions): Promise<AskResult> {
   if (settings.azure_ai_key_set !== "1") {
     throw new Error("Azure AI key is not configured. Set it in Configuration → Identity.");
   }
-  const apiKey = await invoke<string | null>("keychain_get", { key: "azure_ai_key" });
-  if (!apiKey) throw new Error("Azure AI key not found in keychain.");
+  // H-7: the Azure AI key is resolved server-side (see ask_echelon.rs) —
+  // it never crosses the IPC boundary as a plaintext argument.
   const redact = opts.redact ?? (settings.ask_echelon_redact !== "0");
   return await invoke<AskResult>("ask_echelon", {
     args: {
-      azure_ai_key: apiKey,
       question: opts.question,
       redact,
       allowed_tables: opts.allowedTables ?? null,

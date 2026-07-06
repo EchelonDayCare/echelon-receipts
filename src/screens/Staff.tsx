@@ -183,11 +183,7 @@ export default function StaffScreen() {
 
     setOcrBusy(true);
     setConsensus(null);
-    let azureKey: string | null = null;
     try {
-      azureKey = await invoke<string | null>("keychain_get", { key: "azure_ai_key" });
-      if (!azureKey) throw new Error("Azure AI Foundry key not found in keychain — re-save it in Settings.");
-
       // QR month lock — same fast path as before.
       let qrMonthKey: string | undefined;
       let qrNote: string | undefined;
@@ -206,7 +202,6 @@ export default function StaffScreen() {
       const bytes = await readFile(picked);
       const mime = fileToMime(picked);
       const result = await extractTimesheetConsensus({
-        azureKey,
         imageBytes: bytes, mimeType: mime,
         monthYear: qrMonthKey || monthKey(year, month),
         knownStaffNames: activeStaff.map((s) => s.name),
@@ -259,9 +254,7 @@ export default function StaffScreen() {
         notify(msg, red || flagged ? "err" : "ok");
       }
     } catch (e: any) {
-      const raw = String(e?.message || e);
-      let safe = raw;
-      if (azureKey)  safe = safe.split(azureKey).join("***");
+      const safe = String(e?.message || e);
       notify("OCR failed: " + safe, "err");
     } finally { setOcrBusy(false); }
   }

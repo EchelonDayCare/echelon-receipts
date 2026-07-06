@@ -25,13 +25,12 @@ function bytesToB64(bytes: Uint8Array): string {
 }
 
 export async function extractVisaStatement(opts: {
-  azureKey: string;
   fileBytes: Uint8Array;
   mimeType: string;
 }): Promise<ExtractVisaResult> {
   const file_b64 = bytesToB64(opts.fileBytes);
   return await invoke<ExtractVisaResult>("extract_visa_statement", {
-    args: { azure_ai_key: opts.azureKey, file_b64, mime_type: opts.mimeType },
+    args: { file_b64, mime_type: opts.mimeType },
   });
 }
 

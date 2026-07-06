@@ -34,7 +34,6 @@ const SAMPLE_ROWS_PER_TABLE: usize = 3;
 
 #[derive(Deserialize)]
 pub struct AskEchelonArgs {
-    pub azure_ai_key: String,
     pub question: String,
     pub redact: bool,
     /// Optional whitelist of table names the model is allowed to see. Empty
@@ -65,16 +64,16 @@ pub async fn ask_echelon(app: AppHandle, args: AskEchelonArgs) -> Result<AskEche
     if args.question.trim().is_empty() {
         return Err("Question is empty.".to_string());
     }
-    if args.azure_ai_key.trim().is_empty() {
-        return Err("Azure AI key is not configured. Set it in Configuration → Identity.".to_string());
-    }
+    // H-7: resolve the Azure AI key server-side instead of accepting it as a
+    // plaintext IPC argument.
+    let azure_ai_key = crate::secrets::get_secret("azure_ai_key")?;
 
     // Build schema context in Rust (fresh each call — schema is tiny, cache
     // would only save a few ms and adds a stale-cache footgun during dev).
     let schema_ctx = build_schema_context(&db_path, args.redact, args.allowed_tables.as_ref())?;
 
     // ── Step 1: Ask the model for SQL ───────────────────────────────────
-    let sql_raw = generate_sql(&args.azure_ai_key, &args.question, &schema_ctx).await?;
+    let sql_raw = generate_sql(&azure_ai_key, &args.question, &schema_ctx).await?;
     let sql = validate_and_normalize_sql(&sql_raw)?;
 
     // ── Step 2: Execute against a read-only connection ──────────────────
@@ -82,7 +81,7 @@ pub async fn ask_echelon(app: AppHandle, args: AskEchelonArgs) -> Result<AskEche
 
     // ── Step 3: Summarise ───────────────────────────────────────────────
     let (summary, chart_hint) = summarize(
-        &args.azure_ai_key, &args.question, &sql, &columns, &rows, args.redact,
+        &azure_ai_key, &args.question, &sql, &columns, &rows, args.redact,
     ).await.unwrap_or_else(|_| {
         // A summary failure should not fail the whole query — the user still
         // gets the table.

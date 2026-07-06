@@ -64,15 +64,12 @@ export default function Attendance() {
     }
     setOcrBusy(true);
     setOcrResult(null);
-    let apiKey: string | null = null;
     try {
-      apiKey = await invoke<string | null>("keychain_get", { key: "azure_ai_key" });
-      if (!apiKey) throw new Error("Azure AI Foundry key not found in keychain — re-save it in Settings.");
       const bytes = await readFile(picked);
       const mime = fileToMime(picked);
       const studentList = rows.map((r) => ({ id: r.student_id, name: r.student_name }));
       const result = await extractAttendance({
-        azureKey: apiKey, imageBytes: bytes, mimeType: mime,
+        imageBytes: bytes, mimeType: mime,
         targetDate: date,
         knownStudentNames: studentList.map((s) => s.name),
       });
@@ -87,8 +84,7 @@ export default function Attendance() {
         show(`Read ${result.rows.length} entries. Review and import below.`);
       }
     } catch (e: any) {
-      const raw = String(e?.message || e);
-      const safe = apiKey ? raw.split(apiKey).join("***") : raw;
+      const safe = String(e?.message || e);
       show("OCR failed: " + safe, "err");
     } finally { setOcrBusy(false); }
   }

@@ -37,8 +37,6 @@ pub struct ConsensusArgs {
     pub mime_type: String,
     pub month_year: String,
     pub known_staff_names: Vec<String>,
-    // Azure AI Foundry key (serves both Doc AI and Mistral OCR).
-    pub azure_ai_key: Option<String>,
     // If false, skip the Mistral OCR (digits witness) call entirely.
     // Defaults to true when omitted so older clients keep working.
     #[serde(default)]
@@ -1225,8 +1223,12 @@ pub async fn extract_timesheet_consensus(args: ConsensusArgs) -> Result<Consensu
         .decode(args.image_b64.as_bytes())
         .map_err(|e| format!("image base64: {e}"))?;
 
+    // H-7: resolve the Azure AI key server-side instead of accepting it as
+    // a plaintext IPC argument.
+    let azure_ai_key: Option<String> = crate::secrets::get_secret_opt("azure_ai_key");
+
     let secrets_owned: Vec<String> = [
-        args.azure_ai_key.clone().unwrap_or_default(),
+        azure_ai_key.clone().unwrap_or_default(),
     ].into_iter().filter(|s| !s.is_empty()).collect();
 
     let redact_now = |s: String| {
@@ -1275,7 +1277,7 @@ pub async fn extract_timesheet_consensus(args: ConsensusArgs) -> Result<Consensu
     macro_rules! call_with_retries {
         ($name:literal, $call:expr) => {{
             let started = Instant::now();
-            let key = args.azure_ai_key.clone();
+            let key = azure_ai_key.clone();
             let res = match key {
                 Some(k) if !k.is_empty() => {
                     let mut last: Result<(Vec<ExtractedRow>, Option<String>, String), String> =

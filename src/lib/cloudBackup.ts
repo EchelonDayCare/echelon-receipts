@@ -51,14 +51,13 @@ export async function sendCloudBackup(forMonthKey: string): Promise<CloudBackupR
   if (!recipient) {
     return { ok: false, monthKey: forMonthKey, recipient: "", bytes: 0, error: "No backup recipient email configured." };
   }
-  const password = await invoke<string | null>("keychain_get", { key: "smtp_password" });
-  if (!password) {
-    return { ok: false, monthKey: forMonthKey, recipient, bytes: 0, error: "SMTP password not set." };
-  }
   const host = (s.smtp_host || "").trim();
   const port = parseInt(s.smtp_port || "587", 10);
   if (!host || !port) {
     return { ok: false, monthKey: forMonthKey, recipient, bytes: 0, error: "SMTP host/port not set." };
+  }
+  if (s.smtp_password_set !== "1") {
+    return { ok: false, monthKey: forMonthKey, recipient, bytes: 0, error: "SMTP password not set." };
   }
 
   // Flush the WAL into the main .db file before reading, otherwise recent
@@ -78,7 +77,6 @@ export async function sendCloudBackup(forMonthKey: string): Promise<CloudBackupR
       smtp_host: host,
       smtp_port: port,
       smtp_user: (s.smtp_user || sender).trim(),
-      smtp_password: password,
       from_name: s.sender_name || daycare,
       from_email: sender,
       to: [recipient],

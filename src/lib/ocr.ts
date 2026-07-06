@@ -37,7 +37,6 @@ function bytesToB64(bytes: Uint8Array): string {
 }
 
 export async function extractTimesheetConsensus(opts: {
-  azureKey: string | null;
   imageBytes: Uint8Array;
   mimeType: string;
   monthYear: string;
@@ -52,7 +51,6 @@ export async function extractTimesheetConsensus(opts: {
       mime_type: opts.mimeType,
       month_year: opts.monthYear,
       known_staff_names: opts.knownStaffNames,
-      azure_ai_key: opts.azureKey,
       enable_mistral_ocr: opts.enableMistralOcr ?? true,
       enable_azure_di: opts.enableAzureDi ?? true,
     },

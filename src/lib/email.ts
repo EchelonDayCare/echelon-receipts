@@ -120,8 +120,7 @@ export async function sendAnnualReceiptEmail(opts: {
 }): Promise<void> {
   const { pdfBytes, filename, subject, body, recipients, settings: s } = opts;
   if (recipients.length === 0) throw new Error("No recipient email addresses.");
-  const password = await invoke<string | null>("keychain_get", { key: "smtp_password" });
-  if (!password) throw new Error("SMTP password not set. Open Settings → Email and save it first.");
+  if (s.smtp_password_set !== "1") throw new Error("SMTP password not set. Open Settings → Email and save it first.");
 
   const sender = (s.sender_email || s.contact_email || "").trim();
   if (!sender) throw new Error("Sender email not set. Open Settings → Email.");
@@ -135,7 +134,6 @@ export async function sendAnnualReceiptEmail(opts: {
       args: {
         smtp_host: host, smtp_port: port,
         smtp_user: (s.smtp_user || sender).trim(),
-        smtp_password: password,
         from_name: s.sender_name || s.daycare_name || "Echelon Daycare",
         from_email: sender,
         to: recipients, cc: [],
@@ -173,8 +171,7 @@ export async function sendReceiptEmail(opts: {
 }): Promise<void> {
   const { receipt: r, recipients, settings: s } = opts;
   if (recipients.length === 0) throw new Error("No recipient email addresses.");
-  const password = await invoke<string | null>("keychain_get", { key: "smtp_password" });
-  if (!password) throw new Error("SMTP password not set. Open Settings → Email and save it first.");
+  if (s.smtp_password_set !== "1") throw new Error("SMTP password not set. Open Settings → Email and save it first.");
 
   const sender = (s.sender_email || s.contact_email || "").trim();
   if (!sender) throw new Error("Sender email not set. Open Settings → Email.");
@@ -195,7 +192,6 @@ export async function sendReceiptEmail(opts: {
         smtp_host: host,
         smtp_port: port,
         smtp_user: (s.smtp_user || sender).trim(),
-        smtp_password: password,
         from_name: s.sender_name || s.daycare_name || "Echelon Daycare",
         from_email: sender,
         to: recipients,
@@ -240,8 +236,7 @@ export async function sendSubsidyStatementEmail(opts: {
 }
 
 export async function sendTestEmail(s: SettingsMap): Promise<void> {
-  const password = await invoke<string | null>("keychain_get", { key: "smtp_password" });
-  if (!password) throw new Error("Save the SMTP password first.");
+  if (s.smtp_password_set !== "1") throw new Error("Save the SMTP password first.");
   const sender = (s.sender_email || s.contact_email || "").trim();
   if (!sender) throw new Error("Sender email not set.");
   const host = (s.smtp_host || "").trim();
@@ -253,7 +248,6 @@ export async function sendTestEmail(s: SettingsMap): Promise<void> {
       smtp_host: host,
       smtp_port: port,
       smtp_user: (s.smtp_user || sender).trim(),
-      smtp_password: password,
       from_name: s.sender_name || "Echelon Daycare",
       from_email: sender,
       to: [sender],

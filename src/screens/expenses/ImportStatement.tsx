@@ -1,9 +1,9 @@
 import { useState, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
-import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
 import { readFile } from "@tauri-apps/plugin-fs";
 import { showConfirm } from "../../lib/dialogs";
+import { getSettings } from "../../lib/db";
 import {
   extractVisaStatement, guessCategory, PAYMENT_SENTINEL,
   type ExtractedVisaTxn, type ExtractVisaResult,
@@ -97,15 +97,15 @@ export default function ImportStatement() {
     setBusy(true);
     setStatus("Reading file…");
     try {
-      const apiKey = await invoke<string | null>("keychain_get", { key: "azure_ai_key" });
-      if (!apiKey) {
-        setErr("Azure AI Foundry key not found in keychain. Add it in Configuration → Optional features.");
+      const settings = await getSettings();
+      if (settings.azure_ai_key_set !== "1") {
+        setErr("Azure AI Foundry key not configured. Add it in Configuration → Optional features.");
         setBusy(false); return;
       }
       const bytes = await readFile(picked);
       const mime = fileMime(picked);
       setStatus("Extracting transactions with Azure Mistral Document AI… (30-90s for a full statement)");
-      const result = await extractVisaStatement({ azureKey: apiKey, fileBytes: bytes, mimeType: mime });
+      const result = await extractVisaStatement({ fileBytes: bytes, mimeType: mime });
 
       // Sanity: transactions must have valid YYYY-MM-DD dates and finite amounts.
       const clean = (result.transactions || []).filter((t) =>

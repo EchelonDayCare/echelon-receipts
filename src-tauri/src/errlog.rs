@@ -79,7 +79,22 @@ fn epoch_to_ymdhms(secs: u64) -> (i32, u32, u32, u32, u32, u32) {
 #[tauri::command]
 pub fn append_error_log(level: String, message: String) -> Result<(), String> {
     let path = LOG_PATH.get().ok_or_else(|| "log not initialised".to_string())?;
-    write_line(path, &level, &message);
+    // M-6: this command is reachable from any JS code path (including a
+    // compromised/renderer-XSS'd frontend), so treat `level` as untrusted
+    // input — allowlist the known tags rather than writing anything the
+    // caller sends, and cap the message body so a single call can't blow
+    // past the rotation threshold in one write.
+    const ALLOWED_LEVELS: &[&str] = &["ERROR", "WARN", "INFO"];
+    let level = if ALLOWED_LEVELS.contains(&level.as_str()) { level } else { "WARN".to_string() };
+    const MAX_MESSAGE_BYTES: usize = 8 * 1024;
+    let truncated_message = if message.len() > MAX_MESSAGE_BYTES {
+        let mut cut = MAX_MESSAGE_BYTES;
+        while cut > 0 && !message.is_char_boundary(cut) { cut -= 1; }
+        format!("{}… [truncated, {} bytes total]", &message[..cut], message.len())
+    } else {
+        message
+    };
+    write_line(path, &level, &truncated_message);
     Ok(())
 }
 

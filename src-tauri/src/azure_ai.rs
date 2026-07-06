@@ -79,7 +79,6 @@ async fn call_mistral_doc_ai(
 
 #[derive(Deserialize)]
 pub struct ExtractAttendanceArgs {
-    pub azure_ai_key: String,
     pub image_b64: String,
     pub mime_type: String,
     pub target_date: String,             // yyyy-mm-dd
@@ -137,9 +136,9 @@ pub async fn extract_attendance(args: ExtractAttendanceArgs) -> Result<ExtractAt
         "additionalProperties": false
     });
 
-    let key_for_redact = args.azure_ai_key.clone();
+    let key_for_redact = crate::secrets::get_secret("azure_ai_key")?;
     let annotation = call_mistral_doc_ai(
-        &args.azure_ai_key, &args.image_b64, &args.mime_type, schema, "AttendanceExtraction"
+        &key_for_redact, &args.image_b64, &args.mime_type, schema, "AttendanceExtraction"
     ).await?;
 
     let parsed: serde_json::Value = serde_json::from_str(&annotation)
@@ -169,7 +168,6 @@ pub async fn extract_attendance(args: ExtractAttendanceArgs) -> Result<ExtractAt
 
 #[derive(Deserialize)]
 pub struct ExtractVisaArgs {
-    pub azure_ai_key: String,
     pub file_b64: String,
     pub mime_type: String,
 }
@@ -220,9 +218,9 @@ pub async fn extract_visa_statement(args: ExtractVisaArgs) -> Result<ExtractVisa
         "additionalProperties": false
     });
 
-    let key_for_redact = args.azure_ai_key.clone();
+    let key_for_redact = crate::secrets::get_secret("azure_ai_key")?;
     let annotation = call_mistral_doc_ai(
-        &args.azure_ai_key, &args.file_b64, &args.mime_type, schema, "VisaStatementExtraction"
+        &key_for_redact, &args.file_b64, &args.mime_type, schema, "VisaStatementExtraction"
     ).await?;
 
     let parsed: serde_json::Value = serde_json::from_str(&annotation)

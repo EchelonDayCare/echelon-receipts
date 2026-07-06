@@ -10,6 +10,8 @@ mod preprocess;
 mod restore;
 mod waitlist;
 mod documents;
+mod path_guard;
+mod secrets;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {

@@ -41,6 +41,9 @@ pub async fn documents_export_zip(
         rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
     ).map_err(|e| format!("open sqlite: {e}"))?;
 
+    // H-8: don't trust an arbitrary caller-supplied destination — constrain
+    // writes to the app data dir / Documents / Downloads and reject symlinks.
+    let dest_path = crate::path_guard::validate_new_file_dest(&app_handle, &dest_path)?;
     let out_file = File::create(&dest_path).map_err(|e| format!("create zip: {e}"))?;
     let mut zip = zip::ZipWriter::new(out_file);
     let opts = SimpleFileOptions::default()

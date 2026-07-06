@@ -26,10 +26,9 @@ fn app_db_paths(app: &tauri::AppHandle) -> Result<(PathBuf, PathBuf, PathBuf), S
 
 #[tauri::command]
 pub fn stage_restore(src_path: String, app: tauri::AppHandle) -> Result<String, String> {
-    let src = PathBuf::from(&src_path);
-    if !src.exists() {
-        return Err(format!("File not found: {src_path}"));
-    }
+    // H-8: don't trust an arbitrary caller-supplied path — constrain reads
+    // to the app data dir / Documents / Downloads and reject symlinks.
+    let src = crate::path_guard::validate_existing_file(&app, &src_path)?;
     let header = read_header(&src)?;
     if &header != SQLITE_HEADER {
         return Err("Not a valid SQLite database (header mismatch). Refusing to restore.".into());

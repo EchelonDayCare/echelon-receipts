@@ -18,7 +18,6 @@ pub struct SendEmailArgs {
     pub smtp_host: String,
     pub smtp_port: u16,
     pub smtp_user: String,
-    pub smtp_password: String,
     pub from_name: String,
     pub from_email: String,
     pub to: Vec<String>,
@@ -41,6 +40,9 @@ pub struct SendEmailArgs {
 
 #[tauri::command]
 pub async fn send_email(args: SendEmailArgs) -> Result<(), String> {
+    // H-7: resolve the SMTP password server-side instead of accepting it as
+    // a plaintext IPC argument.
+    let smtp_password = crate::secrets::get_secret("smtp_password")?;
     tauri::async_runtime::spawn_blocking(move || -> Result<(), String> {
         let from = format!("{} <{}>", args.from_name, args.from_email)
             .parse()
@@ -102,8 +104,8 @@ pub async fn send_email(args: SendEmailArgs) -> Result<(), String> {
             builder.multipart(mp).map_err(|e| format!("build: {e}"))?
         };
 
-        let creds = Credentials::new(args.smtp_user, args.smtp_password.clone());
-        let pw = args.smtp_password.clone();
+        let creds = Credentials::new(args.smtp_user, smtp_password.clone());
+        let pw = smtp_password;
         let redact = |s: String| if pw.is_empty() { s } else { s.replace(&pw, "***") };
         let mailer = SmtpTransport::starttls_relay(&args.smtp_host)
             .map_err(|e| redact(format!("starttls: {e}")))?

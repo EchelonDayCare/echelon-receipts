@@ -1041,6 +1041,7 @@ version = "1.5.0"
 dependencies = [
  "base64 0.22.1",
  "chrono",
+ "dirs",
  "futures",
  "image",
  "jsonwebtoken",

@@ -45,7 +45,6 @@ export interface ExtractAttendanceResult {
 }
 
 export async function extractAttendance(opts: {
-  azureKey: string;
   imageBytes: Uint8Array;
   mimeType: string;
   targetDate: string;
@@ -54,7 +53,6 @@ export async function extractAttendance(opts: {
   const image_b64 = bytesToB64(opts.imageBytes);
   return await invoke<ExtractAttendanceResult>("extract_attendance", {
     args: {
-      azure_ai_key: opts.azureKey,
       image_b64,
       mime_type: opts.mimeType,
       target_date: opts.targetDate,

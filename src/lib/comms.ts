@@ -337,8 +337,7 @@ export async function sendGroupEmail(opts: GroupSendOptions): Promise<GroupSendR
   const { recipients, attachments, subject, body, extraContext = {}, settings: s, onProgress, scheduledId } = opts;
   if (recipients.length === 0) throw new Error("No recipients matched the filter (0 students with email addresses).");
 
-  const password = await invoke<string | null>("keychain_get", { key: "smtp_password" });
-  if (!password) throw new Error("SMTP password not set. Open Settings → Email and save it first.");
+  if (s.smtp_password_set !== "1") throw new Error("SMTP password not set. Open Settings → Email and save it first.");
   const sender = (s.sender_email || s.contact_email || "").trim();
   if (!sender) throw new Error("Sender email not set. Open Settings → Email.");
   const host = (s.smtp_host || "").trim();
@@ -375,7 +374,6 @@ export async function sendGroupEmail(opts: GroupSendOptions): Promise<GroupSendR
           smtp_host: host,
           smtp_port: port,
           smtp_user: (s.smtp_user || sender).trim(),
-          smtp_password: password,
           from_name: s.sender_name || s.daycare_name || "Echelon Daycare",
           from_email: sender,
           to: toAddrs,
