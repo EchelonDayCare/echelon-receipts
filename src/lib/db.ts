@@ -589,6 +589,11 @@ async function ensureSchema(d: Database): Promise<void> {
     chart_hint TEXT,
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
   )`);
+  // M-1: saved_queries used to hard-delete. Soft delete only — not a full
+  // Data Contract migration (still an autoincrement PK, not in scope here),
+  // just deleted_at + filtered reads so an accidental delete isn't
+  // unrecoverable.
+  await addCol("saved_queries", "deleted_at", "TEXT");
   // Migration 016 — Log of every question asked, for a "top asked" panel.
   await d.execute(`CREATE TABLE IF NOT EXISTS asked_questions (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -628,6 +633,15 @@ async function ensureSchema(d: Database): Promise<void> {
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
   )`);
   await d.execute("CREATE INDEX IF NOT EXISTS ix_agm_ai_events_year ON agm_ai_events(year_label, created_at DESC)");
+
+  // M-7: agm_ai_events had no purge policy and could grow unbounded (every
+  // AI drafting call stores the full prompt + response text). Purge rows
+  // older than 180 days on each startup. Note: if the board wants a longer
+  // audit-retention window than ~6 months, bump this constant rather than
+  // remove the purge entirely.
+  try {
+    await d.execute("DELETE FROM agm_ai_events WHERE created_at < datetime('now', '-180 days')");
+  } catch (e) { console.warn("[ensureSchema] agm_ai_events purge failed:", e); }
 
   // AGM AI opt-in — defaults OFF so packaged builds don't call Azure until the
   // user explicitly turns it on in Settings.

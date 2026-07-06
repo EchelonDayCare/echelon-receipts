@@ -2,11 +2,11 @@
 // v1.4.1 UX pass: horizontal filter bar (was 260px sidebar), popover for
 // less-used filters, friendly empty states (no-docs-yet vs no-matches).
 import { useEffect, useMemo, useRef, useState } from "react";
-import { useSearchParams } from "react-router-dom";
+import { useSearchParams, Link } from "react-router-dom";
 import { invoke } from "@tauri-apps/api/core";
 import { save as saveDialog } from "@tauri-apps/plugin-dialog";
 import {
-  listDocuments, listAllTags, recordEvent,
+  listDocuments, listAllTags, recordEvent, resolveLinkedNames,
   DOC_CATEGORIES, type DocCategory, type Document, type DocFilter, type LinkedKind,
 } from "../../repo/documentsRepo";
 import UploadModal, { type UploadIntent } from "./UploadModal";
@@ -27,6 +27,7 @@ export default function VaultLibrary() {
   const moreRef = useRef<HTMLDivElement>(null);
   // "Ever-had-docs?" — distinguishes empty-because-filtered from empty-because-first-use.
   const [totalDocs, setTotalDocs] = useState<number | null>(null);
+  const [linkedNames, setLinkedNames] = useState<Map<string, string>>(new Map());
 
   const initialExpiring = params.get("expiring");
   const initialCategory = params.get("category") as DocCategory | null;
@@ -73,6 +74,9 @@ export default function VaultLibrary() {
         const all = await listDocuments({ includeOldVersions: true });
         setTotalDocs(all.length);
       }
+      resolveLinkedNames(list.map((d) => ({ kind: d.linkedKind, id: d.linkedId })))
+        .then(setLinkedNames)
+        .catch(() => {});
     } catch (e: any) { setErr(String(e?.message ?? e)); }
   };
 
@@ -264,7 +268,9 @@ export default function VaultLibrary() {
                       <div style={{ fontSize: 11, color: "var(--muted)" }}>{doc.fileName}</div>
                     </td>
                     <td style={{ padding: 10 }}>{doc.category}</td>
-                    <td style={{ padding: 10 }}>{doc.linkedKind ? `${doc.linkedKind} #${doc.linkedId}` : "—"}</td>
+                    <td style={{ padding: 10 }} onClick={(e) => { if (doc.linkedKind && doc.linkedId) e.stopPropagation(); }}>
+                      {linkedEntityCell(doc.linkedKind, doc.linkedId, linkedNames)}
+                    </td>
                     <td style={{ padding: 10 }}>{doc.issuedDate || "—"}</td>
                     <td style={{ padding: 10, color: expired ? "#dc2626" : soon ? "#d97706" : undefined }}>{doc.expiryDate || "—"}</td>
                     <td style={{ padding: 10, textAlign: "right" }}>{(doc.sizeBytes / 1024).toFixed(1)} KB</td>
@@ -293,6 +299,18 @@ export default function VaultLibrary() {
       />
     </div>
   );
+}
+
+// M-16: linked-entity cell — was a plain "student:abc123" string; now a
+// clickable Link with a human-readable name from the bulk resolver map.
+function linkedEntityCell(
+  kind: LinkedKind | null, id: string | null, names: Map<string, string>,
+): React.ReactNode {
+  if (!kind || !id) return "—";
+  const label = names.get(`${kind}:${id}`) ?? `${kind} #${id}`;
+  if (kind === "student") return <Link to={`/students/roster?highlight=${id}`} onClick={(e) => e.stopPropagation()}>{label}</Link>;
+  if (kind === "staff") return <Link to={`/staff/hours?highlight=${id}`} onClick={(e) => e.stopPropagation()}>{label}</Link>;
+  return label; // vendor — freeform, no dedicated screen to link to yet
 }
 
 function FirstRunEmpty({ onUpload }: { onUpload: () => void }) {

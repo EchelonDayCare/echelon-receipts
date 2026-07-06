@@ -1,11 +1,13 @@
 // Per-week per-staff publish tracker — owner ticks off acks manually.
 import { useEffect, useState } from "react";
+import { openUrl } from "@tauri-apps/plugin-opener";
 import { listRecentPublishes, markPublishAcknowledged, type PublishRow } from "../../repo/scheduleRepo";
+import { buildWaMeUrl } from "../../lib/whatsapp";
 import { db } from "../../lib/db";
 import ScheduleSubNav from "./ScheduleSubNav";
 
 export default function ScheduleConfirmations() {
-  const [rows, setRows] = useState<(PublishRow & { staffName: string })[]>([]);
+  const [rows, setRows] = useState<(PublishRow & { staffName: string; staffPhone: string | null })[]>([]);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
 
@@ -13,9 +15,19 @@ export default function ScheduleConfirmations() {
     try {
       const list = await listRecentPublishes(60);
       const d = await db();
-      const names = await d.select<{ id: number; name: string }[]>("SELECT id, name FROM staff");
-      const byId = new Map(names.map((r) => [String(r.id), r.name]));
-      setRows(list.map((r) => ({ ...r, staffName: byId.get(r.staffId) ?? `Staff #${r.staffId}` })));
+      // M-5: staff_weekly_publish.wa_me_url is a point-in-time audit snapshot
+      // (it's also what's recorded on the shift's audit event) — it can
+      // legitimately go stale if the staff member's phone number changes
+      // later. Look up the *current* phone here so "Re-send" always derives
+      // a fresh link instead of trusting the possibly-outdated stored one.
+      const staffRows = await d.select<{ id: number; name: string; whatsapp_phone_e164: string | null }[]>(
+        "SELECT id, name, whatsapp_phone_e164 FROM staff",
+      );
+      const byId = new Map(staffRows.map((r) => [String(r.id), r]));
+      setRows(list.map((r) => {
+        const st = byId.get(r.staffId);
+        return { ...r, staffName: st?.name ?? `Staff #${r.staffId}`, staffPhone: st?.whatsapp_phone_e164 ?? null };
+      }));
     } catch (e: any) { setErr(String(e?.message ?? e)); }
   };
   useEffect(() => { void refresh(); }, []);
@@ -28,6 +40,12 @@ export default function ScheduleConfirmations() {
       await refresh();
     } catch (e: any) { setErr(String(e?.message ?? e)); }
     finally { setBusy(false); }
+  }
+
+  async function resend(r: PublishRow & { staffPhone: string | null }) {
+    if (!r.staffPhone) { setErr("No WhatsApp phone on file for this staff member."); return; }
+    try { await openUrl(buildWaMeUrl(r.staffPhone, r.messageBody)); }
+    catch (e: any) { setErr(String(e?.message ?? e)); }
   }
 
   return (
@@ -46,7 +64,7 @@ export default function ScheduleConfirmations() {
               <th style={{ padding: 8 }}>Published</th>
               <th style={{ padding: 8 }}>Acknowledged</th>
               <th style={{ padding: 8 }}>Notes</th>
-              <th style={{ padding: 8, width: 120 }}></th>
+              <th style={{ padding: 8, width: 180 }}></th>
             </tr>
           </thead>
           <tbody>
@@ -59,7 +77,8 @@ export default function ScheduleConfirmations() {
                   {r.acknowledgedAt ? new Date(r.acknowledgedAt).toLocaleString() : "—"}
                 </td>
                 <td style={{ padding: 8 }}>{r.ackNotes ?? "—"}</td>
-                <td style={{ padding: 8 }}>
+                <td style={{ padding: 8, display: "flex", gap: 6 }}>
+                  <button className="btn" onClick={() => resend(r)} title="Re-open wa.me with the current phone number">Re-send</button>
                   {!r.acknowledgedAt && (
                     <button className="btn" onClick={() => ack(r.id, r.version)} disabled={busy}>Mark ack</button>
                   )}

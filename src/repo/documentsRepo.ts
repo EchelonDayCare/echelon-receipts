@@ -267,6 +267,33 @@ export async function expiringSoon(days: number): Promise<Document[]> {
   return listDocuments({ expiringWithinDays: days });
 }
 
+// M-16: bulk resolver so the Library table can show "Jane Doe" instead of
+// "student:abc123" for linked entities, and link through to the source
+// screen. Batches by kind to avoid N+1 (one query per distinct kind, not
+// per row).
+export async function resolveLinkedNames(pairs: Array<{ kind: LinkedKind | null; id: string | null }>): Promise<Map<string, string>> {
+  const map = new Map<string, string>();
+  const studentIds = Array.from(new Set(pairs.filter((p) => p.kind === "student" && p.id).map((p) => p.id as string)));
+  const staffIds = Array.from(new Set(pairs.filter((p) => p.kind === "staff" && p.id).map((p) => p.id as string)));
+  if (studentIds.length === 0 && staffIds.length === 0) return map;
+  const d = await db();
+  if (studentIds.length) {
+    const placeholders = studentIds.map(() => "?").join(",");
+    const rows = await d.select<{ id: number; name: string }[]>(
+      `SELECT id, name FROM students WHERE id IN (${placeholders})`, studentIds,
+    );
+    for (const r of rows) map.set(`student:${r.id}`, r.name);
+  }
+  if (staffIds.length) {
+    const placeholders = staffIds.map(() => "?").join(",");
+    const rows = await d.select<{ id: number; name: string }[]>(
+      `SELECT id, name FROM staff WHERE id IN (${placeholders})`, staffIds,
+    );
+    for (const r of rows) map.set(`staff:${r.id}`, r.name);
+  }
+  return map;
+}
+
 export async function getVersionHistory(documentId: string): Promise<Document[]> {
   const cur = await getDocument(documentId);
   if (!cur) return [];

@@ -52,7 +52,7 @@ export interface SavedQuery {
 export async function listSavedQueries(): Promise<SavedQuery[]> {
   const d = await db();
   return await d.select<SavedQuery[]>(
-    "SELECT id, question, sql, chart_hint, created_at FROM saved_queries ORDER BY created_at DESC LIMIT 50"
+    "SELECT id, question, sql, chart_hint, created_at FROM saved_queries WHERE deleted_at IS NULL ORDER BY created_at DESC LIMIT 50"
   );
 }
 
@@ -66,7 +66,7 @@ export async function saveQuery(question: string, sql: string, chartHint: string
 
 export async function deleteSavedQuery(id: number): Promise<void> {
   const d = await db();
-  await d.execute("DELETE FROM saved_queries WHERE id = ?", [id]);
+  await d.execute("UPDATE saved_queries SET deleted_at = datetime('now') WHERE id = ?", [id]);
 }
 
 // ── Question popularity log ─────────────────────────────────────────────

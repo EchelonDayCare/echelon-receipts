@@ -394,15 +394,25 @@ struct UncertainSlot {
 async fn refine_uncertain_slots(
     img: &image::DynamicImage, slots: &[UncertainSlot], api_key: &str,
 ) -> Vec<(usize, Option<String>, Option<String>)> {
-    use tokio::task::JoinSet;
-    let mut set = JoinSet::new();
-    // Rc/Arc not needed because we clone tiny crop bytes into each task.
+    use futures::stream::{self, StreamExt};
+    // M-3: bounded to 4 concurrent Azure calls. This used to spawn one
+    // unbounded tokio task per uncertain slot via JoinSet — a sheet with
+    // many ambiguous cells could fire dozens of simultaneous requests at
+    // once, risking rate-limit errors and spiky load on the Azure endpoint.
+    const MAX_CONCURRENT_REFINEMENTS: usize = 4;
     let img_arc = std::sync::Arc::new(img.clone());
-    for slot in slots {
+    // Collect into owned tuples first — mapping directly over `slots.iter()`
+    // into async blocks trips a rustc HRTB inference limitation ("implementation
+    // of `FnOnce` is not general enough") because the closure's return type
+    // (a future) ends up tied to the elided lifetime of `&UncertainSlot`.
+    let owned: Vec<(usize, u32, u32, u32, u32, bool, bool)> = slots
+        .iter()
+        .map(|s| (s.row_idx, s.x0, s.y0, s.x1, s.y1, s.need_in, s.need_out))
+        .collect();
+    let tasks = owned.into_iter().map(move |s| {
         let img = img_arc.clone();
         let key = api_key.to_string();
-        let s = (slot.row_idx, slot.x0, slot.y0, slot.x1, slot.y1, slot.need_in, slot.need_out);
-        set.spawn(async move {
+        async move {
             let (row_idx, x0, y0, x1, y1, ni, no) = s;
             let pad = 15u32;
             let cx0 = x0.saturating_sub(pad);
@@ -418,13 +428,9 @@ async fn refine_uncertain_slots(
             let b64 = base64::engine::general_purpose::STANDARD.encode(&buf);
             let (in_t, out_t) = ask_vlm_for_slot(&key, &b64, ni, no).await;
             (row_idx, in_t, out_t)
-        });
-    }
-    let mut out = Vec::new();
-    while let Some(res) = set.join_next().await {
-        if let Ok(x) = res { out.push(x); }
-    }
-    out
+        }
+    });
+    stream::iter(tasks).buffer_unordered(MAX_CONCURRENT_REFINEMENTS).collect().await
 }
 
 // Ask gpt-4.1 (chosen because in per-cell tests it hallucinated AM/PM less

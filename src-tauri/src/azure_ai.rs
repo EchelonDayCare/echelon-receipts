@@ -55,24 +55,41 @@ async fn call_mistral_doc_ai(
         .build()
         .map_err(|e| redact(format!("http client: {e}"), api_key))?;
 
-    let resp = client.post(MISTRAL_DOC_AI_URL)
-        .header("api-key", api_key)
-        .header("Content-Type", "application/json")
-        .json(&body)
-        .send()
-        .await
-        .map_err(|e| redact(format!("request: {e}"), api_key))?;
+    // M-15: retry with exponential backoff (100ms → 400ms → 1600ms, max 3
+    // attempts) on transient HTTP 429/503/504 — Azure/Mistral rate-limits
+    // and brief backend hiccups shouldn't fail an entire OCR import that a
+    // human is waiting on.
+    const MAX_ATTEMPTS: u32 = 3;
+    const BASE_BACKOFF_MS: u64 = 100;
+    let mut last_err: Result<String, String> = Err("no attempt".to_string());
+    for attempt in 1..=MAX_ATTEMPTS {
+        let resp = client.post(MISTRAL_DOC_AI_URL)
+            .header("api-key", api_key)
+            .header("Content-Type", "application/json")
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| redact(format!("request: {e}"), api_key))?;
 
-    let status = resp.status();
-    let text = resp.text().await.map_err(|e| redact(format!("read: {e}"), api_key))?;
-    if !status.is_success() {
-        return Err(redact(format!("http {status} @ mistral-document-ai :: {}", truncate(&text, 800)), api_key));
+        let status = resp.status();
+        let text = resp.text().await.map_err(|e| redact(format!("read: {e}"), api_key))?;
+        let retriable = matches!(status.as_u16(), 429 | 503 | 504);
+        if !status.is_success() {
+            last_err = Err(redact(format!("http {status} @ mistral-document-ai :: {}", truncate(&text, 800)), api_key));
+            if retriable && attempt < MAX_ATTEMPTS {
+                let backoff = BASE_BACKOFF_MS * 4u64.pow(attempt - 1);
+                tokio::time::sleep(std::time::Duration::from_millis(backoff)).await;
+                continue;
+            }
+            return last_err;
+        }
+        let v: serde_json::Value = serde_json::from_str(&text)
+            .map_err(|e| redact(format!("json: {e}"), api_key))?;
+        return v["document_annotation"].as_str()
+            .map(|s| s.to_string())
+            .ok_or_else(|| redact(format!("no document_annotation in response: {}", truncate(&text, 400)), api_key));
     }
-    let v: serde_json::Value = serde_json::from_str(&text)
-        .map_err(|e| redact(format!("json: {e}"), api_key))?;
-    v["document_annotation"].as_str()
-        .map(|s| s.to_string())
-        .ok_or_else(|| redact(format!("no document_annotation in response: {}", truncate(&text, 400)), api_key))
+    last_err
 }
 
 // ─── Child attendance sign-in sheet ─────────────────────────────────────
