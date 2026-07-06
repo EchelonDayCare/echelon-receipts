@@ -38,6 +38,10 @@ const WaitlistEnrolled = lazy(() => import("./screens/waitlist/Enrolled"));
 const WaitlistArchived = lazy(() => import("./screens/waitlist/Archived"));
 const WaitlistSettings = lazy(() => import("./screens/waitlist/Settings"));
 const VaultLibrary = lazy(() => import("./screens/vault/Library"));
+const StaffSchedule = lazy(() => import("./screens/staff/Schedule"));
+const StaffScheduleAudit = lazy(() => import("./screens/staff/ScheduleAudit"));
+const StaffScheduleConfirmations = lazy(() => import("./screens/staff/ScheduleConfirmations"));
+const OrganizerScreen = lazy(() => import("./screens/organizer/Organizer"));
 import { runCloudBackupIfDue } from "./lib/cloudBackup";
 import { getSettings } from "./lib/db";
 import { getVersion } from "@tauri-apps/api/app";
@@ -155,6 +159,9 @@ function Shell({ logo, name, staffEnabled }: { logo: string; name: string; staff
         name={name}
         items={[
           { to: "/staff/hours", label: "Hours" },
+          { to: "/staff/schedule", label: "Schedule" },
+          { to: "/staff/schedule/audit", label: "Schedule Audit" },
+          { to: "/staff/schedule/confirmations", label: "Confirmations" },
           { to: "/staff/credentials", label: "Credentials" },
         ]}
       />
@@ -256,6 +263,18 @@ function Shell({ logo, name, staffEnabled }: { logo: string; name: string; staff
         ]}
       />
     );
+  } else if (path.startsWith("/organizer")) {
+    sidebar = (
+      <ModuleSidebar
+        title="Organizer"
+        accent="#e11d48"
+        logo={logo}
+        name={name}
+        items={[
+          { to: "/organizer", label: "Dashboard" },
+        ]}
+      />
+    );
   } else if (path.startsWith("/vault")) {
     sidebar = (
       <ModuleSidebar
@@ -292,6 +311,9 @@ function Shell({ logo, name, staffEnabled }: { logo: string; name: string; staff
           {/* Staff module */}
           <Route path="/staff" element={<Navigate to={staffEnabled ? "/staff/hours" : "/config/staff"} replace />} />
           {staffEnabled && <Route path="/staff/hours" element={<StaffScreen />} />}
+          {staffEnabled && <Route path="/staff/schedule" element={<StaffSchedule />} />}
+          {staffEnabled && <Route path="/staff/schedule/audit" element={<StaffScheduleAudit />} />}
+          {staffEnabled && <Route path="/staff/schedule/confirmations" element={<StaffScheduleConfirmations />} />}
           {staffEnabled && <Route path="/staff/credentials" element={<StaffCredentials />} />}
 
           {/* Configuration module */}
@@ -340,6 +362,9 @@ function Shell({ logo, name, staffEnabled }: { logo: string; name: string; staff
 
           {/* Document Vault module (v1.1.0) */}
           <Route path="/vault" element={<VaultLibrary />} />
+
+          {/* Organizer */}
+          <Route path="/organizer" element={<OrganizerScreen />} />
 
           {/* Redirects for old Students routes now moved to Reports module */}
           <Route path="/students/reports" element={<Navigate to="/reports/monthly" replace />} />

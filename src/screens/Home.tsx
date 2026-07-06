@@ -161,6 +161,44 @@ export default function Home() {
         }
       } catch { /* silent — table may not exist yet on fresh installs */ }
 
+      // Organizer: things due today or this week (v1.3.0).
+      try {
+        const { countDueToday, countDueThisWeek } = await import("../repo/organizerRepo");
+        const [today, week] = await Promise.all([countDueToday(), countDueThisWeek()]);
+        if (today > 0) {
+          list.push({
+            tone: "danger",
+            text: `${today} item${today === 1 ? " is" : "s are"} due today.`,
+            cta: { label: "Open Organizer", to: "/organizer" },
+          });
+        } else if (week > 0) {
+          list.push({
+            tone: "info",
+            text: `${week} item${week === 1 ? "" : "s"} due within 7 days.`,
+            cta: { label: "Open Organizer", to: "/organizer" },
+          });
+        }
+      } catch { /* silent — organizer tables not yet migrated */ }
+
+      // Staff Schedule: unpublished shifts this week (v1.2.0).
+      try {
+        const { mondayOf, listShiftsForWeek, listWeeklyPublishes } = await import("../repo/scheduleRepo");
+        const weekStart = mondayOf(new Date());
+        const [shifts, publishes] = await Promise.all([
+          listShiftsForWeek(weekStart), listWeeklyPublishes(weekStart),
+        ]);
+        const publishedStaff = new Set(publishes.map((p) => p.staffId));
+        const unpubStaff = new Set<string>();
+        for (const s of shifts) if (!publishedStaff.has(s.staffId)) unpubStaff.add(s.staffId);
+        if (unpubStaff.size > 0) {
+          list.push({
+            tone: "warn",
+            text: `${unpubStaff.size} staff have unpublished shifts this week.`,
+            cta: { label: "Publish schedule", to: "/staff/schedule" },
+          });
+        }
+      } catch { /* silent — schedule tables not yet migrated */ }
+
       setAlerts(list);
     })();
 
@@ -241,6 +279,12 @@ export default function Home() {
           <div className="home-tile-icon">🤖</div>
           <h2>Ask Echelon</h2>
           <p>Plain-English questions about your data — attendance, revenue, staff, credentials</p>
+        </button>
+
+        <button className="home-tile" onClick={() => nav("/organizer")} style={{ background: "linear-gradient(135deg, #fff1f2, #ffe4e6)" }}>
+          <div className="home-tile-icon">🗓️</div>
+          <h2>Organizer</h2>
+          <p>Upcoming deadlines, meeting log, follow-ups — one calm dashboard</p>
         </button>
 
         <button className="home-tile" onClick={() => nav("/vault")} style={{ background: "linear-gradient(135deg, #f0fdfa, #ccfbf1)" }}>

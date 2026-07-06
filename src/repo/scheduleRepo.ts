@@ -1,0 +1,364 @@
+// Staff Schedule repository (v1.2.0). All shift CRUD + weekly publish record
+// keeping. Data-Contract compliant (UUID PKs, ISO UTC timestamps, soft
+// delete, optimistic concurrency, per-entity event log).
+import { db, execRetry, serializeWrite } from "../lib/db";
+import { uuidv4, nowIso } from "./ids";
+
+export type ShiftStatus = "planned" | "confirmed" | "cancelled" | "swapped";
+
+export type StaffShift = {
+  id: string;
+  staffId: string;
+  shiftDate: string;   // YYYY-MM-DD
+  startTime: string;   // HH:MM
+  endTime: string;     // HH:MM
+  room: string | null;
+  breakMinutes: number;
+  notes: string | null;
+  status: ShiftStatus;
+  revisionOf: string | null;
+  createdAt: string;
+  updatedAt: string;
+  updatedBy: string;
+  version: number;
+  deletedAt: string | null;
+};
+
+export type NewShift = {
+  staffId: string;
+  shiftDate: string;
+  startTime: string;
+  endTime: string;
+  room?: string | null;
+  breakMinutes?: number;
+  notes?: string | null;
+  status?: ShiftStatus;
+};
+
+type ShiftRow = {
+  id: string; staff_id: string; shift_date: string;
+  start_time: string; end_time: string;
+  room: string | null; break_minutes: number; notes: string | null;
+  status: string; revision_of: string | null;
+  created_at: string; updated_at: string; updated_by: string;
+  version: number; deleted_at: string | null;
+};
+
+function rowToShift(r: ShiftRow): StaffShift {
+  return {
+    id: r.id, staffId: r.staff_id, shiftDate: r.shift_date,
+    startTime: r.start_time, endTime: r.end_time, room: r.room,
+    breakMinutes: r.break_minutes, notes: r.notes,
+    status: r.status as ShiftStatus, revisionOf: r.revision_of,
+    createdAt: r.created_at, updatedAt: r.updated_at, updatedBy: r.updated_by,
+    version: r.version, deletedAt: r.deleted_at,
+  };
+}
+
+async function writeEvent(entityId: string, eventType: string, payload?: unknown, channel?: string, messageRef?: string) {
+  await execRetry(
+    "INSERT INTO staff_shift_events (id, entity_id, event_type, payload_json, actor, channel, message_ref, created_at) VALUES (?, ?, ?, ?, 'owner', ?, ?, ?)",
+    [uuidv4(), entityId, eventType, payload === undefined ? null : JSON.stringify(payload), channel ?? null, messageRef ?? null, nowIso()],
+  );
+}
+
+// Monday of the ISO week that contains `date`. Returns YYYY-MM-DD (local).
+export function mondayOf(date: Date): string {
+  const d = new Date(date);
+  const day = d.getDay(); // 0=Sun..6=Sat
+  const diff = (day === 0 ? -6 : 1 - day);
+  d.setDate(d.getDate() + diff);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+}
+
+export function addDays(iso: string, n: number): string {
+  const [y, m, d] = iso.split("-").map(Number);
+  const dt = new Date(y, m - 1, d);
+  dt.setDate(dt.getDate() + n);
+  return `${dt.getFullYear()}-${String(dt.getMonth() + 1).padStart(2, "0")}-${String(dt.getDate()).padStart(2, "0")}`;
+}
+
+// Decimal hours between HH:MM strings minus break minutes.
+export function shiftHours(s: Pick<StaffShift, "startTime" | "endTime" | "breakMinutes">): number {
+  const [sh, sm] = s.startTime.split(":").map(Number);
+  const [eh, em] = s.endTime.split(":").map(Number);
+  const worked = (eh * 60 + em) - (sh * 60 + sm) - (s.breakMinutes || 0);
+  return Math.max(0, worked / 60);
+}
+
+export async function listShiftsForWeek(mondayISO: string): Promise<StaffShift[]> {
+  const sunday = addDays(mondayISO, 6);
+  const d = await db();
+  const rows = await d.select<ShiftRow[]>(
+    "SELECT * FROM staff_shifts WHERE deleted_at IS NULL AND shift_date >= ? AND shift_date <= ? ORDER BY shift_date, start_time",
+    [mondayISO, sunday],
+  );
+  return rows.map(rowToShift);
+}
+
+export async function listShiftsForStaffWeek(staffId: string, mondayISO: string): Promise<StaffShift[]> {
+  const sunday = addDays(mondayISO, 6);
+  const d = await db();
+  const rows = await d.select<ShiftRow[]>(
+    "SELECT * FROM staff_shifts WHERE deleted_at IS NULL AND staff_id = ? AND shift_date >= ? AND shift_date <= ? ORDER BY shift_date, start_time",
+    [staffId, mondayISO, sunday],
+  );
+  return rows.map(rowToShift);
+}
+
+export async function getShift(id: string): Promise<StaffShift | null> {
+  const d = await db();
+  const rows = await d.select<ShiftRow[]>("SELECT * FROM staff_shifts WHERE id = ?", [id]);
+  return rows.length ? rowToShift(rows[0]) : null;
+}
+
+export async function createShift(shift: NewShift): Promise<StaffShift> {
+  if (shift.endTime <= shift.startTime) throw new Error("End time must be after start time.");
+  const id = uuidv4();
+  const now = nowIso();
+  await execRetry(
+    `INSERT INTO staff_shifts (
+      id, staff_id, shift_date, start_time, end_time, room, break_minutes,
+      notes, status, revision_of, created_at, updated_at, updated_by, version, deleted_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, 'owner', 1, NULL)`,
+    [
+      id, shift.staffId, shift.shiftDate, shift.startTime, shift.endTime,
+      shift.room ?? null, shift.breakMinutes ?? 0, shift.notes ?? null,
+      shift.status ?? "planned", now, now,
+    ],
+  );
+  await writeEvent(id, "created", { staffId: shift.staffId, shiftDate: shift.shiftDate, startTime: shift.startTime, endTime: shift.endTime });
+  const created = await getShift(id);
+  if (!created) throw new Error("Shift disappeared after insert");
+  return created;
+}
+
+export type ShiftPatch = Partial<Omit<NewShift, "staffId">>;
+
+export async function updateShift(id: string, patch: ShiftPatch, expectedVersion: number): Promise<StaffShift> {
+  const cur = await getShift(id);
+  if (!cur) throw new Error("Shift not found");
+  const next: StaffShift = {
+    ...cur,
+    shiftDate: patch.shiftDate ?? cur.shiftDate,
+    startTime: patch.startTime ?? cur.startTime,
+    endTime: patch.endTime ?? cur.endTime,
+    room: patch.room !== undefined ? patch.room ?? null : cur.room,
+    breakMinutes: patch.breakMinutes ?? cur.breakMinutes,
+    notes: patch.notes !== undefined ? patch.notes ?? null : cur.notes,
+    status: patch.status ?? cur.status,
+  };
+  if (next.endTime <= next.startTime) throw new Error("End time must be after start time.");
+  const now = nowIso();
+  const res = await execRetry(
+    `UPDATE staff_shifts
+        SET shift_date = ?, start_time = ?, end_time = ?, room = ?,
+            break_minutes = ?, notes = ?, status = ?, updated_at = ?, version = version + 1
+      WHERE id = ? AND version = ?`,
+    [next.shiftDate, next.startTime, next.endTime, next.room, next.breakMinutes, next.notes, next.status, now, id, expectedVersion],
+  );
+  if (res.rowsAffected === 0) throw new Error("Shift was changed by another writer. Please reload.");
+  await writeEvent(id, "updated", { before: cur, after: next });
+  const after = await getShift(id);
+  return after!;
+}
+
+export async function cancelShift(id: string, reason?: string): Promise<void> {
+  const cur = await getShift(id);
+  if (!cur) return;
+  const now = nowIso();
+  await execRetry(
+    "UPDATE staff_shifts SET status = 'cancelled', updated_at = ?, version = version + 1 WHERE id = ?",
+    [now, id],
+  );
+  await writeEvent(id, "cancelled", { reason: reason ?? null, was: { start: cur.startTime, end: cur.endTime, room: cur.room } });
+}
+
+export async function softDeleteShift(id: string): Promise<void> {
+  const now = nowIso();
+  await execRetry(
+    "UPDATE staff_shifts SET deleted_at = ?, updated_at = ?, version = version + 1 WHERE id = ? AND deleted_at IS NULL",
+    [now, now, id],
+  );
+  await writeEvent(id, "deleted", {});
+}
+
+// Reassign: cancels the old shift + inserts a mirror on the new staff.
+// Returns both rows so the UI can prompt WhatsApp for both people.
+export async function reassignShift(id: string, newStaffId: string): Promise<{ cancelled: StaffShift; created: StaffShift }> {
+  const cur = await getShift(id);
+  if (!cur) throw new Error("Shift not found");
+  await cancelShift(id, `Reassigned to staff ${newStaffId}`);
+  const created = await createShift({
+    staffId: newStaffId, shiftDate: cur.shiftDate,
+    startTime: cur.startTime, endTime: cur.endTime,
+    room: cur.room, breakMinutes: cur.breakMinutes, notes: cur.notes,
+    status: "planned",
+  });
+  // Link the new shift back to the source for auditing.
+  await execRetry("UPDATE staff_shifts SET revision_of = ? WHERE id = ?", [id, created.id]);
+  await writeEvent(created.id, "reassigned", { fromShift: id, fromStaff: cur.staffId, toStaff: newStaffId });
+  const cancelled = await getShift(id);
+  const newShift = await getShift(created.id);
+  return { cancelled: cancelled!, created: newShift! };
+}
+
+// Copy every shift from one week to another, generating fresh UUIDs and
+// offsetting dates by 7 days per source week jump. Skips destination days
+// that already have shifts so a partial re-run doesn't duplicate.
+export async function copyWeek(fromMondayISO: string, toMondayISO: string): Promise<StaffShift[]> {
+  const src = await listShiftsForWeek(fromMondayISO);
+  if (src.length === 0) return [];
+  const dstStart = toMondayISO;
+  const dstEnd = addDays(toMondayISO, 6);
+  const d = await db();
+  const existing = await d.select<{ staff_id: string; shift_date: string }[]>(
+    "SELECT staff_id, shift_date FROM staff_shifts WHERE deleted_at IS NULL AND shift_date >= ? AND shift_date <= ?",
+    [dstStart, dstEnd],
+  );
+  const skip = new Set(existing.map((r) => `${r.staff_id}|${r.shift_date}`));
+  const offset = daysBetween(fromMondayISO, toMondayISO);
+  const created: StaffShift[] = [];
+  for (const s of src) {
+    const newDate = addDays(s.shiftDate, offset);
+    if (skip.has(`${s.staffId}|${newDate}`)) continue;
+    const c = await createShift({
+      staffId: s.staffId, shiftDate: newDate,
+      startTime: s.startTime, endTime: s.endTime,
+      room: s.room, breakMinutes: s.breakMinutes, notes: s.notes,
+      status: "planned",
+    });
+    created.push(c);
+  }
+  return created;
+}
+
+function daysBetween(fromISO: string, toISO: string): number {
+  const [fy, fm, fd] = fromISO.split("-").map(Number);
+  const [ty, tm, td] = toISO.split("-").map(Number);
+  const a = new Date(fy, fm - 1, fd).getTime();
+  const b = new Date(ty, tm - 1, td).getTime();
+  return Math.round((b - a) / 86_400_000);
+}
+
+// ─── Weekly publish records ──────────────────────────────────────────────
+export type PublishRow = {
+  id: string; staffId: string; weekStartDate: string;
+  shiftIds: string[]; messageBody: string; waMeUrl: string;
+  publishedAt: string; acknowledgedAt: string | null; ackNotes: string | null;
+};
+
+type PublishRawRow = {
+  id: string; staff_id: string; week_start_date: string;
+  shift_ids_json: string; message_body: string; wa_me_url: string;
+  published_at: string; acknowledged_at: string | null; ack_notes: string | null;
+};
+
+function pubRowToObj(r: PublishRawRow): PublishRow {
+  let ids: string[] = [];
+  try { ids = JSON.parse(r.shift_ids_json || "[]"); } catch { /* leave empty */ }
+  return {
+    id: r.id, staffId: r.staff_id, weekStartDate: r.week_start_date,
+    shiftIds: ids, messageBody: r.message_body, waMeUrl: r.wa_me_url,
+    publishedAt: r.published_at, acknowledgedAt: r.acknowledged_at,
+    ackNotes: r.ack_notes,
+  };
+}
+
+export async function recordWeeklyPublish(
+  staffId: string, weekStartISO: string, shiftIds: string[], messageBody: string, waMeUrl: string,
+): Promise<PublishRow> {
+  const id = uuidv4();
+  const now = nowIso();
+  await serializeWrite(async () => {
+    const dd = await db();
+    // ON CONFLICT emulation: try INSERT, on constraint failure delete the
+    // prior row for that (staff, week) and re-insert. Preserves the "one
+    // publish per staff per week" invariant while still allowing re-publish
+    // after a schedule change.
+    try {
+      await dd.execute(
+        `INSERT INTO staff_weekly_publish (
+          id, staff_id, week_start_date, shift_ids_json, message_body, wa_me_url,
+          published_at, acknowledged_at, ack_notes, created_at, updated_at,
+          updated_by, version, deleted_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?, ?, 'owner', 1, NULL)`,
+        [id, staffId, weekStartISO, JSON.stringify(shiftIds), messageBody, waMeUrl, now, now, now],
+      );
+    } catch (e: any) {
+      if (!/UNIQUE/i.test(String(e?.message ?? e))) throw e;
+      await dd.execute(
+        `UPDATE staff_weekly_publish
+            SET shift_ids_json = ?, message_body = ?, wa_me_url = ?,
+                published_at = ?, updated_at = ?, version = version + 1,
+                acknowledged_at = NULL, ack_notes = NULL
+          WHERE staff_id = ? AND week_start_date = ?`,
+        [JSON.stringify(shiftIds), messageBody, waMeUrl, now, now, staffId, weekStartISO],
+      );
+    }
+  });
+  for (const sid of shiftIds) {
+    await writeEvent(sid, "week_published", { staffId, weekStartISO }, "wa.me", waMeUrl);
+  }
+  const rows = await (await db()).select<PublishRawRow[]>(
+    "SELECT * FROM staff_weekly_publish WHERE staff_id = ? AND week_start_date = ?",
+    [staffId, weekStartISO],
+  );
+  return pubRowToObj(rows[0]);
+}
+
+export async function listWeeklyPublishes(weekStartISO: string): Promise<PublishRow[]> {
+  const d = await db();
+  const rows = await d.select<PublishRawRow[]>(
+    "SELECT * FROM staff_weekly_publish WHERE week_start_date = ? AND deleted_at IS NULL",
+    [weekStartISO],
+  );
+  return rows.map(pubRowToObj);
+}
+
+export async function listRecentPublishes(limit = 40): Promise<PublishRow[]> {
+  const d = await db();
+  const rows = await d.select<PublishRawRow[]>(
+    "SELECT * FROM staff_weekly_publish WHERE deleted_at IS NULL ORDER BY published_at DESC LIMIT ?",
+    [limit],
+  );
+  return rows.map(pubRowToObj);
+}
+
+export async function markPublishAcknowledged(publishId: string, notes?: string): Promise<void> {
+  const now = nowIso();
+  await execRetry(
+    "UPDATE staff_weekly_publish SET acknowledged_at = ?, ack_notes = ?, updated_at = ?, version = version + 1 WHERE id = ?",
+    [now, notes ?? null, now, publishId],
+  );
+}
+
+// ─── Events (audit) ─────────────────────────────────────────────────────
+export type ShiftEvent = {
+  id: string; entityId: string; eventType: string; payload: unknown;
+  actor: string; channel: string | null; messageRef: string | null; createdAt: string;
+};
+
+export async function listAuditForWeek(mondayISO: string): Promise<ShiftEvent[]> {
+  const sunday = addDays(mondayISO, 6);
+  const d = await db();
+  const rows = await d.select<{
+    id: string; entity_id: string; event_type: string; payload_json: string | null;
+    actor: string; channel: string | null; message_ref: string | null; created_at: string;
+  }[]>(
+    `SELECT e.*
+       FROM staff_shift_events e
+       LEFT JOIN staff_shifts s ON s.id = e.entity_id
+      WHERE (s.shift_date IS NULL OR (s.shift_date >= ? AND s.shift_date <= ?))
+        AND e.created_at >= ?
+      ORDER BY e.created_at DESC
+      LIMIT 500`,
+    [mondayISO, sunday, mondayISO],
+  );
+  return rows.map((r) => ({
+    id: r.id, entityId: r.entity_id, eventType: r.event_type,
+    payload: r.payload_json ? safeJson(r.payload_json) : null,
+    actor: r.actor, channel: r.channel, messageRef: r.message_ref, createdAt: r.created_at,
+  }));
+}
+function safeJson(s: string) { try { return JSON.parse(s); } catch { return s; } }

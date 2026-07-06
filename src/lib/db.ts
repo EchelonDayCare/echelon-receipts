@@ -704,6 +704,184 @@ async function ensureSchema(d: Database): Promise<void> {
   // Link column on existing staff_credentials so a credential can point at
   // its source PDF in the Vault (integration hook — see StaffCredentials.tsx).
   await addCol("staff_credentials", "document_id", "TEXT");
+
+  // ─── Migration 020 — Staff Schedule (v1.2.0) ──────────────────────────
+  // Grid-based weekly shift editor + wa.me publish pipeline. Every
+  // mutation writes to staff_shift_events (see Data Contract §5). One
+  // row in staff_weekly_publish per (staff, week_start_date).
+  if (!(await tableExists("staff_shifts"))) {
+    console.warn("[ensureSchema] creating staff_shifts");
+    await d.execute(`CREATE TABLE staff_shifts (
+      id             TEXT PRIMARY KEY,
+      staff_id       TEXT NOT NULL,
+      shift_date     TEXT NOT NULL,
+      start_time     TEXT NOT NULL,
+      end_time       TEXT NOT NULL,
+      room           TEXT,
+      break_minutes  INTEGER NOT NULL DEFAULT 0,
+      notes          TEXT,
+      status         TEXT NOT NULL DEFAULT 'planned',
+      revision_of    TEXT,
+      created_at     TEXT NOT NULL,
+      updated_at     TEXT NOT NULL,
+      updated_by     TEXT NOT NULL DEFAULT 'owner',
+      version        INTEGER NOT NULL DEFAULT 1,
+      deleted_at     TEXT
+    )`);
+    await d.execute("CREATE INDEX ix_staff_shifts_date  ON staff_shifts(shift_date) WHERE deleted_at IS NULL");
+    await d.execute("CREATE INDEX ix_staff_shifts_staff ON staff_shifts(staff_id, shift_date) WHERE deleted_at IS NULL");
+  }
+  if (!(await tableExists("staff_shift_events"))) {
+    console.warn("[ensureSchema] creating staff_shift_events");
+    await d.execute(`CREATE TABLE staff_shift_events (
+      id           TEXT PRIMARY KEY,
+      entity_id    TEXT NOT NULL,
+      event_type   TEXT NOT NULL,
+      payload_json TEXT,
+      actor        TEXT NOT NULL DEFAULT 'owner',
+      channel      TEXT,
+      message_ref  TEXT,
+      created_at   TEXT NOT NULL
+    )`);
+    await d.execute("CREATE INDEX ix_shift_events_entity ON staff_shift_events(entity_id, created_at)");
+  }
+  if (!(await tableExists("staff_weekly_publish"))) {
+    console.warn("[ensureSchema] creating staff_weekly_publish");
+    await d.execute(`CREATE TABLE staff_weekly_publish (
+      id                 TEXT PRIMARY KEY,
+      staff_id           TEXT NOT NULL,
+      week_start_date    TEXT NOT NULL,
+      shift_ids_json     TEXT NOT NULL,
+      message_body       TEXT NOT NULL,
+      wa_me_url          TEXT NOT NULL,
+      published_at       TEXT NOT NULL,
+      acknowledged_at    TEXT,
+      ack_notes          TEXT,
+      created_at         TEXT NOT NULL,
+      updated_at         TEXT NOT NULL,
+      updated_by         TEXT NOT NULL DEFAULT 'owner',
+      version            INTEGER NOT NULL DEFAULT 1,
+      deleted_at         TEXT,
+      UNIQUE(staff_id, week_start_date)
+    )`);
+  }
+  await addCol("staff", "whatsapp_phone_e164", "TEXT");
+  for (const [k, v] of [
+    ["shift_msg_weekly",
+`Hi {{staff_first_name}},
+
+Here is your schedule for {{week_range}}:
+
+{{shift_lines}}
+
+Total: {{total_hours}}h
+
+Please reply YES to confirm, or let me know if you need any changes.
+
+Thanks,
+{{owner_first_name}}`],
+    ["shift_msg_change",
+`Hi {{staff_first_name}},
+
+Quick change to your {{shift_date_pretty}} shift:
+
+Was:  {{old_shift}}
+Now:  {{new_shift}}
+
+Please reply YES to confirm.
+
+Thanks,
+{{owner_first_name}}`],
+    ["shift_msg_cancel",
+`Hi {{staff_first_name}},
+
+Your {{shift_date_pretty}} shift ({{old_shift}}) has been cancelled.
+
+Reason: {{reason_or_none}}
+
+Thanks,
+{{owner_first_name}}`],
+  ] as const) await setting(k, v);
+
+  // ─── Migration 021 — Organizer / Ops Dashboard (v1.3.0) ───────────────
+  // Panels 2+3 tables (Upcoming panel is view-only, no schema).
+  if (!(await tableExists("meetings"))) {
+    console.warn("[ensureSchema] creating meetings");
+    await d.execute(`CREATE TABLE meetings (
+      id                TEXT PRIMARY KEY,
+      meeting_date      TEXT NOT NULL,
+      meeting_time      TEXT,
+      kind              TEXT NOT NULL,
+      subject           TEXT NOT NULL,
+      attendees_text    TEXT,
+      linked_kind       TEXT,
+      linked_id         TEXT,
+      notes_md          TEXT,
+      created_at        TEXT NOT NULL,
+      updated_at        TEXT NOT NULL,
+      updated_by        TEXT NOT NULL DEFAULT 'owner',
+      version           INTEGER NOT NULL DEFAULT 1,
+      deleted_at        TEXT
+    )`);
+    await d.execute("CREATE INDEX ix_meetings_date ON meetings(meeting_date DESC) WHERE deleted_at IS NULL");
+    await d.execute("CREATE INDEX ix_meetings_linked ON meetings(linked_kind, linked_id) WHERE deleted_at IS NULL");
+  }
+  if (!(await tableExists("meeting_actions"))) {
+    console.warn("[ensureSchema] creating meeting_actions");
+    await d.execute(`CREATE TABLE meeting_actions (
+      id            TEXT PRIMARY KEY,
+      meeting_id    TEXT NOT NULL,
+      description   TEXT NOT NULL,
+      owner_text    TEXT,
+      due_date      TEXT,
+      done_at       TEXT,
+      created_at    TEXT NOT NULL,
+      updated_at    TEXT NOT NULL,
+      updated_by    TEXT NOT NULL DEFAULT 'owner',
+      version       INTEGER NOT NULL DEFAULT 1,
+      deleted_at    TEXT
+    )`);
+    await d.execute("CREATE INDEX ix_meeting_actions_meeting ON meeting_actions(meeting_id) WHERE deleted_at IS NULL");
+    await d.execute("CREATE INDEX ix_meeting_actions_open ON meeting_actions(due_date) WHERE deleted_at IS NULL AND done_at IS NULL");
+  }
+  if (!(await tableExists("meeting_events"))) {
+    console.warn("[ensureSchema] creating meeting_events");
+    await d.execute(`CREATE TABLE meeting_events (
+      id           TEXT PRIMARY KEY,
+      entity_id    TEXT NOT NULL,
+      event_type   TEXT NOT NULL,
+      payload_json TEXT,
+      actor        TEXT NOT NULL DEFAULT 'owner',
+      channel      TEXT,
+      message_ref  TEXT,
+      created_at   TEXT NOT NULL
+    )`);
+  }
+  if (!(await tableExists("followups"))) {
+    console.warn("[ensureSchema] creating followups");
+    await d.execute(`CREATE TABLE followups (
+      id            TEXT PRIMARY KEY,
+      title         TEXT NOT NULL,
+      notes         TEXT,
+      due_date      TEXT,
+      priority      TEXT NOT NULL DEFAULT 'normal',
+      linked_kind   TEXT,
+      linked_id     TEXT,
+      done_at       TEXT,
+      created_at    TEXT NOT NULL,
+      updated_at    TEXT NOT NULL,
+      updated_by    TEXT NOT NULL DEFAULT 'owner',
+      version       INTEGER NOT NULL DEFAULT 1,
+      deleted_at    TEXT
+    )`);
+    await d.execute("CREATE INDEX ix_followups_open ON followups(due_date) WHERE deleted_at IS NULL AND done_at IS NULL");
+  }
+  for (const [k, v] of [
+    ["drill_cadence_fire_days", "30"],
+    ["drill_cadence_earthquake_days", "90"],
+    ["drill_cadence_lockdown_days", "90"],
+    ["drill_cadence_evacuation_days", "180"],
+  ] as const) await setting(k, v);
 }
 
 // ---------- Person identity ----------
