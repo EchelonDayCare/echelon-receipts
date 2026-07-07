@@ -19,6 +19,7 @@ mod voice;
 mod security;
 mod device_secret;
 mod db_migration;
+mod db_gate;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
