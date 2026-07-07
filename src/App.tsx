@@ -313,7 +313,7 @@ function Shell({ logo, name, staffEnabled }: { logo: string; name: string; staff
           { to: "/waitlist/list", label: "All Applications" },
           { to: "/waitlist/enrolled", label: "Enrolled" },
           { to: "/waitlist/archived", label: "Archived" },
-          { to: "/config/waitlist", label: "Settings" },
+          { to: "/config/waitlist", label: "Settings ↗" },
         ]}
       />
     );

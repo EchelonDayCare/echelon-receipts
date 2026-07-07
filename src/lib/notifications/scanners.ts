@@ -155,7 +155,7 @@ export async function scanStaffCredentials(): Promise<NotificationInput[]> {
       source_kind: "staff_credential",
       source_id: String(r.id),
       action_route: "/staff",
-      dedup_key: `${category}:staff_credential:${r.id}:${t}`,
+      dedup_key: `${category}:staff_credential:${r.id}`,
     });
   }
   return out;
@@ -194,7 +194,7 @@ export async function scanStaffDrills(): Promise<NotificationInput[]> {
       source_kind: "drill_type",
       source_id: type,
       action_route: "/staff/credentials",
-      dedup_key: `drill_overdue:drill_type:${type}:${t}`,
+      dedup_key: `drill_overdue:drill_type:${type}`,
     });
   }
   return out;
@@ -222,7 +222,7 @@ export async function scanVaultDocuments(): Promise<NotificationInput[]> {
       source_kind: "document",
       source_id: r.id,
       action_route: "/vault",
-      dedup_key: `${category}:document:${r.id}:${t}`,
+      dedup_key: `${category}:document:${r.id}`,
     });
   }
   return out;
@@ -238,8 +238,8 @@ export async function scanReceiptsAging(): Promise<NotificationInput[]> {
   const today = startOfDay();
   const out: NotificationInput[] = [];
   for (const r of rows) {
-    const then = startOfDay(new Date(r.date));
-    if (isNaN(then.getTime())) continue;
+    const then = parseIsoLocal(r.date);
+    if (!then) continue;
     const ageDays = Math.round((today.getTime() - then.getTime()) / DAY_MS);
     // Buckets: 30d / 60d / 90d (spec §aging)
     let bucket: string | null = null;
@@ -256,7 +256,10 @@ export async function scanReceiptsAging(): Promise<NotificationInput[]> {
       source_kind: "receipt",
       source_id: String(r.id),
       action_route: "/students/history",
-      dedup_key: `receipt_aging:receipt:${r.id}:${bucket}`,
+      // Dedup on receipt only — as the aging bucket escalates (30d → 60d → 90d)
+      // upsertByDedupKey refreshes title/body/severity in place instead of
+      // stacking three separate notifications for the same overdue receipt.
+      dedup_key: `receipt_aging:receipt:${r.id}`,
     });
   }
   return out;
@@ -294,7 +297,6 @@ export async function scanSchedulePublish(): Promise<NotificationInput[]> {
   const publishedStaffIds = new Set(published.map((r) => r.staff_id));
 
   const out: NotificationInput[] = [];
-  const t = daysUntil <= 0 ? "0d" : (daysUntil <= 3 ? "3d" : "7d");
   for (const st of staff) {
     const shiftCount = shiftCountByStaff.get(String(st.id)) ?? 0;
     if (!shiftCount) continue;
@@ -307,7 +309,7 @@ export async function scanSchedulePublish(): Promise<NotificationInput[]> {
       source_kind: "staff_weekly",
       source_id: `${st.id}:${nextMonday}`,
       action_route: "/staff/schedule",
-      dedup_key: `schedule_not_published:staff_weekly:${st.id}:${nextMonday}:${t}`,
+      dedup_key: `schedule_not_published:staff_weekly:${st.id}:${nextMonday}`,
     });
   }
   return out;
@@ -337,7 +339,7 @@ export async function scanScheduleConfirmations(): Promise<NotificationInput[]> 
       source_kind: "staff_weekly",
       source_id: r.id,
       action_route: "/staff/schedule",
-      dedup_key: `schedule_change_ack_missing:staff_weekly:${r.id}:${tier}`,
+      dedup_key: `schedule_change_ack_missing:staff_weekly:${r.id}`,
     });
   }
   return out;
@@ -365,7 +367,7 @@ export async function scanMeetingActions(): Promise<NotificationInput[]> {
       source_kind: "meeting_action",
       source_id: r.id,
       action_route: "/organizer",
-      dedup_key: `meeting_action_due:meeting_action:${r.id}:${t}`,
+      dedup_key: `meeting_action_due:meeting_action:${r.id}`,
     });
   }
   return out;
@@ -395,7 +397,7 @@ export async function scanFollowups(): Promise<NotificationInput[]> {
       source_kind: "followup",
       source_id: r.id,
       action_route: "/organizer",
-      dedup_key: `followup_due:followup:${r.id}:${t}`,
+      dedup_key: `followup_due:followup:${r.id}`,
     });
   }
   return out;
@@ -425,7 +427,7 @@ export async function scanWaitlistOffers(): Promise<NotificationInput[]> {
       source_kind: "waitlist_entry",
       source_id: String(r.id),
       action_route: "/waitlist",
-      dedup_key: `waitlist_offer_expiring:waitlist_entry:${r.id}:${tier}`,
+      dedup_key: `waitlist_offer_expiring:waitlist_entry:${r.id}`,
     });
   }
   return out;

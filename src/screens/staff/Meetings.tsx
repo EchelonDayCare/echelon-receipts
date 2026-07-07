@@ -7,6 +7,7 @@ import {
 import { listStaff } from "../../lib/staff";
 import type { StaffMeeting, Staff } from "../../types";
 import { showAlert, showConfirm, showPrompt } from "../../lib/dialogs";
+import { showPdfPreview } from "../../lib/pdfPreview";
 
 function todayIso(): string {
   const d = new Date();
@@ -161,7 +162,7 @@ export default function StaffMeetings() {
     return staff.find(s => s.id === id)?.name ?? `Staff #${id}`;
   }
 
-  function onPrint() {
+  async function onPrint() {
     if (!detail?.meeting.id) return;
     const m = detail.meeting;
     const attendeeNames = attendees.map(staffName).join(", ") || "—";
@@ -173,12 +174,13 @@ export default function StaffMeetings() {
             ${a.owner_staff_id ? ` — <strong>${escapeHtml(staffName(a.owner_staff_id))}</strong>` : ""}
             ${a.due_date ? ` (due ${escapeHtml(a.due_date)})` : ""}
           </li>`).join("")}</ol>`;
-    const html = `<!doctype html><html><head><meta charset="utf-8"><title></title>
+    // NOTE: pdfPreview measures the `.sheet` element to size the PDF, so keep
+    // the .sheet wrapper. Margins here are inside the sheet; the modal's
+    // html2pdf uses format=letter with its own margin (matched to 0.5in below).
+    const html = `<!doctype html><html><head><meta charset="utf-8"><title>${escapeHtml(m.title)}</title>
 <style>
-  @page { size: Letter; margin: 0; }
-  html, body { margin: 0; padding: 0; }
-  body { font-family: Arial, sans-serif; color: #111; }
-  .sheet { width: 7.5in; padding: 0.6in 0.5in; box-sizing: border-box; }
+  body { font-family: Arial, sans-serif; color: #111; margin: 0; padding: 0; }
+  .sheet { width: 7.5in; padding: 0.1in 0.1in; box-sizing: border-box; }
   h1 { margin: 0 0 4px; font-size: 20px; }
   .meta { color: #555; font-size: 12px; margin-bottom: 18px; }
   h2 { font-size: 13px; margin: 18px 0 6px; color: #444; text-transform: uppercase; letter-spacing: 0.5px; }
@@ -190,22 +192,14 @@ export default function StaffMeetings() {
   ${m.notes ? `<h2>Notes</h2><div class="body">${escapeHtml(m.notes)}</div>` : ""}
   <h2>Action Items</h2>${actionsHtml}
 </div></body></html>`;
-    const existing = document.getElementById("__print_frame");
-    if (existing) existing.remove();
-    const iframe = document.createElement("iframe");
-    iframe.id = "__print_frame";
-    iframe.style.cssText = "position:fixed;right:0;bottom:0;width:0;height:0;border:0";
-    document.body.appendChild(iframe);
-    const doc = iframe.contentDocument;
-    if (!doc) return;
-    doc.open(); doc.write(html); doc.close();
-    setTimeout(() => {
-      const parentTitle = document.title;
-      document.title = "";
-      iframe.contentWindow?.focus();
-      iframe.contentWindow?.print();
-      setTimeout(() => { document.title = parentTitle; }, 1000);
-    }, 300);
+    const safeTitle = (m.title || "meeting").replace(/[^A-Za-z0-9._-]+/g, "_");
+    await showPdfPreview({
+      html,
+      filename: `${m.meeting_date}_${safeTitle}.pdf`,
+      title: `${m.title} — ${fmtLongDate(m.meeting_date)}`,
+      format: "letter",
+      margin: 0.5,
+    });
   }
 
   const openCount = detail?.actions.filter(a => !a.done).length ?? 0;
