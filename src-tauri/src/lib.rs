@@ -20,6 +20,7 @@ mod security;
 mod device_secret;
 mod db_migration;
 mod db_gate;
+mod auth;
 
 /// Every schema migration we ship, in version order. Version numbers
 /// are stable across v1.x → v2.0.0 so entries backfilled from the
@@ -49,6 +50,7 @@ pub fn run() {
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_shell::init())
         .manage(db_gate::DbGate::new())
+        .manage(auth::AuthState::new())
         .setup(|app| {
             // Install panic hook + error log file before anything else can crash.
             errlog::init(&app.handle());
@@ -64,8 +66,25 @@ pub fn run() {
             let dir = app.path().app_data_dir()?;
             std::fs::create_dir_all(&dir).ok();
             let db_path = dir.join("echelon.db");
+            let env_path = dir.join("security.json");
             let migrations = embedded_migrations();
             tauri::async_runtime::block_on(async move {
+                // If v2.0.0 security is set up and DB is encrypted,
+                // leave the gate closed — AppLock will prompt for a
+                // PIN and v2_unlock reopens with SQLCipher. Otherwise
+                // open the plaintext DB and apply schema migrations
+                // (v1.x compat path, and pre-migration state on fresh
+                // v2 installs).
+                let encrypted = match security::load_envelope(&env_path) {
+                    Ok(env) => matches!(
+                        env.migration_state,
+                        security::MigrationState::Encrypted
+                    ),
+                    Err(_) => false,
+                };
+                if encrypted {
+                    return;
+                }
                 if let Err(e) = gate.open_plaintext(&db_path).await {
                     eprintln!("[db_gate] open_plaintext failed: {e}");
                 }
@@ -80,6 +99,11 @@ pub fn run() {
             db_gate::db_execute,
             db_gate::db_is_open,
             db_gate::db_close,
+            auth::v2_state,
+            auth::v2_create_pin,
+            auth::v2_unlock,
+            auth::v2_lock,
+            auth::v2_change_pin,
             email::send_email,
             email::keychain_set,
             email::keychain_get,

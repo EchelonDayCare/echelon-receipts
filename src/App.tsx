@@ -1,6 +1,7 @@
 import { HashRouter, NavLink, Route, Routes, Navigate, useLocation, useNavigate } from "react-router-dom";
 import { useEffect, useState, lazy, Suspense, type ReactElement } from "react";
 import Home from "./screens/Home";
+import AppGate from "./components/AppGate";
 const Today = lazy(() => import("./screens/Today"));
 const ThisMonth = lazy(() => import("./screens/ThisMonth"));
 const NewReceipt = lazy(() => import("./screens/NewReceipt"));
@@ -511,11 +512,13 @@ export default function App() {
   }, []);
 
   return (
-    <HashRouter>
-      <PromptHost />
-      <Routes>
-        <Route path="/*" element={<Shell logo={logo} name={name} staffEnabled={staffEnabled} />} />
-      </Routes>
-    </HashRouter>
+    <AppGate>
+      <HashRouter>
+        <PromptHost />
+        <Routes>
+          <Route path="/*" element={<Shell logo={logo} name={name} staffEnabled={staffEnabled} />} />
+        </Routes>
+      </HashRouter>
+    </AppGate>
   );
 }
