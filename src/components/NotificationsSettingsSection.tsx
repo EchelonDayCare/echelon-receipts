@@ -33,6 +33,110 @@ function MmDdPicker({ value, onChange }: { value: string; onChange: (mmdd: strin
   );
 }
 
+// Outlook-style multi-date chip editor. Value is the comma-joined MM-DD
+// string stored in settings; internally we parse to an array, render as
+// chips, and re-join on every change so the persisted format never changes.
+function MmDdMultiPicker({
+  value, onChange, placeholderHint,
+}: {
+  value: string;
+  onChange: (csv: string) => void;
+  placeholderHint?: string;
+}) {
+  const dates = value.split(",").map(x => x.trim()).filter(x => /^\d{2}-\d{2}$/.test(x));
+  // Sort chronologically for a sensible visual order (Jan → Dec).
+  const sorted = [...dates].sort();
+  const [adding, setAdding] = useState(false);
+  const [draft, setDraft] = useState("");
+
+  function commit(next: string[]) {
+    const uniq = Array.from(new Set(next)).sort();
+    onChange(uniq.join(","));
+  }
+  function remove(d: string) {
+    commit(sorted.filter(x => x !== d));
+  }
+  function labelFor(d: string): string {
+    const m = /^(\d{2})-(\d{2})$/.exec(d);
+    if (!m) return d;
+    return `${MONTH_LABELS[Number(m[1]) - 1]} ${Number(m[2])}`;
+  }
+  function confirmAdd() {
+    if (/^\d{2}-\d{2}$/.test(draft) && !sorted.includes(draft)) {
+      commit([...sorted, draft]);
+    }
+    setDraft("");
+    setAdding(false);
+  }
+
+  return (
+    <div style={{ display: "flex", flexWrap: "wrap", gap: 6, alignItems: "center", minHeight: 32 }}>
+      {sorted.length === 0 && !adding && (
+        <span style={{ color: "var(--muted)", fontSize: 12, fontStyle: "italic" }}>
+          No dates set. {placeholderHint ? `(${placeholderHint})` : ""}
+        </span>
+      )}
+      {sorted.map(d => (
+        <span
+          key={d}
+          style={{
+            display: "inline-flex", alignItems: "center", gap: 4,
+            background: "var(--chip-bg, #eef2ff)",
+            color: "var(--chip-fg, #3730a3)",
+            border: "1px solid var(--chip-border, #c7d2fe)",
+            borderRadius: 999, padding: "3px 4px 3px 10px", fontSize: 12,
+            fontWeight: 500,
+          }}
+        >
+          {labelFor(d)}
+          <button
+            type="button"
+            onClick={() => remove(d)}
+            title="Remove"
+            aria-label={`Remove ${labelFor(d)}`}
+            style={{
+              background: "transparent", border: "none", cursor: "pointer",
+              padding: "0 4px", color: "inherit", opacity: 0.6, fontSize: 14,
+              lineHeight: 1,
+            }}
+            onMouseOver={e => (e.currentTarget.style.opacity = "1")}
+            onMouseOut={e => (e.currentTarget.style.opacity = "0.6")}
+          >×</button>
+        </span>
+      ))}
+      {adding ? (
+        <span style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>
+          <MmDdPicker value={draft} onChange={setDraft} />
+          <button
+            type="button"
+            className="btn"
+            onClick={confirmAdd}
+            disabled={!/^\d{2}-\d{2}$/.test(draft)}
+            style={{ padding: "3px 10px", fontSize: 12 }}
+          >Add</button>
+          <button
+            type="button"
+            className="btn secondary"
+            onClick={() => { setDraft(""); setAdding(false); }}
+            style={{ padding: "3px 10px", fontSize: 12 }}
+          >Cancel</button>
+        </span>
+      ) : (
+        <button
+          type="button"
+          onClick={() => setAdding(true)}
+          style={{
+            background: "transparent",
+            border: "1px dashed var(--border, #cbd5e1)",
+            color: "var(--muted)",
+            borderRadius: 999, padding: "3px 10px", fontSize: 12, cursor: "pointer",
+          }}
+        >+ Add date</button>
+      )}
+    </div>
+  );
+}
+
 export default function NotificationsSettingsSection() {
   const [prefs, setPrefs] = useState<Map<string, NotificationSetting>>(new Map());
   const [agmMmdd, setAgmMmdd] = useState("");
@@ -119,25 +223,25 @@ export default function NotificationsSettingsSection() {
           </div>
           <label>WCB quarterly dates</label>
           <div>
-            <input
-              type="text"
+            <MmDdMultiPicker
               value={wcbDays}
-              onChange={e => setWcbDays(e.target.value)}
-              style={{ width: 260 }}
-              placeholder="04-20,07-20,10-20,01-20"
+              onChange={setWcbDays}
+              placeholderHint="e.g. Apr 20, Jul 20, Oct 20, Jan 20"
             />
-            <small style={{ color: "var(--muted)", marginLeft: 8 }}>Comma-separated MM-DD. Fires 1 week before each.</small>
+            <small style={{ color: "var(--muted)", display: "block", marginTop: 4 }}>
+              Fires 1 week before each date.
+            </small>
           </div>
           <label>Staff meeting dates</label>
           <div>
-            <input
-              type="text"
+            <MmDdMultiPicker
               value={staffMeetingDays}
-              onChange={e => setStaffMeetingDays(e.target.value)}
-              style={{ width: 260 }}
-              placeholder="08-31,11-30,02-28,05-31"
+              onChange={setStaffMeetingDays}
+              placeholderHint="e.g. Aug 31, Nov 30, Feb 28, May 31"
             />
-            <small style={{ color: "var(--muted)", marginLeft: 8 }}>Comma-separated MM-DD (quarterly). Fires 1 week before — i.e. from the Wednesday of the previous week if meeting is on a Wednesday.</small>
+            <small style={{ color: "var(--muted)", display: "block", marginTop: 4 }}>
+              Quarterly. Fires 1 week before — i.e. from the Wednesday of the previous week if the meeting is on a Wednesday.
+            </small>
           </div>
           <label>Payroll remittance day</label>
           <div>
