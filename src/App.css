@@ -616,6 +616,18 @@ table.data tr.voided td { color: #9ca3af; text-decoration: line-through; }
   display: flex; align-items: flex-start; gap: 8px;
   padding: 9px 4px; border-top: 1px solid var(--border);
 }
+
+/* ─── Print: hide all app chrome (sidebars, nav) ──────────────────────── */
+@media print {
+  .sidebar { display: none !important; }
+  .app { display: block !important; }
+  .content, .content-home { padding: 0 !important; overflow: visible !important; }
+  .no-print { display: none !important; }
+  body, html { background: #fff !important; }
+  /* Avoid awkward breaks inside tables and cards */
+  table { page-break-inside: auto; }
+  tr, .kpi-card { page-break-inside: avoid; }
+}
 .org-fu:first-child { border-top: 0; }
 .org-fu.done { opacity: .6; }
 .org-fu.done .org-fu-title { text-decoration: line-through; }

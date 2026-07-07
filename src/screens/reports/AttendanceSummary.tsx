@@ -365,9 +365,14 @@ export default function AttendanceAnalytics() {
       <style>{`
         @media print {
           .no-print { display: none !important; }
-          .report-sheet { border: none !important; padding: 0 !important; }
-          @page { margin: 0.5in; }
+          .report-sheet { border: none !important; padding: 0 !important; box-shadow: none !important; }
+          .print-page { page-break-inside: avoid; }
+          .print-page-break { page-break-before: always; }
+          @page { margin: 0.5in; size: letter portrait; }
+          h3 { margin-top: 12px !important; }
+          table { font-size: 11px !important; }
         }
+        .print-page-break { }
       `}</style>
     </div>
   );
@@ -387,90 +392,96 @@ function CentreView(props: {
   const totalAbs = totals.a + totals.s + totals.v;
   return (
     <>
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))", gap: 12, marginBottom: 20 }}>
-        <Kpi label="Attendance rate" value={`${(centreAttendanceRate * 100).toFixed(1)}%`} accent="#166534" />
-        <Kpi label="Days centre open" value={totals.days_open} />
-        <Kpi label="Active children" value={activeChildren} />
-        <Kpi label="Present (P)" value={totals.p} accent={MARK_COLOR.P} />
-        <Kpi label="Half-day (H)" value={totals.h} accent={MARK_COLOR.H} />
-        <Kpi label="Absent+Sick+Vacation" value={totalAbs} accent={MARK_COLOR.A} />
+      {/* ─── PAGE 1 · Summary ─────────────────────────────────────── */}
+      <div className="print-page">
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))", gap: 12, marginBottom: 20 }}>
+          <Kpi label="Attendance rate" value={`${(centreAttendanceRate * 100).toFixed(1)}%`} accent="#166534" />
+          <Kpi label="Days centre open" value={totals.days_open} />
+          <Kpi label="Active children" value={activeChildren} />
+          <Kpi label="Present (P)" value={totals.p} accent={MARK_COLOR.P} />
+          <Kpi label="Half-day (H)" value={totals.h} accent={MARK_COLOR.H} />
+          <Kpi label="Absent+Sick+Vacation" value={totalAbs} accent={MARK_COLOR.A} />
+        </div>
+
+        {/* Monthly trend chart */}
+        <h3 style={{ marginTop: 0 }}>Monthly attendance rate</h3>
+        {monthlyBuckets.length === 0 ? (
+          <p style={{ color: "var(--muted)" }}>No months in range.</p>
+        ) : (
+          <TrendBars months={monthlyBuckets.map((b) => b.ym)} values={attendanceRateSeries} format={(v) => `${(v * 100).toFixed(0)}%`} />
+        )}
       </div>
 
-      {/* Monthly trend chart */}
-      <h3 style={{ marginTop: 0 }}>Monthly attendance rate</h3>
-      {monthlyBuckets.length === 0 ? (
-        <p style={{ color: "var(--muted)" }}>No months in range.</p>
-      ) : (
-        <TrendBars months={monthlyBuckets.map((b) => b.ym)} values={attendanceRateSeries} format={(v) => `${(v * 100).toFixed(0)}%`} />
-      )}
-
-      {/* Per-month breakdown */}
-      <h3 style={{ marginTop: 24 }}>Monthly breakdown</h3>
-      <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
-        <thead>
-          <tr style={{ background: "#f8fafc" }}>
-            <Th>Month</Th>
-            <Th align="right">Days open</Th>
-            <Th align="right">Active kids</Th>
-            <Th align="right" color={MARK_COLOR.P}>P</Th>
-            <Th align="right" color={MARK_COLOR.H}>H</Th>
-            <Th align="right" color={MARK_COLOR.A}>A</Th>
-            <Th align="right" color={MARK_COLOR.S}>S</Th>
-            <Th align="right" color={MARK_COLOR.V}>V</Th>
-            <Th align="right">Rate</Th>
-          </tr>
-        </thead>
-        <tbody>
-          {monthlyBuckets.map((b, i) => {
-            const rate = attendanceRateSeries[i];
-            return (
-              <tr key={b.ym}>
-                <Td>{b.ym}</Td>
-                <Td align="right">{b.days_open}</Td>
-                <Td align="right">{b.active_children}</Td>
-                <Td align="right">{b.p}</Td>
-                <Td align="right">{b.h}</Td>
-                <Td align="right">{b.a}</Td>
-                <Td align="right">{b.s}</Td>
-                <Td align="right">{b.v}</Td>
-                <Td align="right"><b>{(rate * 100).toFixed(1)}%</b></Td>
-              </tr>
-            );
-          })}
-        </tbody>
-      </table>
-
-      {/* Per-child leaderboard */}
-      <h3 style={{ marginTop: 24 }}>Per-child summary</h3>
-      <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
-        <thead>
-          <tr style={{ background: "#f8fafc" }}>
-            <Th>Child</Th>
-            <Th align="right" color={MARK_COLOR.P}>P</Th>
-            <Th align="right" color={MARK_COLOR.H}>H</Th>
-            <Th align="right" color={MARK_COLOR.A}>A</Th>
-            <Th align="right" color={MARK_COLOR.S}>S</Th>
-            <Th align="right" color={MARK_COLOR.V}>V</Th>
-            <Th align="right">Rate</Th>
-          </tr>
-        </thead>
-        <tbody>
-          {studentTotals.length === 0 && (
-            <tr><Td colSpan={7} center muted>No students in range.</Td></tr>
-          )}
-          {studentTotals.map((t) => (
-            <tr key={t.student_id}>
-              <Td>{t.student_name}</Td>
-              <Td align="right">{t.p_days}</Td>
-              <Td align="right">{t.h_days}</Td>
-              <Td align="right">{t.a_days}</Td>
-              <Td align="right">{t.s_days}</Td>
-              <Td align="right">{t.v_days}</Td>
-              <Td align="right"><b>{(t.attendance_rate * 100).toFixed(1)}%</b></Td>
+      {/* ─── PAGE 2 · Details ─────────────────────────────────────── */}
+      <div className="print-page print-page-break">
+        {/* Per-month breakdown */}
+        <h3 style={{ marginTop: 0 }}>Monthly breakdown</h3>
+        <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
+          <thead>
+            <tr style={{ background: "#f8fafc" }}>
+              <Th>Month</Th>
+              <Th align="right">Days open</Th>
+              <Th align="right">Active kids</Th>
+              <Th align="right" color={MARK_COLOR.P}>P</Th>
+              <Th align="right" color={MARK_COLOR.H}>H</Th>
+              <Th align="right" color={MARK_COLOR.A}>A</Th>
+              <Th align="right" color={MARK_COLOR.S}>S</Th>
+              <Th align="right" color={MARK_COLOR.V}>V</Th>
+              <Th align="right">Rate</Th>
             </tr>
-          ))}
-        </tbody>
-      </table>
+          </thead>
+          <tbody>
+            {monthlyBuckets.map((b, i) => {
+              const rate = attendanceRateSeries[i];
+              return (
+                <tr key={b.ym}>
+                  <Td>{b.ym}</Td>
+                  <Td align="right">{b.days_open}</Td>
+                  <Td align="right">{b.active_children}</Td>
+                  <Td align="right">{b.p}</Td>
+                  <Td align="right">{b.h}</Td>
+                  <Td align="right">{b.a}</Td>
+                  <Td align="right">{b.s}</Td>
+                  <Td align="right">{b.v}</Td>
+                  <Td align="right"><b>{(rate * 100).toFixed(1)}%</b></Td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+
+        {/* Per-child leaderboard */}
+        <h3 style={{ marginTop: 18 }}>Per-child summary</h3>
+        <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
+          <thead>
+            <tr style={{ background: "#f8fafc" }}>
+              <Th>Child</Th>
+              <Th align="right" color={MARK_COLOR.P}>P</Th>
+              <Th align="right" color={MARK_COLOR.H}>H</Th>
+              <Th align="right" color={MARK_COLOR.A}>A</Th>
+              <Th align="right" color={MARK_COLOR.S}>S</Th>
+              <Th align="right" color={MARK_COLOR.V}>V</Th>
+              <Th align="right">Rate</Th>
+            </tr>
+          </thead>
+          <tbody>
+            {studentTotals.length === 0 && (
+              <tr><Td colSpan={7} center muted>No students in range.</Td></tr>
+            )}
+            {studentTotals.map((t) => (
+              <tr key={t.student_id}>
+                <Td>{t.student_name}</Td>
+                <Td align="right">{t.p_days}</Td>
+                <Td align="right">{t.h_days}</Td>
+                <Td align="right">{t.a_days}</Td>
+                <Td align="right">{t.s_days}</Td>
+                <Td align="right">{t.v_days}</Td>
+                <Td align="right"><b>{(t.attendance_rate * 100).toFixed(1)}%</b></Td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
     </>
   );
 }
@@ -519,58 +530,64 @@ function ChildView(props: {
 
   return (
     <>
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))", gap: 12, marginBottom: 20 }}>
-        <Kpi label="Attendance rate" value={`${(student.attendance_rate * 100).toFixed(1)}%`} accent="#166534" />
-        <Kpi label="Rank (in centre)" value={rank > 0 ? `${rank} of ${studentTotals.length}` : "—"} />
-        <Kpi label="Present (P)" value={student.p_days} accent={MARK_COLOR.P} />
-        <Kpi label="Half-day (H)" value={student.h_days} accent={MARK_COLOR.H} />
-        <Kpi label="Absent" value={student.a_days} accent={MARK_COLOR.A} />
-        <Kpi label="Sick" value={student.s_days} accent={MARK_COLOR.S} />
-        <Kpi label="Vacation" value={student.v_days} accent={MARK_COLOR.V} />
+      {/* ─── PAGE 1 · Child summary ────────────────────────────────── */}
+      <div className="print-page">
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))", gap: 12, marginBottom: 20 }}>
+          <Kpi label="Attendance rate" value={`${(student.attendance_rate * 100).toFixed(1)}%`} accent="#166534" />
+          <Kpi label="Rank (in centre)" value={rank > 0 ? `${rank} of ${studentTotals.length}` : "—"} />
+          <Kpi label="Present (P)" value={student.p_days} accent={MARK_COLOR.P} />
+          <Kpi label="Half-day (H)" value={student.h_days} accent={MARK_COLOR.H} />
+          <Kpi label="Absent" value={student.a_days} accent={MARK_COLOR.A} />
+          <Kpi label="Sick" value={student.s_days} accent={MARK_COLOR.S} />
+          <Kpi label="Vacation" value={student.v_days} accent={MARK_COLOR.V} />
+        </div>
+
+        {/* Trend chart */}
+        <h3 style={{ marginTop: 0 }}>Monthly attendance rate — {student.student_name}</h3>
+        {perMonth.length === 0 ? (
+          <p style={{ color: "var(--muted)" }}>No months in range.</p>
+        ) : (
+          <TrendBars months={perMonth.map((m) => m.ym)} values={perMonth.map((m) => m.rate)} format={(v) => `${(v * 100).toFixed(0)}%`} />
+        )}
       </div>
 
-      {/* Trend chart */}
-      <h3 style={{ marginTop: 0 }}>Monthly attendance rate — {student.student_name}</h3>
-      {perMonth.length === 0 ? (
-        <p style={{ color: "var(--muted)" }}>No months in range.</p>
-      ) : (
-        <TrendBars months={perMonth.map((m) => m.ym)} values={perMonth.map((m) => m.rate)} format={(v) => `${(v * 100).toFixed(0)}%`} />
-      )}
+      {/* ─── PAGE 2 · Details ─────────────────────────────────────── */}
+      <div className="print-page print-page-break">
+        {/* Calendar grid: one row per month, day columns coloured by mark */}
+        <h3 style={{ marginTop: 0 }}>Day-by-day marks</h3>
+        <CalendarGrid marksByDate={marksByDate} dateFrom={dateFrom} dateTo={dateTo} />
 
-      {/* Calendar grid: one row per month, day columns coloured by mark */}
-      <h3 style={{ marginTop: 24 }}>Day-by-day marks</h3>
-      <CalendarGrid marksByDate={marksByDate} dateFrom={dateFrom} dateTo={dateTo} />
-
-      {/* Per-month breakdown */}
-      <h3 style={{ marginTop: 24 }}>Monthly breakdown</h3>
-      <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
-        <thead>
-          <tr style={{ background: "#f8fafc" }}>
-            <Th>Month</Th>
-            <Th align="right">Days open</Th>
-            <Th align="right" color={MARK_COLOR.P}>P</Th>
-            <Th align="right" color={MARK_COLOR.H}>H</Th>
-            <Th align="right" color={MARK_COLOR.A}>A</Th>
-            <Th align="right" color={MARK_COLOR.S}>S</Th>
-            <Th align="right" color={MARK_COLOR.V}>V</Th>
-            <Th align="right">Rate</Th>
-          </tr>
-        </thead>
-        <tbody>
-          {perMonth.map((m) => (
-            <tr key={m.ym}>
-              <Td>{m.ym}</Td>
-              <Td align="right">{m.days_open}</Td>
-              <Td align="right">{m.p}</Td>
-              <Td align="right">{m.h}</Td>
-              <Td align="right">{m.a}</Td>
-              <Td align="right">{m.s}</Td>
-              <Td align="right">{m.v}</Td>
-              <Td align="right"><b>{(m.rate * 100).toFixed(1)}%</b></Td>
+        {/* Per-month breakdown */}
+        <h3 style={{ marginTop: 18 }}>Monthly breakdown</h3>
+        <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
+          <thead>
+            <tr style={{ background: "#f8fafc" }}>
+              <Th>Month</Th>
+              <Th align="right">Days open</Th>
+              <Th align="right" color={MARK_COLOR.P}>P</Th>
+              <Th align="right" color={MARK_COLOR.H}>H</Th>
+              <Th align="right" color={MARK_COLOR.A}>A</Th>
+              <Th align="right" color={MARK_COLOR.S}>S</Th>
+              <Th align="right" color={MARK_COLOR.V}>V</Th>
+              <Th align="right">Rate</Th>
             </tr>
-          ))}
-        </tbody>
-      </table>
+          </thead>
+          <tbody>
+            {perMonth.map((m) => (
+              <tr key={m.ym}>
+                <Td>{m.ym}</Td>
+                <Td align="right">{m.days_open}</Td>
+                <Td align="right">{m.p}</Td>
+                <Td align="right">{m.h}</Td>
+                <Td align="right">{m.a}</Td>
+                <Td align="right">{m.s}</Td>
+                <Td align="right">{m.v}</Td>
+                <Td align="right"><b>{(m.rate * 100).toFixed(1)}%</b></Td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
     </>
   );
 }
