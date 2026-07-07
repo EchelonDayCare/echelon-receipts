@@ -40,9 +40,17 @@ async fn call_mistral_doc_ai(
         .map_err(|e| format!("file base64: {e}"))?;
 
     let data_url = format!("data:{mime_type};base64,{file_b64}");
+    // Mistral OCR uses different `type`+field for PDFs vs images.
+    // - Images (image/png, image/jpeg, ...): { type: "image_url", image_url: ... }
+    // - PDFs (application/pdf):              { type: "document_url", document_url: ... }
+    let document = if mime_type.eq_ignore_ascii_case("application/pdf") {
+        json!({ "type": "document_url", "document_url": data_url })
+    } else {
+        json!({ "type": "image_url", "image_url": data_url })
+    };
     let body = json!({
         "model": MISTRAL_DOC_AI_MODEL,
-        "document": { "type": "image_url", "image_url": data_url },
+        "document": document,
         "document_annotation_format": {
             "type": "json_schema",
             "json_schema": { "name": name, "schema": schema, "strict": true }
