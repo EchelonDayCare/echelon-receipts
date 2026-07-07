@@ -14,15 +14,13 @@
 //   2) Summary call — temperature 0.3, given the executed rows, produces a
 //      1-2 sentence prose summary + chart hint (bar|line|pie|none).
 
-use rusqlite::{Connection, OpenFlags, types::ValueRef};
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{json, Value, Map};
 use sqlparser::ast::{SetExpr, Statement};
 use sqlparser::dialect::SQLiteDialect;
 use sqlparser::parser::Parser;
-use std::path::PathBuf;
 use std::time::{Duration, Instant};
-use tauri::{AppHandle, Manager};
+use crate::db_gate::DbGate;
 
 const AZURE_ENDPOINT: &str = "https://ai-nse.openai.azure.com";
 const CHAT_DEPLOY: &str = "gpt-4.1";
@@ -57,34 +55,41 @@ pub struct AskEchelonResult {
 // ─── Entry point ────────────────────────────────────────────────────────
 
 #[tauri::command]
-pub async fn ask_echelon(app: AppHandle, args: AskEchelonArgs) -> Result<AskEchelonResult, String> {
+pub async fn ask_echelon(
+    gate: tauri::State<'_, DbGate>,
+    args: AskEchelonArgs,
+) -> Result<AskEchelonResult, String> {
     let started = Instant::now();
-    let db_path = resolve_db_path(&app)?;
 
     if args.question.trim().is_empty() {
         return Err("Question is empty.".to_string());
+    }
+    if !gate.is_open().await {
+        return Err("Database is locked. Unlock the app before asking a question.".to_string());
     }
     // H-7: resolve the Azure AI key server-side instead of accepting it as a
     // plaintext IPC argument.
     let azure_ai_key = crate::secrets::get_secret("azure_ai_key")?;
 
-    // Build schema context in Rust (fresh each call — schema is tiny, cache
-    // would only save a few ms and adds a stale-cache footgun during dev).
-    let schema_ctx = build_schema_context(&db_path, args.redact, args.allowed_tables.as_ref())?;
+    // Build schema context via the app's live DB connection (SQLCipher-
+    // encrypted after v2.0.0). Opening our own rusqlite handle to the file
+    // would fail with "file is not a database" for encrypted DBs.
+    let schema_ctx = build_schema_context(&gate, args.redact, args.allowed_tables.as_ref()).await?;
 
     // ── Step 1: Ask the model for SQL ───────────────────────────────────
     let sql_raw = generate_sql(&azure_ai_key, &args.question, &schema_ctx).await?;
     let sql = validate_and_normalize_sql(&sql_raw)?;
 
-    // ── Step 2: Execute against a read-only connection ──────────────────
-    let (columns, rows, truncated) = execute_readonly(&db_path, &sql)?;
+    // ── Step 2: Execute against the same live connection.
+    // SQL AST validation above guarantees this is a single SELECT (or
+    // WITH ... SELECT), so reusing the read-write gate is safe. See
+    // `validate_and_normalize_sql` for the argument.
+    let (columns, rows, truncated) = execute_readonly(&gate, &sql).await?;
 
     // ── Step 3: Summarise ───────────────────────────────────────────────
     let (summary, chart_hint) = summarize(
         &azure_ai_key, &args.question, &sql, &columns, &rows, args.redact,
     ).await.unwrap_or_else(|_| {
-        // A summary failure should not fail the whole query — the user still
-        // gets the table.
         ("".to_string(), "none".to_string())
     });
 
@@ -99,42 +104,25 @@ pub async fn ask_echelon(app: AppHandle, args: AskEchelonArgs) -> Result<AskEche
     })
 }
 
-// ─── DB path resolution ─────────────────────────────────────────────────
-
-fn resolve_db_path(app: &AppHandle) -> Result<PathBuf, String> {
-    // tauri-plugin-sql stores at app_data_dir/echelon.db (matches the
-    // `sqlite:echelon.db` URL used elsewhere in the app).
-    let dir = app.path().app_data_dir().map_err(|e| format!("app_data_dir: {e}"))?;
-    let p = dir.join("echelon.db");
-    if !p.exists() {
-        return Err(format!("DB not found at {}", p.display()));
-    }
-    Ok(p)
-}
-
 // ─── Schema context builder ─────────────────────────────────────────────
 
-fn build_schema_context(
-    db_path: &PathBuf, redact: bool, allowed: Option<&Vec<String>>,
+async fn build_schema_context(
+    gate: &DbGate, redact: bool, allowed: Option<&Vec<String>>,
 ) -> Result<String, String> {
-    let conn = Connection::open_with_flags(
-        db_path,
-        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_URI,
-    ).map_err(|e| format!("open-ro: {e}"))?;
-
     // Enumerate user tables (skip internal + tauri-plugin-sql housekeeping).
-    let mut stmt = conn
-        .prepare("SELECT name, sql FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' AND name NOT LIKE '\\_%\\_' ESCAPE '\\' ORDER BY name")
+    let master = gate
+        .select(
+            "SELECT name, sql FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' AND name NOT LIKE '\\_%\\_' ESCAPE '\\' ORDER BY name",
+            &[],
+        )
+        .await
         .map_err(|e| format!("prep-master: {e}"))?;
-    let table_iter = stmt.query_map([], |r| {
-        let name: String = r.get(0)?;
-        let sql: Option<String> = r.get(1)?;
-        Ok((name, sql.unwrap_or_default()))
-    }).map_err(|e| format!("query-master: {e}"))?;
 
     let mut tables: Vec<(String, String)> = Vec::new();
-    for row in table_iter {
-        let (name, sql) = row.map_err(|e| format!("scan-master: {e}"))?;
+    for row in master {
+        let name = row.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let sql = row.get("sql").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        if name.is_empty() { continue; }
         if name.starts_with("_") { continue; }
         if let Some(list) = allowed {
             if !list.is_empty() && !list.iter().any(|t| t.eq_ignore_ascii_case(&name)) {
@@ -160,7 +148,7 @@ fn build_schema_context(
     out.push_str(")\n");
     for (name, _) in &tables {
         let sql = format!("SELECT * FROM \"{}\" ORDER BY RANDOM() LIMIT {}", name, SAMPLE_ROWS_PER_TABLE);
-        let sampled = sample_rows_json(&conn, &sql, redact);
+        let sampled = sample_rows_json(gate, &sql, redact).await;
         match sampled {
             Ok(rows_json) if !rows_json.is_empty() => {
                 out.push_str(&format!("\n{name}:\n"));
@@ -255,43 +243,22 @@ fn placeholder_for(col: &str) -> Value {
     else { Value::String("<redacted>".into()) }
 }
 
-fn sample_rows_json(conn: &Connection, sql: &str, redact: bool) -> Result<Vec<String>, String> {
-    let mut stmt = conn.prepare(sql).map_err(|e| format!("prep-sample: {e}"))?;
-    let col_names: Vec<String> = stmt.column_names().iter().map(|s| s.to_string()).collect();
-    let col_count = col_names.len();
-    let mut rows_iter = stmt.query([]).map_err(|e| format!("query-sample: {e}"))?;
-    let mut out: Vec<String> = Vec::new();
-    while let Some(row) = rows_iter.next().map_err(|e| format!("next-sample: {e}"))? {
-        let mut obj = serde_json::Map::new();
-        for i in 0..col_count {
-            let col = &col_names[i];
-            let v = value_from_row(row, i);
-            // Only string-valued cells are redacted — this keeps aggregate
-            // result shapes (COUNT/SUM/dates) structurally identical even
-            // when a column name isn't on the allowlist, while still
-            // failing closed on any free-text/identifying column.
-            let final_v = if should_redact(&v, col, redact) {
+async fn sample_rows_json(gate: &DbGate, sql: &str, redact: bool) -> Result<Vec<String>, String> {
+    let rows = gate.select(sql, &[]).await.map_err(|e| format!("query-sample: {e}"))?;
+    let mut out: Vec<String> = Vec::with_capacity(rows.len());
+    for row in rows {
+        let mut obj: Map<String, Value> = Map::new();
+        for (col, v) in row.iter() {
+            let final_v = if should_redact(v, col, redact) {
                 placeholder_for(col)
             } else {
-                v
+                v.clone()
             };
             obj.insert(col.clone(), final_v);
         }
         out.push(serde_json::to_string(&Value::Object(obj)).unwrap_or_default());
     }
     Ok(out)
-}
-
-fn value_from_row(row: &rusqlite::Row, i: usize) -> Value {
-    match row.get_ref(i) {
-        Ok(ValueRef::Null) => Value::Null,
-        Ok(ValueRef::Integer(v)) => Value::from(v),
-        Ok(ValueRef::Real(v)) => serde_json::Number::from_f64(v)
-            .map(Value::Number).unwrap_or(Value::Null),
-        Ok(ValueRef::Text(bytes)) => Value::String(String::from_utf8_lossy(bytes).into_owned()),
-        Ok(ValueRef::Blob(_)) => Value::String("<blob>".into()),
-        Err(_) => Value::Null,
-    }
 }
 
 // ─── LLM: SQL generation ────────────────────────────────────────────────
@@ -511,37 +478,35 @@ fn ensure_limit(sql: &str) -> Result<String, String> {
 }
 
 // ─── Read-only execution ────────────────────────────────────────────────
+//
+// The SQL AST validator above guarantees this is a single SELECT (or WITH
+// ... SELECT) with no comments, no PRAGMA/ATTACH/DDL/DML, wrapped in an
+// outer LIMIT 500. Any hostile input has already been rejected. Reusing
+// the app's live DbGate connection (which may be SQLCipher-encrypted) is
+// therefore safe — we no longer need our own read-only rusqlite handle.
 
-fn execute_readonly(
-    db_path: &PathBuf, sql: &str,
+async fn execute_readonly(
+    gate: &DbGate, sql: &str,
 ) -> Result<(Vec<String>, Vec<Vec<Value>>, bool), String> {
-    let conn = Connection::open_with_flags(
-        db_path,
-        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_URI,
-    ).map_err(|e| format!("open-ro: {e}"))?;
-
-    // SQLITE_OPEN_READ_ONLY already prevents any write at the SQLite layer,
-    // and sqlparser validation above already restricted the statement kind.
-    // We rely on those two together — the connection flag is the ultimate
-    // guarantee.
-
-    let mut stmt = conn.prepare(sql).map_err(|e| format!("prep: {e}"))?;
-    let col_names: Vec<String> = stmt.column_names().iter().map(|s| s.to_string()).collect();
-    let col_count = col_names.len();
-    let mut rows_iter = stmt.query([]).map_err(|e| format!("query: {e}"))?;
-
-    let mut out: Vec<Vec<Value>> = Vec::new();
+    let rows = gate.select(sql, &[]).await.map_err(|e| format!("query: {e}"))?;
+    let mut columns: Vec<String> = Vec::new();
+    let mut out: Vec<Vec<Value>> = Vec::with_capacity(rows.len());
     let mut truncated = false;
-    while let Some(row) = rows_iter.next().map_err(|e| format!("next: {e}"))? {
+    for row in rows {
         if out.len() >= HARD_ROW_CAP {
             truncated = true;
             break;
         }
-        let mut r: Vec<Value> = Vec::with_capacity(col_count);
-        for i in 0..col_count { r.push(value_from_row(row, i)); }
+        if columns.is_empty() {
+            columns = row.keys().cloned().collect();
+        }
+        let r: Vec<Value> = columns
+            .iter()
+            .map(|c| row.get(c).cloned().unwrap_or(Value::Null))
+            .collect();
         out.push(r);
     }
-    Ok((col_names, out, truncated))
+    Ok((columns, out, truncated))
 }
 
 #[cfg(test)]

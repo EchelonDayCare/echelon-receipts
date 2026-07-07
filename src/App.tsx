@@ -9,7 +9,6 @@ const History = lazy(() => import("./screens/History"));
 const Students = lazy(() => import("./screens/Students"));
 const Reports = lazy(() => import("./screens/Reports"));
 const AnnualReceipts = lazy(() => import("./screens/AnnualReceipts"));
-const Attendance = lazy(() => import("./screens/Attendance"));
 const MonthlyAttendance = lazy(() => import("./screens/MonthlyAttendance"));
 const AgingReport = lazy(() => import("./screens/AgingReport"));
 const StaffScreen = lazy(() => import("./screens/Staff"));
@@ -198,7 +197,6 @@ function Shell({ logo, name, staffEnabled }: { logo: string; name: string; staff
           { to: "/students/month", label: "This Month" },
           { to: "/students/new", label: "New Receipt" },
           { to: "/students/attendance", label: "Attendance" },
-          { to: "/students/attendance-daily", label: "Daily Log" },
           { to: "/students/history", label: "Receipt History" },
           { to: "/students/roster", label: "Roster" },
           { to: "/students/annual", label: "Annual Tax Receipts" },
@@ -268,7 +266,7 @@ function Shell({ logo, name, staffEnabled }: { logo: string; name: string; staff
           { to: "/reports/aging", label: "Aging (A/R)" },
           { to: "/reports/subsidy", label: "Subsidy Reconciliation" },
           { to: "/reports/enrollment", label: "Enrollment Roster" },
-          { to: "/reports/attendance", label: "Attendance Summary" },
+          { to: "/reports/attendance", label: "Attendance Analytics" },
           { to: "/reports/credentials", label: "Staff Credentials" },
           { to: "/reports/drills", label: "Drill Log" },
           { to: "/reports/agm", label: "AGM / Board Package" },
@@ -359,7 +357,6 @@ function Shell({ logo, name, staffEnabled }: { logo: string; name: string; staff
           <Route path="/students/month" element={<ThisMonth />} />
           <Route path="/students/new" element={<NewReceipt />} />
           <Route path="/students/attendance" element={<MonthlyAttendance />} />
-          <Route path="/students/attendance-daily" element={<Attendance />} />
           <Route path="/students/history" element={<History />} />
           <Route path="/students/roster" element={<Students />} />
           <Route path="/students/reports" element={<Reports />} />
@@ -367,14 +364,19 @@ function Shell({ logo, name, staffEnabled }: { logo: string; name: string; staff
           <Route path="/students/annual" element={<AnnualReceipts />} />
           <Route path="/students/deposits" element={<Deposits />} />
 
-          {/* Staff module */}
+          {/* Staff module. Routes are mounted unconditionally so that a
+              race between the settings load (staffEnabled state) and a
+              user click on the Staff tile doesn't briefly flash the
+              module then bounce to "/" via the "*" catch-all. The
+              feature-flag gate lives at the entry points (Home tile,
+              /staff redirect below) and inside the screens themselves. */}
           <Route path="/staff" element={<Navigate to={staffEnabled ? "/staff/hours" : "/config/staff"} replace />} />
-          {staffEnabled && <Route path="/staff/hours" element={<StaffScreen />} />}
-          {staffEnabled && <Route path="/staff/schedule" element={<StaffSchedule />} />}
-          {staffEnabled && <Route path="/staff/schedule/audit" element={<StaffScheduleAudit />} />}
-          {staffEnabled && <Route path="/staff/schedule/confirmations" element={<StaffScheduleConfirmations />} />}
-          {staffEnabled && <Route path="/staff/credentials" element={<StaffCredentials />} />}
-          {staffEnabled && <Route path="/staff/meetings" element={<StaffMeetings />} />}
+          <Route path="/staff/hours" element={<StaffScreen />} />
+          <Route path="/staff/schedule" element={<StaffSchedule />} />
+          <Route path="/staff/schedule/audit" element={<StaffScheduleAudit />} />
+          <Route path="/staff/schedule/confirmations" element={<StaffScheduleConfirmations />} />
+          <Route path="/staff/credentials" element={<StaffCredentials />} />
+          <Route path="/staff/meetings" element={<StaffMeetings />} />
 
           {/* Configuration module */}
           <Route path="/config" element={<Navigate to="/config/identity" replace />} />

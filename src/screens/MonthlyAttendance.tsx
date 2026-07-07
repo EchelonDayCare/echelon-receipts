@@ -1,7 +1,7 @@
 // Monthly child attendance grid — matches Luxmi's paper sign-in sheet
 // (name × day-of-month, single-character marks). No in/out time on purpose;
-// the paper doesn't capture it either. The Daily view remains available at
-// /students/attendance-daily for centres that want per-visit stamping.
+// the paper doesn't capture it either. See /reports/attendance for the
+// analytics view (centre-wide + per-child).
 import { useEffect, useMemo, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import { readFile } from "@tauri-apps/plugin-fs";
@@ -241,11 +241,30 @@ export default function MonthlyAttendance() {
       </table>
       <p class="legend">Legend — P = Present · A = Absent · H = Half-day · S = Sick · V = Vacation. Weekends & closed days pre-shaded.</p>
       </body></html>`;
-    const w = window.open("", "_blank", "width=1000,height=800");
-    if (!w) { show("Pop-up blocked", "err"); return; }
-    w.document.write(html);
-    w.document.close();
-    setTimeout(() => w.print(), 300);
+    // Tauri's webview blocks window.open. Use a hidden iframe attached to
+    // the current document instead — same pattern as printReceipt().
+    const existing = document.getElementById("__print_frame");
+    if (existing) existing.remove();
+    const iframe = document.createElement("iframe");
+    iframe.id = "__print_frame";
+    Object.assign(iframe.style, {
+      position: "fixed", right: "0", bottom: "0",
+      width: "0", height: "0", border: "0",
+    });
+    document.body.appendChild(iframe);
+    const doc = iframe.contentDocument || iframe.contentWindow?.document;
+    if (!doc) { show("Print failed: could not open iframe.", "err"); return; }
+    doc.open();
+    doc.write(html);
+    doc.close();
+    setTimeout(() => {
+      try {
+        iframe.contentWindow?.focus();
+        iframe.contentWindow?.print();
+      } catch (e) {
+        show("Print failed: " + e, "err");
+      }
+    }, 350);
   }
 
   const monthLabel = `${MONTH_NAMES[month-1]} ${year}`;
