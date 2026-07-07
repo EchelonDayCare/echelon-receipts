@@ -1,4 +1,4 @@
-// Organizer / Ops Dashboard — single page with 3 panels:
+// Organizer / Ops Dashboard — 3-panel workspace:
 //   1. Upcoming (fanned-out from credentials, drills, docs, aging, AGM,
 //      tax deadlines, CCFRI, actions, followups) with time-window filter
 //   2. Recent meetings (5 latest, + "New meeting" button)
@@ -14,24 +14,36 @@ import {
 import MeetingDrawer, { type MeetingDrawerState } from "./MeetingDrawer";
 import VoiceCaptureModal from "../../components/VoiceCaptureModal";
 
-// H-13: "All" wasn't offered even though it's in spec-3-organizer.md's
-// filter bar (`Today | Next 7 days | Next 30 days | Next 90 days | All`).
-// Modelled as a very large window rather than a separate code path since
-// listUpcoming/daysAway comparisons already just work with `<= windowDays`.
 const ALL_WINDOW_DAYS = 36_500;
 const WINDOWS = [
   { label: "Today", days: 0 },
-  { label: "7 days", days: 7 },
-  { label: "30 days", days: 30 },
-  { label: "60 days", days: 60 },
-  { label: "90 days", days: 90 },
+  { label: "7d", days: 7 },
+  { label: "30d", days: 30 },
+  { label: "60d", days: 60 },
+  { label: "90d", days: 90 },
   { label: "All", days: ALL_WINDOW_DAYS },
 ];
 
-const SOURCE_LABELS: Record<UpcomingSource, string> = {
-  credential: "Credential", drill: "Drill", document: "Document",
-  aging: "A/R", agm: "AGM", tax: "Tax", ccfri: "CCFRI",
-  subsidy_annual: "Subsidy", action: "Action", followup: "Follow-up",
+const SOURCE_META: Record<UpcomingSource, { label: string; icon: string }> = {
+  credential: { label: "Credential", icon: "🎓" },
+  drill:      { label: "Drill",      icon: "🚨" },
+  document:   { label: "Document",   icon: "📄" },
+  aging:      { label: "A/R",        icon: "💰" },
+  agm:        { label: "AGM",        icon: "🏛" },
+  tax:        { label: "Tax",        icon: "🧾" },
+  ccfri:      { label: "CCFRI",      icon: "🏷" },
+  subsidy_annual: { label: "Subsidy", icon: "🎁" },
+  action:     { label: "Action",     icon: "✅" },
+  followup:   { label: "Follow-up",  icon: "🔔" },
+};
+
+const KIND_META: Record<string, { label: string; color: string }> = {
+  board:      { label: "Board",      color: "#7c3aed" },
+  parent:     { label: "Parent",     color: "#0369a1" },
+  staff:      { label: "Staff",      color: "#9333ea" },
+  vendor:     { label: "Vendor",     color: "#c2410c" },
+  inspection: { label: "Inspection", color: "#dc2626" },
+  other:      { label: "Other",      color: "#64748b" },
 };
 
 export default function Organizer() {
@@ -41,11 +53,10 @@ export default function Organizer() {
   const [followups, setFollowups] = useState<Followup[]>([]);
   const [doneFollowups, setDoneFollowups] = useState<Followup[]>([]);
   const [fuFilter, setFuFilter] = useState<"open" | "done" | "all">("open");
-  const [enabledSources, setEnabledSources] = useState<Set<UpcomingSource>>(new Set(Object.keys(SOURCE_LABELS) as UpcomingSource[]));
+  const [enabledSources, setEnabledSources] = useState<Set<UpcomingSource>>(new Set(Object.keys(SOURCE_META) as UpcomingSource[]));
   const [err, setErr] = useState<string | null>(null);
   const [drawer, setDrawer] = useState<MeetingDrawerState>({ mode: "closed" });
   const [voiceOpen, setVoiceOpen] = useState(false);
-
   const [newFu, setNewFu] = useState({ title: "", due: "", priority: "normal" as Priority });
 
   const refresh = async () => {
@@ -66,6 +77,8 @@ export default function Organizer() {
   const toggleSource = (s: UpcomingSource) => setEnabledSources((cur) => {
     const nx = new Set(cur); nx.has(s) ? nx.delete(s) : nx.add(s); return nx;
   });
+  const allSources = () => setEnabledSources(new Set(Object.keys(SOURCE_META) as UpcomingSource[]));
+  const noSources  = () => setEnabledSources(new Set());
 
   async function addFu() {
     if (!newFu.title.trim()) return;
@@ -76,160 +89,211 @@ export default function Organizer() {
     } catch (e: any) { setErr(String(e?.message ?? e)); }
   }
 
+  // Counts by severity, for the header summary
+  const counts = useMemo(() => {
+    let overdue = 0, today = 0, soon = 0;
+    for (const i of filtered) {
+      if (i.daysAway < 0) overdue++;
+      else if (i.daysAway === 0) today++;
+      else if (i.daysAway <= 7) soon++;
+    }
+    return { overdue, today, soon, total: filtered.length };
+  }, [filtered]);
+
   return (
-    <div style={{ padding: 24, display: "grid", gridTemplateColumns: "2fr 1fr", gap: 20 }}>
-      <div>
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12, flexWrap: "wrap", gap: 8 }}>
-          <h1 style={{ margin: 0 }}>Organizer</h1>
-          <div style={{ display: "flex", gap: 8 }}>
-            <button
-              className="btn primary"
-              onClick={() => setVoiceOpen(true)}
-              title="Dictate a meeting, follow-up or action"
-              style={{ display: "flex", alignItems: "center", gap: 6 }}
-            >
-              <span aria-hidden style={{ fontSize: 15 }}>🎤</span>
-              <span>Voice add</span>
+    <div className="org-layout">
+      <div className="org-main">
+        {/* ── Header ─────────────────────────────────────────────────── */}
+        <div className="org-header">
+          <div>
+            <h1 className="org-title">Organizer</h1>
+            <div className="org-subtitle">
+              {counts.overdue > 0 && <span className="org-hdr-stat overdue">{counts.overdue} overdue</span>}
+              {counts.today   > 0 && <span className="org-hdr-stat today">{counts.today} today</span>}
+              {counts.soon    > 0 && <span className="org-hdr-stat soon">{counts.soon} within 7 days</span>}
+              {counts.total   === 0 && <span className="org-hdr-stat calm">All clear 🎉</span>}
+            </div>
+          </div>
+          <div className="org-header-actions">
+            <button className="btn secondary" onClick={() => setVoiceOpen(true)} title="Dictate a meeting, follow-up or action">
+              🎤 Voice add
             </button>
-            <button className="btn" onClick={() => window.print()}>Print PDF</button>
+            <button className="btn secondary" onClick={() => window.print()}>Print</button>
           </div>
         </div>
 
-        {err && <div style={errBox}>{err}</div>}
+        {err && <div className="org-err">{err}</div>}
 
         {/* ── Upcoming panel ─────────────────────────────────────────── */}
-        <section style={panel}>
-          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 12, gap: 8, flexWrap: "wrap" }}>
-            <h2 style={{ margin: 0 }}>Upcoming</h2>
-            <div style={{ display: "flex", gap: 4 }}>
+        <section className="card org-panel">
+          <div className="org-panel-head">
+            <h2>Upcoming</h2>
+            <div className="org-segmented">
               {WINDOWS.map((w) => (
-                <button key={w.days} className={"btn" + (windowDays === w.days ? " primary" : "")} onClick={() => setWindowDays(w.days)}>
-                  {w.label}
-                </button>
+                <button
+                  key={w.days} type="button"
+                  className={`org-seg ${windowDays === w.days ? "on" : ""}`}
+                  onClick={() => setWindowDays(w.days)}
+                >{w.label}</button>
               ))}
             </div>
           </div>
-          <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 12 }}>
-            {(Object.keys(SOURCE_LABELS) as UpcomingSource[]).map((s) => (
-              <button key={s} className={"btn" + (enabledSources.has(s) ? " primary" : "")} onClick={() => toggleSource(s)} style={{ fontSize: 11 }}>
-                {SOURCE_LABELS[s]}
-              </button>
-            ))}
+
+          <div className="org-filters">
+            {(Object.keys(SOURCE_META) as UpcomingSource[]).map((s) => {
+              const on = enabledSources.has(s);
+              return (
+                <button
+                  key={s} type="button"
+                  className={`org-filter ${on ? "on" : ""}`}
+                  onClick={() => toggleSource(s)}
+                >
+                  <span className="org-filter-icon">{SOURCE_META[s].icon}</span>
+                  {SOURCE_META[s].label}
+                </button>
+              );
+            })}
+            <div className="org-filter-sep" />
+            <button type="button" className="btn link" onClick={allSources}>All</button>
+            <button type="button" className="btn link" onClick={noSources}>None</button>
           </div>
+
           {filtered.length === 0 ? (
-            <div style={emptyBox}>Nothing due in this window. 🎉</div>
+            <div className="empty">Nothing due in this window. 🎉</div>
           ) : (
-            <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
-              <tbody>
-                {filtered.map((i) => (
-                  <tr key={i.id} style={{ borderTop: "1px solid var(--border, #1e293b)" }}>
-                    <td style={{ padding: 8, width: 90 }}>
-                      <span style={pill(i.severity)}>{i.daysAway < 0 ? `${-i.daysAway}d late` : i.daysAway === 0 ? "today" : `${i.daysAway}d`}</span>
-                    </td>
-                    <td style={{ padding: 8, width: 90, color: "var(--muted)", fontSize: 11 }}>{SOURCE_LABELS[i.source]}</td>
-                    <td style={{ padding: 8 }}>
-                      <div><b>{i.title}</b></div>
-                      {i.detail && <div style={{ fontSize: 11, color: "var(--muted)" }}>{i.detail}</div>}
-                    </td>
-                    <td style={{ padding: 8, textAlign: "right", whiteSpace: "nowrap", color: "var(--muted)", fontSize: 11 }}>{i.dueDate}</td>
-                    <td style={{ padding: 8, width: 50 }}>
-                      {i.link && <Link to={i.link} className="btn" style={{ fontSize: 11 }}>Open</Link>}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
+            <div className="org-rows">
+              {filtered.map((i) => (
+                <div key={i.id} className="org-row">
+                  <div className={`org-when ${sevClass(i)}`}>{whenLabel(i.daysAway)}</div>
+                  <div className="org-src" title={SOURCE_META[i.source].label}>
+                    <span className="org-src-icon">{SOURCE_META[i.source].icon}</span>
+                    <span className="org-src-label">{SOURCE_META[i.source].label}</span>
+                  </div>
+                  <div className="org-body">
+                    <div className="org-body-title">{i.title}</div>
+                    {i.detail && <div className="org-body-detail">{i.detail}</div>}
+                  </div>
+                  <div className="org-due">{i.dueDate}</div>
+                  <div className="org-cta">
+                    {i.link && <Link to={i.link} className="btn secondary sm">Open →</Link>}
+                  </div>
+                </div>
+              ))}
+            </div>
           )}
         </section>
 
         {/* ── Meetings panel ─────────────────────────────────────────── */}
-        <section style={panel}>
-          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
-            <h2 style={{ margin: 0 }}>Recent meetings</h2>
-            <button className="btn primary" onClick={() => setDrawer({ mode: "new" })}>+ New meeting</button>
+        <section className="card org-panel">
+          <div className="org-panel-head">
+            <h2>Recent meetings</h2>
+            <button className="btn" onClick={() => setDrawer({ mode: "new" })}>＋ New meeting</button>
           </div>
           {meetings.length === 0 ? (
-            <div style={emptyBox}>No meetings logged yet.</div>
+            <div className="empty">No meetings logged yet.</div>
           ) : (
-            <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
-              <tbody>
-                {meetings.map((m) => (
-                  <tr key={m.id} style={{ borderTop: "1px solid var(--border, #1e293b)", cursor: "pointer" }} onClick={() => setDrawer({ mode: "edit", meeting: m })}>
-                    <td style={{ padding: 8, width: 110, color: "var(--muted)", fontSize: 12 }}>{m.meetingDate}{m.meetingTime ? ` ${m.meetingTime}` : ""}</td>
-                    <td style={{ padding: 8, width: 90 }}><span style={kindPill(m.kind)}>{m.kind}</span></td>
-                    <td style={{ padding: 8 }}>
-                      <div><b>{m.subject}</b></div>
-                      {m.attendeesText && <div style={{ fontSize: 11, color: "var(--muted)" }}>{m.attendeesText}</div>}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
+            <div className="org-rows">
+              {meetings.map((m) => {
+                const km = KIND_META[m.kind] ?? KIND_META.other;
+                return (
+                  <div key={m.id} className="org-row clickable" onClick={() => setDrawer({ mode: "edit", meeting: m })}>
+                    <div className="org-when calm">{m.meetingDate}{m.meetingTime ? ` · ${m.meetingTime}` : ""}</div>
+                    <div className="org-src">
+                      <span className="org-kind-dot" style={{ background: km.color }} />
+                      <span className="org-src-label">{km.label}</span>
+                    </div>
+                    <div className="org-body">
+                      <div className="org-body-title">{m.subject}</div>
+                      {m.attendeesText && <div className="org-body-detail">{m.attendeesText}</div>}
+                    </div>
+                    <div className="org-due" />
+                    <div className="org-cta">
+                      <span className="btn link">Open →</span>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
           )}
         </section>
       </div>
 
       {/* ── Follow-ups sidebar ───────────────────────────────────────── */}
-      <div>
-        <section style={panel}>
-          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 8, flexWrap: "wrap", gap: 8 }}>
-            <h2 style={{ margin: 0 }}>Follow-ups</h2>
-            <div style={{ display: "flex", gap: 4 }}>
+      <aside className="org-side">
+        <section className="card org-panel">
+          <div className="org-panel-head">
+            <h2>Follow-ups</h2>
+            <div className="org-segmented sm">
               {(["open", "done", "all"] as const).map((f) => (
-                <button key={f} className={"btn" + (fuFilter === f ? " primary" : "")} style={{ fontSize: 11 }} onClick={() => setFuFilter(f)}>
+                <button key={f} type="button"
+                  className={`org-seg ${fuFilter === f ? "on" : ""}`}
+                  onClick={() => setFuFilter(f)}>
                   {f === "open" ? "Open" : f === "done" ? "Done" : "All"}
                 </button>
               ))}
             </div>
           </div>
-          <div style={{ display: "grid", gap: 6, marginBottom: 12 }}>
-            <input placeholder="New follow-up…" value={newFu.title} onChange={(e) => setNewFu((v) => ({ ...v, title: e.target.value }))} onKeyDown={(e) => { if (e.key === "Enter") addFu(); }} />
-            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr auto", gap: 6 }}>
-              <input type="date" value={newFu.due} onChange={(e) => setNewFu((v) => ({ ...v, due: e.target.value }))} />
-              <select value={newFu.priority} onChange={(e) => setNewFu((v) => ({ ...v, priority: e.target.value as Priority }))}>
+
+          <div className="org-fu-add">
+            <input
+              placeholder="Quick add…" value={newFu.title}
+              onChange={(e) => setNewFu((v) => ({ ...v, title: e.target.value }))}
+              onKeyDown={(e) => { if (e.key === "Enter") addFu(); }}
+            />
+            <div className="org-fu-add-row">
+              <input type="date" value={newFu.due}
+                onChange={(e) => setNewFu((v) => ({ ...v, due: e.target.value }))} />
+              <select value={newFu.priority}
+                onChange={(e) => setNewFu((v) => ({ ...v, priority: e.target.value as Priority }))}>
                 <option value="low">Low</option>
                 <option value="normal">Normal</option>
                 <option value="high">High</option>
               </select>
-              <button className="btn primary" onClick={addFu} disabled={!newFu.title.trim()}>Add</button>
+              <button className="btn" onClick={addFu} disabled={!newFu.title.trim()}>Add</button>
             </div>
           </div>
+
           {(fuFilter === "open" || fuFilter === "all") && (
-            followups.length === 0 ? (
-              <div style={emptyBox}>No open follow-ups.</div>
-            ) : (
-              <ul style={{ listStyle: "none", padding: 0, margin: 0 }}>
-                {followups.map((f) => (
-                  <li key={f.id} style={{ display: "flex", gap: 8, alignItems: "flex-start", padding: 8, borderTop: "1px solid var(--border, #1e293b)" }}>
-                    <input type="checkbox" checked={!!f.doneAt} onChange={async () => { await toggleFollowupDone(f.id, f.version); await refresh(); }} />
-                    <div style={{ flex: 1, fontSize: 13 }}>
-                      <div style={{ textDecoration: f.doneAt ? "line-through" : "none" }}>
-                        <b>{f.title}</b>
-                        {f.priority === "high" && <span style={{ marginLeft: 6, color: "#dc2626", fontSize: 10 }}>HIGH</span>}
+            <>
+              {fuFilter === "all" && <div className="org-fu-sect">Open</div>}
+              {followups.length === 0 ? (
+                <div className="empty sm">No open follow-ups.</div>
+              ) : (
+                <ul className="org-fu-list">
+                  {followups.map((f) => (
+                    <li key={f.id} className="org-fu">
+                      <input type="checkbox" checked={!!f.doneAt}
+                        onChange={async () => { await toggleFollowupDone(f.id, f.version); await refresh(); }} />
+                      {f.priority === "high" && <span className="org-fu-dot high" title="High priority" />}
+                      {f.priority === "low"  && <span className="org-fu-dot low"  title="Low priority" />}
+                      <div className="org-fu-body">
+                        <div className="org-fu-title">{f.title}</div>
+                        {f.dueDate && <div className="org-fu-meta">due {f.dueDate}</div>}
                       </div>
-                      {f.dueDate && <div style={{ fontSize: 11, color: "var(--muted)" }}>due {f.dueDate}</div>}
-                    </div>
-                    <button className="btn" onClick={async () => { if (confirm("Delete?")) { await softDeleteFollowup(f.id, f.version); await refresh(); } }} style={{ fontSize: 10, padding: "2px 6px" }}>✕</button>
-                  </li>
-                ))}
-              </ul>
-            )
+                      <button className="btn link danger" title="Delete"
+                        onClick={async () => { if (confirm("Delete?")) { await softDeleteFollowup(f.id, f.version); await refresh(); } }}>
+                        ✕
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </>
           )}
           {(fuFilter === "done" || fuFilter === "all") && (
             <>
-              {fuFilter === "all" && <h3 style={{ fontSize: 12, color: "var(--muted)", margin: "14px 0 4px" }}>Done</h3>}
+              {fuFilter === "all" && <div className="org-fu-sect">Done</div>}
               {doneFollowups.length === 0 ? (
-                <div style={emptyBox}>No completed follow-ups yet.</div>
+                <div className="empty sm">No completed follow-ups yet.</div>
               ) : (
-                <ul style={{ listStyle: "none", padding: 0, margin: 0 }}>
+                <ul className="org-fu-list">
                   {doneFollowups.map((f) => (
-                    <li key={f.id} style={{ display: "flex", gap: 8, alignItems: "flex-start", padding: 8, borderTop: "1px solid var(--border, #1e293b)", opacity: 0.7 }}>
-                      <input type="checkbox" checked={!!f.doneAt} onChange={async () => { await toggleFollowupDone(f.id, f.version); await refresh(); }} />
-                      <div style={{ flex: 1, fontSize: 13 }}>
-                        <div style={{ textDecoration: "line-through" }}>
-                          <b>{f.title}</b>
-                        </div>
-                        {f.doneAt && <div style={{ fontSize: 11, color: "var(--muted)" }}>done {f.doneAt.slice(0, 10)}</div>}
+                    <li key={f.id} className="org-fu done">
+                      <input type="checkbox" checked={!!f.doneAt}
+                        onChange={async () => { await toggleFollowupDone(f.id, f.version); await refresh(); }} />
+                      <div className="org-fu-body">
+                        <div className="org-fu-title">{f.title}</div>
+                        {f.doneAt && <div className="org-fu-meta">done {f.doneAt.slice(0, 10)}</div>}
                       </div>
                     </li>
                   ))}
@@ -238,7 +302,7 @@ export default function Organizer() {
             </>
           )}
         </section>
-      </div>
+      </aside>
 
       <MeetingDrawer state={drawer} onClose={() => setDrawer({ mode: "closed" })} onSaved={() => { void refresh(); }} />
       <VoiceCaptureModal open={voiceOpen} onClose={() => setVoiceOpen(false)} onSaved={() => { void refresh(); }} />
@@ -246,24 +310,16 @@ export default function Organizer() {
   );
 }
 
-function pill(sev: UpcomingItem["severity"]): React.CSSProperties {
-  const bg = sev === "danger" ? "#dc2626" : sev === "warn" ? "#d97706" : "#0369a1";
-  return { display: "inline-block", padding: "3px 8px", borderRadius: 6, background: bg + "33", color: bg, fontSize: 11, fontWeight: 600 };
+function sevClass(i: UpcomingItem): string {
+  if (i.daysAway < 0) return "overdue";
+  if (i.daysAway === 0) return "today";
+  if (i.daysAway <= 7) return "soon";
+  return "calm";
 }
-function kindPill(kind: string): React.CSSProperties {
-  const colors: Record<string, string> = {
-    board: "#7c3aed", parent: "#0369a1", staff: "#9333ea",
-    vendor: "#c2410c", inspection: "#dc2626", other: "#64748b",
-  };
-  const c = colors[kind] ?? "#64748b";
-  return { display: "inline-block", padding: "2px 8px", borderRadius: 4, background: c + "22", color: c, fontSize: 11, fontWeight: 600 };
+function whenLabel(d: number): string {
+  if (d < 0)  return `${-d}d late`;
+  if (d === 0) return "today";
+  if (d < 7)  return `in ${d}d`;
+  if (d < 30) return `in ${Math.round(d / 7)}w`;
+  return `in ${Math.round(d / 30)}mo`;
 }
-const panel: React.CSSProperties = {
-  background: "var(--panel, rgba(15,23,42,.5))", border: "1px solid var(--border, #1e293b)",
-  borderRadius: 12, padding: 20, marginBottom: 20,
-};
-const emptyBox: React.CSSProperties = { padding: 24, textAlign: "center", color: "var(--muted)", fontSize: 13 };
-const errBox: React.CSSProperties = {
-  padding: 10, borderRadius: 8, background: "rgba(220,38,38,.1)", color: "#fca5a5",
-  border: "1px solid rgba(220,38,38,.35)", marginBottom: 12,
-};
