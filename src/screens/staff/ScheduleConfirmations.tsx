@@ -2,7 +2,7 @@
 import { useEffect, useState } from "react";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { listRecentPublishes, markPublishAcknowledged, type PublishRow } from "../../repo/scheduleRepo";
-import { buildWaMeUrl } from "../../lib/whatsapp";
+import { buildWhatsappDeepLink } from "../../lib/whatsapp";
 import { db } from "../../lib/db";
 import ScheduleSubNav from "./ScheduleSubNav";
 
@@ -44,7 +44,7 @@ export default function ScheduleConfirmations() {
 
   async function resend(r: PublishRow & { staffPhone: string | null }) {
     if (!r.staffPhone) { setErr("No WhatsApp phone on file for this staff member."); return; }
-    try { await openUrl(buildWaMeUrl(r.staffPhone, r.messageBody)); }
+    try { await openUrl(buildWhatsappDeepLink(r.staffPhone, r.messageBody)); }
     catch (e: any) { setErr(String(e?.message ?? e)); }
   }
 

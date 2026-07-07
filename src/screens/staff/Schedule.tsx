@@ -8,7 +8,7 @@ import {
   addDays, copyWeek, listShiftsForWeek, mondayOf, recordWeeklyPublish,
   shiftHours, type StaffShift,
 } from "../../repo/scheduleRepo";
-import { buildWaMeUrl, renderTemplate } from "../../lib/whatsapp";
+import { buildWaMeUrl, buildWhatsappDeepLink, renderTemplate } from "../../lib/whatsapp";
 import { getSettings } from "../../lib/db";
 import ShiftDrawer, { loadActiveStaff, type DrawerState } from "./ShiftDrawer";
 import ScheduleSubNav from "./ScheduleSubNav";
@@ -192,6 +192,10 @@ function PublishModal({ weekStart, staff, shifts, onClose }: {
   ));
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
+  // queue = one entry per selected staff, in publish order. Owner opens them
+  // one at a time so they can hit Send in WhatsApp Desktop before moving on.
+  const [queue, setQueue] = useState<Array<{ staffId: string; staffName: string; url: string; sent: boolean }>>([]);
+  const [queueIdx, setQueueIdx] = useState(0);
 
   const perStaff = useMemo(() => {
     return staff.map((s) => {
@@ -204,7 +208,9 @@ function PublishModal({ weekStart, staff, shifts, onClose }: {
   const weekEnd = addDays(weekStart, 6);
   const weekRange = `${prettyDate(weekStart)} – ${prettyDate(weekEnd)}`;
 
-  async function doPublish() {
+  // Build the queue. Records each publish in the audit trail up front, so if
+  // the owner closes the modal mid-way the trail still shows what was queued.
+  async function buildQueue() {
     if (busy) return;
     setBusy(true); setErr(null);
     try {
@@ -212,7 +218,7 @@ function PublishModal({ weekStart, staff, shifts, onClose }: {
       const template = settings.shift_msg_weekly || "";
       const ownerFirst = (settings.sender_name || settings.daycare_name || "").split(/\s+/)[0] || "";
       const chosen = perStaff.filter((r) => selected.has(String(r.staff.id)) && r.shifts.length > 0);
-      const openList: string[] = [];
+      const list: Array<{ staffId: string; staffName: string; url: string; sent: boolean }> = [];
       for (const row of chosen) {
         if (!row.staff.whatsapp_phone_e164) {
           setErr((cur) => (cur ?? "") + `\n${row.staff.name}: no WhatsApp number (skipped)`);
@@ -227,24 +233,33 @@ function PublishModal({ weekStart, staff, shifts, onClose }: {
           shift_lines: lines,
           total_hours: row.total.toFixed(1),
         });
-        const url = buildWaMeUrl(row.staff.whatsapp_phone_e164, body);
-        await recordWeeklyPublish(String(row.staff.id), weekStart, row.shifts.map((sh) => sh.id), body, url);
-        openList.push(url);
+        const url = buildWhatsappDeepLink(row.staff.whatsapp_phone_e164, body);
+        // audit trail keeps the wa.me url as the human-readable fallback
+        const auditUrl = buildWaMeUrl(row.staff.whatsapp_phone_e164, body);
+        await recordWeeklyPublish(String(row.staff.id), weekStart, row.shifts.map((sh) => sh.id), body, auditUrl);
+        list.push({ staffId: String(row.staff.id), staffName: row.staff.name, url, sent: false });
       }
-      // Space out link opens by 500ms so the OS doesn't drop tabs.
-      for (const url of openList) {
-        try { await openUrl(url); } catch { /* keep going */ }
-        await new Promise((r) => setTimeout(r, 500));
-      }
-      alert(`Opened ${openList.length} WhatsApp chat${openList.length === 1 ? "" : "s"}. Hit Send in each to complete.`);
-      onClose();
+      setQueue(list);
+      setQueueIdx(0);
     } catch (e: any) { setErr((cur) => (cur ?? "") + "\n" + String(e?.message ?? e)); }
     finally { setBusy(false); }
+  }
+
+  async function openCurrent() {
+    if (queueIdx >= queue.length) return;
+    const item = queue[queueIdx];
+    try { await openUrl(item.url); } catch (e: any) { setErr(String(e?.message ?? e)); return; }
+    setQueue((cur) => cur.map((q, i) => (i === queueIdx ? { ...q, sent: true } : q)));
+    setQueueIdx((i) => i + 1);
   }
 
   const toggle = (id: string) => setSelected((cur) => {
     const nx = new Set(cur); nx.has(id) ? nx.delete(id) : nx.add(id); return nx;
   });
+
+  const inQueueMode = queue.length > 0;
+  const done = inQueueMode && queueIdx >= queue.length;
+  const current = inQueueMode && !done ? queue[queueIdx] : null;
 
   return (
     <div style={backdrop} onClick={onClose}>
@@ -254,28 +269,72 @@ function PublishModal({ weekStart, staff, shifts, onClose }: {
           <button className="btn" onClick={onClose}>✕</button>
         </div>
         {err && <div style={errBox}><pre style={{ margin: 0, whiteSpace: "pre-wrap" }}>{err}</pre></div>}
-        <div style={{ maxHeight: 320, overflowY: "auto", marginBottom: 12 }}>
-          {perStaff.map((row) => (
-            <label key={row.staff.id} style={{ display: "flex", alignItems: "center", gap: 10, padding: "8px 0", borderTop: "1px solid var(--border, #1e293b)", opacity: row.shifts.length === 0 ? 0.5 : 1 }}>
-              <input type="checkbox" checked={selected.has(String(row.staff.id))} onChange={() => toggle(String(row.staff.id))} disabled={row.shifts.length === 0} />
-              <div style={{ flex: 1 }}>
-                <div><b>{row.staff.name}</b></div>
-                <div style={{ fontSize: 12, color: "var(--muted)" }}>
-                  {row.shifts.length} shift{row.shifts.length === 1 ? "" : "s"} · {row.total.toFixed(1)}h
-                  {row.total > 40 && <span style={{ color: "#d97706" }}> ⚠ OT</span>}
-                  {!row.staff.whatsapp_phone_e164 && <span style={{ color: "#dc2626" }}> · no WhatsApp</span>}
-                  {row.shifts.length === 0 && <span> · nothing to send</span>}
+
+        {!inQueueMode && (
+          <>
+            <div style={{ maxHeight: 320, overflowY: "auto", marginBottom: 12 }}>
+              {perStaff.map((row) => (
+                <label key={row.staff.id} style={{ display: "flex", alignItems: "center", gap: 10, padding: "8px 0", borderTop: "1px solid var(--border, #1e293b)", opacity: row.shifts.length === 0 ? 0.5 : 1 }}>
+                  <input type="checkbox" checked={selected.has(String(row.staff.id))} onChange={() => toggle(String(row.staff.id))} disabled={row.shifts.length === 0} />
+                  <div style={{ flex: 1 }}>
+                    <div><b>{row.staff.name}</b></div>
+                    <div style={{ fontSize: 12, color: "var(--muted)" }}>
+                      {row.shifts.length} shift{row.shifts.length === 1 ? "" : "s"} · {row.total.toFixed(1)}h
+                      {row.total > 40 && <span style={{ color: "#d97706" }}> ⚠ OT</span>}
+                      {!row.staff.whatsapp_phone_e164 && <span style={{ color: "#dc2626" }}> · no WhatsApp</span>}
+                      {row.shifts.length === 0 && <span> · nothing to send</span>}
+                    </div>
+                  </div>
+                </label>
+              ))}
+            </div>
+            <div style={{ display: "flex", gap: 8, justifyContent: "flex-end" }}>
+              <button className="btn" onClick={onClose} disabled={busy}>Cancel</button>
+              <button className="btn primary" onClick={buildQueue} disabled={busy || selected.size === 0}>
+                {busy ? "Preparing…" : "Prepare messages →"}
+              </button>
+            </div>
+          </>
+        )}
+
+        {inQueueMode && (
+          <>
+            <p style={{ color: "var(--muted)", fontSize: 13, marginTop: 0 }}>
+              Opens WhatsApp Desktop with a pre-filled message. Hit <b>Send</b> in WhatsApp, then click <b>Next</b> here.
+            </p>
+            <div style={{ display: "grid", gap: 6, marginBottom: 14 }}>
+              {queue.map((q, i) => (
+                <div key={q.staffId} style={{
+                  padding: "8px 10px", borderRadius: 6,
+                  background: i === queueIdx && !done ? "rgba(37,99,235,.18)" : "transparent",
+                  border: `1px solid ${i === queueIdx && !done ? "#2563eb" : "var(--border, #1e293b)"}`,
+                  display: "flex", alignItems: "center", gap: 8, fontSize: 13,
+                }}>
+                  <span style={{ width: 20 }}>{q.sent ? "✅" : i === queueIdx ? "▶" : "•"}</span>
+                  <span style={{ flex: 1 }}>{q.staffName}</span>
+                  <span style={{ color: "var(--muted)", fontSize: 11 }}>{q.sent ? "opened" : i === queueIdx ? "next" : "pending"}</span>
                 </div>
+              ))}
+            </div>
+            {done ? (
+              <div style={{ padding: 12, borderRadius: 8, background: "rgba(34,197,94,.10)", color: "#4ade80", border: "1px solid rgba(34,197,94,.35)", marginBottom: 12, fontSize: 13 }}>
+                All {queue.length} chat{queue.length === 1 ? "" : "s"} opened. Make sure you hit Send in each one.
               </div>
-            </label>
-          ))}
-        </div>
-        <div style={{ display: "flex", gap: 8, justifyContent: "flex-end" }}>
-          <button className="btn" onClick={onClose} disabled={busy}>Cancel</button>
-          <button className="btn primary" onClick={doPublish} disabled={busy || selected.size === 0}>
-            {busy ? "Opening…" : "Open WhatsApp for each →"}
-          </button>
-        </div>
+            ) : null}
+            <div style={{ display: "flex", gap: 8, justifyContent: "flex-end" }}>
+              {done ? (
+                <button className="btn primary" onClick={onClose}>Done</button>
+              ) : (
+                <>
+                  <button className="btn" onClick={onClose}>Close</button>
+                  <button className="btn primary" onClick={openCurrent}>
+                    Open {current?.staffName} in WhatsApp →
+                  </button>
+                </>
+              )}
+            </div>
+          </>
+        )}
       </div>
     </div>
   );

@@ -13,6 +13,16 @@ export function buildWaMeUrl(phoneE164: string, message: string): string {
   return `https://wa.me/${cleanPhone}?text=${encoded}`;
 }
 
+// Native deep link into the WhatsApp Desktop app. On Windows and macOS this
+// launches WhatsApp Desktop directly without going through the browser, which
+// is what Luxmi wants — no "wa.me is opening..." tab. Falls back gracefully
+// if WhatsApp Desktop isn't installed (OS will prompt to install).
+export function buildWhatsappDeepLink(phoneE164: string, message: string): string {
+  const cleanPhone = phoneE164.replace(/\D/g, "");
+  const encoded = encodeURIComponent(message);
+  return `whatsapp://send?phone=${cleanPhone}&text=${encoded}`;
+}
+
 // E.164: leading "+", up to 15 total digits, first digit 1-9.
 const E164 = /^\+[1-9]\d{1,14}$/;
 export function isValidE164(phone: string): boolean {

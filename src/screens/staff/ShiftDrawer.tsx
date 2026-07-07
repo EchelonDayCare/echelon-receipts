@@ -5,7 +5,7 @@ import {
   createShift, updateShift, cancelShift, reassignShift,
   shiftHours, type StaffShift,
 } from "../../repo/scheduleRepo";
-import { buildWaMeUrl, renderTemplate } from "../../lib/whatsapp";
+import { buildWhatsappDeepLink, renderTemplate } from "../../lib/whatsapp";
 import { db, getSettings } from "../../lib/db";
 import { openUrl } from "@tauri-apps/plugin-opener";
 
@@ -82,7 +82,7 @@ export default function ShiftDrawer({
       ...tokens,
     });
     if (!confirm(`Open WhatsApp for ${s.name}?\n\n${msg}`)) return;
-    const url = buildWaMeUrl(s.whatsapp_phone_e164, msg);
+    const url = buildWhatsappDeepLink(s.whatsapp_phone_e164, msg);
     try { await openUrl(url); }
     catch (e: any) { setErr(`Could not open WhatsApp: ${String(e?.message ?? e)}`); }
   }
