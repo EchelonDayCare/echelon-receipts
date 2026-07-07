@@ -149,6 +149,7 @@ export default function NotificationsSettingsSection() {
   const [quietEnd, setQuietEnd] = useState("");
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState("");
+  const [loaded, setLoaded] = useState(false);
 
   async function refresh() {
     const p = await getNotifSettings();
@@ -162,10 +163,12 @@ export default function NotificationsSettingsSection() {
     setRemitDay(s.notif_remittance_day_of_month || "12");
     setQuietStart(s.notif_quiet_hours_start || "");
     setQuietEnd(s.notif_quiet_hours_end || "");
+    setLoaded(true);
   }
   useEffect(() => { void refresh(); }, []);
 
   async function saveDates() {
+    if (!loaded) return; // guard: don't write hard-coded defaults over real values before refresh() resolves
     setBusy(true); setMsg("");
     try {
       await setAppSetting("notif_agm_reminder_mmdd", agmMmdd);
@@ -259,7 +262,7 @@ export default function NotificationsSettingsSection() {
           </div>
         </div>
         <div style={{ marginTop: 12, display: "flex", gap: 10, alignItems: "center" }}>
-          <button className="btn" onClick={saveDates} disabled={busy}>{busy ? "Saving…" : "Save & Rescan"}</button>
+          <button className="btn" onClick={saveDates} disabled={busy || !loaded}>{busy ? "Saving…" : loaded ? "Save & Rescan" : "Loading…"}</button>
           <button className="btn secondary" onClick={testNotification}>Test notification</button>
           {msg && <span style={{ color: "var(--muted)", fontSize: 12 }}>{msg}</span>}
         </div>
@@ -306,8 +309,8 @@ export default function NotificationsSettingsSection() {
           </tbody>
         </table>
         <div style={{ marginTop: 14, display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
-          <button className="btn primary" onClick={saveDates} disabled={busy}>
-            {busy ? "Saving…" : "Save all & rescan"}
+          <button className="btn primary" onClick={saveDates} disabled={busy || !loaded}>
+            {busy ? "Saving…" : loaded ? "Save all & rescan" : "Loading…"}
           </button>
           <small style={{ color: "var(--muted)" }}>
             Per-category toggles above save instantly. Use this to save the recurring dates and re-run the scan now.

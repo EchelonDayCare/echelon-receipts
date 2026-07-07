@@ -16,12 +16,32 @@ import type { NotificationInput, NotificationCategory, Severity } from "../../re
 // ─── Helpers ──────────────────────────────────────────────────────────
 const DAY_MS = 86400_000;
 const startOfDay = (d = new Date()) => { const x = new Date(d); x.setHours(0,0,0,0); return x; };
-const isoDate = (d: Date) => d.toISOString().slice(0,10);
+// Local-timezone ISO date formatter. Never use toISOString().slice(0,10) —
+// that converts to UTC and can flip the day for anyone west of GMT.
+const isoDate = (d: Date) => {
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, "0");
+  const dd = String(d.getDate()).padStart(2, "0");
+  return `${y}-${m}-${dd}`;
+};
+// Parse "YYYY-MM-DD" as LOCAL midnight, not UTC. `new Date("2026-01-20")`
+// is spec-defined as UTC midnight, which becomes Jan-19 evening in the
+// Americas — that off-by-one silently shifted every due-date scanner.
+function parseIsoLocal(iso: string): Date | null {
+  const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(iso);
+  if (m) {
+    const y = Number(m[1]), mo = Number(m[2]) - 1, da = Number(m[3]);
+    const d = new Date(y, mo, da);
+    return isNaN(d.getTime()) ? null : d;
+  }
+  const d = new Date(iso);
+  return isNaN(d.getTime()) ? null : startOfDay(d);
+}
 
 function daysBetween(fromIso: string | null | undefined, to = startOfDay()): number | null {
   if (!fromIso) return null;
-  const then = startOfDay(new Date(fromIso));
-  if (isNaN(then.getTime())) return null;
+  const then = parseIsoLocal(fromIso);
+  if (!then) return null;
   return Math.round((then.getTime() - to.getTime()) / DAY_MS);
 }
 
@@ -49,18 +69,29 @@ function tierLabel(t: Tier, dueIso: string, noun = "due"): string {
   return `${noun} in ${d}d`;
 }
 
+/** Build a Date only if the (year, mm, dd) triple is a real calendar date.
+ *  Guards against JS Date auto-rollover (Feb 29 non-leap → Mar 1, Apr 31 → May 1). */
+function makeValidDate(y: number, mm: number, dd: number): Date | null {
+  const d = new Date(y, mm - 1, dd);
+  if (d.getFullYear() !== y || d.getMonth() !== mm - 1 || d.getDate() !== dd) return null;
+  return d;
+}
+
 /** Advance an MM-DD (e.g. "02-28") to the next calendar occurrence >= today.
- *  Returns null if the input is not a valid MM-DD. */
+ *  Returns null if the input is not a valid MM-DD.
+ *  Feb 29 in non-leap years advances to the next leap year (up to 4 tries). */
 function nextMmDdOccurrence(mmdd: string): string | null {
   const m = /^(\d{2})-(\d{2})$/.exec((mmdd || "").trim());
   if (!m) return null;
   const mm = Number(m[1]); const dd = Number(m[2]);
   if (mm < 1 || mm > 12 || dd < 1 || dd > 31) return null;
   const today = startOfDay();
-  let year = today.getFullYear();
-  let candidate = new Date(year, mm - 1, dd);
-  if (candidate < today) candidate = new Date(year + 1, mm - 1, dd);
-  return isoDate(candidate);
+  const startYear = today.getFullYear();
+  for (let offset = 0; offset < 5; offset++) {
+    const candidate = makeValidDate(startYear + offset, mm, dd);
+    if (candidate && candidate >= today) return isoDate(candidate);
+  }
+  return null;
 }
 /** Next monthly occurrence of a day-of-month (1-28), >= today. */
 function nextDayOfMonthOccurrence(day: number): string | null {
@@ -69,6 +100,32 @@ function nextDayOfMonthOccurrence(day: number): string | null {
   let cand = new Date(today.getFullYear(), today.getMonth(), day);
   if (cand < today) cand = new Date(today.getFullYear(), today.getMonth() + 1, day);
   return isoDate(cand);
+}
+
+/** All upcoming MM-DD occurrences within the given horizon (in days).
+ *  Used by multi-date scanners so every configured date within window fires,
+ *  not just the earliest. */
+function upcomingMmDdOccurrences(mmdds: string[], horizonDays: number, overdueDays = 14): string[] {
+  const today = startOfDay();
+  const isos = new Set<string>();
+  for (const raw of mmdds) {
+    const iso = nextMmDdOccurrence(raw);
+    if (!iso) continue;
+    const days = daysBetween(iso) ?? Infinity;
+    if (days <= horizonDays) isos.add(iso);
+    // Also consider the previous year's occurrence if it's still within the
+    // overdue window (e.g. WCB Jan 20 that she missed — still surface until
+    // she acts). We reconstruct by subtracting a year from the "next".
+    const parsed = parseIsoLocal(iso);
+    if (parsed) {
+      const prev = makeValidDate(parsed.getFullYear() - 1, parsed.getMonth() + 1, parsed.getDate());
+      if (prev) {
+        const prevDays = Math.round((prev.getTime() - today.getTime()) / DAY_MS);
+        if (prevDays < 0 && prevDays >= -overdueDays) isos.add(isoDate(prev));
+      }
+    }
+  }
+  return Array.from(isos).sort();
 }
 
 // ─── Scanner: staff credentials ───────────────────────────────────────
@@ -414,7 +471,10 @@ export async function scanAgmDeadline(): Promise<NotificationInput[]> {
     source_kind: "agm",
     source_id: iso,
     action_route: "/reports/agm",
-    dedup_key: `agm_deadline:agm:${iso}:${t}`,
+    // Dedup on the target date only — as tier escalates (7d → 3d → 0d →
+    // overdue) upsertByDedupKey refreshes title/body/severity in place
+    // instead of creating a new notification each tier.
+    dedup_key: `agm_deadline:agm:${iso}`,
   }];
 }
 
@@ -435,7 +495,7 @@ export async function scanTslipDeadline(): Promise<NotificationInput[]> {
     source_kind: "tslip",
     source_id: iso,
     action_route: "/students/annual",
-    dedup_key: `tslip_deadline:tslip:${iso}:${t}`,
+    dedup_key: `tslip_deadline:tslip:${iso}`,
   }];
 }
 
@@ -457,86 +517,101 @@ export async function scanCcfriClaim(): Promise<NotificationInput[]> {
     source_kind: "ccfri",
     source_id: iso,
     action_route: "/reports/subsidy",
-    dedup_key: `ccfri_claim_due:ccfri:${iso}:${t}`,
+    dedup_key: `ccfri_claim_due:ccfri:${iso}`,
   }];
 }
 
 // ─── Scanner: WCB quarterly (Apr 20 / Jul 20 / Oct 20 / Jan 20) ───────
 // User setting `notif_wcb_days` (default "04-20,07-20,10-20,01-20").
-// Fires from 7 days out through the due date.
+// Surfaces each configured date from 7 days out through 14 days overdue,
+// so a missed WCB filing stays visible until she acts on it.
 export async function scanWcbQuarterly(): Promise<NotificationInput[]> {
   const s = await getSettings();
   const raw = (s.notif_wcb_days || "04-20,07-20,10-20,01-20").trim();
   const parts = raw.split(",").map(x => x.trim()).filter(Boolean);
-  const isos = parts.map(nextMmDdOccurrence).filter((x): x is string => !!x);
-  if (isos.length === 0) return [];
-  // Earliest upcoming occurrence
-  isos.sort();
-  const iso = isos[0];
-  const days = daysBetween(iso);
-  if (days == null) return [];
-  if (days > 7 || days < 0) return []; // week-before window only
-  const t = tierFor(days) ?? "7d";
-  return [{
-    category: "wcb_quarterly_due",
-    severity: tierSeverity(t),
-    title: "WCB quarterly return due",
-    body: `${tierLabel(t, iso)} (${iso})`,
-    source_kind: "wcb",
-    source_id: iso,
-    action_route: "/reports/agm",
-    dedup_key: `wcb_quarterly_due:wcb:${iso}:${t}`,
-  }];
+  const isos = upcomingMmDdOccurrences(parts, 7, 14);
+  const out: NotificationInput[] = [];
+  for (const iso of isos) {
+    const days = daysBetween(iso);
+    if (days == null) continue;
+    const t = tierFor(days);
+    if (!t) continue;
+    out.push({
+      category: "wcb_quarterly_due",
+      severity: tierSeverity(t),
+      title: "WCB quarterly return due",
+      body: `${tierLabel(t, iso)} (${iso})`,
+      source_kind: "wcb",
+      source_id: iso,
+      action_route: "/reports/agm",
+      dedup_key: `wcb_quarterly_due:wcb:${iso}`,
+    });
+  }
+  return out;
 }
 
 // ─── Scanner: staff meeting quarterly (default end of Aug/Nov/Feb/May) ─
-// Reminder starts 7 days before through the meeting day, so on a Wednesday
-// meeting the Wednesday-before is already surfacing the alert.
+// Reminder surfaces from 7 days before through 14 days overdue.
 export async function scanStaffMeetingQuarterly(): Promise<NotificationInput[]> {
   const s = await getSettings();
   const raw = (s.notif_staff_meeting_days || "08-31,11-30,02-28,05-31").trim();
   const parts = raw.split(",").map(x => x.trim()).filter(Boolean);
-  const isos = parts.map(nextMmDdOccurrence).filter((x): x is string => !!x);
-  if (isos.length === 0) return [];
-  isos.sort();
-  const iso = isos[0];
-  const days = daysBetween(iso);
-  if (days == null) return [];
-  if (days > 7 || days < 0) return [];
-  const t = tierFor(days) ?? "7d";
-  return [{
-    category: "staff_meeting_quarterly",
-    severity: tierSeverity(t),
-    title: "Staff meeting approaching",
-    body: `${tierLabel(t, iso)} (${iso})`,
-    source_kind: "staff_meeting",
-    source_id: iso,
-    action_route: "/organizer",
-    dedup_key: `staff_meeting_quarterly:staff_meeting:${iso}:${t}`,
-  }];
+  const isos = upcomingMmDdOccurrences(parts, 7, 14);
+  const out: NotificationInput[] = [];
+  for (const iso of isos) {
+    const days = daysBetween(iso);
+    if (days == null) continue;
+    const t = tierFor(days);
+    if (!t) continue;
+    out.push({
+      category: "staff_meeting_quarterly",
+      severity: tierSeverity(t),
+      title: "Staff meeting approaching",
+      body: `${tierLabel(t, iso)} (${iso})`,
+      source_kind: "staff_meeting",
+      source_id: iso,
+      action_route: "/organizer",
+      dedup_key: `staff_meeting_quarterly:staff_meeting:${iso}`,
+    });
+  }
+  return out;
 }
 
 // ─── Scanner: monthly payroll remittance (default day-of-month 12) ────
-// Fires 7 days before through the due day.
+// Surfaces from 7 days before through 14 days overdue.
 export async function scanRemittanceMonthly(): Promise<NotificationInput[]> {
   const s = await getSettings();
   const dom = Number(s.notif_remittance_day_of_month || "12");
-  const iso = nextDayOfMonthOccurrence(dom);
-  if (!iso) return [];
-  const days = daysBetween(iso);
-  if (days == null) return [];
-  if (days > 7 || days < 0) return [];
-  const t = tierFor(days) ?? "7d";
-  return [{
-    category: "remittance_monthly_due",
-    severity: tierSeverity(t),
-    title: "Payroll remittance due",
-    body: `${tierLabel(t, iso)} (${iso})`,
-    source_kind: "remittance",
-    source_id: iso,
-    action_route: "/reports/agm",
-    dedup_key: `remittance_monthly_due:remittance:${iso}:${t}`,
-  }];
+  const nextIso = nextDayOfMonthOccurrence(dom);
+  if (!nextIso) return [];
+  // Also consider last month's occurrence if it's within the overdue window.
+  const candidates: string[] = [];
+  const nextParsed = parseIsoLocal(nextIso);
+  if (nextParsed) {
+    const prev = new Date(nextParsed.getFullYear(), nextParsed.getMonth() - 1, nextParsed.getDate());
+    const prevDays = daysBetween(isoDate(prev));
+    if (prevDays != null && prevDays < 0 && prevDays >= -14) candidates.push(isoDate(prev));
+  }
+  candidates.push(nextIso);
+  const out: NotificationInput[] = [];
+  for (const iso of candidates) {
+    const days = daysBetween(iso);
+    if (days == null) continue;
+    if (days > 7) continue;
+    const t = tierFor(days);
+    if (!t) continue;
+    out.push({
+      category: "remittance_monthly_due",
+      severity: tierSeverity(t),
+      title: "Payroll remittance due",
+      body: `${tierLabel(t, iso)} (${iso})`,
+      source_kind: "remittance",
+      source_id: iso,
+      action_route: "/reports/agm",
+      dedup_key: `remittance_monthly_due:remittance:${iso}`,
+    });
+  }
+  return out;
 }
 
 // ─── Scanner: backup stale / failed ───────────────────────────────────

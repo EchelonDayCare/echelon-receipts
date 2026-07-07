@@ -13,6 +13,8 @@ import {
 } from "../../repo/followupsRepo";
 import MeetingDrawer, { type MeetingDrawerState } from "./MeetingDrawer";
 import VoiceCaptureModal from "../../components/VoiceCaptureModal";
+import { getSettings } from "../../lib/db";
+import { isVoiceConfigured } from "../../lib/voice";
 
 const ALL_WINDOW_DAYS = 36_500;
 const WINDOWS = [
@@ -57,6 +59,7 @@ export default function Organizer() {
   const [err, setErr] = useState<string | null>(null);
   const [drawer, setDrawer] = useState<MeetingDrawerState>({ mode: "closed" });
   const [voiceOpen, setVoiceOpen] = useState(false);
+  const [voiceEnabled, setVoiceEnabled] = useState(false);
   const [newFu, setNewFu] = useState({ title: "", due: "", priority: "normal" as Priority });
 
   const refresh = async () => {
@@ -68,6 +71,19 @@ export default function Organizer() {
     } catch (e: any) { setErr(String(e?.message ?? e)); }
   };
   useEffect(() => { void refresh(); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, [windowDays]);
+
+  // Gate the Voice mic button on Whisper being fully configured. On Luxmi's
+  // tenant Azure Policy blocks disableLocalAuth=false so `azure_whisper_key_set`
+  // stays "", and this evaluates false — the button stays hidden and she never
+  // sees a broken feature. When Whisper becomes reachable, the button appears.
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      const s = await getSettings();
+      if (!cancelled) setVoiceEnabled(isVoiceConfigured(s as Record<string, string>));
+    })();
+    return () => { cancelled = true; };
+  }, []);
 
   const filtered = useMemo(
     () => upcoming.filter((i) => enabledSources.has(i.source) && (windowDays === 0 ? i.daysAway <= 0 : i.daysAway <= windowDays)),
@@ -115,9 +131,11 @@ export default function Organizer() {
             </div>
           </div>
           <div className="org-header-actions">
-            <button className="btn secondary" onClick={() => setVoiceOpen(true)} title="Dictate a meeting, follow-up or action">
-              🎤 Voice add
-            </button>
+            {voiceEnabled && (
+              <button className="btn secondary" onClick={() => setVoiceOpen(true)} title="Dictate a meeting, follow-up or action">
+                🎤 Voice add
+              </button>
+            )}
             <button className="btn secondary" onClick={() => window.print()}>Print</button>
           </div>
         </div>

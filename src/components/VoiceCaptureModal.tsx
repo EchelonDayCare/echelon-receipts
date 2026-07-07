@@ -178,7 +178,7 @@ export default function VoiceCaptureModal({ open, onClose, onSaved }: Props) {
 
         {configured === false && (
           <div style={warnBox}>
-            Voice capture isn't set up yet. Open <b>Settings → AI</b> and paste your Azure Whisper endpoint URL and API key.
+            Voice capture isn't set up yet. Open <b>Configuration → Staff</b> and paste your Azure Whisper endpoint URL and API key under Voice capture.
           </div>
         )}
 

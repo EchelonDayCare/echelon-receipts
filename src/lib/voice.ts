@@ -115,7 +115,7 @@ async function blobToBase64(blob: Blob): Promise<string> {
 export async function transcribeAudio(blob: Blob, mimeType: string): Promise<{ text: string; latencyMs: number }> {
   const endpoint = ((await getSettings())["azure_whisper_endpoint"] ?? "").toString();
   if (!endpoint.trim()) {
-    throw new Error("Whisper endpoint isn't configured. Open Settings → AI to paste your Azure Whisper URL.");
+    throw new Error("Whisper endpoint isn't configured. Open Configuration → Staff to paste your Azure Whisper URL.");
   }
   const audio_b64 = await blobToBase64(blob);
   const res = await invoke<{ text: string; latency_ms: number }>("transcribe_audio", {
