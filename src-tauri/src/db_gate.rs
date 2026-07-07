@@ -140,6 +140,17 @@ impl DbGate {
         self.inner.lock().await.is_some()
     }
 
+    /// Force any pending WAL frames to be checkpointed back into the
+    /// main DB and truncate the WAL file to zero length. Called right
+    /// before close-and-migrate so recent transactions are guaranteed
+    /// to be in the main file that sqlcipher_export reads from.
+    pub async fn checkpoint_wal(&self) -> Result<(), DbError> {
+        let guard = self.inner.lock().await;
+        let conn = guard.as_ref().ok_or(DbError::Locked)?;
+        conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")?;
+        Ok(())
+    }
+
     /// Apply embedded schema migrations idempotently. Called at
     /// startup. Backfills from `_sqlx_migrations` (the tracking table
     /// tauri-plugin-sql used in v1.x) so users upgrading from v1.8.1

@@ -4,16 +4,24 @@ import { SetupPinModal } from "./AppGate";
 
 // v2.0.0 device security settings tile — drop into Settings.tsx.
 //
-// Shows current envelope state (not set up / plaintext / encrypted +
-// unlocked) and offers the three user actions: Enable security, Change
-// PIN, Lock now.
+// Shows current envelope state and offers: Enable / Change PIN / Lock now
+// / Show recovery kit.
 
-type V2State = { isSetUp: boolean; isUnlocked: boolean; migrationState: string };
+type V2State = {
+  isSetUp: boolean;
+  isUnlocked: boolean;
+  migrationState: string;
+  envelopeError: string | null;
+  hasRecovery: boolean;
+  rateLimitedSecs: number;
+};
 
 export default function SecuritySettingsSection() {
   const [state, setState] = useState<V2State | null>(null);
   const [wizardOpen, setWizardOpen] = useState(false);
   const [changeOpen, setChangeOpen] = useState(false);
+  const [recoveryOpen, setRecoveryOpen] = useState(false);
+  const [recoveryCode, setRecoveryCode] = useState<string | null>(null);
 
   const refresh = () => {
     invoke<V2State>("v2_state").then(setState).catch((e) =>
@@ -28,10 +36,24 @@ export default function SecuritySettingsSection() {
     if (!confirm("Lock the app now? You'll need to enter your PIN to continue.")) return;
     try {
       await invoke("v2_lock");
-      // Reload to trigger AppGate to show the lock screen.
       window.location.reload();
     } catch (e) {
       alert(`Lock failed: ${e}`);
+    }
+  };
+
+  const generateRecovery = async () => {
+    const warning = state.hasRecovery
+      ? "You already have a recovery code. Generating a new one INVALIDATES the previous one. Continue?"
+      : "You will see a 48-character recovery code. Anyone with this code can decrypt your data — store it OFFLINE (printed, in a safe). Continue?";
+    if (!confirm(warning)) return;
+    try {
+      const code = await invoke<string>("v2_generate_recovery");
+      setRecoveryCode(code);
+      setRecoveryOpen(true);
+      refresh();
+    } catch (e) {
+      alert(`Recovery generation failed: ${e}`);
     }
   };
 
@@ -42,6 +64,12 @@ export default function SecuritySettingsSection() {
         {state.isSetUp
           ? "Your database is encrypted on this device."
           : "Not enabled. Your database is currently unencrypted on disk."}
+        {state.isSetUp && !state.hasRecovery && (
+          <div style={{ color: "#c62828", marginTop: 6, fontSize: 12 }}>
+            ⚠ You have no recovery code. If you forget your PIN or lose this
+            machine's keychain, your data will be permanently unrecoverable.
+          </div>
+        )}
       </div>
       <div style={{ display: "flex", gap: 10, marginTop: 12, flexWrap: "wrap" }}>
         {!state.isSetUp && (
@@ -53,6 +81,12 @@ export default function SecuritySettingsSection() {
           <>
             <button style={btn} onClick={() => setChangeOpen(true)}>Change PIN…</button>
             <button style={btn} onClick={lock}>Lock now</button>
+            <button
+              style={state.hasRecovery ? btn : btnPrimary}
+              onClick={generateRecovery}
+            >
+              {state.hasRecovery ? "Regenerate recovery code…" : "Create recovery code…"}
+            </button>
           </>
         )}
       </div>
@@ -68,6 +102,82 @@ export default function SecuritySettingsSection() {
           onCancel={() => setChangeOpen(false)}
         />
       )}
+      {recoveryOpen && recoveryCode && (
+        <RecoveryCodeModal
+          code={recoveryCode}
+          onDone={() => { setRecoveryOpen(false); setRecoveryCode(null); }}
+        />
+      )}
+    </div>
+  );
+}
+
+function RecoveryCodeModal({ code, onDone }: { code: string; onDone: () => void }) {
+  const [confirmed, setConfirmed] = useState(false);
+  const [copied, setCopied] = useState(false);
+  return (
+    <div style={overlay}>
+      <div style={{ ...card, minWidth: 480, maxWidth: 560 }}>
+        <div style={{ fontSize: 18, fontWeight: 600, color: "#c62828" }}>
+          Your recovery code
+        </div>
+        <div style={{ fontSize: 13, color: "#555", lineHeight: 1.5 }}>
+          Write this down and store it somewhere safe (a locked drawer, a
+          safety deposit box). <b>Anyone with this code can decrypt your
+          database on any machine</b> — treat it like a spare house key.
+          <br /><br />
+          This is the <b>only</b> time you'll see this code. If you lose it,
+          generate a new one from Settings.
+        </div>
+        <pre style={{
+          background: "#f5f5f5", padding: 16, borderRadius: 8,
+          fontSize: 16, fontFamily: "ui-monospace, monospace",
+          textAlign: "center", letterSpacing: 2, wordBreak: "break-all",
+          whiteSpace: "pre-wrap", border: "2px dashed #999",
+        }}>{code}</pre>
+        <div style={{ display: "flex", gap: 8 }}>
+          <button
+            type="button"
+            style={{ ...btn, flex: 1 }}
+            onClick={async () => {
+              try { await navigator.clipboard.writeText(code); setCopied(true); }
+              catch { alert("Copy failed — write it down manually."); }
+            }}
+          >
+            {copied ? "Copied ✓" : "Copy to clipboard"}
+          </button>
+          <button
+            type="button"
+            style={{ ...btn, flex: 1 }}
+            onClick={() => window.print()}
+          >
+            Print
+          </button>
+        </div>
+        <label style={{ fontSize: 13, color: "#333", marginTop: 12, display: "flex", gap: 8, alignItems: "flex-start" }}>
+          <input
+            type="checkbox"
+            checked={confirmed}
+            onChange={(e) => setConfirmed(e.target.checked)}
+            style={{ marginTop: 3 }}
+          />
+          I have securely stored this code offline. I understand it will not
+          be shown again.
+        </label>
+        <button
+          type="button"
+          disabled={!confirmed}
+          onClick={onDone}
+          style={{
+            ...btnPrimary,
+            opacity: confirmed ? 1 : 0.4,
+            cursor: confirmed ? "pointer" : "not-allowed",
+            marginTop: 8,
+          }}
+        >
+          Done
+        </button>
+      </div>
     </div>
   );
 }

@@ -1,110 +1,392 @@
-import { useEffect, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import { invoke } from "@tauri-apps/api/core";
 
 // v2.0.0 AppLock overlay + Setup Wizard gate.
 //
 // Wraps the entire app. On mount, calls v2_state and:
-//   * isSetUp=false: shows the SetupWizard (create-PIN screen). The
-//     wizard calls v2_create_pin which encrypts the DB in place and
-//     unlocks it. Then falls through to normal render.
+//   * envelopeError !== null: FAIL CLOSED. Renders an error screen and
+//     refuses to render children. This distinguishes "envelope missing"
+//     (legitimate v1.x compat, safe to open plaintext) from "envelope
+//     exists but corrupted" (never silently downgrade to plaintext).
+//   * isSetUp=false: shows the SetupPinModal (create-PIN screen). User
+//     may "Skip for now" and continue with a red banner + re-prompt on
+//     next launch.
 //   * isSetUp=true && !isUnlocked: shows the AppLock overlay (PIN
-//     prompt). Calls v2_unlock. On success, unmounts and renders the
-//     app underneath.
-//   * isSetUp=true && isUnlocked: renders children directly.
-//
-// This is v2.0.0 PIN-only. Biometric slots (v2.1) will surface as an
-// extra "Use TouchID / Windows Hello" button here.
+//     prompt or recovery-code prompt).
+//   * isSetUp=true && isUnlocked: renders children with an idle
+//     auto-lock timer wrapped around them.
 
-type V2State = { isSetUp: boolean; isUnlocked: boolean; migrationState: string };
+type V2State = {
+  isSetUp: boolean;
+  isUnlocked: boolean;
+  migrationState: string;
+  envelopeError: string | null;
+  hasRecovery: boolean;
+  rateLimitedSecs: number;
+};
+
+const IDLE_LOCK_MS_DEFAULT = 15 * 60 * 1000; // 15 minutes
+const SKIP_SETUP_SESSION_KEY = "security_setup_skipped_v1";
 
 export default function AppGate({ children }: { children: ReactNode }) {
   const [state, setState] = useState<V2State | null>(null);
   const [checking, setChecking] = useState(true);
+  const [gateError, setGateError] = useState<string | null>(null);
+  const [showSetup, setShowSetup] = useState(false);
 
-  const refresh = async () => {
+  const refresh = useCallback(async () => {
     try {
       const s = await invoke<V2State>("v2_state");
       setState(s);
+      setGateError(null);
     } catch (e) {
+      // v2_state itself failed (Rust panic, missing command, etc). Fail
+      // closed: don't render the app. Show an error screen instead.
       console.error("[AppGate] v2_state failed:", e);
-      // Fail-open in dev so a broken auth module doesn't lock everyone
-      // out. Production shipping keeps this behaviour: if the security
-      // module errors, treat the DB as plaintext v1.x compat.
-      setState({ isSetUp: false, isUnlocked: false, migrationState: "plaintext" });
+      setGateError(String((e as { message?: string })?.message ?? e));
     } finally {
       setChecking(false);
     }
-  };
+  }, []);
 
   useEffect(() => {
     void refresh();
-  }, []);
+  }, [refresh]);
 
-  if (checking || !state) {
+  if (checking || (!state && !gateError)) {
     return <FullScreenCentered>Loading…</FullScreenCentered>;
   }
 
-  // Not set up yet — either fresh install or v1.x install upgrading to
-  // v2. The wizard is optional-ish: on first launch we do NOT force
-  // the user through it (they may want to explore the app first). We
-  // surface it via Settings later; here we just pass through.
-  if (!state.isSetUp) {
-    return <>{children}</>;
+  // Hard failure: v2_state Tauri command errored (e.g. Rust panic).
+  if (gateError) {
+    return <FailClosedScreen title="Security check failed" detail={gateError} />;
   }
 
-  // Set up but locked → PIN prompt.
-  if (!state.isUnlocked) {
-    return <UnlockScreen onUnlocked={refresh} />;
+  // Soft failure: envelope file present but unreadable / unsupported
+  // version. Never fall through to plaintext — that would be a silent
+  // security downgrade.
+  if (state!.envelopeError) {
+    return (
+      <FailClosedScreen
+        title="Security configuration unreadable"
+        detail={state!.envelopeError}
+      />
+    );
   }
+
+  // Set up but locked → PIN prompt (or recovery flow).
+  if (state!.isSetUp && !state!.isUnlocked) {
+    return (
+      <UnlockScreen
+        hasRecovery={state!.hasRecovery}
+        rateLimitedSecs={state!.rateLimitedSecs}
+        onUnlocked={refresh}
+      />
+    );
+  }
+
+  // Not set up: prompt user to enable security. Non-blocking:
+  // "Skip for now" respects autonomy but re-prompts next launch.
+  const skipped = typeof sessionStorage !== "undefined"
+    && sessionStorage.getItem(SKIP_SETUP_SESSION_KEY) === "1";
+  if (!state!.isSetUp && !skipped && !showSetup) {
+    return (
+      <EnableSecurityPrompt
+        onEnable={() => setShowSetup(true)}
+        onSkip={() => {
+          try { sessionStorage.setItem(SKIP_SETUP_SESSION_KEY, "1"); } catch {}
+          void refresh();
+        }}
+      />
+    );
+  }
+  if (!state!.isSetUp && showSetup) {
+    return (
+      <SetupPinModal
+        onDone={() => {
+          setShowSetup(false);
+          void refresh();
+        }}
+        onCancel={() => setShowSetup(false)}
+      />
+    );
+  }
+
+  // Unlocked (or !isSetUp && skipped for this session).
+  return (
+    <>
+      {!state!.isSetUp && skipped && <UnprotectedBanner />}
+      <IdleLockWrapper
+        enabled={state!.isSetUp && state!.isUnlocked}
+        timeoutMs={IDLE_LOCK_MS_DEFAULT}
+        onIdle={async () => {
+          try { await invoke("v2_lock"); } catch (e) { console.warn(e); }
+          void refresh();
+        }}
+      >
+        {children}
+      </IdleLockWrapper>
+    </>
+  );
+}
+
+// ────────────────────────────────────────────────────────────────────────
+// Idle auto-lock
+
+function IdleLockWrapper({
+  enabled,
+  timeoutMs,
+  onIdle,
+  children,
+}: {
+  enabled: boolean;
+  timeoutMs: number;
+  onIdle: () => void;
+  children: ReactNode;
+}) {
+  const timerRef = useRef<number | null>(null);
+
+  useEffect(() => {
+    if (!enabled) return;
+    const reset = () => {
+      if (timerRef.current !== null) window.clearTimeout(timerRef.current);
+      timerRef.current = window.setTimeout(() => onIdle(), timeoutMs);
+    };
+    const events: Array<keyof WindowEventMap> = [
+      "mousemove", "keydown", "pointerdown", "wheel", "touchstart", "focus",
+    ];
+    events.forEach((e) => window.addEventListener(e, reset, { passive: true } as AddEventListenerOptions));
+    document.addEventListener("visibilitychange", reset);
+    reset();
+    return () => {
+      if (timerRef.current !== null) window.clearTimeout(timerRef.current);
+      events.forEach((e) => window.removeEventListener(e, reset));
+      document.removeEventListener("visibilitychange", reset);
+    };
+  }, [enabled, timeoutMs, onIdle]);
 
   return <>{children}</>;
 }
 
 // ────────────────────────────────────────────────────────────────────────
+// Fail-closed error screen
 
-function UnlockScreen({ onUnlocked }: { onUnlocked: () => void }) {
+function FailClosedScreen({ title, detail }: { title: string; detail: string }) {
+  return (
+    <FullScreenCentered>
+      <div style={{ ...styles.card, borderTop: "6px solid #c62828" }}>
+        <div style={{ ...styles.logo, color: "#c62828" }}>⚠️</div>
+        <div style={styles.title}>{title}</div>
+        <div style={styles.subtitle}>
+          Your encrypted database is safe, but the security metadata could
+          not be read. To recover, either:
+          <ul style={{ textAlign: "left", fontSize: 13, marginTop: 8, lineHeight: 1.6 }}>
+            <li>Restore your most recent encrypted backup, or</li>
+            <li>Use your printed recovery code (if you have one), or</li>
+            <li>Contact support.</li>
+          </ul>
+          <div style={{ fontSize: 11, color: "#999", marginTop: 8, wordBreak: "break-all" }}>
+            Technical detail: {detail}
+          </div>
+        </div>
+      </div>
+    </FullScreenCentered>
+  );
+}
+
+// ────────────────────────────────────────────────────────────────────────
+// Enable-security prompt shown on first launch of a not-yet-set-up install.
+
+function EnableSecurityPrompt({
+  onEnable,
+  onSkip,
+}: {
+  onEnable: () => void;
+  onSkip: () => void;
+}) {
+  return (
+    <FullScreenCentered>
+      <div style={styles.card}>
+        <div style={styles.logo}>🛡️</div>
+        <div style={styles.title}>Protect your data</div>
+        <div style={styles.subtitle}>
+          Set a PIN to encrypt your database on this device. If your laptop
+          is lost or stolen, your daycare records stay safe.
+          <br /><br />
+          You can skip this and enable it later from Settings → Security.
+        </div>
+        <div style={{ display: "flex", gap: 10, marginTop: 10 }}>
+          <button
+            type="button"
+            onClick={onSkip}
+            style={{ ...styles.button, background: "#eee", color: "#333" }}
+          >
+            Skip for now
+          </button>
+          <button type="button" onClick={onEnable} style={styles.button}>
+            Enable security
+          </button>
+        </div>
+      </div>
+    </FullScreenCentered>
+  );
+}
+
+function UnprotectedBanner() {
+  return (
+    <div style={{
+      position: "fixed", top: 0, left: 0, right: 0,
+      background: "#fff3cd", color: "#664d03",
+      padding: "6px 12px", fontSize: 12, textAlign: "center",
+      borderBottom: "1px solid #ffecb5", zIndex: 9998,
+      fontFamily: "system-ui, sans-serif",
+    }}>
+      🔓 Device security is off — enable it in Settings → Security.
+    </div>
+  );
+}
+
+// ────────────────────────────────────────────────────────────────────────
+
+function UnlockScreen({
+  onUnlocked,
+  hasRecovery,
+  rateLimitedSecs,
+}: {
+  onUnlocked: () => void;
+  hasRecovery: boolean;
+  rateLimitedSecs: number;
+}) {
   const [pin, setPin] = useState("");
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
+  const [mode, setMode] = useState<"pin" | "recovery">("pin");
+  const [recoveryCode, setRecoveryCode] = useState("");
+  const [cooldown, setCooldown] = useState(rateLimitedSecs);
 
-  const submit = async (e: React.FormEvent) => {
+  useEffect(() => {
+    setCooldown(rateLimitedSecs);
+  }, [rateLimitedSecs]);
+
+  useEffect(() => {
+    if (cooldown <= 0) return;
+    const t = window.setInterval(() => setCooldown((c) => Math.max(0, c - 1)), 1000);
+    return () => window.clearInterval(t);
+  }, [cooldown]);
+
+  const disabled = busy || cooldown > 0;
+
+  const submitPin = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (busy || pin.length < 4) return;
+    if (disabled || pin.length < 4) return;
     setBusy(true);
     setErr(null);
     try {
       await invoke("v2_unlock", { pin });
       setPin("");
       onUnlocked();
-    } catch (e: any) {
-      const msg = String(e?.message ?? e);
-      setErr(/wrong pin/i.test(msg) ? "Wrong PIN. Try again." : `Unlock failed: ${msg}`);
+    } catch (e: unknown) {
+      const msg = String((e as { message?: string })?.message ?? e);
+      const match = msg.match(/retry after (\d+)/i);
+      if (match) {
+        setCooldown(parseInt(match[1], 10));
+        setErr(`Too many attempts. Wait ${match[1]}s before trying again.`);
+      } else {
+        setErr(/wrong pin/i.test(msg) ? "Wrong PIN. Try again." : `Unlock failed: ${msg}`);
+      }
       setPin("");
     } finally {
       setBusy(false);
     }
   };
 
+  const submitRecovery = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (disabled || recoveryCode.trim().length === 0) return;
+    setBusy(true);
+    setErr(null);
+    try {
+      await invoke("v2_unlock_with_recovery", { code: recoveryCode });
+      setRecoveryCode("");
+      onUnlocked();
+    } catch (e: unknown) {
+      const msg = String((e as { message?: string })?.message ?? e);
+      const match = msg.match(/retry after (\d+)/i);
+      if (match) {
+        setCooldown(parseInt(match[1], 10));
+        setErr(`Too many attempts. Wait ${match[1]}s.`);
+      } else {
+        setErr(`Recovery failed: ${msg}`);
+      }
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  if (mode === "recovery") {
+    return (
+      <FullScreenCentered>
+        <form onSubmit={submitRecovery} style={styles.card}>
+          <div style={styles.logo}>🔑</div>
+          <div style={styles.title}>Recovery code</div>
+          <div style={styles.subtitle}>
+            Enter the 48-character recovery code printed when you set up
+            security. Dashes and case don't matter.
+          </div>
+          <textarea
+            value={recoveryCode}
+            onChange={(e) => { setRecoveryCode(e.target.value); setErr(null); }}
+            rows={3}
+            autoFocus
+            style={{ ...styles.pinInput, letterSpacing: 2, fontSize: 15, textAlign: "left", padding: 10 }}
+            placeholder="XXXX-XXXX-XXXX-XXXX-XXXX-XXXX-..."
+          />
+          {err && <div style={styles.error}>{err}</div>}
+          {cooldown > 0 && <div style={styles.error}>Locked out for {cooldown}s</div>}
+          <div style={{ display: "flex", gap: 10, marginTop: 6 }}>
+            <button type="button" onClick={() => { setMode("pin"); setErr(null); }} style={{ ...styles.button, background: "#eee", color: "#333" }}>
+              Back to PIN
+            </button>
+            <button type="submit" disabled={disabled || recoveryCode.trim().length === 0} style={styles.button}>
+              {busy ? "Unlocking…" : "Unlock"}
+            </button>
+          </div>
+        </form>
+      </FullScreenCentered>
+    );
+  }
+
   return (
     <FullScreenCentered>
-      <form onSubmit={submit} style={styles.card}>
+      <form onSubmit={submitPin} style={styles.card}>
         <div style={styles.logo}>🔒</div>
         <div style={styles.title}>Echelon Receipts</div>
-        <div style={styles.subtitle}>Enter your 6-digit PIN</div>
+        <div style={styles.subtitle}>Enter your PIN</div>
         <input
           type="password"
-          inputMode="numeric"
+          inputMode="text"
           autoFocus
           value={pin}
           onChange={(e) => { setPin(e.target.value); setErr(null); }}
           maxLength={64}
           style={styles.pinInput}
           placeholder="••••••"
+          disabled={disabled}
         />
         {err && <div style={styles.error}>{err}</div>}
-        <button type="submit" disabled={busy || pin.length < 4} style={styles.button}>
-          {busy ? "Unlocking…" : "Unlock"}
+        {cooldown > 0 && <div style={styles.error}>Locked out for {cooldown}s</div>}
+        <button type="submit" disabled={disabled || pin.length < 4} style={styles.button}>
+          {busy ? "Unlocking…" : cooldown > 0 ? `Wait ${cooldown}s` : "Unlock"}
         </button>
+        {hasRecovery && (
+          <button
+            type="button"
+            onClick={() => { setMode("recovery"); setErr(null); }}
+            style={{ background: "none", border: "none", color: "#2c5282", fontSize: 13, marginTop: 6, cursor: "pointer" }}
+          >
+            Forgot PIN? Use recovery code
+          </button>
+        )}
       </form>
     </FullScreenCentered>
   );

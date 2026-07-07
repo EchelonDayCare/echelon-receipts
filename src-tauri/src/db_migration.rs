@@ -52,6 +52,15 @@ pub enum MigrationError {
 
     #[error("security envelope error: {0}")]
     Envelope(#[from] security::SecurityError),
+
+    #[error("could not delete sidecar {0}: {1}")]
+    SidecarPurge(PathBuf, io::Error),
+
+    #[error("sidecar still present after purge: {0}")]
+    SidecarSurvived(PathBuf),
+
+    #[error("unrecoverable migration state: envelope=Encrypting but main DB is missing at {0}")]
+    RecoveryImpossibleDbMissing(PathBuf),
 }
 
 // ────────────────────────────────────────────────────────────────────────
@@ -315,7 +324,7 @@ pub fn migrate_to_encrypted<E: Encryptor>(
     // pointing at what is now an encrypted DB. The plaintext DB itself
     // is superseded by the rename.
     let _ = sync_dir(parent);
-    purge_sqlite_sidecars_only(&paths.plaintext);
+    purge_sqlite_sidecars_only(&paths.plaintext)?;
     atomic_replace(&encrypting_path, &paths.plaintext)?;
     writeln!(progress, "[migrate] atomic rename complete")?;
 
@@ -327,34 +336,121 @@ pub fn migrate_to_encrypted<E: Encryptor>(
     Ok(())
 }
 
-/// Called on every app launch. If we crashed during migration, clean up
-/// the partial `.encrypting` file so the next attempt starts fresh.
+/// Called on every app launch. Recovers from a mid-migration crash by
+/// inspecting the on-disk state of the main DB file:
+///
+///   * envelope=Encrypting AND main DB is plaintext:
+///     the crash happened BEFORE `atomic_replace`. The `.encrypting`
+///     sidecar (if any) is safe to delete; envelope resets to `Plaintext`
+///     and the setup wizard can be retried.
+///
+///   * envelope=Encrypting AND main DB is encrypted:
+///     the crash happened AFTER `atomic_replace` but BEFORE
+///     `save_envelope(Encrypted)`. The DB is already the encrypted one;
+///     forward-complete by setting envelope to `Encrypted`. **Critical**
+///     — without this the old rollback would revert envelope to Plaintext
+///     while the on-disk DB is actually SQLCipher-encrypted, permanently
+///     stranding the user.
+///
+///   * envelope=Encrypting AND main DB missing:
+///     unrecoverable. Return an error so the caller can prompt the user
+///     to restore from backup.
+///
+///   * any other state: no-op.
+pub fn recover_on_startup(
+    paths: &Paths,
+    envelope: &mut SecurityEnvelope,
+) -> Result<(), MigrationError> {
+    if envelope.migration_state != MigrationState::Encrypting {
+        return Ok(());
+    }
+    let leftover = paths.encrypting();
+
+    if !paths.plaintext.exists() {
+        // The main DB is gone entirely — we can't tell what happened.
+        // Do NOT touch the envelope; let the operator restore a backup.
+        return Err(MigrationError::RecoveryImpossibleDbMissing(
+            paths.plaintext.clone(),
+        ));
+    }
+
+    match db_file_is_plaintext(&paths.plaintext)? {
+        true => {
+            // Rollback: plaintext DB untouched. Purge partial encrypted sidecar.
+            if leftover.exists() {
+                if let Err(e) = std::fs::remove_file(&leftover) {
+                    return Err(MigrationError::SidecarPurge(leftover.clone(), e));
+                }
+            }
+            envelope.migration_state = MigrationState::Plaintext;
+            security::save_envelope(&paths.envelope, envelope)?;
+        }
+        false => {
+            // Forward-complete: main DB is already encrypted; the rename
+            // succeeded but the envelope write did not. Mark encrypted so
+            // v2_unlock can decrypt with the PIN's MDK.
+            // Also delete any lingering .encrypting file (safe: the atomic
+            // rename means it's redundant, and we may or may not still
+            // have one depending on which OS/rename semantics fired).
+            if leftover.exists() {
+                let _ = std::fs::remove_file(&leftover);
+            }
+            envelope.migration_state = MigrationState::Encrypted;
+            security::save_envelope(&paths.envelope, envelope)?;
+        }
+    }
+    Ok(())
+}
+
+/// Legacy name kept as a thin wrapper for the old test suite.
+#[cfg(test)]
 pub fn resume_or_rollback(
     paths: &Paths,
     envelope: &mut SecurityEnvelope,
 ) -> Result<(), MigrationError> {
-    if envelope.migration_state == MigrationState::Encrypting {
-        let leftover = paths.encrypting();
-        if leftover.exists() {
-            let _ = std::fs::remove_file(&leftover);
-        }
-        // Plaintext DB was never touched — safe to reset state.
-        envelope.migration_state = MigrationState::Plaintext;
-        security::save_envelope(&paths.envelope, envelope)?;
+    recover_on_startup(paths, envelope)
+}
+
+/// Read the first 16 bytes of `path` and compare against SQLite's plaintext
+/// magic header `"SQLite format 3\0"` (RFC-defined). SQLCipher-encrypted
+/// databases have a random-looking first page (the header itself is
+/// encrypted), so any non-magic prefix implies "not plaintext".
+pub fn db_file_is_plaintext(path: &Path) -> io::Result<bool> {
+    use std::io::Read;
+    const MAGIC: &[u8; 16] = b"SQLite format 3\0";
+    let mut f = std::fs::File::open(path)?;
+    let mut buf = [0u8; 16];
+    match f.read(&mut buf)? {
+        16 => Ok(&buf == MAGIC),
+        _ => Ok(false), // truncated → definitely not a valid plaintext DB
     }
-    Ok(())
 }
 
 /// Delete ONLY the -wal, -shm, -journal sidecars, never the main file.
 /// Used during migration to strip plaintext-flavoured sidecars just
 /// before we rename the encrypted DB over the plaintext file. The main
 /// plaintext file itself is superseded (and overwritten) by the rename.
-fn purge_sqlite_sidecars_only(base: &Path) {
+///
+/// **Fails loudly** if any sidecar cannot be removed and still exists —
+/// leaving a stale plaintext WAL beside an encrypted main DB would let
+/// SQLCipher try to apply the plaintext WAL on next open and corrupt data.
+fn purge_sqlite_sidecars_only(base: &Path) -> Result<(), MigrationError> {
     for suffix in ["-wal", "-shm", "-journal"] {
         let mut p = base.as_os_str().to_owned();
         p.push(suffix);
-        let _ = std::fs::remove_file(PathBuf::from(p));
+        let target = PathBuf::from(p);
+        match std::fs::remove_file(&target) {
+            Ok(_) => {}
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+            Err(e) => return Err(MigrationError::SidecarPurge(target, e)),
+        }
+        // Belt-and-braces: some Windows AV/backup handles report success
+        // then keep the file. Verify.
+        if target.exists() {
+            return Err(MigrationError::SidecarSurvived(target));
+        }
     }
+    Ok(())
 }
 
 // ────────────────────────────────────────────────────────────────────────
@@ -429,7 +525,11 @@ mod tests {
 
     fn setup(dir: &Path) -> Paths {
         let plaintext = dir.join("echelon.db");
-        std::fs::write(&plaintext, b"pretend this is a real sqlite db").unwrap();
+        // Prefix with the SQLite plaintext magic header so
+        // db_file_is_plaintext detects this fixture correctly.
+        let mut body = b"SQLite format 3\0".to_vec();
+        body.extend_from_slice(b"pretend this is a real sqlite db");
+        std::fs::write(&plaintext, &body).unwrap();
         // Add sidecars to make sure they're cleaned up.
         std::fs::write(dir.join("echelon.db-wal"), b"stale wal").unwrap();
         std::fs::write(dir.join("echelon.db-shm"), b"stale shm").unwrap();
@@ -499,9 +599,9 @@ mod tests {
         resume_or_rollback(&paths, &mut env).unwrap();
         assert_eq!(env.migration_state, MigrationState::Plaintext);
         assert!(!paths.encrypting().exists());
-        // Plaintext DB is untouched.
+        // Plaintext DB is untouched (magic-prefixed fixture, see setup()).
         let content = std::fs::read(&paths.plaintext).unwrap();
-        assert_eq!(content, b"pretend this is a real sqlite db");
+        assert!(content.starts_with(b"SQLite format 3\0"));
 
         // A fresh migration attempt now succeeds.
         let mut log = Vec::<u8>::new();
@@ -514,6 +614,54 @@ mod tests {
         )
         .unwrap();
         assert_eq!(env.migration_state, MigrationState::Encrypted);
+    }
+
+    #[test]
+    fn crash_after_rename_before_envelope_save_forward_completes() {
+        // Simulates the tightest crash window: main DB has already been
+        // atomically replaced with the SQLCipher version, but
+        // save_envelope(Encrypted) never made it to disk. The old
+        // rollback would have wrongly reset envelope to Plaintext,
+        // stranding the user. recover_on_startup must detect the
+        // encrypted DB and forward-complete the envelope.
+        let d = tempfile::tempdir().unwrap();
+        let paths = setup(d.path());
+        let mut env = seed_envelope(&paths);
+
+        // Simulate the mid-crash state:
+        //   - envelope = Encrypting
+        //   - main DB = "encrypted" bytes (does NOT start with SQLite magic)
+        env.migration_state = MigrationState::Encrypting;
+        security::save_envelope(&paths.envelope, &env).unwrap();
+        std::fs::write(&paths.plaintext, b"ENC:encrypted-db-bytes").unwrap();
+
+        recover_on_startup(&paths, &mut env).unwrap();
+        assert_eq!(env.migration_state, MigrationState::Encrypted);
+        // Envelope on disk agrees.
+        let reloaded = security::load_envelope(&paths.envelope).unwrap();
+        assert_eq!(reloaded.migration_state, MigrationState::Encrypted);
+        // Main DB content is preserved.
+        assert_eq!(
+            std::fs::read(&paths.plaintext).unwrap(),
+            b"ENC:encrypted-db-bytes"
+        );
+    }
+
+    #[test]
+    fn crash_with_missing_db_fails_recoverably() {
+        let d = tempfile::tempdir().unwrap();
+        let paths = setup(d.path());
+        let mut env = seed_envelope(&paths);
+        env.migration_state = MigrationState::Encrypting;
+        security::save_envelope(&paths.envelope, &env).unwrap();
+        // Simulate: main DB deleted after crash.
+        std::fs::remove_file(&paths.plaintext).unwrap();
+
+        let err = recover_on_startup(&paths, &mut env).unwrap_err();
+        assert!(matches!(err, MigrationError::RecoveryImpossibleDbMissing(_)));
+        // Envelope untouched — operator restore path.
+        let reloaded = security::load_envelope(&paths.envelope).unwrap();
+        assert_eq!(reloaded.migration_state, MigrationState::Encrypting);
     }
 
     #[test]
@@ -546,11 +694,9 @@ mod tests {
         let err = migrate_to_encrypted(&stub, &paths, "deadbeef", &mut env, &mut log)
             .unwrap_err();
         assert!(matches!(err, MigrationError::EncryptionFailed(_)));
-        // Plaintext untouched.
-        assert_eq!(
-            std::fs::read(&paths.plaintext).unwrap(),
-            b"pretend this is a real sqlite db"
-        );
+        // Plaintext untouched: still SQLite-magic-prefixed fixture content.
+        let after = std::fs::read(&paths.plaintext).unwrap();
+        assert!(after.starts_with(b"SQLite format 3\0"));
         // State was flipped to Encrypting but no encrypted file was produced.
         // resume_or_rollback should clean it up.
         assert_eq!(env.migration_state, MigrationState::Encrypting);

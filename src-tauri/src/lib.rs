@@ -69,22 +69,41 @@ pub fn run() {
             let env_path = dir.join("security.json");
             let migrations = embedded_migrations();
             tauri::async_runtime::block_on(async move {
-                // If v2.0.0 security is set up and DB is encrypted,
-                // leave the gate closed — AppLock will prompt for a
-                // PIN and v2_unlock reopens with SQLCipher. Otherwise
-                // open the plaintext DB and apply schema migrations
-                // (v1.x compat path, and pre-migration state on fresh
-                // v2 installs).
-                let encrypted = match security::load_envelope(&env_path) {
-                    Ok(env) => matches!(
-                        env.migration_state,
-                        security::MigrationState::Encrypted
-                    ),
-                    Err(_) => false,
-                };
-                if encrypted {
-                    return;
+                // Step 1: recover from any mid-migration crash BEFORE
+                // we decide plaintext vs encrypted branch. This can
+                // forward-complete an envelope that got stuck at
+                // Encrypting while the DB was already renamed to
+                // encrypted (the tightest crash window).
+                if let Ok(mut env) = security::load_envelope(&env_path) {
+                    let paths = db_migration::Paths {
+                        plaintext: db_path.clone(),
+                        envelope: env_path.clone(),
+                    };
+                    if let Err(e) = db_migration::recover_on_startup(&paths, &mut env) {
+                        eprintln!("[db_migration] recover_on_startup failed: {e}");
+                        // Do not touch the DB — leave AppGate to show
+                        // an error screen based on v2_state.
+                        return;
+                    }
                 }
+
+                // Step 2: read the recovered envelope and decide branch.
+                //   - envelope exists AND state = Encrypted → leave gate closed, AppGate prompts.
+                //   - envelope exists but load fails         → leave gate closed, AppGate fails-closed.
+                //   - envelope missing OR state != Encrypted → plaintext startup (v1.x compat / pre-migration).
+                match security::load_envelope(&env_path) {
+                    Ok(env) if env.migration_state == security::MigrationState::Encrypted => {
+                        return;
+                    }
+                    Err(e) if !matches!(e, security::SecurityError::Io(ref io)
+                        if io.kind() == std::io::ErrorKind::NotFound) =>
+                    {
+                        eprintln!("[security] envelope load failed: {e}");
+                        return; // AppGate will render fail-closed error screen.
+                    }
+                    _ => {}
+                }
+
                 if let Err(e) = gate.open_plaintext(&db_path).await {
                     eprintln!("[db_gate] open_plaintext failed: {e}");
                 }
@@ -104,6 +123,8 @@ pub fn run() {
             auth::v2_unlock,
             auth::v2_lock,
             auth::v2_change_pin,
+            auth::v2_generate_recovery,
+            auth::v2_unlock_with_recovery,
             email::send_email,
             email::keychain_set,
             email::keychain_get,

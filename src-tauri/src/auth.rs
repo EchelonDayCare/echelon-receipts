@@ -20,14 +20,16 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use tauri::Manager;
+use zeroize::Zeroizing;
 
 use crate::db_gate::DbGate;
 use crate::db_migration::{self, Encryptor, MigrationError, Paths};
 use crate::device_secret;
 use crate::security::{
-    self, ArgonParams, Mdk, MigrationState, SecurityEnvelope, SecurityError, Slot, SlotKind,
+    self, ArgonParams, Mdk, MigrationState, SecurityEnvelope, SecurityError, SlotKind,
 };
 
 // ────────────────────────────────────────────────────────────────────────
@@ -62,6 +64,15 @@ pub enum AuthError {
 
     #[error("app handle unavailable")]
     NoAppHandle,
+
+    #[error("too many failed attempts; retry after {retry_after_secs} s")]
+    RateLimited { retry_after_secs: u64 },
+
+    #[error("recovery code invalid or does not match this device's data")]
+    RecoveryInvalid,
+
+    #[error("recovery not configured")]
+    RecoveryMissing,
 }
 
 impl serde::Serialize for AuthError {
@@ -85,6 +96,29 @@ struct Inner {
     /// Never leaves this module. When set to `None`, the previous Mdk
     /// value is dropped which zeroises the bytes.
     mdk: Option<Mdk>,
+
+    /// Wrong-PIN attempt timestamps within the current window. Used
+    /// to enforce a Rust-side rate limit that a compromised frontend
+    /// cannot bypass by re-invoking Tauri commands directly.
+    attempts: Vec<Instant>,
+
+    /// If Some(t), reject unlock attempts until now >= t.
+    lockout_until: Option<Instant>,
+}
+
+// Rate-limit policy: after this many failures in ATTEMPT_WINDOW,
+// apply an increasing cool-off before the next attempt is honoured.
+const MAX_ATTEMPTS: usize = 5;
+const ATTEMPT_WINDOW: Duration = Duration::from_secs(5 * 60);
+
+/// Cool-off ladder — grows with successive lockouts within the window.
+fn cool_off_for(prior_attempts: usize) -> Duration {
+    match prior_attempts {
+        0..=4 => Duration::from_secs(0),
+        5..=9 => Duration::from_secs(60),
+        10..=14 => Duration::from_secs(5 * 60),
+        _ => Duration::from_secs(30 * 60),
+    }
 }
 
 impl AuthState {
@@ -95,6 +129,8 @@ impl AuthState {
     fn set_mdk(&self, mdk: Mdk) {
         let mut g = self.inner.lock().unwrap();
         g.mdk = Some(mdk);
+        g.attempts.clear();
+        g.lockout_until = None;
     }
 
     fn take_mdk(&self) -> Option<Mdk> {
@@ -104,6 +140,39 @@ impl AuthState {
 
     fn has_mdk(&self) -> bool {
         self.inner.lock().unwrap().mdk.is_some()
+    }
+
+    /// Check whether unlock is currently rate-limited. Returns
+    /// `Err(RateLimited)` with remaining seconds if so.
+    fn check_rate_limit(&self) -> Result<(), AuthError> {
+        let mut g = self.inner.lock().unwrap();
+        if let Some(until) = g.lockout_until {
+            let now = Instant::now();
+            if now < until {
+                return Err(AuthError::RateLimited {
+                    retry_after_secs: (until - now).as_secs().max(1),
+                });
+            } else {
+                // Cool-off expired: clear the deadline but keep
+                // the attempt counter so subsequent failures escalate.
+                g.lockout_until = None;
+            }
+        }
+        Ok(())
+    }
+
+    /// Record a failed unlock attempt. Prunes old attempts, then
+    /// sets a lockout if we're past MAX_ATTEMPTS in the window.
+    fn record_failure(&self) {
+        let mut g = self.inner.lock().unwrap();
+        let now = Instant::now();
+        g.attempts.retain(|t| now.duration_since(*t) < ATTEMPT_WINDOW);
+        g.attempts.push(now);
+        let n = g.attempts.len();
+        let cool = cool_off_for(n);
+        if !cool.is_zero() {
+            g.lockout_until = Some(now + cool);
+        }
     }
 }
 
@@ -128,11 +197,14 @@ impl Encryptor for SqlCipherExporter {
         // sqlcipher_export copies schema+data from `main` into the
         // aliased attached DB. The attached DB is opened with a fresh
         // key so its file becomes SQLCipher-encrypted on disk.
+        // The ATTACH string contains the raw MDK — keep it in a
+        // Zeroizing<String> so the heap allocation is wiped on drop
+        // and never lingers in a swap file / memory dump.
         let dst = dst_encrypted.to_string_lossy().replace('\'', "''");
-        let attach = format!(
+        let attach = Zeroizing::new(format!(
             "ATTACH DATABASE '{}' AS encrypted KEY \"x'{}'\"",
             dst, mdk_hex
-        );
+        ));
         conn.execute_batch(&attach).map_err(|e| e.to_string())?;
         conn.execute_batch("SELECT sqlcipher_export('encrypted')")
             .map_err(|e| e.to_string())?;
@@ -144,7 +216,7 @@ impl Encryptor for SqlCipherExporter {
     fn integrity_check(&self, path: &Path, mdk_hex: &str) -> Result<String, String> {
         use rusqlite::Connection;
         let conn = Connection::open(path).map_err(|e| e.to_string())?;
-        let key = format!("PRAGMA key = \"x'{}'\"", mdk_hex);
+        let key = Zeroizing::new(format!("PRAGMA key = \"x'{}'\"", mdk_hex));
         conn.execute_batch(&key).map_err(|e| e.to_string())?;
         let result: String = conn
             .query_row("PRAGMA integrity_check", [], |r| r.get(0))
@@ -156,7 +228,7 @@ impl Encryptor for SqlCipherExporter {
         use rusqlite::Connection;
         let conn = Connection::open(path).map_err(|e| e.to_string())?;
         if let Some(hex) = mdk_hex {
-            let key = format!("PRAGMA key = \"x'{}'\"", hex);
+            let key = Zeroizing::new(format!("PRAGMA key = \"x'{}'\"", hex));
             conn.execute_batch(&key).map_err(|e| e.to_string())?;
         }
         // Sum row counts across every user table. Excludes sqlite_
@@ -211,12 +283,21 @@ fn db_path(app: &tauri::AppHandle) -> Result<PathBuf, AuthError> {
 #[derive(Debug, Clone, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct V2State {
-    /// True once security.json exists.
+    /// True once security.json exists AND migration is complete (Encrypted).
     pub is_set_up: bool,
     /// True when the MDK is in memory and db_gate has an encrypted
     /// connection open (or has a plaintext connection open pre-migration).
     pub is_unlocked: bool,
     pub migration_state: &'static str,
+    /// True iff the envelope file exists but could not be loaded
+    /// (corrupted JSON, unsupported version, I/O error). When set,
+    /// the frontend must fail closed and refuse to render the app.
+    pub envelope_error: Option<String>,
+    /// True iff a recovery slot has been provisioned. UI uses this to
+    /// show/hide the "Show recovery kit" button in the security tile.
+    pub has_recovery: bool,
+    /// Remaining rate-limit cool-off in seconds, if any.
+    pub rate_limited_secs: u64,
 }
 
 fn migration_state_str(s: MigrationState) -> &'static str {
@@ -237,22 +318,42 @@ pub async fn v2_state(
     auth: tauri::State<'_, AuthState>,
 ) -> Result<V2State, AuthError> {
     let env_path = envelope_path(&app)?;
-    // is_set_up requires BOTH an envelope AND migration_state == Encrypted.
-    // A stale envelope with Plaintext/Encrypting state means a prior setup
-    // crashed before the DB was actually encrypted; treat as not set up so
-    // the user can retry the wizard instead of being stuck at a PIN prompt
-    // that can't unlock a plaintext DB.
-    let (is_set_up, migration_state) = if env_path.exists() {
-        let env = security::load_envelope(&env_path)?;
-        let done = env.migration_state == MigrationState::Encrypted;
-        (done, env.migration_state)
+
+    // Distinguish three cases:
+    //   1. envelope does not exist                → legitimate v1.x compat, is_set_up=false
+    //   2. envelope exists and loads OK           → normal path
+    //   3. envelope exists but fails to load      → envelope_error set; frontend must fail closed
+    let (is_set_up, migration_state, envelope_error, has_recovery) = if !env_path.exists() {
+        (false, MigrationState::Plaintext, None, false)
     } else {
-        (false, MigrationState::Plaintext)
+        match security::load_envelope(&env_path) {
+            Ok(env) => {
+                let done = env.migration_state == MigrationState::Encrypted;
+                let has_rec = env.find_slot(SlotKind::Recovery).is_some();
+                (done, env.migration_state, None, has_rec)
+            }
+            Err(e) => (
+                false,
+                MigrationState::Plaintext,
+                Some(e.to_string()),
+                false,
+            ),
+        }
     };
+
+    let rate_limited_secs = match auth.check_rate_limit() {
+        Ok(_) => 0,
+        Err(AuthError::RateLimited { retry_after_secs }) => retry_after_secs,
+        Err(_) => 0,
+    };
+
     Ok(V2State {
         is_set_up,
         is_unlocked: auth.has_mdk(),
         migration_state: migration_state_str(migration_state),
+        envelope_error,
+        has_recovery,
+        rate_limited_secs,
     })
 }
 
@@ -269,8 +370,23 @@ pub async fn v2_create_pin(
     pin: String,
 ) -> Result<(), AuthError> {
     let env_path = envelope_path(&app)?;
+
+    // Allow retry if a prior setup wizard crashed. recover_on_startup
+    // (called from lib.rs) has already normalized envelope state, so at
+    // this point:
+    //   * envelope missing            → fresh install, proceed
+    //   * envelope Plaintext          → prior wizard rolled back, delete stale envelope and proceed
+    //   * envelope Encrypted          → already set up, refuse
+    //   * envelope Encrypting/other   → recovery didn't run or failed, refuse
     if env_path.exists() {
-        return Err(AuthError::AlreadySetUp);
+        let env = security::load_envelope(&env_path)?;
+        match env.migration_state {
+            MigrationState::Plaintext => {
+                std::fs::remove_file(&env_path)?;
+            }
+            MigrationState::Encrypted => return Err(AuthError::AlreadySetUp),
+            MigrationState::Encrypting => return Err(AuthError::AlreadySetUp),
+        }
     }
     // Fresh device-bound secret + fresh MDK.
     let device_secret = device_secret::get_or_create()?;
@@ -294,6 +410,12 @@ pub async fn v2_create_pin(
         plaintext: db.clone(),
         envelope: env_path.clone(),
     };
+    // Checkpoint any pending WAL frames back into the main file BEFORE
+    // closing, so sqlcipher_export sees every committed transaction.
+    // Ignore checkpoint errors — they are non-fatal (WAL may already be
+    // empty, or the DB may be in journal mode); the migration will fail
+    // downstream if data is genuinely missing.
+    let _ = gate.checkpoint_wal().await;
     // Close current plaintext connection so migration has exclusive
     // file access. Otherwise the running WAL blocks the rename.
     gate.close().await;
@@ -316,6 +438,11 @@ pub async fn v2_create_pin(
 
 /// Unlock: derive MDK from PIN + device_secret + envelope, verify by
 /// opening the SQLCipher DB with it, stash MDK for the session.
+///
+/// Enforces a server-side rate limit: after 5 wrong-PIN attempts in a
+/// 5-minute window we cool off for 60s, then 5min, then 30min. A
+/// successful unlock clears the counter. Argon2 already imposes a
+/// ~1s CPU cost per attempt, so this is defense-in-depth.
 #[tauri::command]
 pub async fn v2_unlock(
     app: tauri::AppHandle,
@@ -323,6 +450,8 @@ pub async fn v2_unlock(
     gate: tauri::State<'_, DbGate>,
     pin: String,
 ) -> Result<(), AuthError> {
+    auth.check_rate_limit()?;
+
     let env_path = envelope_path(&app)?;
     let env = security::load_envelope(&env_path)?;
     let slot = env
@@ -332,14 +461,17 @@ pub async fn v2_unlock(
     let device_secret = device_secret::get_or_create()?;
     let mdk = match security::unwrap_mdk(&slot, pin.as_bytes(), &device_secret) {
         Ok(m) => m,
-        Err(SecurityError::Authentication) => return Err(AuthError::WrongPin),
+        Err(SecurityError::Authentication) => {
+            auth.record_failure();
+            return Err(AuthError::WrongPin);
+        }
         Err(e) => return Err(e.into()),
     };
     // Close any pre-migration plaintext connection and reopen encrypted.
     gate.close().await;
     let db = db_path(&app)?;
     gate.open_encrypted(&db, &mdk).await?;
-    auth.set_mdk(mdk);
+    auth.set_mdk(mdk); // set_mdk clears rate-limit state
     Ok(())
 }
 
@@ -390,6 +522,130 @@ pub async fn v2_change_pin(
     if !auth.has_mdk() {
         auth.set_mdk(mdk);
     }
+    Ok(())
+}
+
+// ────────────────────────────────────────────────────────────────────────
+// Recovery kit
+// ────────────────────────────────────────────────────────────────────────
+//
+// The recovery kit is a random 24-byte secret shown to the user ONCE
+// (typically printed) and wrapped over a copy of the MDK in a separate
+// envelope slot. It bypasses the device-bound secret entirely so it
+// works even after OS reinstall / laptop replacement — as long as the
+// user still has the printed code.
+//
+// Format: 24 bytes → hex → grouped as `XXXX-XXXX-XXXX-XXXX-XXXX-XXXX`
+// (6 groups × 4 hex chars = 48 char human-friendly string).
+//
+// Threat: if the printed code is stolen, the encrypted DB can be
+// decrypted anywhere. The UI must make this clear at generation time.
+
+const RECOVERY_BYTES: usize = 24;
+
+fn format_recovery_code(bytes: &[u8]) -> Zeroizing<String> {
+    let mut out = String::with_capacity(RECOVERY_BYTES * 2 + RECOVERY_BYTES / 2);
+    for (i, b) in bytes.iter().enumerate() {
+        if i > 0 && i % 2 == 0 {
+            out.push('-');
+        }
+        out.push_str(&format!("{:02X}", b));
+    }
+    Zeroizing::new(out)
+}
+
+fn parse_recovery_code(code: &str) -> Result<Zeroizing<Vec<u8>>, AuthError> {
+    let cleaned: String = code
+        .chars()
+        .filter(|c| !c.is_whitespace() && *c != '-')
+        .flat_map(|c| c.to_uppercase())
+        .collect();
+    if cleaned.len() != RECOVERY_BYTES * 2 {
+        return Err(AuthError::RecoveryInvalid);
+    }
+    let mut out = Vec::with_capacity(RECOVERY_BYTES);
+    for chunk in cleaned.as_bytes().chunks(2) {
+        let s = std::str::from_utf8(chunk).map_err(|_| AuthError::RecoveryInvalid)?;
+        let b = u8::from_str_radix(s, 16).map_err(|_| AuthError::RecoveryInvalid)?;
+        out.push(b);
+    }
+    Ok(Zeroizing::new(out))
+}
+
+/// Generate a new recovery code, wrap a fresh copy of the MDK with it
+/// (no device-bound secret), and persist the resulting slot in the
+/// envelope. Requires the user to already be unlocked (session MDK).
+///
+/// Returns the human-readable code exactly ONCE. Callers must show it
+/// to the user immediately and warn that it will not be recoverable.
+#[tauri::command]
+pub async fn v2_generate_recovery(
+    app: tauri::AppHandle,
+    auth: tauri::State<'_, AuthState>,
+) -> Result<String, AuthError> {
+    // We need the current session MDK to wrap a copy of it under the
+    // recovery code. Fail if the app is locked.
+    let mdk_bytes: [u8; 32] = {
+        let g = auth.inner.lock().unwrap();
+        let m = g.mdk.as_ref().ok_or(AuthError::NotSetUp)?;
+        *m.as_bytes()
+    };
+    let mdk = Mdk::from_bytes(mdk_bytes);
+
+    // Fresh 24-byte random recovery secret.
+    use rand::RngCore;
+    let mut secret = Zeroizing::new(vec![0u8; RECOVERY_BYTES]);
+    rand::thread_rng().fill_bytes(secret.as_mut());
+    let code = format_recovery_code(&secret);
+
+    // Wrap MDK with recovery secret ONLY (no device_bound_secret) so the
+    // resulting slot is portable across machines.
+    let slot = security::wrap_mdk(
+        SlotKind::Recovery,
+        &mdk,
+        &secret,
+        b"",
+        ArgonParams::default(),
+    )?;
+
+    let env_path = envelope_path(&app)?;
+    let mut env = security::load_envelope(&env_path)?;
+    env.upsert_slot(slot);
+    security::save_envelope(&env_path, &env)?;
+
+    Ok((*code).clone())
+}
+
+/// Unlock the app using a previously-generated recovery code (bypasses PIN
+/// AND device-bound secret). Same rate limit applies.
+#[tauri::command]
+pub async fn v2_unlock_with_recovery(
+    app: tauri::AppHandle,
+    auth: tauri::State<'_, AuthState>,
+    gate: tauri::State<'_, DbGate>,
+    code: String,
+) -> Result<(), AuthError> {
+    auth.check_rate_limit()?;
+
+    let bytes = parse_recovery_code(&code)?;
+    let env_path = envelope_path(&app)?;
+    let env = security::load_envelope(&env_path)?;
+    let slot = env
+        .find_slot(SlotKind::Recovery)
+        .ok_or(AuthError::RecoveryMissing)?
+        .clone();
+    let mdk = match security::unwrap_mdk(&slot, &bytes, b"") {
+        Ok(m) => m,
+        Err(SecurityError::Authentication) => {
+            auth.record_failure();
+            return Err(AuthError::RecoveryInvalid);
+        }
+        Err(e) => return Err(e.into()),
+    };
+    gate.close().await;
+    let db = db_path(&app)?;
+    gate.open_encrypted(&db, &mdk).await?;
+    auth.set_mdk(mdk);
     Ok(())
 }
 
