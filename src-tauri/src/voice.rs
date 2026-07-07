@@ -44,6 +44,26 @@ fn redact(s: String, secret: &str) -> String {
     s.replace(secret, "***")
 }
 
+// Fetch an Azure AAD access token for the Cognitive Services audience via
+// the local `az` CLI. Used only as a fallback when key-auth returns 403
+// AuthenticationTypeDisabled (some Azure Policies enforce key-off on
+// certain subs). Returns None if `az` isn't installed or the user isn't
+// signed in — caller surfaces the original 403 in that case.
+fn az_cli_token() -> Option<String> {
+    let out = std::process::Command::new("az")
+        .args([
+            "account", "get-access-token",
+            "--resource", "https://cognitiveservices.azure.com/",
+            "--query", "accessToken",
+            "-o", "tsv",
+        ])
+        .output()
+        .ok()?;
+    if !out.status.success() { return None; }
+    let tok = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if tok.is_empty() { None } else { Some(tok) }
+}
+
 // ─── transcribe_audio ────────────────────────────────────────────────────
 
 #[derive(Deserialize)]
@@ -94,31 +114,65 @@ pub async fn transcribe_audio(args: TranscribeArgs) -> Result<TranscribeResult, 
     });
 
     let start = std::time::Instant::now();
-    let form = reqwest::multipart::Form::new()
-        .part(
-            "file",
-            reqwest::multipart::Part::bytes(audio_bytes)
-                .file_name(filename)
-                .mime_str(args.mime_type.split(';').next().unwrap_or("audio/webm").trim())
-                .map_err(|e| format!("mime: {e}"))?,
-        )
-        .text("response_format", "json");
 
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(120))
         .build()
         .map_err(|e| redact(format!("http client: {e}"), &api_key))?;
 
+    // Build the multipart form as a closure so we can rebuild it for the
+    // retry (reqwest::multipart::Form is not Clone).
+    let mime = args.mime_type.split(';').next().unwrap_or("audio/webm").trim().to_string();
+    let build_form = || -> Result<reqwest::multipart::Form, String> {
+        Ok(reqwest::multipart::Form::new()
+            .part(
+                "file",
+                reqwest::multipart::Part::bytes(audio_bytes.clone())
+                    .file_name(filename.clone())
+                    .mime_str(&mime)
+                    .map_err(|e| format!("mime: {e}"))?,
+            )
+            .text("response_format", "json"))
+    };
+
+    // First attempt: key auth (the common case; also works for any user
+    // whose Whisper resource isn't governed by an Azure Policy that
+    // disables local auth).
     let resp = client
         .post(&endpoint)
         .header("api-key", &api_key)
-        .multipart(form)
+        .multipart(build_form()?)
         .send()
         .await
         .map_err(|e| redact(format!("request: {e}"), &api_key))?;
 
     let status = resp.status();
     let text = resp.text().await.map_err(|e| redact(format!("read: {e}"), &api_key))?;
+
+    // If the resource has key-auth disabled (Azure Policy modify effect),
+    // transparently fall back to an AAD token from the local `az` CLI.
+    // This keeps the Voice Capture feature working on dev machines governed
+    // by MSFT sandbox policies without changing the shipping code path.
+    let (status, text) = if status.as_u16() == 403 && text.contains("AuthenticationTypeDisabled") {
+        match az_cli_token() {
+            Some(tok) => {
+                let resp2 = client
+                    .post(&endpoint)
+                    .header("Authorization", format!("Bearer {tok}"))
+                    .multipart(build_form()?)
+                    .send()
+                    .await
+                    .map_err(|e| redact(format!("request(AAD): {e}"), &api_key))?;
+                let s2 = resp2.status();
+                let t2 = resp2.text().await.map_err(|e| redact(format!("read(AAD): {e}"), &api_key))?;
+                (s2, t2)
+            }
+            None => (status, text),
+        }
+    } else {
+        (status, text)
+    };
+
     if !status.is_success() {
         return Err(redact(
             format!("http {status} @ whisper :: {}", truncate(&text, 800)),
