@@ -36,7 +36,6 @@ const WaitlistOverview = lazy(() => import("./screens/waitlist/Overview"));
 const WaitlistList = lazy(() => import("./screens/waitlist/List"));
 const WaitlistEnrolled = lazy(() => import("./screens/waitlist/Enrolled"));
 const WaitlistArchived = lazy(() => import("./screens/waitlist/Archived"));
-const WaitlistSettings = lazy(() => import("./screens/waitlist/Settings"));
 const VaultLibrary = lazy(() => import("./screens/vault/Library"));
 const StaffSchedule = lazy(() => import("./screens/staff/Schedule"));
 const StaffScheduleAudit = lazy(() => import("./screens/staff/ScheduleAudit"));
@@ -314,7 +313,7 @@ function Shell({ logo, name, staffEnabled }: { logo: string; name: string; staff
           { to: "/waitlist/list", label: "All Applications" },
           { to: "/waitlist/enrolled", label: "Enrolled" },
           { to: "/waitlist/archived", label: "Archived" },
-          { to: "/waitlist/settings", label: "Settings" },
+          { to: "/config/waitlist", label: "Settings" },
         ]}
       />
     );
@@ -415,7 +414,7 @@ function Shell({ logo, name, staffEnabled }: { logo: string; name: string; staff
           <Route path="/waitlist/list" element={<WaitlistList />} />
           <Route path="/waitlist/enrolled" element={<WaitlistEnrolled />} />
           <Route path="/waitlist/archived" element={<WaitlistArchived />} />
-          <Route path="/waitlist/settings" element={<WaitlistSettings />} />
+          <Route path="/waitlist/settings" element={<Navigate to="/config/waitlist" replace />} />
 
           {/* Document Vault module (v1.1.0) */}
           <Route path="/vault" element={<VaultLibrary />} />

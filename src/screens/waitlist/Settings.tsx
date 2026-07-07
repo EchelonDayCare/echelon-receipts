@@ -164,7 +164,7 @@ export default function WaitlistSettings() {
 
   return (
     <div>
-      <h1>Waitlist — Settings</h1>
+      <h2 style={{ marginTop: 0 }}>Waitlist</h2>
       <p className="subtitle">Google Sheet source + service-account credentials for read-only sync.</p>
 
       <div className="card" style={{ marginBottom: 16 }}>
