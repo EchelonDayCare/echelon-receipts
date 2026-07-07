@@ -41,6 +41,7 @@ const VaultLibrary = lazy(() => import("./screens/vault/Library"));
 const StaffSchedule = lazy(() => import("./screens/staff/Schedule"));
 const StaffScheduleAudit = lazy(() => import("./screens/staff/ScheduleAudit"));
 const StaffScheduleConfirmations = lazy(() => import("./screens/staff/ScheduleConfirmations"));
+const StaffMeetings = lazy(() => import("./screens/staff/Meetings"));
 const OrganizerScreen = lazy(() => import("./screens/organizer/Organizer"));
 const NotificationsHistory = lazy(() => import("./screens/Notifications"));
 const Deposits = lazy(() => import("./screens/Deposits"));
@@ -214,6 +215,7 @@ function Shell({ logo, name, staffEnabled }: { logo: string; name: string; staff
           { to: "/staff/hours", label: "Hours" },
           { to: "/staff/schedule", label: "Schedule", match: (p) => p.startsWith("/staff/schedule") },
           { to: "/staff/credentials", label: "Credentials" },
+          { to: "/staff/meetings", label: "Meeting Notes" },
         ]}
       />
     );
@@ -369,6 +371,7 @@ function Shell({ logo, name, staffEnabled }: { logo: string; name: string; staff
           {staffEnabled && <Route path="/staff/schedule/audit" element={<StaffScheduleAudit />} />}
           {staffEnabled && <Route path="/staff/schedule/confirmations" element={<StaffScheduleConfirmations />} />}
           {staffEnabled && <Route path="/staff/credentials" element={<StaffCredentials />} />}
+          {staffEnabled && <Route path="/staff/meetings" element={<StaffMeetings />} />}
 
           {/* Configuration module */}
           <Route path="/config" element={<Navigate to="/config/identity" replace />} />

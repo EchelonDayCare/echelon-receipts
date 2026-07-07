@@ -38,6 +38,9 @@ export default function NotificationsSettingsSection() {
   const [agmMmdd, setAgmMmdd] = useState("");
   const [tslipMmdd, setTslipMmdd] = useState("02-28");
   const [ccfriDay, setCcfriDay] = useState("15");
+  const [wcbDays, setWcbDays] = useState("04-20,07-20,10-20,01-20");
+  const [staffMeetingDays, setStaffMeetingDays] = useState("08-31,11-30,02-28,05-31");
+  const [remitDay, setRemitDay] = useState("12");
   const [quietStart, setQuietStart] = useState("");
   const [quietEnd, setQuietEnd] = useState("");
   const [busy, setBusy] = useState(false);
@@ -50,6 +53,9 @@ export default function NotificationsSettingsSection() {
     setAgmMmdd(s.notif_agm_reminder_mmdd || "");
     setTslipMmdd(s.notif_tslip_reminder_mmdd || "02-28");
     setCcfriDay(s.notif_ccfri_claim_day_of_month || "15");
+    setWcbDays(s.notif_wcb_days || "04-20,07-20,10-20,01-20");
+    setStaffMeetingDays(s.notif_staff_meeting_days || "08-31,11-30,02-28,05-31");
+    setRemitDay(s.notif_remittance_day_of_month || "12");
     setQuietStart(s.notif_quiet_hours_start || "");
     setQuietEnd(s.notif_quiet_hours_end || "");
   }
@@ -61,6 +67,9 @@ export default function NotificationsSettingsSection() {
       await setAppSetting("notif_agm_reminder_mmdd", agmMmdd);
       await setAppSetting("notif_tslip_reminder_mmdd", tslipMmdd);
       await setAppSetting("notif_ccfri_claim_day_of_month", ccfriDay);
+      await setAppSetting("notif_wcb_days", wcbDays);
+      await setAppSetting("notif_staff_meeting_days", staffMeetingDays);
+      await setAppSetting("notif_remittance_day_of_month", remitDay);
       await setAppSetting("notif_quiet_hours_start", quietStart);
       await setAppSetting("notif_quiet_hours_end", quietEnd);
       await runScanNow();
@@ -107,6 +116,35 @@ export default function NotificationsSettingsSection() {
               {Array.from({ length: 28 }, (_, i) => String(i + 1)).map(d => <option key={d} value={d}>{d}</option>)}
             </select>
             <small style={{ color: "var(--muted)", marginLeft: 8 }}>Day of each month.</small>
+          </div>
+          <label>WCB quarterly dates</label>
+          <div>
+            <input
+              type="text"
+              value={wcbDays}
+              onChange={e => setWcbDays(e.target.value)}
+              style={{ width: 260 }}
+              placeholder="04-20,07-20,10-20,01-20"
+            />
+            <small style={{ color: "var(--muted)", marginLeft: 8 }}>Comma-separated MM-DD. Fires 1 week before each.</small>
+          </div>
+          <label>Staff meeting dates</label>
+          <div>
+            <input
+              type="text"
+              value={staffMeetingDays}
+              onChange={e => setStaffMeetingDays(e.target.value)}
+              style={{ width: 260 }}
+              placeholder="08-31,11-30,02-28,05-31"
+            />
+            <small style={{ color: "var(--muted)", marginLeft: 8 }}>Comma-separated MM-DD (quarterly). Fires 1 week before — i.e. from the Wednesday of the previous week if meeting is on a Wednesday.</small>
+          </div>
+          <label>Payroll remittance day</label>
+          <div>
+            <select value={remitDay} onChange={e => setRemitDay(e.target.value)}>
+              {Array.from({ length: 28 }, (_, i) => String(i + 1)).map(d => <option key={d} value={d}>{d}</option>)}
+            </select>
+            <small style={{ color: "var(--muted)", marginLeft: 8 }}>Day of each month. Fires 1 week before.</small>
           </div>
           <label>Quiet hours</label>
           <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
@@ -163,6 +201,15 @@ export default function NotificationsSettingsSection() {
             })}
           </tbody>
         </table>
+        <div style={{ marginTop: 14, display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
+          <button className="btn primary" onClick={saveDates} disabled={busy}>
+            {busy ? "Saving…" : "Save all & rescan"}
+          </button>
+          <small style={{ color: "var(--muted)" }}>
+            Per-category toggles above save instantly. Use this to save the recurring dates and re-run the scan now.
+          </small>
+          {msg && <span style={{ color: "var(--muted)", fontSize: 12 }}>{msg}</span>}
+        </div>
       </section>
     </div>
   );

@@ -126,3 +126,29 @@ export interface StaffCredential {
   notes: string | null;
   created_at: string;
 }
+
+
+export interface StaffMeeting {
+  id: number;
+  meeting_date: string;
+  title: string;
+  agenda: string | null;
+  notes: string | null;
+  attendees_json: string | null;
+  voided: number;
+  voided_at: string | null;
+  void_reason: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface StaffMeetingAction {
+  id: number;
+  meeting_id: number;
+  text: string;
+  owner_staff_id: number | null;
+  due_date: string | null;
+  done: number;
+  done_at: string | null;
+  created_at: string;
+}

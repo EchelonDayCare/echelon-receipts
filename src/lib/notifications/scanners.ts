@@ -461,6 +461,84 @@ export async function scanCcfriClaim(): Promise<NotificationInput[]> {
   }];
 }
 
+// ─── Scanner: WCB quarterly (Apr 20 / Jul 20 / Oct 20 / Jan 20) ───────
+// User setting `notif_wcb_days` (default "04-20,07-20,10-20,01-20").
+// Fires from 7 days out through the due date.
+export async function scanWcbQuarterly(): Promise<NotificationInput[]> {
+  const s = await getSettings();
+  const raw = (s.notif_wcb_days || "04-20,07-20,10-20,01-20").trim();
+  const parts = raw.split(",").map(x => x.trim()).filter(Boolean);
+  const isos = parts.map(nextMmDdOccurrence).filter((x): x is string => !!x);
+  if (isos.length === 0) return [];
+  // Earliest upcoming occurrence
+  isos.sort();
+  const iso = isos[0];
+  const days = daysBetween(iso);
+  if (days == null) return [];
+  if (days > 7 || days < 0) return []; // week-before window only
+  const t = tierFor(days) ?? "7d";
+  return [{
+    category: "wcb_quarterly_due",
+    severity: tierSeverity(t),
+    title: "WCB quarterly return due",
+    body: `${tierLabel(t, iso)} (${iso})`,
+    source_kind: "wcb",
+    source_id: iso,
+    action_route: "/reports/agm",
+    dedup_key: `wcb_quarterly_due:wcb:${iso}:${t}`,
+  }];
+}
+
+// ─── Scanner: staff meeting quarterly (default end of Aug/Nov/Feb/May) ─
+// Reminder starts 7 days before through the meeting day, so on a Wednesday
+// meeting the Wednesday-before is already surfacing the alert.
+export async function scanStaffMeetingQuarterly(): Promise<NotificationInput[]> {
+  const s = await getSettings();
+  const raw = (s.notif_staff_meeting_days || "08-31,11-30,02-28,05-31").trim();
+  const parts = raw.split(",").map(x => x.trim()).filter(Boolean);
+  const isos = parts.map(nextMmDdOccurrence).filter((x): x is string => !!x);
+  if (isos.length === 0) return [];
+  isos.sort();
+  const iso = isos[0];
+  const days = daysBetween(iso);
+  if (days == null) return [];
+  if (days > 7 || days < 0) return [];
+  const t = tierFor(days) ?? "7d";
+  return [{
+    category: "staff_meeting_quarterly",
+    severity: tierSeverity(t),
+    title: "Staff meeting approaching",
+    body: `${tierLabel(t, iso)} (${iso})`,
+    source_kind: "staff_meeting",
+    source_id: iso,
+    action_route: "/organizer",
+    dedup_key: `staff_meeting_quarterly:staff_meeting:${iso}:${t}`,
+  }];
+}
+
+// ─── Scanner: monthly payroll remittance (default day-of-month 12) ────
+// Fires 7 days before through the due day.
+export async function scanRemittanceMonthly(): Promise<NotificationInput[]> {
+  const s = await getSettings();
+  const dom = Number(s.notif_remittance_day_of_month || "12");
+  const iso = nextDayOfMonthOccurrence(dom);
+  if (!iso) return [];
+  const days = daysBetween(iso);
+  if (days == null) return [];
+  if (days > 7 || days < 0) return [];
+  const t = tierFor(days) ?? "7d";
+  return [{
+    category: "remittance_monthly_due",
+    severity: tierSeverity(t),
+    title: "Payroll remittance due",
+    body: `${tierLabel(t, iso)} (${iso})`,
+    source_kind: "remittance",
+    source_id: iso,
+    action_route: "/reports/agm",
+    dedup_key: `remittance_monthly_due:remittance:${iso}:${t}`,
+  }];
+}
+
 // ─── Scanner: backup stale / failed ───────────────────────────────────
 export async function scanBackup(): Promise<NotificationInput[]> {
   const s = await getSettings();
@@ -538,6 +616,9 @@ export const SCANNERS: ScannerDef[] = [
   { id: "agm",               category: "agm_deadline",               label: "AGM date reminder",         run: scanAgmDeadline },
   { id: "tslip",             category: "tslip_deadline",             label: "T-slip deadline",           run: scanTslipDeadline },
   { id: "ccfri",             category: "ccfri_claim_due",            label: "CCFRI monthly claim",       run: scanCcfriClaim },
+  { id: "wcb",               category: "wcb_quarterly_due",          label: "WCB quarterly return",      run: scanWcbQuarterly },
+  { id: "staffMeeting",      category: "staff_meeting_quarterly",    label: "Staff meeting (quarterly)", run: scanStaffMeetingQuarterly },
+  { id: "remittance",        category: "remittance_monthly_due",     label: "Payroll remittance (monthly)", run: scanRemittanceMonthly },
   { id: "backupStale",       category: "backup_stale",               label: "Cloud backup stale",        run: scanBackup },
   { id: "backupFailed",      category: "backup_failed",              label: "Cloud backup failed",       run: noop },
 ];

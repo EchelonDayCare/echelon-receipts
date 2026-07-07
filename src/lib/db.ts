@@ -1081,6 +1081,9 @@ Thanks,
     ["notif_agm_reminder_mmdd",       ""],
     ["notif_tslip_reminder_mmdd",     "02-28"],
     ["notif_ccfri_claim_day_of_month","15"],
+    ["notif_wcb_days",                "04-20,07-20,10-20,01-20"],
+    ["notif_staff_meeting_days",      "08-31,11-30,02-28,05-31"],
+    ["notif_remittance_day_of_month", "12"],
     ["notif_quiet_hours_start",       ""],
     ["notif_quiet_hours_end",         ""],
     ["notif_last_scan_at",            ""],
@@ -1176,6 +1179,45 @@ Thanks,
     ["voice_organizer_enabled",          "1"],
     ["organizer_ai_store_transcripts",   ""],
   ] as const) await setting(k, v);
+
+  // ─── Migration 026 — Staff Meeting Notes (v1.8.0) ────────────────────
+  // Persistent record of staff meetings: title, date, agenda, notes, who
+  // attended, and structured action items. Meetings are never hard-deleted
+  // (history-of-record rule); voiding is a status flip. Action items are
+  // in a separate table so we can later surface "my open action items" per
+  // staff member without JSON parsing.
+  if (!(await tableExists("staff_meetings"))) {
+    console.warn("[ensureSchema] creating staff_meetings");
+    await d.execute(`CREATE TABLE staff_meetings (
+      id              INTEGER PRIMARY KEY AUTOINCREMENT,
+      meeting_date    TEXT NOT NULL,
+      title           TEXT NOT NULL,
+      agenda          TEXT,
+      notes           TEXT,
+      attendees_json  TEXT,
+      voided          INTEGER NOT NULL DEFAULT 0,
+      voided_at       TEXT,
+      void_reason     TEXT,
+      created_at      TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at      TEXT NOT NULL DEFAULT (datetime('now'))
+    )`);
+    await d.execute("CREATE INDEX ix_staff_meetings_date ON staff_meetings(meeting_date DESC)");
+  }
+  if (!(await tableExists("staff_meeting_actions"))) {
+    console.warn("[ensureSchema] creating staff_meeting_actions");
+    await d.execute(`CREATE TABLE staff_meeting_actions (
+      id              INTEGER PRIMARY KEY AUTOINCREMENT,
+      meeting_id      INTEGER NOT NULL REFERENCES staff_meetings(id),
+      text            TEXT NOT NULL,
+      owner_staff_id  INTEGER REFERENCES staff(id),
+      due_date        TEXT,
+      done            INTEGER NOT NULL DEFAULT 0,
+      done_at         TEXT,
+      created_at      TEXT NOT NULL DEFAULT (datetime('now'))
+    )`);
+    await d.execute("CREATE INDEX ix_staff_meeting_actions_mtg ON staff_meeting_actions(meeting_id)");
+    await d.execute("CREATE INDEX ix_staff_meeting_actions_open ON staff_meeting_actions(done, owner_staff_id)");
+  }
 
   await logIntegrityWarnings(d);
 }
