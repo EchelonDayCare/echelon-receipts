@@ -9,6 +9,13 @@ edition = "2021"
 name = "echelon_receipts_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
+[features]
+default = ["sqlcipher"]
+# Enables SQLCipher-backed encrypted-DB paths in db_gate::open_encrypted.
+# Turned on by default; disabling would require also switching the rusqlite
+# feature from bundled-sqlcipher-vendored-openssl back to bundled.
+sqlcipher = []
+
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 
@@ -19,7 +26,6 @@ tauri-build = { version = "2", features = [] }
 # from shipping an always-on inspector.
 tauri = { version = "2", features = [] }
 tauri-plugin-opener = "2"
-tauri-plugin-sql = { version = "2", features = ["sqlite"] }
 tauri-plugin-dialog = "2"
 tauri-plugin-fs = "2"
 tauri-plugin-shell = "2"
@@ -36,7 +42,7 @@ zip = { version = "2", default-features = false, features = ["deflate"] }
 tokio = { version = "1", features = ["macros", "time", "rt-multi-thread"] }
 futures = "0.3"
 sqlparser = "0.52"
-rusqlite = { version = "0.32", features = ["bundled"] }
+rusqlite = { version = "0.32", features = ["bundled-sqlcipher-vendored-openssl"] }
 jsonwebtoken = "9"
 dirs = "6.0.0"
 zeroize = { version = "1.8", features = ["derive"] }

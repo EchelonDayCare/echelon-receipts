@@ -1,5 +1,46 @@
-import Database from "@tauri-apps/plugin-sql";
+import { invoke } from "@tauri-apps/api/core";
 import type { Student, Receipt, SettingsMap, AnnualReceipt, AccbEntry, FeeBreakdown, Deposit } from "../types";
+
+// ---------- Database shim ----------
+// v2.0.0 replaced @tauri-apps/plugin-sql with a Rust-side db_gate module
+// (single-connection SQLite pool behind a Tokio Mutex). This shim mimics
+// the tauri-plugin-sql Database interface so the rest of db.ts (and
+// every screen that goes through it) needs zero changes.
+//
+// * Match method signatures exactly: execute(sql, args) -> {lastInsertId, rowsAffected},
+//   select<T>(sql, args) -> T[], close() -> Promise<void>.
+// * The Rust side already opened and ran migrations on startup; load()
+//   is a no-op returning the same singleton instance.
+class Database {
+  private constructor() {}
+
+  static async load(_url: string): Promise<Database> {
+    // Rust startup already opened the connection and ran migrations.
+    // We do a cheap round-trip so any early breakage surfaces here
+    // rather than deep inside a repository call.
+    const ok = await invoke<boolean>("db_is_open");
+    if (!ok) throw new Error("[db] db_gate not open at load()");
+    return _instance;
+  }
+
+  async execute(sql: string, args: any[] = []): Promise<{ lastInsertId: number; rowsAffected: number }> {
+    return invoke<{ lastInsertId: number; rowsAffected: number }>("db_execute", { sql, args });
+  }
+
+  async select<T = any>(sql: string, args: any[] = []): Promise<T> {
+    // db_query returns Vec<Map<String, Value>>; callers annotate with
+    // arrays of row shapes so the cast lines up.
+    return invoke<T>("db_query", { sql, args });
+  }
+
+  async close(): Promise<boolean> {
+    await invoke("db_close");
+    return true;
+  }
+}
+
+const _instance = new (Database as any)() as Database;
+export type { Database };
 
 let _db: Database | null = null;
 let _schemaChecked = false;

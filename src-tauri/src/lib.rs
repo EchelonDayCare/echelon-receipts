@@ -1,4 +1,4 @@
-use tauri_plugin_sql::{Migration, MigrationKind};
+use tauri::Manager;
 
 mod email;
 mod errlog;
@@ -21,107 +21,65 @@ mod device_secret;
 mod db_migration;
 mod db_gate;
 
+/// Every schema migration we ship, in version order. Version numbers
+/// are stable across v1.x → v2.0.0 so entries backfilled from the
+/// legacy tauri-plugin-sql `_sqlx_migrations` tracker line up with
+/// our new `_migrations` table 1:1 (no re-execution on upgrade).
+fn embedded_migrations() -> Vec<(i64, &'static str, &'static str)> {
+    vec![
+        (1, "create_initial_tables", include_str!("../migrations/001_initial.sql")),
+        (2, "add_pdf_folder_setting", include_str!("../migrations/002_pdf_folder.sql")),
+        (3, "add_email_settings_and_audit", include_str!("../migrations/003_email.sql")),
+        (4, "add_person_id_refunds_and_annual_receipts", include_str!("../migrations/004_annual_receipts.sql")),
+        (5, "add_subsidies_ccfri_accb", include_str!("../migrations/005_subsidies.sql")),
+        (6, "add_void_audit_columns", include_str!("../migrations/006_void_audit.sql")),
+        (7, "add_issuer_snapshot", include_str!("../migrations/007_issuer_snapshot.sql")),
+        (8, "add_staff_hours", include_str!("../migrations/008_staff.sql")),
+        (9, "add_staff_credentials_drills", include_str!("../migrations/009_staff_credentials.sql")),
+        (10, "add_child_attendance", include_str!("../migrations/010_child_attendance.sql")),
+        (11, "add_no_lunch_flag", include_str!("../migrations/011_no_lunch.sql")),
+    ]
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    let migrations = vec![
-        Migration {
-            version: 1,
-            description: "create_initial_tables",
-            sql: include_str!("../migrations/001_initial.sql"),
-            kind: MigrationKind::Up,
-        },
-        Migration {
-            version: 2,
-            description: "add_pdf_folder_setting",
-            sql: include_str!("../migrations/002_pdf_folder.sql"),
-            kind: MigrationKind::Up,
-        },
-        Migration {
-            version: 3,
-            description: "add_email_settings_and_audit",
-            sql: include_str!("../migrations/003_email.sql"),
-            kind: MigrationKind::Up,
-        },
-        Migration {
-            version: 4,
-            description: "add_person_id_refunds_and_annual_receipts",
-            sql: include_str!("../migrations/004_annual_receipts.sql"),
-            kind: MigrationKind::Up,
-        },
-        Migration {
-            version: 5,
-            description: "add_subsidies_ccfri_accb",
-            sql: include_str!("../migrations/005_subsidies.sql"),
-            kind: MigrationKind::Up,
-        },
-        Migration {
-            version: 6,
-            description: "add_void_audit_columns",
-            sql: include_str!("../migrations/006_void_audit.sql"),
-            kind: MigrationKind::Up,
-        },
-        Migration {
-            version: 7,
-            description: "add_issuer_snapshot",
-            sql: include_str!("../migrations/007_issuer_snapshot.sql"),
-            kind: MigrationKind::Up,
-        },
-        Migration {
-            version: 8,
-            description: "add_staff_hours",
-            sql: include_str!("../migrations/008_staff.sql"),
-            kind: MigrationKind::Up,
-        },
-        Migration {
-            version: 9,
-            description: "add_staff_credentials_drills",
-            sql: include_str!("../migrations/009_staff_credentials.sql"),
-            kind: MigrationKind::Up,
-        },
-        Migration {
-            version: 10,
-            description: "add_child_attendance",
-            sql: include_str!("../migrations/010_child_attendance.sql"),
-            kind: MigrationKind::Up,
-        },
-        Migration {
-            version: 11,
-            description: "add_no_lunch_flag",
-            sql: include_str!("../migrations/011_no_lunch.sql"),
-            kind: MigrationKind::Up,
-        },
-    ];
-
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_shell::init())
+        .manage(db_gate::DbGate::new())
         .setup(|app| {
             // Install panic hook + error log file before anything else can crash.
             errlog::init(&app.handle());
-            // Heal migration checksums BEFORE the SQL plugin opens the DB.
-            // Any user upgrading to a build that has edits to previously-shipped
-            // migration files would otherwise get "migration X previously
-            // applied but has been modified" and every Database.load() would
-            // throw. This rewrites stored checksums to match embedded SQL; it
-            // never re-runs a migration and never touches user data.
-            if let Err(e) = migration_heal::heal(&app.handle()) {
-                eprintln!("[migration_heal] {e}");
-            }
-            // Apply any pending DB restore BEFORE the SQL plugin opens a connection.
-            // The frontend invokes Database.load(...) lazily, so this runs first.
+            // Apply any pending DB restore BEFORE we open the DB.
             if let Err(e) = restore::apply_pending_restore(&app.handle()) {
                 eprintln!("[restore] {e}");
             }
+            // Open the DB (still plaintext until the v2 setup wizard
+            // encrypts it) and apply schema migrations. Migrations
+            // backfill from the legacy _sqlx_migrations table so
+            // upgraders from v1.8.1 don't re-execute anything.
+            let gate = app.state::<db_gate::DbGate>().inner().clone();
+            let dir = app.path().app_data_dir()?;
+            std::fs::create_dir_all(&dir).ok();
+            let db_path = dir.join("echelon.db");
+            let migrations = embedded_migrations();
+            tauri::async_runtime::block_on(async move {
+                if let Err(e) = gate.open_plaintext(&db_path).await {
+                    eprintln!("[db_gate] open_plaintext failed: {e}");
+                }
+                if let Err(e) = gate.run_migrations(&migrations).await {
+                    eprintln!("[db_gate] run_migrations failed: {e}");
+                }
+            });
             Ok(())
         })
-        .plugin(
-            tauri_plugin_sql::Builder::default()
-                .add_migrations("sqlite:echelon.db", migrations)
-                .build(),
-        )
         .invoke_handler(tauri::generate_handler![
+            db_gate::db_query,
+            db_gate::db_execute,
+            db_gate::db_is_open,
+            db_gate::db_close,
             email::send_email,
             email::keychain_set,
             email::keychain_get,

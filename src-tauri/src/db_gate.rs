@@ -140,6 +140,69 @@ impl DbGate {
         self.inner.lock().await.is_some()
     }
 
+    /// Apply embedded schema migrations idempotently. Called at
+    /// startup. Backfills from `_sqlx_migrations` (the tracking table
+    /// tauri-plugin-sql used in v1.x) so users upgrading from v1.8.1
+    /// don't re-run migrations that already ran under the old plugin.
+    pub async fn run_migrations(
+        &self,
+        migrations: &[(i64, &str, &str)],
+    ) -> Result<(), DbError> {
+        let guard = self.inner.lock().await;
+        let conn = guard.as_ref().ok_or(DbError::Locked)?;
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS _migrations (\
+                 version INTEGER PRIMARY KEY,\
+                 description TEXT NOT NULL,\
+                 applied_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP\
+             )",
+        )?;
+        // Backfill from legacy plugin-sql tracking table if present.
+        let has_legacy: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM sqlite_master \
+                 WHERE type='table' AND name='_sqlx_migrations'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap_or(0);
+        if has_legacy > 0 {
+            let mut stmt = conn.prepare(
+                "SELECT version, description FROM _sqlx_migrations \
+                 WHERE success = 1",
+            )?;
+            let mut rows = stmt.query([])?;
+            while let Some(row) = rows.next()? {
+                let v: i64 = row.get(0)?;
+                let d: String = row.get(1)?;
+                conn.execute(
+                    "INSERT OR IGNORE INTO _migrations(version, description) \
+                     VALUES(?, ?)",
+                    rusqlite::params![v, d],
+                )?;
+            }
+        }
+        // Apply anything not yet recorded, in ascending version order.
+        let mut sorted: Vec<_> = migrations.iter().collect();
+        sorted.sort_by_key(|(v, _, _)| *v);
+        for (version, description, sql) in sorted {
+            let already: i64 = conn.query_row(
+                "SELECT count(*) FROM _migrations WHERE version = ?",
+                rusqlite::params![version],
+                |r| r.get(0),
+            )?;
+            if already > 0 {
+                continue;
+            }
+            conn.execute_batch(sql)?;
+            conn.execute(
+                "INSERT INTO _migrations(version, description) VALUES(?, ?)",
+                rusqlite::params![version, description],
+            )?;
+        }
+        Ok(())
+    }
+
     /// SELECT-style query. Rows are returned as `[{ "col": <json>, ... }]`.
     /// Matches the JSON shape tauri-plugin-sql's `select()` returns so
     /// the frontend db.ts shim can be a straight swap.
@@ -482,17 +545,94 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn open_encrypted_without_feature_fails_cleanly() {
-        // Feature is not enabled in the default build — confirm we get
-        // the specific error instead of silently opening a plain DB.
+    async fn open_encrypted_round_trip() {
+        // SQLCipher is compiled in (default feature). Confirm we can
+        // create -> write -> reopen with the same key.
+        let d = tempfile::tempdir().unwrap();
+        let path = d.path().join("enc.db");
+        let mdk = Mdk::generate();
+        let gate = DbGate::new();
+        gate.open_encrypted(&path, &mdk).await.unwrap();
+        gate.execute("CREATE TABLE k (v INTEGER)", &[]).await.unwrap();
+        gate.execute("INSERT INTO k(v) VALUES(42)", &[]).await.unwrap();
+        gate.close().await;
+
+        // Reopen with same key.
+        gate.open_encrypted(&path, &mdk).await.unwrap();
+        let rows = gate.select("SELECT v FROM k", &[]).await.unwrap();
+        assert_eq!(rows[0].get("v").unwrap(), &json!(42));
+        gate.close().await;
+
+        // Wrong key must be rejected.
+        let wrong = Mdk::generate();
+        let err = gate.open_encrypted(&path, &wrong).await.unwrap_err();
+        assert!(matches!(err, DbError::Sqlite(_)));
+
+        // File header must not be plain SQLite magic.
+        let header = std::fs::read(&path).unwrap();
+        assert!(!header.starts_with(b"SQLite format 3\0"));
+    }
+
+    #[tokio::test]
+    async fn run_migrations_applies_pending_and_is_idempotent() {
         let d = tempfile::tempdir().unwrap();
         let gate = DbGate::new();
-        let mdk = Mdk::generate();
-        let err = gate
-            .open_encrypted(&d.path().join("enc.db"), &mdk)
-            .await
-            .unwrap_err();
-        assert!(matches!(err, DbError::SqlCipherUnavailable));
+        gate.open_plaintext(&d.path().join("m.db")).await.unwrap();
+        let migs = vec![
+            (1i64, "one", "CREATE TABLE m1 (x INT);"),
+            (2, "two", "CREATE TABLE m2 (y INT);"),
+        ];
+        gate.run_migrations(&migs).await.unwrap();
+        gate.execute("INSERT INTO m1(x) VALUES(1)", &[]).await.unwrap();
+        gate.execute("INSERT INTO m2(y) VALUES(2)", &[]).await.unwrap();
+
+        // Second call is a no-op — must not recreate tables or wipe data.
+        gate.run_migrations(&migs).await.unwrap();
+        let r1 = gate.select("SELECT count(*) AS n FROM m1", &[]).await.unwrap();
+        assert_eq!(r1[0].get("n").unwrap(), &json!(1));
+    }
+
+    #[tokio::test]
+    async fn run_migrations_backfills_from_legacy_sqlx_tracker() {
+        let d = tempfile::tempdir().unwrap();
+        let gate = DbGate::new();
+        gate.open_plaintext(&d.path().join("legacy.db")).await.unwrap();
+        // Simulate an existing v1.x install: _sqlx_migrations exists
+        // and records that migrations 1 and 2 already ran. Their tables
+        // exist too, so re-running them would fail.
+        gate.execute(
+            "CREATE TABLE _sqlx_migrations (\
+                 version BIGINT PRIMARY KEY,\
+                 description TEXT NOT NULL,\
+                 installed_on TIMESTAMP,\
+                 success BOOLEAN NOT NULL,\
+                 checksum BLOB NOT NULL,\
+                 execution_time BIGINT NOT NULL)",
+            &[],
+        )
+        .await
+        .unwrap();
+        gate.execute("CREATE TABLE m1 (x INT)", &[]).await.unwrap();
+        gate.execute("CREATE TABLE m2 (y INT)", &[]).await.unwrap();
+        gate.execute(
+            "INSERT INTO _sqlx_migrations(version, description, success, checksum, execution_time) \
+             VALUES(1, 'one', 1, x'00', 0), (2, 'two', 1, x'00', 0)",
+            &[],
+        )
+        .await
+        .unwrap();
+
+        let migs = vec![
+            (1i64, "one", "CREATE TABLE m1 (x INT);"),
+            (2, "two", "CREATE TABLE m2 (y INT);"),
+            (3, "three", "CREATE TABLE m3 (z INT);"),
+        ];
+        // Should backfill 1 and 2 from _sqlx_migrations (skipping
+        // re-execution) and apply only 3.
+        gate.run_migrations(&migs).await.unwrap();
+        gate.execute("INSERT INTO m3(z) VALUES(9)", &[]).await.unwrap();
+        let r = gate.select("SELECT count(*) AS n FROM _migrations", &[]).await.unwrap();
+        assert_eq!(r[0].get("n").unwrap(), &json!(3));
     }
 
     #[test]

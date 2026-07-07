@@ -36,14 +36,6 @@
       ]
     },
     "shell:default",
-    "shell:allow-open",
-    {
-      "identifier": "sql:default",
-      "allow": [{ "name": "sqlite:echelon.db" }]
-    },
-    "sql:allow-execute",
-    "sql:allow-select",
-    "sql:allow-load",
-    "sql:allow-close"
+    "shell:allow-open"
   ]
 }
