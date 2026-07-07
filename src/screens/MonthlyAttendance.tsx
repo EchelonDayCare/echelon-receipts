@@ -209,6 +209,15 @@ export default function MonthlyAttendance() {
   // ─── Printable blank template ─────────────────────────────────────────
   function printBlank() {
     const monthLabel = `${MONTH_NAMES[month-1]}'${String(year).slice(-2)}`;
+    // Fit strictly on one landscape page — shrink row height + font as the
+    // child count grows. Landscape Letter usable area (with 6mm body padding)
+    // is roughly 800px of vertical space for the table.
+    const nRows = Math.max(1, cells.length);
+    const TABLE_AVAIL_PX = 780; // after header + legend + margins
+    const rowH = Math.max(11, Math.min(22, Math.floor(TABLE_AVAIL_PX / (nRows + 1))));
+    const fontPx = rowH <= 13 ? 8 : rowH <= 16 ? 9 : 10;
+    const nameFontPx = fontPx + 1;
+    const padY = Math.max(1, Math.floor(rowH / 8));
     const rowsHtml = cells.map((c) => `
       <tr>
         <td class="name">${h(c.student_name)}</td>
@@ -222,24 +231,50 @@ export default function MonthlyAttendance() {
     const headerCells = dayNums.map((d) => `<th>${d}</th>`).join("");
     const html = `<!doctype html><html><head><title>Attendance ${monthLabel}</title>
       <style>
-        @page { size: landscape; margin: 10mm; }
-        body { font-family: -apple-system, Segoe UI, sans-serif; font-size: 10px; }
-        h1 { margin: 0 0 4px; font-size: 16px; }
-        .meta { margin: 0 0 10px; font-size: 11px; }
-        table { border-collapse: collapse; width: 100%; }
-        th, td { border: 1px solid #333; padding: 3px; text-align: center; height: 22px; }
-        td.name { text-align: left; white-space: nowrap; padding-left: 6px; font-size: 11px; }
+        /* margin:0 tells Chromium/WebView2 not to draw its default header &
+           footer (date, URL, page number, "Tauri + React + Typescript" title).
+           We add visual whitespace via body padding instead. */
+        @page { size: 11in 8.5in; margin: 0; }
+        html, body { margin: 0; padding: 0; }
+        body {
+          font-family: -apple-system, "Segoe UI", sans-serif;
+          font-size: ${fontPx}px;
+          padding: 6mm 8mm;
+          -webkit-print-color-adjust: exact;
+          print-color-adjust: exact;
+        }
+        h1 { margin: 0 0 2px; font-size: 14px; }
+        .meta { margin: 0 0 6px; font-size: 10px; }
+        table { border-collapse: collapse; width: 100%; table-layout: fixed; }
+        col.day { width: 2.7%; }
+        col.name { width: 15%; }
+        th, td {
+          border: 1px solid #333; padding: ${padY}px 2px;
+          text-align: center; height: ${rowH}px;
+          overflow: hidden;
+        }
+        td.name {
+          text-align: left; white-space: nowrap;
+          padding-left: 4px; font-size: ${nameFontPx}px;
+          text-overflow: ellipsis;
+        }
         td.closed { background: #e5e5e5; }
-        thead th { background: #f0f0f0; }
-        .legend { margin-top: 8px; font-size: 10px; color: #333; }
+        thead th { background: #f0f0f0; font-size: ${fontPx}px; }
+        .legend { margin-top: 4px; font-size: 9px; color: #333; }
+        /* Belt-and-braces: never spill onto a 2nd page. */
+        table, tr, td, th { page-break-inside: avoid; break-inside: avoid; }
       </style></head><body>
       <h1>${h(daycareName || "Echelon Day Care")}</h1>
       <p class="meta">Attendance report for month of ${monthLabel}. Number of days Centre <b>____</b> open</p>
       <table>
+        <colgroup>
+          <col class="name" />
+          ${dayNums.map(() => `<col class="day" />`).join("")}
+        </colgroup>
         <thead><tr><th style="text-align:left;">Child</th>${headerCells}</tr></thead>
         <tbody>${rowsHtml}</tbody>
       </table>
-      <p class="legend">Legend — P = Present · A = Absent · H = Half-day · S = Sick · V = Vacation. Weekends & closed days pre-shaded.</p>
+      <p class="legend">Legend — P = Present · A = Absent · H = Half-day · S = Sick · V = Vacation. Weekends &amp; closed days pre-shaded.</p>
       </body></html>`;
     // Tauri's webview blocks window.open. Use a hidden iframe attached to
     // the current document instead — same pattern as printReceipt().
