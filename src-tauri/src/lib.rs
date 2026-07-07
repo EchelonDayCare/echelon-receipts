@@ -16,6 +16,7 @@ mod backup_crypto;
 mod migration_heal;
 mod azure_url_guard;
 mod voice;
+mod security;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
