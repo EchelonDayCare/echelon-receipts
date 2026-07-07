@@ -80,7 +80,7 @@ export default function Deposits() {
     <div style={{ padding: "16px 20px", maxWidth: 1100 }}>
       <h1 style={{ marginTop: 0 }}>Bank Deposits</h1>
       <p style={{ color: "#555", marginTop: -6 }}>
-        Select cheque/cash receipts to bundle into a TD-style deposit slip. Bank fields
+        Select cheque/cash receipts to bundle into a bank deposit slip. Bank fields
         (date, branch #, account #) are handwritten at the teller.
       </p>
 

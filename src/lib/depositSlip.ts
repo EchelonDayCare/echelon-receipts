@@ -1,4 +1,4 @@
-// TD Canada Trust Business Deposit Slip renderer.
+// Bank Business Deposit Slip renderer.
 //
 // Mirrors the layout Luxmi uses in her Excel replica: a two-column form with
 // the cheque list on the left and the cash-count / totals block on the right.
@@ -55,8 +55,7 @@ export function buildDepositSlipHtml(
   .orgBox .label { font-size: 10px; color: #555; text-transform: uppercase; letter-spacing: 0.5px; }
   .orgBox .cell { border-bottom: 1px solid #000; min-height: 22px; padding: 2px 4px; }
   .bankBox { text-align: right; font-size: 12px; }
-  .bankBox .tdName { font-weight: 700; font-size: 16px; color: #007a33; }
-  .bankBox .slipName { font-size: 11px; color: #333; }
+  .bankBox .slipName { font-weight: 700; font-size: 13px; color: #333; }
   .metaRow { display: grid; grid-template-columns: 1.4fr 1fr 1.4fr 1fr; gap: 10px; margin-top: 10px; font-size: 11px; }
   .metaRow .cell { border-bottom: 1px solid #000; min-height: 22px; padding: 2px 4px; }
   .metaRow .lbl { font-size: 9px; color: #555; text-transform: uppercase; letter-spacing: 0.5px; }
@@ -88,7 +87,6 @@ export function buildDepositSlipHtml(
       <div class="cell"></div>
     </div>
     <div class="bankBox">
-      <div class="tdName">TD Canada Trust</div>
       <div class="slipName">BUSINESS ACCOUNT DEPOSIT SLIP</div>
     </div>
   </div>
