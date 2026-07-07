@@ -399,6 +399,8 @@ export function SetupPinModal({ onDone, onCancel }: { onDone: () => void; onCanc
   const [confirm, setConfirm] = useState("");
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
+  const [phase, setPhase] = useState<"pin" | "recovery">("pin");
+  const [recoveryCode, setRecoveryCode] = useState<string | null>(null);
 
   const canSubmit = pin.length >= 6 && pin === confirm && !busy;
 
@@ -409,13 +411,21 @@ export function SetupPinModal({ onDone, onCancel }: { onDone: () => void; onCanc
     setErr(null);
     try {
       await invoke("v2_create_pin", { pin });
-      onDone();
+      // Mandatory: generate recovery code immediately so the user cannot
+      // complete setup without seeing (and acknowledging) it.
+      const code = await invoke<string>("v2_generate_recovery");
+      setRecoveryCode(code);
+      setPhase("recovery");
     } catch (e: any) {
       setErr(String(e?.message ?? e));
     } finally {
       setBusy(false);
     }
   };
+
+  if (phase === "recovery" && recoveryCode) {
+    return <MandatoryRecoveryStep code={recoveryCode} onDone={onDone} />;
+  }
 
   return (
     <FullScreenCentered>
@@ -425,8 +435,8 @@ export function SetupPinModal({ onDone, onCancel }: { onDone: () => void; onCanc
         <div style={styles.subtitle}>
           Choose a 6-digit PIN. Your database will be encrypted on this device.
           <br />
-          <b>You can't recover this PIN if you forget it</b> — make sure your
-          monthly encrypted backup is set up first.
+          After you set your PIN, you'll get a <b>recovery code</b> to save —
+          keep it somewhere safe in case you forget your PIN.
         </div>
         <label style={styles.label}>PIN (at least 6 characters)</label>
         <input
@@ -462,6 +472,79 @@ export function SetupPinModal({ onDone, onCancel }: { onDone: () => void; onCanc
           </button>
         </div>
       </form>
+    </FullScreenCentered>
+  );
+}
+
+// ────────────────────────────────────────────────────────────────────────
+
+function MandatoryRecoveryStep({ code, onDone }: { code: string; onDone: () => void }) {
+  const [confirmed, setConfirmed] = useState(false);
+  const [copied, setCopied] = useState(false);
+  return (
+    <FullScreenCentered>
+      <div style={{ ...styles.card, minWidth: 480, maxWidth: 560 }}>
+        <div style={styles.logo}>🔑</div>
+        <div style={styles.title}>Save your recovery code</div>
+        <div style={{ ...styles.subtitle, textAlign: "left" }}>
+          This is the <b>only</b> way to get back into your data if you forget
+          your PIN, replace your device, or reinstall the OS.
+          <br /><br />
+          Write it down or print it and store it somewhere safe (a locked
+          drawer, a safe). <b>Anyone with this code can decrypt your database
+          on any machine</b> — treat it like a spare house key.
+          <br /><br />
+          You will <b>not</b> see this code again.
+        </div>
+        <pre style={{
+          background: "#f5f5f5", color: "#111", padding: 16, borderRadius: 8,
+          fontSize: 16, fontFamily: "ui-monospace, monospace",
+          textAlign: "center", letterSpacing: 2, wordBreak: "break-all",
+          whiteSpace: "pre-wrap", border: "2px dashed #999", margin: "12px 0",
+        }}>{code}</pre>
+        <div style={{ display: "flex", gap: 8 }}>
+          <button
+            type="button"
+            style={{ ...styles.button, flex: 1, background: "#eee", color: "#333" }}
+            onClick={async () => {
+              try { await navigator.clipboard.writeText(code); setCopied(true); }
+              catch { alert("Copy failed — write it down manually."); }
+            }}
+          >
+            {copied ? "Copied ✓" : "Copy to clipboard"}
+          </button>
+          <button
+            type="button"
+            style={{ ...styles.button, flex: 1, background: "#eee", color: "#333" }}
+            onClick={() => window.print()}
+          >
+            Print
+          </button>
+        </div>
+        <label style={{ fontSize: 13, color: "#fff", marginTop: 14, display: "flex", gap: 8, alignItems: "flex-start" }}>
+          <input
+            type="checkbox"
+            checked={confirmed}
+            onChange={(e) => setConfirmed(e.target.checked)}
+            style={{ marginTop: 3 }}
+          />
+          I have saved this recovery code somewhere safe. I understand it will
+          not be shown again.
+        </label>
+        <button
+          type="button"
+          disabled={!confirmed}
+          onClick={onDone}
+          style={{
+            ...styles.button,
+            opacity: confirmed ? 1 : 0.4,
+            cursor: confirmed ? "pointer" : "not-allowed",
+            marginTop: 10,
+          }}
+        >
+          Continue
+        </button>
+      </div>
     </FullScreenCentered>
   );
 }
