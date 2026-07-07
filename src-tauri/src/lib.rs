@@ -132,6 +132,7 @@ pub fn run() {
             restore::stage_restore,
             restore::restart_app,
             azure_ai::extract_attendance,
+            azure_ai::extract_month_attendance,
             azure_ai::extract_visa_statement,
             ask_echelon::ask_echelon,
             consensus::extract_timesheet_consensus,

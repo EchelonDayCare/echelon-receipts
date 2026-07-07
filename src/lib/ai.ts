@@ -60,3 +60,32 @@ export async function extractAttendance(opts: {
     },
   });
 }
+
+// ─── Monthly child attendance grid ──────────────────────────────────────
+export interface ExtractedMonthAttendanceRow {
+  child_name: string;
+  marks: Record<string, "P" | "A" | "H" | "S" | "V">;
+}
+export interface ExtractMonthAttendanceResult {
+  month: string;
+  days_centre_open: number | null;
+  rows: ExtractedMonthAttendanceRow[];
+  raw_text: string;
+}
+
+export async function extractMonthAttendance(opts: {
+  imageBytes: Uint8Array;
+  mimeType: string;
+  targetMonth: string; // YYYY-MM
+  knownStudentNames: string[];
+}): Promise<ExtractMonthAttendanceResult> {
+  const image_b64 = bytesToB64(opts.imageBytes);
+  return await invoke<ExtractMonthAttendanceResult>("extract_month_attendance", {
+    args: {
+      image_b64,
+      mime_type: opts.mimeType,
+      target_month: opts.targetMonth,
+      known_student_names: opts.knownStudentNames,
+    },
+  });
+}

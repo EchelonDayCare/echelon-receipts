@@ -189,6 +189,108 @@ pub async fn extract_attendance(args: ExtractAttendanceArgs) -> Result<ExtractAt
     Ok(ExtractAttendanceResult { rows, raw_text: annotation })
 }
 
+// ─── Monthly child attendance grid ──────────────────────────────────────
+//
+// The physical form (see Echelon Day Care template) is a matrix of
+// child_name × day_of_month with single-character marks. This extractor is
+// tailored to that shape and returns one row per child with a map of
+// {day-string -> mark-char}. Marks understood:
+//   P  present
+//   A  absent (or the paper's `-` dash)
+//   H  half day (or the paper's `~`/curly line)
+//   S  sick
+//   V  vacation
+
+#[derive(Deserialize)]
+pub struct ExtractMonthAttendanceArgs {
+    pub image_b64: String,
+    pub mime_type: String,
+    pub target_month: String,             // "YYYY-MM"
+    pub known_student_names: Vec<String>,
+}
+
+#[derive(Serialize, Deserialize, Clone)]
+pub struct ExtractedMonthAttendanceRow {
+    pub child_name: String,
+    pub marks: std::collections::BTreeMap<String, String>, // "1".."31" -> "P|A|H|S|V"
+}
+
+#[derive(Serialize)]
+pub struct ExtractMonthAttendanceResult {
+    pub month: String,
+    pub days_centre_open: Option<u32>,
+    pub rows: Vec<ExtractedMonthAttendanceRow>,
+    pub raw_text: String,
+}
+
+#[tauri::command]
+pub async fn extract_month_attendance(args: ExtractMonthAttendanceArgs) -> Result<ExtractMonthAttendanceResult, String> {
+    let known_hint = if args.known_student_names.is_empty() {
+        "(none - use names exactly as written on the sheet)".to_string()
+    } else {
+        args.known_student_names.join(", ")
+    };
+
+    let schema = json!({
+        "type": "object",
+        "properties": {
+            "month": { "type": "string", "description": format!("YYYY-MM detected from the header. Default: {}", args.target_month) },
+            "days_centre_open": { "type": ["integer", "null"], "description": "The 'Number of days Centre __ open' figure in the header, if legible." },
+            "rows": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "child_name": { "type": "string",
+                            "description": format!("Exact child name as written. Known children: {known_hint}") },
+                        "marks": {
+                            "type": "object",
+                            "description": "Object mapping day-of-month (as string '1'..'31') to a single-character mark: P=present, A=absent (or '-'/dash on paper), H=half-day (or '~' on paper), S=sick, V=vacation. OMIT days that are blank or covered by the merged 'Saturday & Sunday' block — do NOT emit those as 'A'. Emit only days where a distinct handwritten mark is present in the child's row.",
+                            "additionalProperties": { "type": "string", "enum": ["P","A","H","S","V"] }
+                        }
+                    },
+                    "required": ["child_name", "marks"],
+                    "additionalProperties": false
+                }
+            }
+        },
+        "required": ["month", "days_centre_open", "rows"],
+        "additionalProperties": false
+    });
+
+    let key_for_redact = crate::secrets::get_secret("azure_ai_key")?;
+    let annotation = call_mistral_doc_ai(
+        &key_for_redact, &args.image_b64, &args.mime_type, schema, "MonthAttendanceExtraction"
+    ).await?;
+
+    let parsed: serde_json::Value = serde_json::from_str(&annotation)
+        .map_err(|e| redact(format!("model output not JSON: {e} :: {}", truncate(&annotation, 400)), &key_for_redact))?;
+
+    let month = parsed["month"].as_str().unwrap_or(&args.target_month).trim().to_string();
+    let days_centre_open = parsed["days_centre_open"].as_u64().map(|n| n as u32);
+
+    let rows_json = parsed["rows"].as_array().cloned().unwrap_or_default();
+    let mut rows: Vec<ExtractedMonthAttendanceRow> = Vec::with_capacity(rows_json.len());
+    for r in rows_json {
+        let name = r["child_name"].as_str().unwrap_or("").trim().to_string();
+        if name.is_empty() || is_placeholder_name(&name) { continue; }
+        let mut marks: std::collections::BTreeMap<String, String> = std::collections::BTreeMap::new();
+        if let Some(obj) = r["marks"].as_object() {
+            for (k, v) in obj {
+                let val = v.as_str().unwrap_or("").trim().to_uppercase();
+                if !["P","A","H","S","V"].contains(&val.as_str()) { continue; }
+                // Normalise key: strip leading zeros ("01" -> "1"), reject non-numeric.
+                let n: u32 = match k.trim().parse() { Ok(x) => x, Err(_) => continue };
+                if !(1..=31).contains(&n) { continue; }
+                marks.insert(n.to_string(), val);
+            }
+        }
+        if marks.is_empty() { continue; }
+        rows.push(ExtractedMonthAttendanceRow { child_name: name, marks });
+    }
+    Ok(ExtractMonthAttendanceResult { month, days_centre_open, rows, raw_text: annotation })
+}
+
 // ─── Visa / credit-card statement extraction ────────────────────────────
 
 #[derive(Deserialize)]

@@ -438,6 +438,22 @@ async function ensureSchema(d: Database): Promise<void> {
     await d.execute("CREATE INDEX IF NOT EXISTS ix_child_attendance_student ON child_attendance(student_id)");
   }
 
+  // Centre operating calendar — records which dates the centre is open/closed.
+  // Weekend rows are lazily created by the monthly attendance UI when a month
+  // is first opened (is_open=0, reason='Weekend'). Stat holidays and PA days
+  // are marked here so the "days centre was open" denominator on subsidy /
+  // CCFRI reports is derived, not manually entered.
+  if (!(await tableExists("centre_calendar"))) {
+    console.warn("[ensureSchema] creating centre_calendar");
+    await d.execute(`CREATE TABLE centre_calendar (
+      day TEXT PRIMARY KEY,               -- yyyy-mm-dd
+      is_open INTEGER NOT NULL DEFAULT 1,
+      reason TEXT,                        -- 'Weekend' | 'Stat Holiday' | 'PA Day' | free-text
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    )`);
+    await d.execute("CREATE INDEX IF NOT EXISTS ix_centre_calendar_open ON centre_calendar(is_open)");
+  }
+
   // Backup bookkeeping (not a real migration — stored in settings)
   for (const [k, v] of [
     ["last_backup_at", ""],
