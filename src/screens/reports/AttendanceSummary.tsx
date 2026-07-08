@@ -50,26 +50,9 @@ function monthsBetween(fromYm: string, toYm: string): string[] {
   }
   return out;
 }
-function statusToBucket(status: string | null, hours: number): "p"|"h"|"a"|"s"|"v"|null {
-  const s = (status || "").toLowerCase();
-  if (s === "present") return hours > 0 ? "p" : "h";
-  if (s === "absent")  return "a";
-  if (s === "sick")    return "s";
-  if (s === "holiday") return "v";
-  return null;
-}
-
-// Post-Migration 027: prefer the explicit monthly mark if set. Falls back
-// to hours-based inference only for pure daily-flow rows (no mark).
-function rowToBucket(r: { status: string | null; hours_decimal: number; attendance_mark: string | null }): "p"|"h"|"a"|"s"|"v"|null {
-  const m = (r.attendance_mark || "").toUpperCase();
-  if (m === "P") return "p";
-  if (m === "H") return "h";
-  if (m === "A") return "a";
-  if (m === "S") return "s";
-  if (m === "V") return "v";
-  return statusToBucket(r.status, r.hours_decimal ?? 0);
-}
+// Bucket classification lives in a dedicated module so it can be unit-
+// tested in isolation. See src/lib/attendanceBucket.ts + .test.ts.
+import { rowToBucket } from "../../lib/attendanceBucket";
 
 // ─── Component ────────────────────────────────────────────────────────
 type ViewMode = "centre" | "child";
