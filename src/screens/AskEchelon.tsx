@@ -297,7 +297,7 @@ export default function AskEchelon() {
                   color: "#0f172a", display: "flex", gap: 12, alignItems: "flex-start",
                 }}>
                   <span style={{ fontSize: 20, flexShrink: 0 }}>✨</span>
-                  <span>{result.summary}</span>
+                  <span style={{ whiteSpace: "pre-wrap" }}>{result.summary}</span>
                 </div>
               )}
 

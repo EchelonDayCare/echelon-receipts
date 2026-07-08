@@ -71,6 +71,24 @@ pub async fn ask_echelon(
     // plaintext IPC argument.
     let azure_ai_key = crate::secrets::get_secret("azure_ai_key")?;
 
+    // ── Step 0: Route "how do I…" questions to the UI-nav assistant.
+    // Data questions ("how much…", "how many…", "who owes…") stay in the
+    // SQL path. Pure how-to questions ("how do I add a student?") deserve
+    // grounded UI-navigation steps, not SQL over the schema.
+    if is_howto_question(&args.question) {
+        let (summary, _) = howto_answer(&azure_ai_key, &args.question).await
+            .unwrap_or_else(|e| (format!("Sorry — I couldn't produce steps for that. ({e})"), "none".to_string()));
+        return Ok(AskEchelonResult {
+            sql: String::new(),
+            columns: Vec::new(),
+            rows: Vec::new(),
+            summary,
+            chart_hint: "none".to_string(),
+            elapsed_ms: started.elapsed().as_millis() as u64,
+            truncated: false,
+        });
+    }
+
     // Build schema context via the app's live DB connection (SQLCipher-
     // encrypted after v2.0.0). Opening our own rusqlite handle to the file
     // would fail with "file is not a database" for encrypted DBs.
@@ -259,6 +277,104 @@ async fn sample_rows_json(gate: &DbGate, sql: &str, redact: bool) -> Result<Vec<
         out.push(serde_json::to_string(&Value::Object(obj)).unwrap_or_default());
     }
     Ok(out)
+}
+
+// ─── How-to routing: classifier + UI-grounded answerer ─────────────────
+//
+// The Ask Echelon SQL path is useless for questions like "how do I add a
+// student?" because the answer isn't in the database — it's in the UI.
+// We route those questions to a second prompt seeded with the actual app
+// navigation map so the answer is grounded in real steps the user can
+// follow.
+
+fn is_howto_question(q: &str) -> bool {
+    let l = q.to_lowercase();
+    let l = l.trim();
+    // Purely data-shaped "how many/much" questions must stay in the SQL path.
+    if l.starts_with("how many") || l.starts_with("how much") { return false; }
+    // "how do I / how can I / how to" → UI steps.
+    if l.starts_with("how do i") || l.starts_with("how can i") || l.starts_with("how to") { return true; }
+    if l.starts_with("where do i") || l.starts_with("where can i") || l.starts_with("where is the")
+        || l.starts_with("where's the") { return true; }
+    // Explicit UI-shaped verbs at the start.
+    for verb in &[
+        "how do you", "how does one",
+        "how i can", "steps to", "walk me through",
+        "guide me", "show me how",
+    ] {
+        if l.starts_with(verb) { return true; }
+    }
+    false
+}
+
+// Static navigation map — kept in one place so we can keep it in sync
+// with App.tsx routes. If you add a top-level feature, add a bullet here.
+const UI_NAV_MAP: &str = "\
+Top-level nav (left sidebar):\n\
+  Students → Today / This Month / New Receipt / Attendance / History / Roster / Reports / Aging / Annual Receipts / Deposits\n\
+  Staff → Hours / Schedule / Credentials / Meeting Notes\n\
+  Expenses → Dashboard / Add Expense / All / Recurring / Import Statement / Reports\n\
+  Reports → Overview / Monthly / Aging / Subsidy / Enrollment / Attendance / Credentials / Drills / AGM\n\
+  Communications → Compose / Templates / History / Directory / Scheduled\n\
+  Waitlist → Overview / List / Enrolled / Archived\n\
+  Vault (document library), Organizer (calendar/AI notes), Ask Echelon\n\
+  Config (Settings) → Identity / Receipts & Email / Folders / Staff / Backups / Security / Stat Holidays / Notifications / Waitlist / About\n\
+\n\
+Common tasks and where to do them:\n\
+  Add / edit a student: Students → Roster → \"+ Add Student\" (top-right).\n\
+    Fields include name, DOB, parent contacts, start date, monthly fee. Save.\n\
+  Record a receipt / payment: Students → New Receipt. Pick the student, amount, method, date, then Save. A PDF preview appears.\n\
+  Email a receipt: after saving, click \"Email\" on the preview (requires SMTP set up under Config → Receipts & Email).\n\
+  Print a receipt: Students → History → open the receipt → Print (uses native OS print dialog on both Mac and Windows).\n\
+  Void a receipt: Students → History → open receipt → \"Void\" (you'll be asked for a reason).\n\
+  Mark attendance for the month: Students → Attendance → pick the year+month at top → click a day cell to cycle P → A → blank.\n\
+  Upload a paper attendance sheet: Students → Attendance → \"Upload sheet\" → either \"Import from Downloads\" (picks the newest scan) or choose manually. Review the extracted grid before saving.\n\
+  Mark a specific day open or closed: Students → Attendance → \"Centre Calendar\" (top-right of the month) → click the day → toggle Open/Closed.\n\
+  Change which stat holidays apply: Config → Stat Holidays → tick/untick the 12 BC holidays (year-on-year).\n\
+  Add a staff member: Config → Staff → \"+ Add Staff\". Then Staff → Hours will show them.\n\
+  Log staff hours from a sign-in sheet: Staff → Hours → \"Upload sheet\". Same dual-button flow as attendance.\n\
+  Build a staff schedule: Staff → Schedule → click a cell to add a shift. Publish week to lock changes.\n\
+  Create meeting notes: Staff → Meeting Notes → \"+ New meeting\". Or paste raw notes into the AI panel to auto-fill title/attendees/actions.\n\
+  Amend saved meeting notes with AI: open the meeting → click \"✨ Amend with AI\" next to Notes.\n\
+  Enter an expense: Expenses → Add Expense. For monthly bills use Expenses → Recurring.\n\
+  Import a Visa / credit-card statement: Expenses → Import Statement → upload PDF/CSV → review → Save.\n\
+  Run the annual (tax) receipt for a family: Students → Annual Receipts → pick year → per-student PDF.\n\
+  Compose a bulk message to parents: Communications → Compose → pick audience → send now or schedule.\n\
+  Add a family to the waitlist: Waitlist → List → \"+ Add family\".\n\
+  Back up your database to email: Config → Backups → \"Send cloud backup now\" (needs a passphrase set on the same tab).\n\
+  Restore from backup: Config → Backups → \"Restore from file\" (creates a safety copy of the current DB first).\n\
+  Change PIN: Config → Security → \"Change PIN\".\n\
+  Set up email (SMTP): Config → Receipts & Email → enter host / port / from address / password. Use \"Send test email\".\n\
+  Set up Azure AI (needed for OCR + statement import): Config → Staff → \"Azure AI Foundry key\".\n\
+";
+
+async fn howto_answer(api_key: &str, question: &str) -> Result<(String, String), String> {
+    let system = format!(
+        "You answer 'how do I…' questions about the Echelon Receipts desktop app.\n\
+         \n\
+         GROUND RULES — non-negotiable:\n\
+         - Answer with the EXACT UI navigation path from the app map below. Never invent screens, buttons, menus or SQL.\n\
+         - Format the answer as numbered steps. Keep it to 3-8 concise steps.\n\
+         - Use the arrow notation for menus, e.g. 'Students → Roster → + Add Student'.\n\
+         - Reference real button labels in quotes when they help ('Save', 'Upload sheet', '✨ Amend with AI').\n\
+         - If the requested feature is NOT in the app map, say so plainly and suggest the closest existing feature — do not guess.\n\
+         - Do NOT mention SQL, tables, columns, JSON, or code. This is an end-user answer.\n\
+         - No preamble. Start directly with step 1.\n\
+         \n\
+         APP MAP:\n{}",
+        UI_NAV_MAP
+    );
+    let body = json!({
+        "messages": [
+            {"role":"system","content": system},
+            {"role":"user","content": question}
+        ],
+        "temperature": 0.2,
+        "max_completion_tokens": 500
+    });
+    let raw = call_chat(api_key, body).await?;
+    let cleaned = strip_code_fence(&raw).trim().to_string();
+    Ok((cleaned, "none".to_string()))
 }
 
 // ─── LLM: SQL generation ────────────────────────────────────────────────

@@ -15,6 +15,7 @@ import type { SettingsMap } from "../types";
 import HealthCheck from "../components/HealthCheck";
 import NotificationsSettingsSection from "../components/NotificationsSettingsSection";
 import SecuritySettingsSection from "../components/SecuritySettingsSection";
+import HolidaysSettingsSection from "../components/HolidaysSettingsSection";
 import WaitlistSettings from "./waitlist/Settings";
 
 function HelpTip({ text }: { text: string }) {
@@ -317,6 +318,7 @@ export default function Settings() {
     { key: "staff", label: "Staff" },
     { key: "backups", label: "Backups" },
     { key: "security", label: "Security" },
+    { key: "holidays", label: "Stat Holidays" },
     { key: "notifications", label: "Notifications" },
     { key: "waitlist", label: "Waitlist" },
     { key: "about", label: "About" },
@@ -954,11 +956,12 @@ export default function Settings() {
       {activeTab === "staff" && renderStaff()}
       {activeTab === "backups" && renderBackups()}
       {activeTab === "security" && <SecuritySettingsSection />}
+      {activeTab === "holidays" && <HolidaysSettingsSection />}
       {activeTab === "notifications" && <NotificationsSettingsSection />}
       {activeTab === "waitlist" && <WaitlistSettings />}
       {activeTab === "about" && renderAbout()}
 
-      {activeTab !== "about" && activeTab !== "notifications" && activeTab !== "waitlist" && activeTab !== "security" && SaveBar}
+      {activeTab !== "about" && activeTab !== "notifications" && activeTab !== "waitlist" && activeTab !== "security" && activeTab !== "holidays" && SaveBar}
     </div>
   );
 }

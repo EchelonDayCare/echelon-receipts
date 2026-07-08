@@ -8,7 +8,7 @@ import { listStaff } from "../../lib/staff";
 import type { StaffMeeting, Staff } from "../../types";
 import { showAlert, showConfirm, showPrompt } from "../../lib/dialogs";
 import { showPdfPreview } from "../../lib/pdfPreview";
-import { isAiTextConfigured } from "../../lib/voice";
+import { isAiTextConfigured, amendMeetingNotes } from "../../lib/voice";
 import { getSettings } from "../../lib/db";
 import MeetingNotesAiTextPanel from "./MeetingNotesAiTextPanel";
 
@@ -321,7 +321,40 @@ export default function StaffMeetings() {
               />
             </div>
             <div className="mtg-section">
-              <div className="mtg-label">Notes</div>
+              <div className="mtg-label" style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8 }}>
+                <span>Notes</span>
+                {aiEnabled && (
+                  <button
+                    type="button"
+                    className="btn secondary"
+                    style={{ fontSize: 12, padding: "3px 10px" }}
+                    disabled={busy}
+                    title="Rewrite these notes with AI — describe the change in plain English"
+                    onClick={async () => {
+                      const instr = await showPrompt(
+                        "How should AI change these notes? e.g. 'add a bullet about the parent complaint follow-up', 'reformat as bullet points', 'add follow-up meeting next Monday'.",
+                        ""
+                      );
+                      if (!instr || !instr.trim()) return;
+                      setBusy(true);
+                      try {
+                        const { notes } = await amendMeetingNotes({
+                          currentNotes: detail?.meeting.notes ?? "",
+                          instruction: instr,
+                        });
+                        patchMeeting({ notes });
+                        setDirty(true);
+                        setToast("AI updated the notes — review, then Save when ready.");
+                        window.setTimeout(() => setToast(null), 3500);
+                      } catch (e: any) {
+                        void showAlert("AI amend failed: " + String(e?.message ?? e));
+                      } finally {
+                        setBusy(false);
+                      }
+                    }}
+                  >✨ Amend with AI</button>
+                )}
+              </div>
               <textarea
                 className="mtg-textarea"
                 placeholder="What was discussed, decisions made, follow-ups…"

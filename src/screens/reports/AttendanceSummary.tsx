@@ -5,7 +5,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { db, getSettings, listStudents, listYears } from "../../lib/db";
 import { MARK_COLOR, MARK_LABEL, type MonthMark } from "../../lib/monthAttendance";
-import { daysOpenInRange, getDefaultOpenDays, isBcHolidaysEnabled, mergeBcHolidayOverrides } from "../../lib/centreCalendar";
+import { daysOpenInRange, getDefaultOpenDays, isBcHolidaysEnabled, mergeBcHolidayOverridesAsync } from "../../lib/centreCalendar";
 import type { Student, SettingsMap } from "../../types";
 
 // ─── Types ────────────────────────────────────────────────────────────
@@ -129,7 +129,7 @@ export default function AttendanceAnalytics() {
     for (const c of cal) overrides.set(String(c.day), !!c.is_open);
     const defaultOpen = await getDefaultOpenDays();
     const overridesWithHolidays = (await isBcHolidaysEnabled())
-      ? mergeBcHolidayOverrides(overrides, dateFrom, dateTo)
+      ? await mergeBcHolidayOverridesAsync(overrides, dateFrom, dateTo)
       : overrides;
 
     const months = monthsBetween(ymOf(dateFrom), ymOf(dateTo));

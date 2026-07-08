@@ -16,6 +16,7 @@ import { bcHolidayLookup } from "./bcHolidays";
 
 const DEFAULT_OPEN_DAYS = "0111110"; // Sun..Sat, 1 = open; Mon-Fri default
 const BC_HOLIDAYS_SETTING = "bc_stat_holidays_enabled";
+const BC_HOLIDAYS_DISABLED_SETTING = "bc_stat_holidays_disabled_ids"; // JSON string[] of holiday ids that DO NOT apply
 
 /** Are BC statutory holidays treated as closed days? Default ON. */
 export async function isBcHolidaysEnabled(): Promise<boolean> {
@@ -28,6 +29,41 @@ export async function setBcHolidaysEnabled(enabled: boolean): Promise<void> {
 }
 
 /**
+ * Read the per-holiday opt-out list from settings. Empty set means "all
+ * 12 BC statutory holidays apply". Setting persists year-on-year.
+ */
+export async function getDisabledBcHolidayIds(): Promise<Set<string>> {
+  const s = await getSettings();
+  const raw = s[BC_HOLIDAYS_DISABLED_SETTING];
+  if (!raw) return new Set();
+  try {
+    const arr = JSON.parse(raw);
+    if (Array.isArray(arr)) return new Set(arr.filter((x) => typeof x === "string"));
+  } catch { /* fall through */ }
+  return new Set();
+}
+
+export async function setDisabledBcHolidayIds(ids: string[]): Promise<void> {
+  const uniq = [...new Set(ids.filter((x) => typeof x === "string"))].sort();
+  await setSetting(BC_HOLIDAYS_DISABLED_SETTING, JSON.stringify(uniq));
+}
+
+/**
+ * Layer BC statutory holidays onto an overrides map as closed days, honouring
+ * the per-holiday opt-out list from settings. Async variant preferred going
+ * forward — the sync `mergeBcHolidayOverrides` below is kept for callers that
+ * pre-computed the exclusion set.
+ */
+export async function mergeBcHolidayOverridesAsync(
+  overrides: Map<string, boolean>,
+  fromIso: string,
+  toIso: string,
+): Promise<Map<string, boolean>> {
+  const excluded = await getDisabledBcHolidayIds();
+  return mergeBcHolidayOverrides(overrides, fromIso, toIso, excluded);
+}
+
+/**
  * Layer BC statutory holidays onto an overrides map as closed days. An
  * explicit override in `overrides` always wins over the seeded holiday
  * (user can force a holiday open if they choose to run that day).
@@ -36,9 +72,10 @@ export function mergeBcHolidayOverrides(
   overrides: Map<string, boolean>,
   fromIso: string,
   toIso: string,
+  excludedIds?: ReadonlySet<string>,
 ): Map<string, boolean> {
   const merged = new Map(overrides);
-  for (const iso of bcHolidayLookup(fromIso, toIso).keys()) {
+  for (const iso of bcHolidayLookup(fromIso, toIso, excludedIds).keys()) {
     if (!merged.has(iso)) merged.set(iso, false);
   }
   return merged;

@@ -16,7 +16,7 @@ import ShiftDrawer, { loadActiveStaff, type DrawerState } from "./ShiftDrawer";
 import ScheduleSubNav from "./ScheduleSubNav";
 import ScheduleAiTextPanel from "./ScheduleAiTextPanel";
 import { bcHolidayLookup } from "../../lib/bcHolidays";
-import { isBcHolidaysEnabled } from "../../lib/centreCalendar";
+import { isBcHolidaysEnabled, getDisabledBcHolidayIds } from "../../lib/centreCalendar";
 
 type StaffLite = { id: number; name: string; whatsapp_phone_e164: string | null };
 
@@ -36,7 +36,8 @@ export default function StaffSchedule() {
     (async () => {
       const on = await isBcHolidaysEnabled();
       const end = addDays(weekStart, 6);
-      setHolidayMap(on ? bcHolidayLookup(weekStart, end) : new Map());
+      const excluded = on ? await getDisabledBcHolidayIds() : new Set<string>();
+      setHolidayMap(on ? bcHolidayLookup(weekStart, end, excluded) : new Map());
     })();
   }, [weekStart]);
 

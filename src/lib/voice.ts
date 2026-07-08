@@ -431,6 +431,22 @@ export async function parseMeetingNotes(opts: {
   };
 }
 
+/**
+ * Rewrite the notes body of a meeting via AI given a plain-language
+ * instruction. Returns the revised notes plus latency for logging.
+ * The Rust command uses the same Azure chat deployment as parse.
+ */
+export async function amendMeetingNotes(opts: {
+  currentNotes: string;
+  instruction: string;
+}): Promise<{ notes: string; latencyMs: number }> {
+  const res = await invoke<{ notes: string; latency_ms: number }>(
+    "amend_meeting_notes",
+    { args: { current_notes: opts.currentNotes, instruction: opts.instruction } },
+  );
+  return { notes: res.notes, latencyMs: res.latency_ms };
+}
+
 // ─── Audit trail ─────────────────────────────────────────────────────────
 
 async function sha256Hex(s: string): Promise<string> {

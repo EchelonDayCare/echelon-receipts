@@ -59,6 +59,26 @@ function toIso(d: Date): string {
   return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, "0")}-${String(d.getUTCDate()).padStart(2, "0")}`;
 }
 
+/**
+ * Ordered catalog of BC statutory holiday IDs and display labels — used by
+ * the Settings → Stat Holidays tab to render the year-on-year opt-out
+ * checkboxes. Order matches bcStatHolidays() output order (Jan..Dec).
+ */
+export const BC_HOLIDAY_CATALOG: { id: string; label: string }[] = [
+  { id: "new_years",       label: "New Year's Day" },
+  { id: "family_day",      label: "Family Day (3rd Mon Feb)" },
+  { id: "good_friday",     label: "Good Friday" },
+  { id: "victoria_day",    label: "Victoria Day" },
+  { id: "canada_day",      label: "Canada Day" },
+  { id: "bc_day",          label: "BC Day (1st Mon Aug)" },
+  { id: "labour_day",      label: "Labour Day (1st Mon Sep)" },
+  { id: "truth_recon",     label: "National Day for Truth & Reconciliation" },
+  { id: "thanksgiving",    label: "Thanksgiving" },
+  { id: "remembrance_day", label: "Remembrance Day" },
+  { id: "christmas",       label: "Christmas Day" },
+  { id: "boxing_day",      label: "Boxing Day" },
+];
+
 /** All BC-observed closures for the given calendar year, in date order. */
 export function bcStatHolidays(year: number): BcHoliday[] {
   const easter = easterSunday(year);
@@ -86,12 +106,25 @@ export function bcStatHolidays(year: number): BcHoliday[] {
  * Build a lookup {iso → reason} for all BC holidays that fall in the
  * inclusive [fromIso, toIso] range. Pure function.
  */
-export function bcHolidayLookup(fromIso: string, toIso: string): Map<string, string> {
+/**
+ * Build a lookup {iso → reason} for all BC holidays that fall in the
+ * inclusive [fromIso, toIso] range. Pure function.
+ *
+ * If `excludedIds` is provided, holidays whose id is in that set are
+ * omitted from the result — used to honour the Settings → Stat Holidays
+ * per-holiday opt-out.
+ */
+export function bcHolidayLookup(
+  fromIso: string,
+  toIso: string,
+  excludedIds?: ReadonlySet<string>,
+): Map<string, string> {
   const fromYear = Number(fromIso.slice(0, 4));
   const toYear   = Number(toIso.slice(0, 4));
   const out = new Map<string, string>();
   for (let y = fromYear; y <= toYear; y++) {
     for (const h of bcStatHolidays(y)) {
+      if (excludedIds?.has(h.id)) continue;
       if (h.iso >= fromIso && h.iso <= toIso) out.set(h.iso, h.name);
     }
   }

@@ -161,6 +161,7 @@ pub fn run() {
             voice::parse_expense,
             voice::parse_recurring_expense,
             voice::parse_meeting_notes,
+            voice::amend_meeting_notes,
             printing::print_current_window,
         ])
         .run(tauri::generate_context!())

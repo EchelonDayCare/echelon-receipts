@@ -174,9 +174,12 @@ export async function seedWeekends(year: number, month: number): Promise<number>
 // is preserved (INSERT is a no-op when the row exists).
 export async function seedBcHolidays(year: number, month: number): Promise<number> {
   const { bcStatHolidays } = await import("./bcHolidays");
+  const { getDisabledBcHolidayIds } = await import("./centreCalendar");
+  const excluded = await getDisabledBcHolidayIds();
   const mmPrefix = `${year}-${String(month).padStart(2, "0")}-`;
   let added = 0;
   for (const h of bcStatHolidays(year)) {
+    if (excluded.has(h.id)) continue;
     if (!h.iso.startsWith(mmPrefix)) continue;
     const r = await execRetry(
       `INSERT OR IGNORE INTO centre_calendar(day, is_open, reason) VALUES(?, 0, ?)`,

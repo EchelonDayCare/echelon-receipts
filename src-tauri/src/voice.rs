@@ -1080,3 +1080,103 @@ pub async fn parse_meeting_notes(args: ParseMeetingArgs) -> Result<ParseMeetingR
         raw_json: content,
     })
 }
+
+// ─── Amend meeting notes with AI ────────────────────────────────────────
+//
+// Given the current `notes` text of a meeting plus a plain-language
+// `instruction`, return a rewritten notes body. No structured schema —
+// notes are freeform. The prompt is deliberately conservative: preserve
+// content unless explicitly told to change it, keep line breaks, do not
+// invent facts.
+
+#[derive(Deserialize)]
+pub struct AmendMeetingNotesArgs {
+    pub current_notes: String,
+    pub instruction: String,
+}
+
+#[derive(Serialize)]
+pub struct AmendMeetingNotesResult {
+    pub notes: String,
+    pub latency_ms: u64,
+}
+
+#[tauri::command]
+pub async fn amend_meeting_notes(args: AmendMeetingNotesArgs) -> Result<AmendMeetingNotesResult, String> {
+    let instr = args.instruction.trim();
+    if instr.is_empty() {
+        return Err("Tell me what you want changed (e.g. \"add a bullet about parent complaint follow-up\").".to_string());
+    }
+    if args.current_notes.len() > 20_000 || instr.len() > 2_000 {
+        return Err("Notes or instruction too long (max 20k / 2k chars).".to_string());
+    }
+
+    let api_key = crate::secrets::get_secret("azure_ai_key")?;
+
+    let system_prompt = "You revise a staff meeting's notes based on a plain-language instruction.\n\
+        Rules:\n\
+        - Return ONLY the revised notes text. No prose about what you changed. No code fences.\n\
+        - Preserve everything from the original notes UNLESS the instruction tells you to remove, replace or restructure it.\n\
+        - Keep line breaks and bullet formatting the user is already using.\n\
+        - Do not invent facts, names, dates, or decisions that aren't in the original notes or the instruction.\n\
+        - If the instruction is to reformat only, keep the content verbatim.\n\
+        - If the current notes are empty, treat the instruction as the entire content to write.";
+
+    let user = format!(
+        "CURRENT NOTES:\n{}\n\nINSTRUCTION:\n{}\n\nReturn the revised notes now:",
+        if args.current_notes.trim().is_empty() { "(none)" } else { args.current_notes.as_str() },
+        instr,
+    );
+
+    let body = json!({
+        "messages": [
+            { "role": "system", "content": system_prompt },
+            { "role": "user",   "content": user }
+        ],
+        "temperature": 0.2,
+        "max_tokens": 2500
+    });
+
+    let url = format!(
+        "{AZURE_CHAT_ENDPOINT}/openai/deployments/{CHAT_DEPLOY}/chat/completions?api-version={CHAT_API_VER}"
+    );
+    let start = std::time::Instant::now();
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(60))
+        .build()
+        .map_err(|e| redact(format!("http client: {e}"), &api_key))?;
+    let resp = client
+        .post(&url)
+        .header("api-key", &api_key)
+        .header("Content-Type", "application/json")
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| redact(format!("request: {e}"), &api_key))?;
+
+    let status = resp.status();
+    let raw = resp.text().await.map_err(|e| redact(format!("read: {e}"), &api_key))?;
+    if !status.is_success() {
+        return Err(redact(
+            format!("http {status} @ chat/completions :: {}", truncate(&raw, 800)),
+            &api_key,
+        ));
+    }
+    let v: Value = serde_json::from_str(&raw)
+        .map_err(|e| redact(format!("chat json: {e} :: {}", truncate(&raw, 400)), &api_key))?;
+    let content = v["choices"][0]["message"]["content"].as_str().unwrap_or("").trim().to_string();
+    if content.is_empty() {
+        return Err(redact(format!("chat: empty content :: {}", truncate(&raw, 400)), &api_key));
+    }
+    // Strip any accidental code fence wrapping the model may have added.
+    let cleaned = content
+        .trim_start_matches("```markdown").trim_start_matches("```md").trim_start_matches("```")
+        .trim_end_matches("```")
+        .trim()
+        .to_string();
+
+    Ok(AmendMeetingNotesResult {
+        notes: cleaned,
+        latency_ms: start.elapsed().as_millis() as u64,
+    })
+}
