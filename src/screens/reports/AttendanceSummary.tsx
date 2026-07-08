@@ -5,6 +5,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { db, getSettings, listStudents, listYears } from "../../lib/db";
 import { MARK_COLOR, MARK_LABEL, type MonthMark } from "../../lib/monthAttendance";
+import { daysOpenInRange, getDefaultOpenDays } from "../../lib/centreCalendar";
 import type { Student, SettingsMap } from "../../types";
 
 // ─── Types ────────────────────────────────────────────────────────────
@@ -127,30 +128,34 @@ export default function AttendanceAnalytics() {
       [dateFrom, dateTo]
     );
 
-    // Days centre open per month (from centre_calendar). Any day with
-    // is_open=0 subtracts from the calendar-days total.
+    // Days centre open per month.
+    //
+    // Pre-v2.1.1 this counted `centre_calendar` rows with is_open=0 and
+    // subtracted them from the calendar-day total. That was wrong because
+    // weekend closures are seeded lazily by MonthlyAttendance's onMount:
+    // reports run over months the user hadn't opened treated Sat/Sun as
+    // open, materially under-reporting rates. Now we treat centre_calendar
+    // strictly as an *override* table and derive the default open-days
+    // pattern from centre_default_open_days (Mon-Fri by default). All
+    // date iteration is UTC-anchored so day-of-week is stable.
     const cal = await d.select<any[]>(
       "SELECT day, is_open FROM centre_calendar WHERE day >= ? AND day <= ?",
       [dateFrom, dateTo]
     );
-    const closedDaysByYm = new Map<string, number>();
-    for (const c of cal) {
-      if (c.is_open) continue;
-      const k = String(c.day).slice(0, 7);
-      closedDaysByYm.set(k, (closedDaysByYm.get(k) ?? 0) + 1);
-    }
+    const overrides = new Map<string, boolean>();
+    for (const c of cal) overrides.set(String(c.day), !!c.is_open);
+    const defaultOpen = await getDefaultOpenDays();
 
     const months = monthsBetween(ymOf(dateFrom), ymOf(dateTo));
     const buckets: MonthlyBucket[] = months.map((ym) => {
       const [y, m] = ym.split("-").map((x) => parseInt(x, 10));
-      // Count calendar days in the ym that fall in [dateFrom, dateTo].
-      const monthStart = new Date(y, m - 1, 1);
-      const monthEnd = new Date(y, m, 0);
-      const rangeStart = new Date(Math.max(monthStart.getTime(), new Date(dateFrom).getTime()));
-      const rangeEnd = new Date(Math.min(monthEnd.getTime(), new Date(dateTo).getTime()));
-      const daysInRange = Math.max(0, Math.floor((rangeEnd.getTime() - rangeStart.getTime()) / 86400000) + 1);
-      const closed = closedDaysByYm.get(ym) ?? 0;
-      const daysOpen = Math.max(0, daysInRange - closed);
+      // ISO range of this month intersected with [dateFrom, dateTo].
+      const monthStartIso = `${ym}-01`;
+      const lastDom = new Date(Date.UTC(y, m, 0)).getUTCDate();
+      const monthEndIso = `${ym}-${String(lastDom).padStart(2, "0")}`;
+      const fromIso = monthStartIso < dateFrom ? dateFrom : monthStartIso;
+      const toIso = monthEndIso > dateTo ? dateTo : monthEndIso;
+      const daysOpen = daysOpenInRange(fromIso, toIso, overrides, defaultOpen);
       return { ym, p: 0, h: 0, a: 0, s: 0, v: 0, days_open: daysOpen, active_children: 0 };
     });
     const bucketByYm = new Map(buckets.map((b) => [b.ym, b]));
