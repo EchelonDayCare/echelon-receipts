@@ -205,12 +205,37 @@ export async function cancelShift(id: string, expectedVersion: number, reason?: 
 
 export async function softDeleteShift(id: string, expectedVersion: number): Promise<void> {
   const now = nowIso();
-  const res = await execRetry(
-    "UPDATE staff_shifts SET deleted_at = ?, updated_at = ?, version = version + 1 WHERE id = ? AND deleted_at IS NULL AND version = ?",
-    [now, now, id, expectedVersion],
-  );
-  if (res.rowsAffected === 0) throw new StaleWriteError("Shift");
-  await writeEvent(id, "deleted", {});
+  // Serialize with concurrent publish writes so we can't race a publish add
+  // vs our removal.
+  await serializeWrite(async () => {
+    // 1. Soft-delete the shift row itself.
+    const res = await execRetry(
+      "UPDATE staff_shifts SET deleted_at = ?, updated_at = ?, version = version + 1 WHERE id = ? AND deleted_at IS NULL AND version = ?",
+      [now, now, id, expectedVersion],
+    );
+    if (res.rowsAffected === 0) throw new StaleWriteError("Shift");
+
+    // 2. Clean up any staff_weekly_publish rows that reference this shift so a
+    //    published week no longer points at a ghost id. Without this, viewing
+    //    a past publish would show a soft-deleted shift as still-scheduled
+    //    (data-integrity bug in the schedule audit + WhatsApp re-send flows).
+    const referencing = await (await db()).select<Array<{ id: string; shift_ids_json: string }>>(
+      "SELECT id, shift_ids_json FROM staff_weekly_publish WHERE deleted_at IS NULL AND shift_ids_json LIKE ?",
+      [`%${id}%`],
+    );
+    for (const row of referencing) {
+      let ids: string[] = [];
+      try { ids = JSON.parse(row.shift_ids_json || "[]"); } catch { continue; }
+      if (!ids.includes(id)) continue; // false-positive LIKE hit (id fragment)
+      const filtered = ids.filter((x) => x !== id);
+      await execRetry(
+        "UPDATE staff_weekly_publish SET shift_ids_json = ?, updated_at = ?, version = version + 1 WHERE id = ?",
+        [JSON.stringify(filtered), now, row.id],
+      );
+    }
+
+    await writeEvent(id, "deleted", { unlinked_publishes: referencing.length });
+  });
 }
 
 // Reassign: cancels the old shift + inserts a mirror on the new staff.

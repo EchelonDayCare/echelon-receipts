@@ -201,7 +201,7 @@ export default function AttendanceAnalytics() {
         if (r.student_id !== selectedStudent) continue;
         const b = rowToBucket(r);
         if (!b) continue;
-        const mark: MonthMark = b === "p" ? "P" : b === "h" ? "H" : b === "a" ? "A" : b === "s" ? "S" : "V";
+        const mark: MonthMark = b === "p" || b === "h" ? "P" : "A";
         marks.push({ work_date: String(r.work_date), mark });
       }
       setChildMarks(marks);
@@ -402,8 +402,7 @@ function CentreView(props: {
           <Kpi label="Days centre open" value={totals.days_open} />
           <Kpi label="Active children" value={activeChildren} />
           <Kpi label="Present (P)" value={totals.p} accent={MARK_COLOR.P} />
-          <Kpi label="Half-day (H)" value={totals.h} accent={MARK_COLOR.H} />
-          <Kpi label="Absent+Sick+Vacation" value={totalAbs} accent={MARK_COLOR.A} />
+          <Kpi label="Absent (A)" value={totalAbs} accent={MARK_COLOR.A} />
         </div>
 
         {/* Monthly trend chart */}
@@ -426,10 +425,7 @@ function CentreView(props: {
               <Th align="right">Days open</Th>
               <Th align="right">Active kids</Th>
               <Th align="right" color={MARK_COLOR.P}>P</Th>
-              <Th align="right" color={MARK_COLOR.H}>H</Th>
               <Th align="right" color={MARK_COLOR.A}>A</Th>
-              <Th align="right" color={MARK_COLOR.S}>S</Th>
-              <Th align="right" color={MARK_COLOR.V}>V</Th>
               <Th align="right">Rate</Th>
             </tr>
           </thead>
@@ -441,11 +437,8 @@ function CentreView(props: {
                   <Td>{b.ym}</Td>
                   <Td align="right">{b.days_open}</Td>
                   <Td align="right">{b.active_children}</Td>
-                  <Td align="right">{b.p}</Td>
-                  <Td align="right">{b.h}</Td>
-                  <Td align="right">{b.a}</Td>
-                  <Td align="right">{b.s}</Td>
-                  <Td align="right">{b.v}</Td>
+                  <Td align="right">{b.p + b.h}</Td>
+                  <Td align="right">{b.a + b.s + b.v}</Td>
                   <Td align="right"><b>{(rate * 100).toFixed(1)}%</b></Td>
                 </tr>
               );
@@ -460,25 +453,19 @@ function CentreView(props: {
             <tr style={{ background: "#f8fafc" }}>
               <Th>Child</Th>
               <Th align="right" color={MARK_COLOR.P}>P</Th>
-              <Th align="right" color={MARK_COLOR.H}>H</Th>
               <Th align="right" color={MARK_COLOR.A}>A</Th>
-              <Th align="right" color={MARK_COLOR.S}>S</Th>
-              <Th align="right" color={MARK_COLOR.V}>V</Th>
               <Th align="right">Rate</Th>
             </tr>
           </thead>
           <tbody>
             {studentTotals.length === 0 && (
-              <tr><Td colSpan={7} center muted>No students in range.</Td></tr>
+              <tr><Td colSpan={4} center muted>No students in range.</Td></tr>
             )}
             {studentTotals.map((t) => (
               <tr key={t.student_id}>
                 <Td>{t.student_name}</Td>
-                <Td align="right">{t.p_days}</Td>
-                <Td align="right">{t.h_days}</Td>
-                <Td align="right">{t.a_days}</Td>
-                <Td align="right">{t.s_days}</Td>
-                <Td align="right">{t.v_days}</Td>
+                <Td align="right">{t.p_days + t.h_days}</Td>
+                <Td align="right">{t.a_days + t.s_days + t.v_days}</Td>
                 <Td align="right"><b>{(t.attendance_rate * 100).toFixed(1)}%</b></Td>
               </tr>
             ))}
@@ -517,10 +504,7 @@ function ChildView(props: {
       for (const m of marks) {
         if (m.work_date.slice(0, 7) !== b.ym) continue;
         if (m.mark === "P") p++;
-        else if (m.mark === "H") h++;
         else if (m.mark === "A") a++;
-        else if (m.mark === "S") s++;
-        else if (m.mark === "V") v++;
       }
       const denom = b.days_open;
       const rate = denom > 0 ? Math.min(1, (p + 0.5 * h) / denom) : 0;
@@ -539,10 +523,7 @@ function ChildView(props: {
           <Kpi label="Attendance rate" value={`${(student.attendance_rate * 100).toFixed(1)}%`} accent="#166534" />
           <Kpi label="Rank (in centre)" value={rank > 0 ? `${rank} of ${studentTotals.length}` : "—"} />
           <Kpi label="Present (P)" value={student.p_days} accent={MARK_COLOR.P} />
-          <Kpi label="Half-day (H)" value={student.h_days} accent={MARK_COLOR.H} />
-          <Kpi label="Absent" value={student.a_days} accent={MARK_COLOR.A} />
-          <Kpi label="Sick" value={student.s_days} accent={MARK_COLOR.S} />
-          <Kpi label="Vacation" value={student.v_days} accent={MARK_COLOR.V} />
+          <Kpi label="Absent (A)" value={student.a_days + student.s_days + student.v_days + student.h_days} accent={MARK_COLOR.A} />
         </div>
 
         {/* Trend chart */}
@@ -568,10 +549,7 @@ function ChildView(props: {
               <Th>Month</Th>
               <Th align="right">Days open</Th>
               <Th align="right" color={MARK_COLOR.P}>P</Th>
-              <Th align="right" color={MARK_COLOR.H}>H</Th>
               <Th align="right" color={MARK_COLOR.A}>A</Th>
-              <Th align="right" color={MARK_COLOR.S}>S</Th>
-              <Th align="right" color={MARK_COLOR.V}>V</Th>
               <Th align="right">Rate</Th>
             </tr>
           </thead>
@@ -580,11 +558,8 @@ function ChildView(props: {
               <tr key={m.ym}>
                 <Td>{m.ym}</Td>
                 <Td align="right">{m.days_open}</Td>
-                <Td align="right">{m.p}</Td>
-                <Td align="right">{m.h}</Td>
-                <Td align="right">{m.a}</Td>
-                <Td align="right">{m.s}</Td>
-                <Td align="right">{m.v}</Td>
+                <Td align="right">{m.p + m.h}</Td>
+                <Td align="right">{m.a + m.s + m.v}</Td>
                 <Td align="right"><b>{(m.rate * 100).toFixed(1)}%</b></Td>
               </tr>
             ))}

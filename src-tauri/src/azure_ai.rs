@@ -192,14 +192,19 @@ pub async fn extract_attendance(args: ExtractAttendanceArgs) -> Result<ExtractAt
 // ─── Monthly child attendance grid ──────────────────────────────────────
 //
 // The physical form (see Echelon Day Care template) is a matrix of
-// child_name × day_of_month with single-character marks. This extractor is
-// tailored to that shape and returns one row per child with a map of
-// {day-string -> mark-char}. Marks understood:
-//   P  present
-//   A  absent (or the paper's `-` dash)
-//   H  half day (or the paper's `~`/curly line)
-//   S  sick
-//   V  vacation
+// child_name × day_of_month with single-character marks. Since v2.2.2 we
+// only recognise two states: Present and Absent. On this specific paper
+// template Luxmi's staff mark:
+//   X  (or ✓, ✱, star, asterisk)   = Present  → emit "P"
+//   -  (dash, en-dash, hyphen)     = Absent   → emit "A"
+//   (blank cell inside a numbered day column)  → Absent → emit "A"
+//   (blank cell inside the wide "Saturday & Sunday" column)  → OMIT — not attendance data
+//   (any letter P/A written by hand)          → emit as-is
+// The 4 wide vertical bands labelled "Saturday & Sunday" between weeks
+// must NEVER be interpreted as day columns. They are gutters.
+//
+// Historical H/S/V marks may still exist in old data; on the read path we
+// collapse them to A. See src/lib/monthAttendance.ts.
 
 #[derive(Deserialize)]
 pub struct ExtractMonthAttendanceArgs {
@@ -212,7 +217,7 @@ pub struct ExtractMonthAttendanceArgs {
 #[derive(Serialize, Deserialize, Clone)]
 pub struct ExtractedMonthAttendanceRow {
     pub child_name: String,
-    pub marks: std::collections::BTreeMap<String, String>, // "1".."31" -> "P|A|H|S|V"
+    pub marks: std::collections::BTreeMap<String, String>, // "1".."31" -> "P|A"
 }
 
 #[derive(Serialize)]
@@ -245,8 +250,8 @@ pub async fn extract_month_attendance(args: ExtractMonthAttendanceArgs) -> Resul
                             "description": format!("Exact child name as written. Known children: {known_hint}") },
                         "marks": {
                             "type": "object",
-                            "description": "Object mapping day-of-month (as string '1'..'31') to a single-character mark: P=present, A=absent (or '-'/dash on paper), H=half-day (or '~' on paper), S=sick, V=vacation. OMIT days that are blank or covered by the merged 'Saturday & Sunday' block — do NOT emit those as 'A'. Emit only days where a distinct handwritten mark is present in the child's row.",
-                            "additionalProperties": { "type": "string", "enum": ["P","A","H","S","V"] }
+                            "description": "Object mapping day-of-month (as string '1'..'31') to a single-character mark: 'P' = present (any X, ✓, ✱, asterisk, star, or hand-written 'P'), 'A' = absent (any dash '-', en-dash, hyphen, blank inside a numbered day column, or hand-written 'A'). CRITICAL: (1) The 4 wide vertical bands labelled 'Saturday & Sunday' between weeks are NOT day columns — do NOT emit anything for cells inside those bands. (2) Do NOT invent a mark for a day the child's row does not clearly indicate — omit it. (3) Every emitted mark must be exactly 'P' or 'A' — no other letters. (4) Emit one row per child even if some marks are missing.",
+                            "additionalProperties": { "type": "string", "enum": ["P","A"] }
                         }
                     },
                     "required": ["child_name", "marks"],
@@ -277,8 +282,15 @@ pub async fn extract_month_attendance(args: ExtractMonthAttendanceArgs) -> Resul
         let mut marks: std::collections::BTreeMap<String, String> = std::collections::BTreeMap::new();
         if let Some(obj) = r["marks"].as_object() {
             for (k, v) in obj {
-                let val = v.as_str().unwrap_or("").trim().to_uppercase();
-                if !["P","A","H","S","V"].contains(&val.as_str()) { continue; }
+                let raw = v.as_str().unwrap_or("").trim().to_uppercase();
+                // v2.2.2: model schema is P/A only, but be defensive against
+                // stray legacy letters — collapse H/S/V to A on the fly so a
+                // model hiccup can't corrupt the DB.
+                let val = match raw.as_str() {
+                    "P" => "P".to_string(),
+                    "A" | "H" | "S" | "V" => "A".to_string(),
+                    _ => continue,
+                };
                 // Normalise key: strip leading zeros ("01" -> "1"), reject non-numeric.
                 let n: u32 = match k.trim().parse() { Ok(x) => x, Err(_) => continue };
                 if !(1..=31).contains(&n) { continue; }

@@ -3,48 +3,37 @@
 // in/out time here on purpose — the paper doesn't capture it either.
 import { db, execRetry } from "./db";
 
-// One-character mark codes. Kept short so cells are compact in the grid.
-export type MonthMark = "P" | "A" | "H" | "S" | "V";
-// P = present         (full day)
-// A = absent          (no reason given)
-// H = half-day        (partial attendance)
-// S = sick            (absent, sick note)
-// V = vacation        (planned family absence)
+// One-character mark codes. Only two states matter for this centre:
+// P = present, A = absent. (v2.2.2 dropped H/S/V per user directive —
+// legacy rows migrate to A on read; the setter never writes H/S/V again.)
+export type MonthMark = "P" | "A";
 
 export const MARK_LABEL: Record<MonthMark, string> = {
   P: "Present",
   A: "Absent",
-  H: "Half-day",
-  S: "Sick",
-  V: "Vacation",
 };
 
 export const MARK_COLOR: Record<MonthMark, string> = {
   P: "#166534", // green
   A: "#991b1b", // red
-  H: "#a16207", // amber
-  S: "#7c3aed", // purple
-  V: "#075985", // blue
 };
 
 // Map to the legacy `child_attendance.status` column so the monthly grid
-// and the (still-supported) daily view stay in sync. Half-day has no direct
-// analogue; stored as 'present' with hours_decimal=0 by convention.
+// and the (still-supported) daily view stay in sync.
 export function markToLegacyStatus(m: MonthMark): string {
   switch (m) {
     case "P": return "present";
     case "A": return "absent";
-    case "H": return "present";
-    case "S": return "sick";
-    case "V": return "holiday";
   }
 }
 export function legacyStatusToMark(s: string | null | undefined): MonthMark | null {
   switch ((s || "").toLowerCase()) {
     case "present": return "P";
     case "absent":  return "A";
-    case "sick":    return "S";
-    case "holiday": return "V";
+    // Legacy rows written before v2.2.2 that used sick/holiday/half-day
+    // collapse to A so historical months still render coherently.
+    case "sick":    return "A";
+    case "holiday": return "A";
     case "late":    return "P";
     default:        return null;
   }

@@ -898,6 +898,16 @@ async function ensureSchema(d: Database): Promise<void> {
     await d.execute("CREATE INDEX ix_staff_shifts_date  ON staff_shifts(shift_date) WHERE deleted_at IS NULL");
     await d.execute("CREATE INDEX ix_staff_shifts_staff ON staff_shifts(staff_id, shift_date) WHERE deleted_at IS NULL");
   }
+  // Enforce the one-shift-per-staff-per-day business rule at the DB level.
+  // Complements the app-layer hasExistingShift() guard so concurrent inserts
+  // can't slip a duplicate through the race window.
+  // Partial index: only enforced on live, non-cancelled rows so soft-deleted
+  // or cancelled shifts don't block a legitimate replacement on the same day.
+  await d.execute(
+    "CREATE UNIQUE INDEX IF NOT EXISTS ux_staff_shifts_one_per_day " +
+    "ON staff_shifts(staff_id, shift_date) " +
+    "WHERE deleted_at IS NULL AND status != 'cancelled'",
+  );
   if (!(await tableExists("staff_shift_events"))) {
     console.warn("[ensureSchema] creating staff_shift_events");
     await d.execute(`CREATE TABLE staff_shift_events (

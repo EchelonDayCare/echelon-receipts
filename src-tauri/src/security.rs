@@ -434,6 +434,22 @@ pub fn load_envelope(path: &std::path::Path) -> Result<SecurityEnvelope, Securit
     Ok(env)
 }
 
+/// Global write lock guarding load-modify-save of the security envelope.
+///
+/// Every Tauri command that mutates the envelope (v2_create_pin,
+/// v2_change_pin, v2_reset_pin, v2_generate_recovery,
+/// v2_unlock_with_recovery, migration paths) must hold this lock across the
+/// entire load → mutate → save critical section. Without it two concurrent
+/// commands could each `load_envelope`, both mutate their local copy, and
+/// the second `save_envelope` would silently clobber the first (classic
+/// TOCTOU — e.g. adding a recovery code while the user changes their PIN
+/// would drop one of the two writes on the floor).
+///
+/// The lock is deliberately scoped to envelope mutations only — reads
+/// (`load_envelope`) do not need it because the tmp-rename in
+/// `save_envelope` gives atomic file replace semantics per the OS.
+pub static ENVELOPE_WRITE_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 pub fn save_envelope(
     path: &std::path::Path,
     env: &SecurityEnvelope,

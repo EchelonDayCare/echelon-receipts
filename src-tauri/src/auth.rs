@@ -500,6 +500,8 @@ pub async fn v2_create_pin(
     if pin.chars().count() < 6 {
         return Err(AuthError::PinTooShort);
     }
+    // Serialize envelope mutations to prevent TOCTOU vs concurrent commands.
+    let _env_write_guard = security::ENVELOPE_WRITE_LOCK.lock().await;
     let env_path = envelope_path(&app)?;
 
     // Allow retry if a prior setup wizard crashed. recover_on_startup
@@ -629,6 +631,7 @@ pub async fn v2_change_pin(
     if new_pin.chars().count() < 6 {
         return Err(AuthError::PinTooShort);
     }
+    let _env_write_guard = security::ENVELOPE_WRITE_LOCK.lock().await;
     let env_path = envelope_path(&app)?;
     let mut env = security::load_envelope(&env_path)?;
     let slot = env
@@ -678,6 +681,7 @@ pub async fn v2_reset_pin(
     if new_pin.chars().count() < 6 {
         return Err(AuthError::PinTooShort);
     }
+    let _env_write_guard = security::ENVELOPE_WRITE_LOCK.lock().await;
     let env_path = envelope_path(&app)?;
     let mut env = security::load_envelope(&env_path)?;
     if env.find_slot(SlotKind::Pin).is_none() {
@@ -764,6 +768,7 @@ pub async fn v2_generate_recovery(
     auth: tauri::State<'_, AuthState>,
     proof: StepUpProof,
 ) -> Result<String, AuthError> {
+    let _env_write_guard = security::ENVELOPE_WRITE_LOCK.lock().await;
     let env_path = envelope_path(&app)?;
     let mut env = security::load_envelope(&env_path)?;
     auth.verify_step_up(&env, &proof)?;
