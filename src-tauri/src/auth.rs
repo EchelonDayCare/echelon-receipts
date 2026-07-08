@@ -142,6 +142,14 @@ impl AuthState {
         self.inner.lock().unwrap().mdk.is_some()
     }
 
+    /// Return a copy of the currently-loaded MDK, if any. Used by the
+    /// "change PIN while unlocked" flow (e.g. after unlocking via recovery
+    /// code when the user has forgotten their PIN).
+    fn clone_mdk(&self) -> Option<Mdk> {
+        let g = self.inner.lock().unwrap();
+        g.mdk.as_ref().map(|m| Mdk::from_bytes(*m.as_bytes()))
+    }
+
     /// Check whether unlock is currently rate-limited. Returns
     /// `Err(RateLimited)` with remaining seconds if so.
     fn check_rate_limit(&self) -> Result<(), AuthError> {
@@ -522,6 +530,36 @@ pub async fn v2_change_pin(
     if !auth.has_mdk() {
         auth.set_mdk(mdk);
     }
+    Ok(())
+}
+
+/// Set a new PIN without requiring the old one, using the MDK already
+/// loaded in the current session. Used when the user has forgotten
+/// their PIN and unlocked via recovery code — they can pick a fresh
+/// PIN without needing to guess the old one. Requires the app to be
+/// currently unlocked (v2_state.isUnlocked == true).
+#[tauri::command]
+pub async fn v2_reset_pin(
+    app: tauri::AppHandle,
+    auth: tauri::State<'_, AuthState>,
+    new_pin: String,
+) -> Result<(), AuthError> {
+    let mdk = auth.clone_mdk().ok_or(AuthError::NotSetUp)?;
+    let env_path = envelope_path(&app)?;
+    let mut env = security::load_envelope(&env_path)?;
+    if env.find_slot(SlotKind::Pin).is_none() {
+        return Err(AuthError::NotSetUp);
+    }
+    let device_secret = device_secret::get_or_create()?;
+    let new_slot = security::wrap_mdk(
+        SlotKind::Pin,
+        &mdk,
+        new_pin.as_bytes(),
+        &device_secret,
+        ArgonParams::default(),
+    )?;
+    env.upsert_slot(new_slot);
+    security::save_envelope(&env_path, &env)?;
     Ok(())
 }
 

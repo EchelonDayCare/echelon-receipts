@@ -188,14 +188,21 @@ function ChangePinModal({ onDone, onCancel }: { onDone: () => void; onCancel: ()
   const [confirm, setConfirm] = useState("");
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
-  const canSubmit = oldPin.length >= 4 && newPin.length >= 6 && newPin === confirm && !busy;
+  // Set an initial PIN without knowing the old one — only allowed while
+  // the app is already unlocked (i.e. after unlocking via recovery code).
+  const [forgotOld, setForgotOld] = useState(false);
+  const canSubmit = (forgotOld || oldPin.length >= 4) && newPin.length >= 6 && newPin === confirm && !busy;
 
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!canSubmit) return;
     setBusy(true); setErr(null);
     try {
-      await invoke("v2_change_pin", { oldPin, newPin });
+      if (forgotOld) {
+        await invoke("v2_reset_pin", { newPin });
+      } else {
+        await invoke("v2_change_pin", { oldPin, newPin });
+      }
       onDone();
     } catch (e: any) {
       const msg = String(e?.message ?? e);
@@ -208,10 +215,33 @@ function ChangePinModal({ onDone, onCancel }: { onDone: () => void; onCancel: ()
     <div style={overlay}>
       <form onSubmit={submit} style={card}>
         <div style={{ fontSize: 18, fontWeight: 600 }}>Change PIN</div>
-        <label style={label}>Current PIN</label>
-        <input type="password" value={oldPin} onChange={(e) => { setOldPin(e.target.value); setErr(null); }} style={input} autoFocus />
+        {!forgotOld && (
+          <>
+            <label style={label}>Current PIN</label>
+            <input type="password" value={oldPin} onChange={(e) => { setOldPin(e.target.value); setErr(null); }} style={input} autoFocus />
+            <button
+              type="button"
+              onClick={() => { setForgotOld(true); setOldPin(""); setErr(null); }}
+              style={{ background: "none", border: "none", color: "#2c5282", fontSize: 12, textAlign: "left", padding: 0, marginTop: 4, cursor: "pointer" }}
+            >
+              I don't remember the current PIN
+            </button>
+          </>
+        )}
+        {forgotOld && (
+          <div style={{ padding: 10, background: "#fef3c7", border: "1px solid #fbbf24", borderRadius: 6, fontSize: 12, color: "#92400e" }}>
+            You're already unlocked, so we can set a fresh PIN without the old one. This rewraps the same encrypted database under your new PIN.
+            <button
+              type="button"
+              onClick={() => setForgotOld(false)}
+              style={{ background: "none", border: "none", color: "#92400e", fontSize: 12, textDecoration: "underline", cursor: "pointer", padding: 0, marginLeft: 6 }}
+            >
+              Undo
+            </button>
+          </div>
+        )}
         <label style={label}>New PIN (6+ chars)</label>
-        <input type="password" value={newPin} onChange={(e) => { setNewPin(e.target.value); setErr(null); }} style={input} />
+        <input type="password" value={newPin} onChange={(e) => { setNewPin(e.target.value); setErr(null); }} style={input} autoFocus={forgotOld} />
         <label style={label}>Confirm new PIN</label>
         <input type="password" value={confirm} onChange={(e) => { setConfirm(e.target.value); setErr(null); }} style={input} />
         {newPin && confirm && newPin !== confirm && <div style={errStyle}>New PINs don't match</div>}
@@ -219,7 +249,7 @@ function ChangePinModal({ onDone, onCancel }: { onDone: () => void; onCancel: ()
         <div style={{ display: "flex", gap: 10, marginTop: 8 }}>
           <button type="button" onClick={onCancel} style={{ ...btn, flex: 1 }}>Cancel</button>
           <button type="submit" disabled={!canSubmit} style={{ ...btnPrimary, flex: 1 }}>
-            {busy ? "Saving…" : "Change PIN"}
+            {busy ? "Saving…" : forgotOld ? "Set new PIN" : "Change PIN"}
           </button>
         </div>
       </form>
