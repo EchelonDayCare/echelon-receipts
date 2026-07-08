@@ -613,6 +613,8 @@ const styles: Record<string, React.CSSProperties> = {
     borderRadius: 8,
     fontFamily: "monospace",
     outline: "none",
+    width: "100%",
+    boxSizing: "border-box",
   },
   error: { color: "#c00", fontSize: 13, textAlign: "center" },
   button: {
