@@ -8,6 +8,13 @@
     "opener:default",
     "opener:allow-open-path",
     "opener:allow-open-url",
+    {
+      "identifier": "opener:allow-open-url",
+      "allow": [
+        { "url": "whatsapp:*" },
+        { "url": "sms:*" }
+      ]
+    },
     "opener:allow-reveal-item-in-dir",
     "dialog:default",
     "fs:default",
