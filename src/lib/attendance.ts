@@ -88,9 +88,11 @@ export async function upsertAttendance(args: {
 }): Promise<void> {
   const hours = hoursBetween(args.inTime, args.outTime);
   const status = args.status || (args.inTime || args.outTime ? "present" : "absent");
+  // NOTE: attendance_mark is a monthly-view override (see Migration 027).
+  // Any daily write clears it — the source of truth is now the daily data.
   await execRetry(
-    `INSERT INTO child_attendance(student_id, work_date, in_time, out_time, hours_decimal, signed_in_by, signed_out_by, status, notes)
-     VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `INSERT INTO child_attendance(student_id, work_date, in_time, out_time, hours_decimal, signed_in_by, signed_out_by, status, notes, attendance_mark)
+     VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
      ON CONFLICT(student_id, work_date) DO UPDATE SET
        in_time=excluded.in_time,
        out_time=excluded.out_time,
@@ -98,7 +100,8 @@ export async function upsertAttendance(args: {
        signed_in_by=COALESCE(excluded.signed_in_by, child_attendance.signed_in_by),
        signed_out_by=COALESCE(excluded.signed_out_by, child_attendance.signed_out_by),
        status=excluded.status,
-       notes=COALESCE(excluded.notes, child_attendance.notes)`,
+       notes=COALESCE(excluded.notes, child_attendance.notes),
+       attendance_mark=NULL`,
     [args.studentId, args.workDate, args.inTime, args.outTime, hours,
      args.signedInBy ?? null, args.signedOutBy ?? null, status, args.notes ?? null]
   );
@@ -110,12 +113,13 @@ export async function stampIn(studentId: number, workDate: string, who?: string)
   const now = new Date();
   const hhmm = `${String(now.getHours()).padStart(2, "0")}:${String(now.getMinutes()).padStart(2, "0")}`;
   await execRetry(
-    `INSERT INTO child_attendance(student_id, work_date, in_time, hours_decimal, signed_in_by, status)
-     VALUES(?, ?, ?, 0, ?, 'present')
+    `INSERT INTO child_attendance(student_id, work_date, in_time, hours_decimal, signed_in_by, status, attendance_mark)
+     VALUES(?, ?, ?, 0, ?, 'present', NULL)
      ON CONFLICT(student_id, work_date) DO UPDATE SET
        in_time=COALESCE(child_attendance.in_time, excluded.in_time),
        signed_in_by=COALESCE(child_attendance.signed_in_by, excluded.signed_in_by),
-       status='present'`,
+       status='present',
+       attendance_mark=NULL`,
     [studentId, workDate, hhmm, who ?? null]
   );
 }
@@ -142,7 +146,7 @@ export async function stampOut(studentId: number, workDate: string, who?: string
   const row = cur[0];
   const newHours = hoursBetween(row.in_time, hhmm);
   await execRetry(
-    `UPDATE child_attendance SET out_time=?, hours_decimal=?, signed_out_by=COALESCE(signed_out_by, ?), status='present'
+    `UPDATE child_attendance SET out_time=?, hours_decimal=?, signed_out_by=COALESCE(signed_out_by, ?), status='present', attendance_mark=NULL
        WHERE student_id=? AND work_date=?`,
     [hhmm, newHours, who ?? null, studentId, workDate]
   );
@@ -151,12 +155,13 @@ export async function stampOut(studentId: number, workDate: string, who?: string
 
 export async function markAbsent(studentId: number, workDate: string, status: AttendanceStatus = "absent", notes: string | null = null): Promise<void> {
   await execRetry(
-    `INSERT INTO child_attendance(student_id, work_date, hours_decimal, status, notes)
-     VALUES(?, ?, 0, ?, ?)
+    `INSERT INTO child_attendance(student_id, work_date, hours_decimal, status, notes, attendance_mark)
+     VALUES(?, ?, 0, ?, ?, NULL)
      ON CONFLICT(student_id, work_date) DO UPDATE SET
        in_time=NULL, out_time=NULL, hours_decimal=0,
        status=excluded.status,
-       notes=COALESCE(excluded.notes, child_attendance.notes)`,
+       notes=COALESCE(excluded.notes, child_attendance.notes),
+       attendance_mark=NULL`,
     [studentId, workDate, status, notes]
   );
 }

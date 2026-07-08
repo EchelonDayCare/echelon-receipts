@@ -58,6 +58,18 @@ function statusToBucket(status: string | null, hours: number): "p"|"h"|"a"|"s"|"
   return null;
 }
 
+// Post-Migration 027: prefer the explicit monthly mark if set. Falls back
+// to hours-based inference only for pure daily-flow rows (no mark).
+function rowToBucket(r: { status: string | null; hours_decimal: number; attendance_mark: string | null }): "p"|"h"|"a"|"s"|"v"|null {
+  const m = (r.attendance_mark || "").toUpperCase();
+  if (m === "P") return "p";
+  if (m === "H") return "h";
+  if (m === "A") return "a";
+  if (m === "S") return "s";
+  if (m === "V") return "v";
+  return statusToBucket(r.status, r.hours_decimal ?? 0);
+}
+
 // ─── Component ────────────────────────────────────────────────────────
 type ViewMode = "centre" | "child";
 
@@ -109,7 +121,7 @@ export default function AttendanceAnalytics() {
     // Per-student aggregates for the range
     const d = await db();
     const rowsAll = await d.select<any[]>(
-      `SELECT student_id, status, COALESCE(hours_decimal, 0) AS hours_decimal, work_date
+      `SELECT student_id, status, COALESCE(hours_decimal, 0) AS hours_decimal, work_date, attendance_mark
          FROM child_attendance
         WHERE work_date >= ? AND work_date <= ?`,
       [dateFrom, dateTo]
@@ -156,7 +168,7 @@ export default function AttendanceAnalytics() {
     const activeInMonth = new Map<string, Set<number>>();
 
     for (const r of rowsAll) {
-      const bucket = statusToBucket(r.status, r.hours_decimal ?? 0);
+      const bucket = rowToBucket(r);
       if (!bucket) continue;
       const ym = String(r.work_date).slice(0, 7);
       const b = bucketByYm.get(ym);
@@ -196,7 +208,7 @@ export default function AttendanceAnalytics() {
       const marks: { work_date: string; mark: MonthMark }[] = [];
       for (const r of rowsAll) {
         if (r.student_id !== selectedStudent) continue;
-        const b = statusToBucket(r.status, r.hours_decimal ?? 0);
+        const b = rowToBucket(r);
         if (!b) continue;
         const mark: MonthMark = b === "p" ? "P" : b === "h" ? "H" : b === "a" ? "A" : b === "s" ? "S" : "V";
         marks.push({ work_date: String(r.work_date), mark });

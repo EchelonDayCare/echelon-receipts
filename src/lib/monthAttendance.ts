@@ -63,12 +63,16 @@ export interface CalendarDay {
 }
 
 // ---- Roster + marks ---------------------------------------------------
+// Read precedence (post-Migration 027):
+//   1. `attendance_mark` if set → authoritative monthly view.
+//   2. Otherwise fall back to legacyStatusToMark(status).
+// Daily writers clear `attendance_mark` on every write, so it's never stale.
 export async function monthGrid(year: number, month: number): Promise<MonthCell[]> {
   const d = await db();
   const ym = `${year}-${String(month).padStart(2, "0")}`;
   const rows = await d.select<any[]>(
     `SELECT s.id AS student_id, s.name AS student_name,
-            a.work_date, a.status, a.hours_decimal
+            a.work_date, a.status, a.hours_decimal, a.attendance_mark
        FROM students s
        LEFT JOIN child_attendance a
               ON a.student_id = s.id AND a.work_date LIKE ?
@@ -83,35 +87,66 @@ export async function monthGrid(year: number, month: number): Promise<MonthCell[
     }
     if (!r.work_date) continue;
     const day = String(parseInt(r.work_date.slice(8, 10), 10));
-    // Half-day heuristic: present + 0 hours + not sick/holiday = "H".
-    // Otherwise take the legacy status.
-    let m = legacyStatusToMark(r.status);
-    if (m === "P" && (r.hours_decimal ?? 0) === 0 && r.status?.toLowerCase() === "present") {
-      // ambiguous — could be a monthly-flow "P" too, so default to P.
-      m = "P";
-    }
+    const m: MonthMark | null = r.attendance_mark
+      ? (r.attendance_mark as MonthMark)
+      : legacyStatusToMark(r.status);
     if (m) map.get(r.student_id)!.marks[day] = m;
   }
   return Array.from(map.values());
 }
 
+// Monthly-grid writer. See Migration 027 in db.ts for the ownership contract:
+//   - If the row has daily evidence (in_time or out_time), only update
+//     attendance_mark. Do NOT touch status/hours/times.
+//   - If no daily evidence, also mirror status + hours_decimal so daily
+//     screens render consistently.
+//   - Clearing (mark=null) removes only attendance_mark on evidence-bearing
+//     rows; on monthly-only rows it deletes the row as before.
 export async function setMark(studentId: number, workDate: string, mark: MonthMark | null): Promise<void> {
+  const d = await db();
+  const existing = await d.select<Array<{ in_time: string | null; out_time: string | null }>>(
+    "SELECT in_time, out_time FROM child_attendance WHERE student_id=? AND work_date=?",
+    [studentId, workDate]
+  );
+  const hasDailyEvidence = existing.length > 0 && !!(existing[0].in_time || existing[0].out_time);
+
   if (mark === null) {
-    await execRetry("DELETE FROM child_attendance WHERE student_id=? AND work_date=?", [studentId, workDate]);
+    if (hasDailyEvidence) {
+      await execRetry(
+        "UPDATE child_attendance SET attendance_mark=NULL WHERE student_id=? AND work_date=?",
+        [studentId, workDate]
+      );
+    } else {
+      await execRetry(
+        "DELETE FROM child_attendance WHERE student_id=? AND work_date=?",
+        [studentId, workDate]
+      );
+    }
     return;
   }
+
+  if (hasDailyEvidence) {
+    // Preserve the daily row's in/out/hours; only override the monthly display.
+    await execRetry(
+      "UPDATE child_attendance SET attendance_mark=? WHERE student_id=? AND work_date=?",
+      [mark, studentId, workDate]
+    );
+    return;
+  }
+
   const status = markToLegacyStatus(mark);
   // hours_decimal: 0 for absent/sick/vacation/half-day; nominal 8 for present
   // (kept for backward-compat with reports; real time is entered on the
   // Daily view for centres that opt into time tracking).
   const hours = mark === "P" ? 8 : 0;
   await execRetry(
-    `INSERT INTO child_attendance(student_id, work_date, hours_decimal, status)
-     VALUES(?, ?, ?, ?)
+    `INSERT INTO child_attendance(student_id, work_date, hours_decimal, status, attendance_mark)
+     VALUES(?, ?, ?, ?, ?)
      ON CONFLICT(student_id, work_date) DO UPDATE SET
-       status=excluded.status,
-       hours_decimal=excluded.hours_decimal`,
-    [studentId, workDate, hours, status]
+       hours_decimal   = excluded.hours_decimal,
+       status          = excluded.status,
+       attendance_mark = excluded.attendance_mark`,
+    [studentId, workDate, hours, status, mark]
   );
 }
 

@@ -1276,6 +1276,42 @@ Thanks,
     await d.execute("CREATE INDEX ix_staff_meeting_actions_open ON staff_meeting_actions(done, owner_staff_id)");
   }
 
+  // ─── Migration 027 — Explicit monthly attendance mark (v2.1.1) ───────
+  // The monthly grid used to encode half-days as `status='present',
+  // hours_decimal=0` — which collides with the daily-flow shape where a
+  // child has stamped in but not yet out. Result: H marks silently
+  // decayed to P on refresh. Fix: add an explicit `attendance_mark`
+  // column that acts as a *monthly-view override*.
+  //
+  // Ownership contract:
+  //   * `setMark(P|A|H|S|V)` in monthAttendance.ts writes attendance_mark.
+  //     When the row has no daily evidence (no in/out times), it also
+  //     mirrors status + hours_decimal so daily views stay consistent.
+  //     When daily evidence exists, ONLY attendance_mark is written —
+  //     preserving the real times.
+  //   * `setMark(null)` clears attendance_mark, and deletes the row only
+  //     if there's no daily evidence to preserve.
+  //   * All daily writers (stampIn, stampOut, upsertAttendance,
+  //     markAbsent) clear attendance_mark on every write so a stale
+  //     monthly override can never survive a daily update.
+  //
+  // Backfill is deliberately narrow — only rows shaped like they came
+  // from the monthly grid (status set, no in/out, hours=0) are given a
+  // mark. Rows with real daily evidence are left NULL and resolved via
+  // legacy fallback (which for those rows is already correct).
+  await addCol("child_attendance", "attendance_mark", "TEXT");
+  await d.execute(
+    `UPDATE child_attendance
+        SET attendance_mark = CASE
+          WHEN status='present' AND hours_decimal=0 AND in_time IS NULL AND out_time IS NULL THEN 'H'
+          WHEN status='absent'  AND hours_decimal=0 AND in_time IS NULL AND out_time IS NULL THEN 'A'
+          WHEN status='sick'    AND hours_decimal=0 AND in_time IS NULL AND out_time IS NULL THEN 'S'
+          WHEN status='holiday' AND hours_decimal=0 AND in_time IS NULL AND out_time IS NULL THEN 'V'
+          ELSE NULL
+        END
+      WHERE attendance_mark IS NULL`,
+  );
+
   await logIntegrityWarnings(d);
 }
 
