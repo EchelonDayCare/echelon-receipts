@@ -905,3 +905,178 @@ pub async fn parse_recurring_expense(args: ParseRecurringArgs) -> Result<ParseRe
         raw_json: content,
     })
 }
+
+
+// ─── parse_meeting_notes ────────────────────────────────────────────────
+// Staff meeting notes captured in plain English → structured meeting rows
+// with attendees returned as free-text names. The frontend resolves those
+// to real staff IDs (whitelist) before saving.
+
+#[derive(Deserialize)]
+pub struct ParseMeetingArgs {
+    pub text: String,
+    pub now_iso: String,
+    pub tz: String,
+    pub staff_names: Vec<String>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct ParsedMeeting {
+    pub meeting_date: String,
+    pub title: String,
+    pub attendees: Vec<String>,
+    pub agenda: String,
+    pub notes: String,
+    pub action_items: Vec<ParsedActionItem>,
+    pub confidence: Option<f32>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct ParsedActionItem {
+    pub text: String,
+    pub owner: Option<String>,
+    pub due_date: Option<String>,
+}
+
+#[derive(Serialize)]
+pub struct ParseMeetingResult {
+    pub meetings: Vec<ParsedMeeting>,
+    pub latency_ms: u64,
+    pub raw_json: String,
+}
+
+#[tauri::command]
+pub async fn parse_meeting_notes(args: ParseMeetingArgs) -> Result<ParseMeetingResult, String> {
+    let text = args.text.trim();
+    if text.is_empty() {
+        return Err("Nothing to parse — the text box is empty.".to_string());
+    }
+    if text.len() > 8000 {
+        return Err("Text too long (>8000 chars). Trim before parsing.".to_string());
+    }
+
+    let api_key = crate::secrets::get_secret("azure_ai_key")?;
+
+    let staff_hint = if args.staff_names.is_empty() {
+        "(no staff on file yet)".to_string()
+    } else {
+        args.staff_names.join(", ")
+    };
+
+    let system_prompt = format!(
+        "You extract a staff meeting record from free-text notes. Return STRICT JSON matching the schema — no prose.\n\
+         \n\
+         Current local time: {now_iso}\n\
+         User timezone: {tz}\n\
+         Known staff names: {staff_hint}\n\
+         \n\
+         Rules:\n\
+         - meeting_date: resolve 'today', 'yesterday', 'last Tuesday' -> YYYY-MM-DD. Default to today.\n\
+         - title: short human label ('July staff meeting', 'Weekly stand-up'). If unclear, generate 'Staff meeting — <date>'.\n\
+         - attendees: array of staff names taken verbatim from the text; match to Known staff names when possible.\n\
+         - agenda: bullet-style summary of topics on the agenda (may be empty).\n\
+         - notes: full narrative of what was discussed, decisions made, follow-ups. Preserve line breaks.\n\
+         - action_items: distinct to-dos assigned to someone. Each has text; owner (name) and due_date (YYYY-MM-DD) are optional.\n\
+         - confidence: 0.0-1.0 self-report.\n\
+         - If the text contains multiple separate meetings, return one entry each. Otherwise return exactly one.\n\
+         \n\
+         Return {{ \"meetings\": [...] }} — always wrap in an object.",
+        now_iso = args.now_iso,
+        tz = args.tz,
+        staff_hint = staff_hint,
+    );
+
+    let schema = json!({
+        "type": "object",
+        "properties": {
+            "meetings": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "meeting_date": { "type": "string" },
+                        "title":        { "type": "string" },
+                        "attendees":    { "type": "array", "items": { "type": "string" } },
+                        "agenda":       { "type": "string" },
+                        "notes":        { "type": "string" },
+                        "action_items": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "text":     { "type": "string" },
+                                    "owner":    { "type": ["string", "null"] },
+                                    "due_date": { "type": ["string", "null"] }
+                                },
+                                "required": ["text", "owner", "due_date"],
+                                "additionalProperties": false
+                            }
+                        },
+                        "confidence": { "type": ["number", "null"] }
+                    },
+                    "required": ["meeting_date", "title", "attendees", "agenda", "notes", "action_items", "confidence"],
+                    "additionalProperties": false
+                }
+            }
+        },
+        "required": ["meetings"],
+        "additionalProperties": false
+    });
+
+    let body = json!({
+        "messages": [
+            { "role": "system", "content": system_prompt },
+            { "role": "user",   "content": text }
+        ],
+        "temperature": 0,
+        "max_tokens": 2500,
+        "response_format": {
+            "type": "json_schema",
+            "json_schema": { "name": "MeetingEntries", "schema": schema, "strict": true }
+        }
+    });
+
+    let url = format!(
+        "{AZURE_CHAT_ENDPOINT}/openai/deployments/{CHAT_DEPLOY}/chat/completions?api-version={CHAT_API_VER}"
+    );
+    let start = std::time::Instant::now();
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(60))
+        .build()
+        .map_err(|e| redact(format!("http client: {e}"), &api_key))?;
+    let resp = client
+        .post(&url)
+        .header("api-key", &api_key)
+        .header("Content-Type", "application/json")
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| redact(format!("request: {e}"), &api_key))?;
+
+    let status = resp.status();
+    let raw = resp.text().await.map_err(|e| redact(format!("read: {e}"), &api_key))?;
+    if !status.is_success() {
+        return Err(redact(
+            format!("http {status} @ chat/completions :: {}", truncate(&raw, 800)),
+            &api_key,
+        ));
+    }
+    let v: Value = serde_json::from_str(&raw)
+        .map_err(|e| redact(format!("chat json: {e} :: {}", truncate(&raw, 400)), &api_key))?;
+    let content = v["choices"][0]["message"]["content"].as_str().unwrap_or("").trim().to_string();
+    if content.is_empty() {
+        return Err(redact(format!("chat: empty content :: {}", truncate(&raw, 400)), &api_key));
+    }
+    #[derive(Deserialize)]
+    struct Wrapper { meetings: Vec<ParsedMeeting> }
+    let parsed: Wrapper = serde_json::from_str(&content)
+        .map_err(|e| redact(format!("parsed JSON: {e} :: {}", truncate(&content, 400)), &api_key))?;
+
+    let cleaned: Vec<ParsedMeeting> = parsed.meetings.into_iter().filter(|m| !m.title.trim().is_empty()).collect();
+
+    Ok(ParseMeetingResult {
+        meetings: cleaned,
+        latency_ms: start.elapsed().as_millis() as u64,
+        raw_json: content,
+    })
+}

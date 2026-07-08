@@ -5,7 +5,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { db, getSettings, listStudents, listYears } from "../../lib/db";
 import { MARK_COLOR, MARK_LABEL, type MonthMark } from "../../lib/monthAttendance";
-import { daysOpenInRange, getDefaultOpenDays } from "../../lib/centreCalendar";
+import { daysOpenInRange, getDefaultOpenDays, isBcHolidaysEnabled, mergeBcHolidayOverrides } from "../../lib/centreCalendar";
 import type { Student, SettingsMap } from "../../types";
 
 // ─── Types ────────────────────────────────────────────────────────────
@@ -128,6 +128,9 @@ export default function AttendanceAnalytics() {
     const overrides = new Map<string, boolean>();
     for (const c of cal) overrides.set(String(c.day), !!c.is_open);
     const defaultOpen = await getDefaultOpenDays();
+    const overridesWithHolidays = (await isBcHolidaysEnabled())
+      ? mergeBcHolidayOverrides(overrides, dateFrom, dateTo)
+      : overrides;
 
     const months = monthsBetween(ymOf(dateFrom), ymOf(dateTo));
     const buckets: MonthlyBucket[] = months.map((ym) => {
@@ -138,7 +141,7 @@ export default function AttendanceAnalytics() {
       const monthEndIso = `${ym}-${String(lastDom).padStart(2, "0")}`;
       const fromIso = monthStartIso < dateFrom ? dateFrom : monthStartIso;
       const toIso = monthEndIso > dateTo ? dateTo : monthEndIso;
-      const daysOpen = daysOpenInRange(fromIso, toIso, overrides, defaultOpen);
+      const daysOpen = daysOpenInRange(fromIso, toIso, overridesWithHolidays, defaultOpen);
       return { ym, p: 0, h: 0, a: 0, s: 0, v: 0, days_open: daysOpen, active_children: 0 };
     });
     const bucketByYm = new Map(buckets.map((b) => [b.ym, b]));

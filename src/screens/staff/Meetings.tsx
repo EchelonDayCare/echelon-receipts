@@ -8,6 +8,9 @@ import { listStaff } from "../../lib/staff";
 import type { StaffMeeting, Staff } from "../../types";
 import { showAlert, showConfirm, showPrompt } from "../../lib/dialogs";
 import { showPdfPreview } from "../../lib/pdfPreview";
+import { isAiTextConfigured } from "../../lib/voice";
+import { getSettings } from "../../lib/db";
+import MeetingNotesAiTextPanel from "./MeetingNotesAiTextPanel";
 
 function todayIso(): string {
   const d = new Date();
@@ -33,6 +36,10 @@ export default function StaffMeetings() {
   const [dirty, setDirty] = useState(false);
   const [busy, setBusy] = useState(false);
   const [toast, setToast] = useState<string | null>(null);
+  const [aiEnabled, setAiEnabled] = useState(false);
+  useEffect(() => {
+    getSettings().then((s) => setAiEnabled(isAiTextConfigured(s))).catch(() => setAiEnabled(false));
+  }, []);
 
   async function refreshList() {
     const [m, s] = await Promise.all([listMeetings(), listStaff(false)]);
@@ -220,6 +227,11 @@ export default function StaffMeetings() {
           onChange={e => setSearch(e.target.value)}
         />
         <div className="mtg-list-scroll">
+          {aiEnabled && (
+            <div style={{ padding: "0 8px 8px" }}>
+              <MeetingNotesAiTextPanel staff={staff} onSaved={refreshList} />
+            </div>
+          )}
           {filtered.length === 0 ? (
             <div className="empty" style={{ padding: 20 }}>
               {meetings.length === 0 ? "No meetings yet. Click ＋ New to start." : "No matches."}

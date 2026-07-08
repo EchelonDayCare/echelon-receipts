@@ -8,13 +8,14 @@ import { readFile } from "@tauri-apps/plugin-fs";
 import { getSettings, listYears } from "../lib/db";
 import { matchStudentByName } from "../lib/attendance";
 import {
-  monthGrid, setMark, calendarForMonth, seedWeekends, setCalendarDay,
+  monthGrid, setMark, calendarForMonth, seedWeekends, seedBcHolidays, setCalendarDay,
   daysOpenInMonth, MARK_LABEL, MARK_COLOR,
   type MonthMark, type MonthCell, type CalendarDay,
 } from "../lib/monthAttendance";
 import { extractMonthAttendance, fileToMime } from "../lib/ai";
 import { h } from "../lib/html";
 import { showConfirm } from "../lib/dialogs";
+import { isBcHolidaysEnabled, setBcHolidaysEnabled } from "../lib/centreCalendar";
 
 const MARK_CYCLE: (MonthMark | null)[] = ["P", "A", "H", "S", "V", null];
 const MONTH_NAMES = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
@@ -48,6 +49,15 @@ export default function MonthlyAttendance() {
   const [dataYears, setDataYears] = useState<number[]>([]);
   const [toast, setToast] = useState<{ msg: string; tone: "ok" | "err" } | null>(null);
   const [showCalendar, setShowCalendar] = useState(false);
+  const [holidaysOn, setHolidaysOn] = useState(true);
+  useEffect(() => { void isBcHolidaysEnabled().then(setHolidaysOn); }, []);
+
+  async function toggleHolidays(next: boolean) {
+    await setBcHolidaysEnabled(next);
+    setHolidaysOn(next);
+    if (next) await seedBcHolidays(year, month);
+    setCalendar(await calendarForMonth(year, month));
+  }
 
   // OCR state
   const [ocrBusy, setOcrBusy] = useState(false);
@@ -82,7 +92,8 @@ export default function MonthlyAttendance() {
   useEffect(() => {
     (async () => {
       const added = await seedWeekends(year, month);
-      if (added > 0) setCalendar(await calendarForMonth(year, month));
+      const holidayAdded = (await isBcHolidaysEnabled()) ? await seedBcHolidays(year, month) : 0;
+      if (added + holidayAdded > 0) setCalendar(await calendarForMonth(year, month));
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [year, month]);
@@ -357,6 +368,10 @@ export default function MonthlyAttendance() {
           <p style={{ margin: "0 0 10px", color: "var(--muted)", fontSize: 13 }}>
             Toggle days when the Centre is closed (stat holidays, PD days, closures). Weekends are seeded automatically. The "Days Centre open" figure updates live.
           </p>
+          <label style={{ display: "inline-flex", alignItems: "center", gap: 8, marginBottom: 10, fontSize: 13 }}>
+            <input type="checkbox" checked={holidaysOn} onChange={(e) => toggleHolidays(e.target.checked)} />
+            Include BC statutory holidays as closed days (12 dates/year — New Year, Family Day, Good Friday, Victoria Day, Canada Day, BC Day, Labour Day, Truth &amp; Reconciliation, Thanksgiving, Remembrance Day, Christmas, Boxing Day)
+          </label>
           <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(160px, 1fr))", gap: 8 }}>
             {dayNums.map((d) => {
               const iso = isoDay(year, month, d);

@@ -175,6 +175,73 @@ export async function deleteRecurring(id: number): Promise<void> {
   await execRetry("DELETE FROM recurring_expenses WHERE id=?", [id]);
 }
 
+/**
+ * Duplicate detection.
+ *
+ * Two expenses are considered "possible duplicates" when ALL are true:
+ *   1. amount difference ≤ $0.50 (handles small FX rounding)
+ *   2. date difference ≤ 3 days (handles bank posting lag)
+ *   3. vendor matches case-insensitively (word-level), OR — when either
+ *      vendor is blank — same category
+ *   4. They are not the same row.
+ *
+ * Common trigger: user scans a credit-card statement, and the same vendor
+ * bill is ALSO already posted from a recurring template. The pair is
+ * flagged so the operator can delete the copy they don't want.
+ *
+ * Computed on the fly — no schema change. If perf becomes an issue over
+ * huge date ranges we'll move to a SQL self-join.
+ */
+export type DuplicateGroup = {
+  keyExpenseId: number;
+  matches: number[]; // other expense ids in the group
+};
+
+function normVendor(v: string | null | undefined): string {
+  return (v ?? "").trim().toLowerCase().replace(/\s+/g, " ");
+}
+function daysApart(a: string, b: string): number {
+  const [ay, am, ad] = a.split("-").map(Number);
+  const [by, bm, bd] = b.split("-").map(Number);
+  const da = Date.UTC(ay, am - 1, ad);
+  const db2 = Date.UTC(by, bm - 1, bd);
+  return Math.abs(da - db2) / 86_400_000;
+}
+
+export function findDuplicateIds(rows: Expense[]): Set<number> {
+  const flagged = new Set<number>();
+  // O(n^2) — expenses list is typically ≤ a few hundred rows per filter.
+  for (let i = 0; i < rows.length; i++) {
+    for (let j = i + 1; j < rows.length; j++) {
+      const a = rows[i]; const b = rows[j];
+      if (Math.abs(a.amount - b.amount) > 0.5) continue;
+      if (daysApart(a.date, b.date) > 3) continue;
+      const va = normVendor(a.vendor); const vb = normVendor(b.vendor);
+      const vendorMatch = va && vb && va === vb;
+      const categoryFallback = (!va || !vb) && a.category === b.category;
+      if (!vendorMatch && !categoryFallback) continue;
+      flagged.add(a.id); flagged.add(b.id);
+    }
+  }
+  return flagged;
+}
+
+/** For a given expense, return every other row in `rows` that pairs with it. */
+export function findDuplicatePartners(target: Expense, rows: Expense[]): Expense[] {
+  const out: Expense[] = [];
+  for (const b of rows) {
+    if (b.id === target.id) continue;
+    if (Math.abs(target.amount - b.amount) > 0.5) continue;
+    if (daysApart(target.date, b.date) > 3) continue;
+    const va = normVendor(target.vendor); const vb = normVendor(b.vendor);
+    const vendorMatch = va && vb && va === vb;
+    const categoryFallback = (!va || !vb) && target.category === b.category;
+    if (!vendorMatch && !categoryFallback) continue;
+    out.push(b);
+  }
+  return out;
+}
+
 // Compute the target date this template should post on for the given YYYY-MM
 // period, ignoring whether it's already posted. Returns null if the period is
 // out of range or the frequency doesn't hit this month.

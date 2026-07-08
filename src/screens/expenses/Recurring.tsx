@@ -127,10 +127,28 @@ export default function Recurring() {
         </div>
         <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
           <label style={{ fontSize: 13 }}>Period: <input type="month" value={ym} onChange={(e) => setYm(e.target.value)} /></label>
-          <button className="btn secondary" onClick={onPostAllDue} disabled={busy}>Post all due</button>
+          <button className="btn secondary" onClick={onPostAllDue} disabled={busy} title="Post every template that's due for this period at its template amount">Post all due</button>
           <button className="btn" onClick={() => setEditing({ ...BLANK })}>+ New template</button>
         </div>
       </div>
+
+      <details style={{ marginBottom: 14, padding: "10px 14px", background: "#f0f9ff", border: "1px solid #bae6fd", borderRadius: 8, fontSize: 13 }}>
+        <summary style={{ cursor: "pointer", fontWeight: 600, color: "#075985" }}>How this works ▼</summary>
+        <div style={{ marginTop: 10, lineHeight: 1.55, color: "#0c4a6e" }}>
+          <p style={{ margin: "0 0 8px" }}>
+            <strong>Templates</strong> are the master list of bills that repeat — one per real-world charge (Rent, Hydro, Internet, CRA, WCB, etc.). A template does <em>not</em> post any expense on its own; it just remembers "there will be one of these this month".
+          </p>
+          <p style={{ margin: "0 0 8px" }}>
+            <strong>Post</strong> writes a real expense row into <em>All Expenses</em> for the selected month. Use <em>Post all due</em> at month-end for one-click posting of every template, or use the row's <em>Post</em> button to override the amount for variable bills (phone, hydro).
+          </p>
+          <p style={{ margin: "0 0 8px" }}>
+            Each template can only be posted <strong>once per period</strong> — the Status column shows whether it's already posted. If you delete a posted expense in All Expenses, the template becomes "due" again.
+          </p>
+          <p style={{ margin: 0 }}>
+            <strong>Duplicate flagging:</strong> when you scan a bank/credit-card statement, any expense that matches a recurring post (same vendor/amount within ±3 days) is flagged in All Expenses so you can delete one and keep only the correct copy.
+          </p>
+        </div>
+      </details>
 
       {msg && <div style={{ marginBottom: 12, padding: 10, borderRadius: 6, background: "#dbeafe", color: "#1e3a8a", fontSize: 13 }}>{msg}</div>}
 

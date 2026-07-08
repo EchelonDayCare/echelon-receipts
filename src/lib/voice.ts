@@ -372,6 +372,65 @@ export async function parseRecurringExpense(opts: {
   };
 }
 
+// ─── parse_meeting_notes ─────────────────────────────────────────────────
+
+export interface ParsedActionItem {
+  text: string;
+  owner: string | null;
+  dueDate: string | null;
+}
+export interface ParsedMeeting {
+  meetingDate: string;
+  title: string;
+  attendees: string[];
+  agenda: string;
+  notes: string;
+  actionItems: ParsedActionItem[];
+  confidence: number | null;
+}
+
+interface RustParsedMeeting {
+  meeting_date: string;
+  title: string;
+  attendees: string[];
+  agenda: string;
+  notes: string;
+  action_items: Array<{ text: string; owner: string | null; due_date: string | null }>;
+  confidence: number | null;
+}
+
+export async function parseMeetingNotes(opts: {
+  text: string;
+  staffNames: string[];
+}): Promise<{ meetings: ParsedMeeting[]; latencyMs: number; rawJson: string }> {
+  const now = new Date();
+  const tz = Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
+  const res = await invoke<{ meetings: RustParsedMeeting[]; latency_ms: number; raw_json: string }>(
+    "parse_meeting_notes",
+    {
+      args: {
+        text: opts.text,
+        now_iso: toLocalIso(now),
+        tz,
+        staff_names: opts.staffNames,
+      },
+    },
+  );
+  return {
+    meetings: res.meetings.map((m) => ({
+      meetingDate: m.meeting_date,
+      title: m.title,
+      attendees: m.attendees,
+      agenda: m.agenda,
+      notes: m.notes,
+      actionItems: m.action_items.map((a) => ({ text: a.text, owner: a.owner, dueDate: a.due_date })),
+      confidence: m.confidence,
+    })),
+    latencyMs: res.latency_ms,
+    rawJson: res.raw_json,
+  };
+}
+
 // ─── Audit trail ─────────────────────────────────────────────────────────
 
 async function sha256Hex(s: string): Promise<string> {

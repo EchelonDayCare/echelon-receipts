@@ -35,8 +35,21 @@ export default function ScheduleConfirmations() {
   async function ack(id: string, version: number) {
     setBusy(true);
     try {
-      const notes = prompt("Ack notes (optional):", "") ?? "";
-      await markPublishAcknowledged(id, version, notes);
+      await markPublishAcknowledged(id, version, "");
+      await refresh();
+    } catch (e: any) { setErr(String(e?.message ?? e)); }
+    finally { setBusy(false); }
+  }
+
+  async function unack(id: string, version: number) {
+    setBusy(true);
+    try {
+      const d = await db();
+      const now = new Date().toISOString();
+      await d.execute(
+        "UPDATE staff_weekly_publish SET acknowledged_at = NULL, ack_notes = NULL, updated_at = ?, version = version + 1 WHERE id = ? AND version = ?",
+        [now, id, version],
+      );
       await refresh();
     } catch (e: any) { setErr(String(e?.message ?? e)); }
     finally { setBusy(false); }
@@ -79,8 +92,10 @@ export default function ScheduleConfirmations() {
                 <td style={{ padding: 8 }}>{r.ackNotes ?? "—"}</td>
                 <td style={{ padding: 8, display: "flex", gap: 6 }}>
                   <button className="btn" onClick={() => resend(r)} title="Re-open wa.me with the current phone number">Re-send</button>
-                  {!r.acknowledgedAt && (
-                    <button className="btn" onClick={() => ack(r.id, r.version)} disabled={busy}>Mark ack</button>
+                  {!r.acknowledgedAt ? (
+                    <button className="btn" onClick={() => ack(r.id, r.version)} disabled={busy} title="Mark this week's schedule as confirmed">Confirm</button>
+                  ) : (
+                    <button className="btn secondary" onClick={() => unack(r.id, r.version)} disabled={busy} title="Undo confirmation (e.g. staff wants a change)">Undo</button>
                   )}
                 </td>
               </tr>

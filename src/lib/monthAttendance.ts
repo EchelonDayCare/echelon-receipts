@@ -180,6 +180,24 @@ export async function seedWeekends(year: number, month: number): Promise<number>
   return added;
 }
 
+// Seed BC statutory holidays for a given month as closed days. Idempotent
+// via INSERT OR IGNORE — a user-set open/close override for that iso day
+// is preserved (INSERT is a no-op when the row exists).
+export async function seedBcHolidays(year: number, month: number): Promise<number> {
+  const { bcStatHolidays } = await import("./bcHolidays");
+  const mmPrefix = `${year}-${String(month).padStart(2, "0")}-`;
+  let added = 0;
+  for (const h of bcStatHolidays(year)) {
+    if (!h.iso.startsWith(mmPrefix)) continue;
+    const r = await execRetry(
+      `INSERT OR IGNORE INTO centre_calendar(day, is_open, reason) VALUES(?, 0, ?)`,
+      [h.iso, h.name],
+    );
+    if ((r as any)?.rowsAffected) added++;
+  }
+  return added;
+}
+
 export async function setCalendarDay(day: string, isOpen: boolean, reason: string | null): Promise<void> {
   await execRetry(
     `INSERT INTO centre_calendar(day, is_open, reason)

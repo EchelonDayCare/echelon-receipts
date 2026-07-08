@@ -15,6 +15,8 @@ import { showConfirm } from "../../lib/dialogs";
 import ShiftDrawer, { loadActiveStaff, type DrawerState } from "./ShiftDrawer";
 import ScheduleSubNav from "./ScheduleSubNav";
 import ScheduleAiTextPanel from "./ScheduleAiTextPanel";
+import { bcHolidayLookup } from "../../lib/bcHolidays";
+import { isBcHolidaysEnabled } from "../../lib/centreCalendar";
 
 type StaffLite = { id: number; name: string; whatsapp_phone_e164: string | null };
 
@@ -29,6 +31,14 @@ export default function StaffSchedule() {
   const [aiTextEnabled, setAiTextEnabled] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [holidayMap, setHolidayMap] = useState<Map<string, string>>(new Map());
+  useEffect(() => {
+    (async () => {
+      const on = await isBcHolidaysEnabled();
+      const end = addDays(weekStart, 6);
+      setHolidayMap(on ? bcHolidayLookup(weekStart, end) : new Map());
+    })();
+  }, [weekStart]);
 
   const refresh = async () => {
     try {
@@ -139,9 +149,11 @@ export default function StaffSchedule() {
                   const iso = addDays(weekStart, i);
                   const [y, m, dd] = iso.split("-").map(Number);
                   const dt = new Date(y, m - 1, dd);
+                  const holidayName = holidayMap.get(iso);
                   return (
-                    <th key={d} style={{ textAlign: "left", padding: 8, color: "var(--muted)" }}>
+                    <th key={d} style={{ textAlign: "left", padding: 8, color: "var(--muted)", background: holidayName ? "#fff7ed" : undefined }} title={holidayName ?? undefined}>
                       {d} <span style={{ fontWeight: 400 }}>{dt.getMonth() + 1}/{dt.getDate()}</span>
+                      {holidayName && <div style={{ fontSize: 10, color: "#ea580c", fontWeight: 500 }}>🎉 {holidayName}</div>}
                     </th>
                   );
                 })}

@@ -12,8 +12,37 @@
 // All date iteration is anchored at UTC noon to avoid local-timezone
 // day-of-week drift.
 import { getSettings, setSetting } from "./db";
+import { bcHolidayLookup } from "./bcHolidays";
 
 const DEFAULT_OPEN_DAYS = "0111110"; // Sun..Sat, 1 = open; Mon-Fri default
+const BC_HOLIDAYS_SETTING = "bc_stat_holidays_enabled";
+
+/** Are BC statutory holidays treated as closed days? Default ON. */
+export async function isBcHolidaysEnabled(): Promise<boolean> {
+  const s = await getSettings();
+  return (s[BC_HOLIDAYS_SETTING] ?? "1") !== "0";
+}
+
+export async function setBcHolidaysEnabled(enabled: boolean): Promise<void> {
+  await setSetting(BC_HOLIDAYS_SETTING, enabled ? "1" : "0");
+}
+
+/**
+ * Layer BC statutory holidays onto an overrides map as closed days. An
+ * explicit override in `overrides` always wins over the seeded holiday
+ * (user can force a holiday open if they choose to run that day).
+ */
+export function mergeBcHolidayOverrides(
+  overrides: Map<string, boolean>,
+  fromIso: string,
+  toIso: string,
+): Map<string, boolean> {
+  const merged = new Map(overrides);
+  for (const iso of bcHolidayLookup(fromIso, toIso).keys()) {
+    if (!merged.has(iso)) merged.set(iso, false);
+  }
+  return merged;
+}
 
 /** Read the centre-wide default-open-days bitmap, validated. */
 export async function getDefaultOpenDays(): Promise<string> {

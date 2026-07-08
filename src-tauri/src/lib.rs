@@ -21,6 +21,7 @@ mod device_secret;
 mod db_migration;
 mod db_gate;
 mod auth;
+mod printing;
 
 /// Every schema migration we ship, in version order. Version numbers
 /// are stable across v1.x → v2.0.0 so entries backfilled from the
@@ -159,6 +160,8 @@ pub fn run() {
             voice::parse_staff_shifts,
             voice::parse_expense,
             voice::parse_recurring_expense,
+            voice::parse_meeting_notes,
+            printing::print_current_window,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
