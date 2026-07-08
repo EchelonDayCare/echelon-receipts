@@ -295,7 +295,8 @@ fn is_howto_question(q: &str) -> bool {
     // "how do I / how can I / how to" → UI steps.
     if l.starts_with("how do i") || l.starts_with("how can i") || l.starts_with("how to") { return true; }
     if l.starts_with("where do i") || l.starts_with("where can i") || l.starts_with("where is the")
-        || l.starts_with("where's the") { return true; }
+        || l.starts_with("where's the") || l.starts_with("where to") || l.starts_with("where do you")
+        { return true; }
     // Explicit UI-shaped verbs at the start.
     for verb in &[
         "how do you", "how does one",
