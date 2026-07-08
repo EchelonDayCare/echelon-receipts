@@ -42,11 +42,33 @@ pub enum DeviceSecretError {
     Keychain(String),
     #[error("stored device secret is corrupted (not valid base64 or wrong length)")]
     Corrupted,
+    #[error("keychain returned an empty entry unexpectedly — refusing to rotate the device secret. This is usually a transient Credential Manager glitch on Windows; retry in a moment.")]
+    UnexpectedlyEmpty,
 }
 
 /// Return the device-bound secret, creating and persisting one on first
 /// call. Idempotent — subsequent calls always return the same value for
 /// the lifetime of the OS user account on this machine.
+///
+/// # Silent-rotation hazard (v2.2.1 fix)
+///
+/// PRE-v2.2.1 this function silently rotated the secret whenever the
+/// keychain returned `Ok("")`, treating an empty read as if it were
+/// `NoEntry`. On Windows, Credential Manager can *transiently* return
+/// success with an empty blob during credential-roaming sync, after
+/// updates, or under AV interference — even for entries that exist and
+/// are valid. Once rotated, every previously-wrapped envelope slot that
+/// depended on the old secret (i.e. the PIN slot; recovery uses no
+/// device secret) became permanently unwrappable, forcing a recovery-
+/// -code fallback and a PIN reset. This bug matched the reported
+/// symptom pattern: N successful unlocks, then abruptly "wrong PIN" on
+/// first attempt, broken across restarts, recovery still works.
+///
+/// The fix: we now ONLY create a new secret on `Err(NoEntry)`. `Ok("")`
+/// is treated as an anomaly and returns `UnexpectedlyEmpty` — the
+/// caller must retry (which usually succeeds on the next call once the
+/// Credential Manager glitch clears) rather than nuke the existing
+/// device secret.
 ///
 /// The returned bytes are wrapped in `Zeroizing` so callers don't
 /// accidentally leak them via `Debug` or long-lived buffers.
@@ -54,18 +76,38 @@ pub fn get_or_create() -> Result<zeroize::Zeroizing<Vec<u8>>, DeviceSecretError>
     let entry = keyring::Entry::new(KEYRING_SERVICE, DEVICE_SECRET_KEY)
         .map_err(|e| DeviceSecretError::Keychain(e.to_string()))?;
 
-    match entry.get_password() {
-        Ok(existing) if !existing.is_empty() => decode(&existing),
-        Ok(_) | Err(keyring::Error::NoEntry) => {
-            let fresh = generate();
-            let encoded = base64::engine::general_purpose::STANDARD.encode(&*fresh);
-            entry
-                .set_password(&encoded)
-                .map_err(|e| DeviceSecretError::Keychain(e.to_string()))?;
-            Ok(fresh)
+    // Small retry loop for transient Credential Manager glitches on
+    // Windows (empty reads during roaming sync, brief AV interference).
+    // We deliberately do NOT retry on real errors — only on the
+    // "Ok(empty)" anomaly.
+    for attempt in 0..3u32 {
+        match entry.get_password() {
+            Ok(existing) if !existing.is_empty() => return decode(&existing),
+            Err(keyring::Error::NoEntry) => {
+                // First-run: create + persist a fresh secret. This is
+                // the ONLY path that generates a new secret.
+                let fresh = generate();
+                let encoded = base64::engine::general_purpose::STANDARD.encode(&*fresh);
+                entry
+                    .set_password(&encoded)
+                    .map_err(|e| DeviceSecretError::Keychain(e.to_string()))?;
+                return Ok(fresh);
+            }
+            Ok(_) => {
+                // Anomaly: keychain returned success but the blob was
+                // empty. NEVER treat this as first-run — the entry
+                // exists, we just can't read its contents right now.
+                // Rotating would strand the existing envelope forever.
+                if attempt < 2 {
+                    std::thread::sleep(std::time::Duration::from_millis(150));
+                    continue;
+                }
+                return Err(DeviceSecretError::UnexpectedlyEmpty);
+            }
+            Err(e) => return Err(DeviceSecretError::Keychain(e.to_string())),
         }
-        Err(e) => Err(DeviceSecretError::Keychain(e.to_string())),
     }
+    Err(DeviceSecretError::UnexpectedlyEmpty)
 }
 
 /// Best-effort peek: return the existing secret without creating one.
