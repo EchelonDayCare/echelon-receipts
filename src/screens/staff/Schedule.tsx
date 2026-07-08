@@ -6,11 +6,12 @@ import { Link } from "react-router-dom";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import {
   addDays, copyWeek, listShiftsForWeek, mondayOf, recordWeeklyPublish,
-  shiftHours, type StaffShift,
+  shiftHours, softDeleteShift, type StaffShift,
 } from "../../repo/scheduleRepo";
 import { buildWaMeUrl, buildWhatsappDeepLink, renderTemplate } from "../../lib/whatsapp";
 import { getSettings } from "../../lib/db";
 import { isAiTextConfigured } from "../../lib/voice";
+import { showConfirm } from "../../lib/dialogs";
 import ShiftDrawer, { loadActiveStaff, type DrawerState } from "./ShiftDrawer";
 import ScheduleSubNav from "./ScheduleSubNav";
 import ScheduleAiTextPanel from "./ScheduleAiTextPanel";
@@ -92,6 +93,17 @@ export default function StaffSchedule() {
     finally { setBusy(false); }
   }
 
+  async function doDeleteShift(sh: StaffShift) {
+    if (!(await showConfirm(
+      `Delete this shift?\n\n${sh.shiftDate} · ${sh.startTime}–${sh.endTime}${sh.room ? " · " + sh.room : ""}\n\nThis cannot be undone.`,
+      { kind: "warning" }
+    ))) return;
+    try {
+      await softDeleteShift(sh.id, sh.version);
+      await refresh();
+    } catch (e: any) { setErr(String(e?.message ?? e)); }
+  }
+
   return (
     <div style={{ padding: 24 }} className="schedule-page">
       <style>{PRINT_CSS}</style>
@@ -159,15 +171,22 @@ export default function StaffSchedule() {
                             >+ Add</button>
                           ) : (
                             cellShifts.map((sh) => (
-                              <button
-                                key={sh.id}
-                                onClick={() => setDrawer({ mode: "edit", shift: sh })}
-                                style={cellStyle(sh.status)}
-                                title={`${sh.startTime}–${sh.endTime}${sh.room ? ` · ${sh.room}` : ""}`}
-                              >
-                                <div>{sh.startTime}–{sh.endTime}</div>
-                                {sh.room && <div style={{ fontSize: 10, opacity: 0.85 }}>{sh.room}</div>}
-                              </button>
+                              <div key={sh.id} className="shift-cell" style={{ position: "relative" }}>
+                                <button
+                                  onClick={() => setDrawer({ mode: "edit", shift: sh })}
+                                  style={cellStyle(sh.status)}
+                                  title={`${sh.startTime}–${sh.endTime}${sh.room ? ` · ${sh.room}` : ""}`}
+                                >
+                                  <div>{sh.startTime}–{sh.endTime}</div>
+                                  {sh.room && <div style={{ fontSize: 10, opacity: 0.85 }}>{sh.room}</div>}
+                                </button>
+                                <button
+                                  className="shift-delete"
+                                  onClick={(e) => { e.stopPropagation(); void doDeleteShift(sh); }}
+                                  title="Delete shift"
+                                  aria-label="Delete shift"
+                                >✕</button>
+                              </div>
                             ))
                           )}
                         </td>
@@ -430,7 +449,7 @@ function cellStyle(status: StaffShift["status"]): React.CSSProperties {
     : status === "confirmed" ? "#22c55e"
     : status === "swapped" ? "#d97706" : "#2563eb";
   return {
-    display: "block", width: "100%", marginBottom: 4,
+    display: "block", width: "100%",
     padding: "6px 8px", background: bg, border: `1px solid ${bd}55`,
     color: "inherit", borderRadius: 6, cursor: "pointer", textAlign: "left",
     textDecoration: status === "cancelled" ? "line-through" : "none",
@@ -455,6 +474,17 @@ const errBox: React.CSSProperties = {
 // scales down as row count grows so 20+ staff still fit on one page.
 const PRINT_CSS = `
   @media screen { .print-only { display: none !important; } }
+  .shift-cell { margin-bottom: 4px; }
+  .shift-cell .shift-delete {
+    position: absolute; top: -6px; right: -6px;
+    width: 18px; height: 18px; padding: 0; line-height: 1;
+    border-radius: 999px; border: 1px solid #dc2626;
+    background: #fff; color: #dc2626; font-size: 11px; font-weight: 700;
+    cursor: pointer; display: none; box-shadow: 0 1px 3px rgba(0,0,0,.15);
+  }
+  .shift-cell:hover .shift-delete { display: block; }
+  .shift-cell .shift-delete:hover { background: #dc2626; color: #fff; }
+  @media print { .shift-delete { display: none !important; } }
   @media print {
     @page { size: landscape; margin: 8mm; }
     html, body { background: #fff !important; color: #000 !important; }
