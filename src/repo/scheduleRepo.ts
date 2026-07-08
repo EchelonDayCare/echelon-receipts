@@ -206,10 +206,14 @@ export async function cancelShift(id: string, expectedVersion: number, reason?: 
 export async function softDeleteShift(id: string, expectedVersion: number): Promise<void> {
   const now = nowIso();
   // Serialize with concurrent publish writes so we can't race a publish add
-  // vs our removal.
+  // vs our removal. All writes inside the block must use the raw connection
+  // (`d.execute`) — `execRetry` internally calls `serializeWrite`, so using it
+  // here would self-deadlock the whole app-wide write queue.
+  let unlinkedPublishes = 0;
   await serializeWrite(async () => {
+    const d = await db();
     // 1. Soft-delete the shift row itself.
-    const res = await execRetry(
+    const res = await d.execute(
       "UPDATE staff_shifts SET deleted_at = ?, updated_at = ?, version = version + 1 WHERE id = ? AND deleted_at IS NULL AND version = ?",
       [now, now, id, expectedVersion],
     );
@@ -219,7 +223,7 @@ export async function softDeleteShift(id: string, expectedVersion: number): Prom
     //    published week no longer points at a ghost id. Without this, viewing
     //    a past publish would show a soft-deleted shift as still-scheduled
     //    (data-integrity bug in the schedule audit + WhatsApp re-send flows).
-    const referencing = await (await db()).select<Array<{ id: string; shift_ids_json: string }>>(
+    const referencing = await d.select<Array<{ id: string; shift_ids_json: string }>>(
       "SELECT id, shift_ids_json FROM staff_weekly_publish WHERE deleted_at IS NULL AND shift_ids_json LIKE ?",
       [`%${id}%`],
     );
@@ -228,14 +232,17 @@ export async function softDeleteShift(id: string, expectedVersion: number): Prom
       try { ids = JSON.parse(row.shift_ids_json || "[]"); } catch { continue; }
       if (!ids.includes(id)) continue; // false-positive LIKE hit (id fragment)
       const filtered = ids.filter((x) => x !== id);
-      await execRetry(
+      await d.execute(
         "UPDATE staff_weekly_publish SET shift_ids_json = ?, updated_at = ?, version = version + 1 WHERE id = ?",
         [JSON.stringify(filtered), now, row.id],
       );
+      unlinkedPublishes++;
     }
-
-    await writeEvent(id, "deleted", { unlinked_publishes: referencing.length });
   });
+
+  // writeEvent takes serializeWrite itself, so it MUST run after the guarded
+  // block above has released the write queue.
+  await writeEvent(id, "deleted", { unlinked_publishes: unlinkedPublishes });
 }
 
 // Reassign: cancels the old shift + inserts a mirror on the new staff.

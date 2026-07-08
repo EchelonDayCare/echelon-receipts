@@ -436,18 +436,25 @@ pub fn load_envelope(path: &std::path::Path) -> Result<SecurityEnvelope, Securit
 
 /// Global write lock guarding load-modify-save of the security envelope.
 ///
-/// Every Tauri command that mutates the envelope (v2_create_pin,
-/// v2_change_pin, v2_reset_pin, v2_generate_recovery,
-/// v2_unlock_with_recovery, migration paths) must hold this lock across the
-/// entire load → mutate → save critical section. Without it two concurrent
-/// commands could each `load_envelope`, both mutate their local copy, and
-/// the second `save_envelope` would silently clobber the first (classic
-/// TOCTOU — e.g. adding a recovery code while the user changes their PIN
-/// would drop one of the two writes on the floor).
+/// The four Tauri commands that persist the envelope must hold this lock
+/// across the entire load → mutate → save critical section:
+///   • `v2_create_pin`   (auth.rs)
+///   • `v2_change_pin`   (auth.rs)
+///   • `v2_reset_pin`    (auth.rs)
+///   • `v2_generate_recovery` (auth.rs)
 ///
-/// The lock is deliberately scoped to envelope mutations only — reads
-/// (`load_envelope`) do not need it because the tmp-rename in
-/// `save_envelope` gives atomic file replace semantics per the OS.
+/// Read-only commands (`v2_unlock_with_recovery`) do NOT need the guard.
+/// The v1→v2 migration path (`db_migration::migrate_to_encrypted` and its
+/// `save_envelope` callers) is only reachable from either (a) startup
+/// `recover_on_startup` — single-threaded, runs before Tauri commands are
+/// served — or (b) `v2_create_pin`, which already holds this lock.
+/// New callers of `save_envelope` MUST take the lock themselves.
+///
+/// Without the lock two concurrent commands could each `load_envelope`,
+/// both mutate their local copy, and the second `save_envelope` would
+/// silently clobber the first (classic TOCTOU — e.g. adding a recovery
+/// code while the user changes their PIN would drop one of the two writes
+/// on the floor).
 pub static ENVELOPE_WRITE_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 pub fn save_envelope(

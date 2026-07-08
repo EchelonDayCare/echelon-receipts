@@ -903,11 +903,43 @@ async function ensureSchema(d: Database): Promise<void> {
   // can't slip a duplicate through the race window.
   // Partial index: only enforced on live, non-cancelled rows so soft-deleted
   // or cancelled shifts don't block a legitimate replacement on the same day.
-  await d.execute(
-    "CREATE UNIQUE INDEX IF NOT EXISTS ux_staff_shifts_one_per_day " +
-    "ON staff_shifts(staff_id, shift_date) " +
-    "WHERE deleted_at IS NULL AND status != 'cancelled'",
-  );
+  //
+  // Startup-safety: an existing install upgrading from v2.2.1 or earlier
+  // might already contain duplicate live rows (the app-layer check has a
+  // race window). CREATE UNIQUE INDEX would abort with SQLITE_CONSTRAINT
+  // in that case, bricking startup. So we (1) pre-dedup by soft-deleting
+  // all but the newest live row for each (staff_id, shift_date), and
+  // (2) wrap the CREATE in try/catch so a stubborn corruption logs a
+  // warning instead of blocking boot.
+  try {
+    await d.execute(
+      `UPDATE staff_shifts
+          SET deleted_at = strftime('%Y-%m-%dT%H:%M:%fZ','now'),
+              updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now'),
+              version    = version + 1
+        WHERE id IN (
+          SELECT id FROM (
+            SELECT id, row_number() OVER (
+              PARTITION BY staff_id, shift_date
+              ORDER BY COALESCE(updated_at, created_at) DESC, id DESC
+            ) AS rn
+              FROM staff_shifts
+             WHERE deleted_at IS NULL AND status != 'cancelled'
+          ) WHERE rn > 1
+        )`
+    );
+  } catch (e) {
+    console.warn("[ensureSchema] pre-index dedup failed (continuing):", e);
+  }
+  try {
+    await d.execute(
+      "CREATE UNIQUE INDEX IF NOT EXISTS ux_staff_shifts_one_per_day " +
+      "ON staff_shifts(staff_id, shift_date) " +
+      "WHERE deleted_at IS NULL AND status != 'cancelled'",
+    );
+  } catch (e) {
+    console.warn("[ensureSchema] could not create ux_staff_shifts_one_per_day (dup rows likely persist):", e);
+  }
   if (!(await tableExists("staff_shift_events"))) {
     console.warn("[ensureSchema] creating staff_shift_events");
     await d.execute(`CREATE TABLE staff_shift_events (

@@ -159,8 +159,15 @@ export default function AttendanceAnalytics() {
     const activeInMonth = new Map<string, Set<number>>();
 
     for (const r of rowsAll) {
-      const bucket = rowToBucket(r);
-      if (!bucket) continue;
+      const rawBucket = rowToBucket(r);
+      if (!rawBucket) continue;
+      // v2.2.2+ P/A migration: collapse legacy H/S/V rows to A for both
+      // the monthly bucket totals and per-student totals so KPI cards
+      // ("Absent = a+s+v+h") and attendance_rate (p / days_open) agree.
+      // Without this, legacy H marks made attendance_rate treat H as
+      // half-present while KPIs counted H as full-absent → contradictory
+      // percentages on the same screen.
+      const bucket = rawBucket === "p" ? "p" : "a";
       const ym = String(r.work_date).slice(0, 7);
       const b = bucketByYm.get(ym);
       if (b) {
@@ -172,18 +179,16 @@ export default function AttendanceAnalytics() {
       const t = stTotals.get(r.student_id);
       if (t) {
         if (bucket === "p") t.p_days++;
-        else if (bucket === "h") t.h_days++;
-        else if (bucket === "a") t.a_days++;
-        else if (bucket === "s") t.s_days++;
-        else if (bucket === "v") t.v_days++;
+        else t.a_days++;
         t.total_marks++;
       }
     }
-    // Attendance rate = (P + 0.5H) / days_open (in range). Capped at 1.
-    // days_open across the whole range = sum of buckets[i].days_open.
+    // Attendance rate = P / days_open (in range). Capped at 1. H/S/V
+    // legacy marks were already folded into A above so they no longer
+    // contribute a half-day bonus that KPI cards contradict.
     const totalDaysOpen = buckets.reduce((n, b) => n + b.days_open, 0);
     for (const t of stTotals.values()) {
-      t.attended_equiv = t.p_days + 0.5 * t.h_days;
+      t.attended_equiv = t.p_days;
       t.attendance_rate = totalDaysOpen > 0 ? Math.min(1, t.attended_equiv / totalDaysOpen) : 0;
     }
     // Fill active_children per month
@@ -201,7 +206,7 @@ export default function AttendanceAnalytics() {
         if (r.student_id !== selectedStudent) continue;
         const b = rowToBucket(r);
         if (!b) continue;
-        const mark: MonthMark = b === "p" || b === "h" ? "P" : "A";
+        const mark: MonthMark = b === "p" ? "P" : "A";
         marks.push({ work_date: String(r.work_date), mark });
       }
       setChildMarks(marks);
