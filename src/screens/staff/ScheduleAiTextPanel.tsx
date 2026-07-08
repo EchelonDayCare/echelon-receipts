@@ -29,7 +29,6 @@ export default function ScheduleAiTextPanel({
   roster: Array<{ id: string; name: string }>;
   onSaved: () => void;
 }) {
-  const [expanded, setExpanded] = useState(false);
   const [text, setText] = useState("");
   const [busy, setBusy] = useState<"idle" | "parsing" | "saving">("idle");
   const [err, setErr] = useState<string | null>(null);
@@ -92,7 +91,7 @@ export default function ScheduleAiTextPanel({
       const msg = skipped > 0 ? `Saved ${ok}. Skipped ${skipped}.` : `Saved ${ok}.`;
       setErr(null);
       onSaved();
-      setText(""); setRows(null); setExpanded(false);
+      setText(""); setRows(null);
       window.setTimeout(() => alert(msg), 50);
     }
   }
@@ -101,23 +100,12 @@ export default function ScheduleAiTextPanel({
     setRows((prev) => prev ? prev.map((r, ix) => ix === i ? { ...r, ...patch } : r) : prev);
   }
 
-  if (!expanded) {
-    return (
-      <div style={styles.strip}>
-        <button style={styles.stripBtn} onClick={() => setExpanded(true)}>
-          ✨ Type shifts in plain English → AI schedules them
-        </button>
-      </div>
-    );
-  }
-
   return (
     <div style={styles.card}>
       <div style={styles.header}>
         <div style={styles.title}>✨ AI Schedule Builder</div>
-        <button style={styles.closeBtn} onClick={() => { setExpanded(false); setRows(null); setErr(null); }}>✕</button>
       </div>
-      <div style={styles.weekLabel}>Week of {weekStartIso} — AI will only add shifts inside this week.</div>
+      <div style={styles.weekLabel}>Currently viewing week of {weekStartIso} — but you can schedule any future date (e.g. "next Monday", "July 20", "every Mon for 4 weeks").</div>
 
       {!rows && (
         <>
@@ -149,7 +137,7 @@ export default function ScheduleAiTextPanel({
       {rows && (
         <div>
           <div style={styles.reviewHeader}>
-            Review {rows.length} parsed shift{rows.length === 1 ? "" : "s"}. Uncheck rows to skip; fix any that need a staff match.
+            Review {rows.length} parsed shift{rows.length === 1 ? "" : "s"}. Uncheck rows to skip; fix any that need a staff match. Shifts outside the currently-visible week are saved but you'll need to navigate to that week to see them.
           </div>
           <div style={styles.rowsWrap}>
             {rows.map((r, i) => {

@@ -111,14 +111,6 @@ export default function StaffSchedule() {
 
       {err && <div style={errBox}>{err}</div>}
 
-      {aiTextEnabled && (
-        <ScheduleAiTextPanel
-          weekStartIso={weekStart}
-          roster={staff.map((s) => ({ id: String(s.id), name: s.name }))}
-          onSaved={() => { void refresh(); }}
-        />
-      )}
-
       {staff.length === 0 ? (
         <div style={{ padding: 40, border: "1px dashed var(--border, #334155)", borderRadius: 8, textAlign: "center", color: "var(--muted)" }}>
           No active staff. Add staff first in <Link to="/staff/hours">Staff → Hours</Link>.
@@ -188,6 +180,14 @@ export default function StaffSchedule() {
             </tbody>
           </table>
         </div>
+      )}
+
+      {aiTextEnabled && staff.length > 0 && (
+        <ScheduleAiTextPanel
+          weekStartIso={weekStart}
+          roster={staff.map((s) => ({ id: String(s.id), name: s.name }))}
+          onSaved={() => { void refresh(); }}
+        />
       )}
 
       <ShiftDrawer state={drawer} onClose={() => setDrawer({ mode: "closed" })} onSaved={() => { void refresh(); }} staffList={staff} />

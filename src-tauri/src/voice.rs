@@ -359,8 +359,11 @@ pub async fn parse_staff_shifts(args: ParseShiftsArgs) -> Result<ParseShiftsResu
          \n\
          Current local time: {now_iso}\n\
          User timezone: {tz}\n\
-         Target week starts (Monday): {week_start}\n\
-         Only emit dates in [Mon..Sun] of that week. Reject anything outside.\n\
+         User is currently viewing the week starting (Monday): {week_start}.\n\
+         Use that week as the default anchor when the user says \"Monday\", \"Tuesday\", etc.\n\
+         without more context. But shifts CAN and SHOULD be created for any future date if the\n\
+         user says so — e.g. \"next Monday\", \"July 20\", \"in 3 weeks\", \"every Monday for the\n\
+         next month\" all produce dates outside the current week. Never emit dates in the past.\n\
          \n\
          Active staff roster (name → id). You MUST match every shift to one of these ids.\n\
          If a name in the user's text is ambiguous or not in the roster, return staff_id=null\n\
@@ -370,12 +373,14 @@ pub async fn parse_staff_shifts(args: ParseShiftsArgs) -> Result<ParseShiftsResu
          Rules:\n\
          - Expand multi-day phrases like \"Mon-Fri\" into one shift per day.\n\
          - Expand \"weekdays\" to Mon..Fri. \"weekend\" to Sat..Sun.\n\
+         - Expand \"every Monday for next 4 weeks\", \"daily until end of month\", etc.\n\
          - Times: accept \"7-2\", \"7am to 2pm\", \"morning\", \"closing\", \"full day\".\n\
            Default anchors when only a shift word is given:\n\
              morning = 07:00-13:00, afternoon = 13:00-18:00, closing = 14:00-18:00, full day = 07:00-18:00.\n\
          - break_minutes: 0 unless the user says \"with lunch\", \"1h break\", \"no lunch\" (0), etc.\n\
          - room, notes: only fill if explicitly said. Otherwise null.\n\
          - Never emit end_time <= start_time.\n\
+         - Never emit a date in the past (before today's local date).\n\
          - confidence: 0.0-1.0 self-report per shift.\n\
          \n\
          Return {{ \"shifts\": [...] }} — always wrap in an object, never a bare array.",
@@ -461,17 +466,16 @@ pub async fn parse_staff_shifts(args: ParseShiftsArgs) -> Result<ParseShiftsResu
     let parsed: Wrapper = serde_json::from_str(&content)
         .map_err(|e| redact(format!("parsed JSON: {e} :: {}", truncate(&content, 400)), &api_key))?;
 
-    // Post-process: enforce week bounds + verify staff_id is either null or
-    // a real roster id. The model *should* obey the prompt, but strict
-    // validation server-side prevents a hallucinated UUID from ever
-    // reaching the DB layer.
-    let week_start = &args.week_start_iso;
-    let week_end = add_days_iso(week_start, 6);
+    // Post-process: enforce (a) date is today or later, (b) end > start,
+    // (c) staff_id is either null or a real roster id. Model *should*
+    // obey the prompt but strict server-side validation prevents a
+    // hallucinated UUID or a stale date from reaching the DB layer.
+    let today = args.now_iso.get(0..10).unwrap_or("").to_string();
     let valid_ids: std::collections::HashSet<&str> =
         args.roster.iter().map(|m| m.id.as_str()).collect();
     let mut cleaned: Vec<ParsedShift> = Vec::with_capacity(parsed.shifts.len());
     for mut s in parsed.shifts {
-        if s.shift_date.as_str() < week_start.as_str() || s.shift_date.as_str() > week_end.as_str() {
+        if !today.is_empty() && s.shift_date.as_str() < today.as_str() {
             continue;
         }
         if s.end_time.as_str() <= s.start_time.as_str() {
@@ -492,9 +496,10 @@ pub async fn parse_staff_shifts(args: ParseShiftsArgs) -> Result<ParseShiftsResu
     })
 }
 
-// Naive ISO-date +N days (YYYY-MM-DD in, YYYY-MM-DD out). Used to compute
-// the Sunday of a week from its Monday — string math is fine because we
-// stay within a single week and the caller already sends a valid ISO date.
+// Naive ISO-date +N days (YYYY-MM-DD in, YYYY-MM-DD out). Kept for the
+// upstream week-anchor prompt hint; also a general utility should future
+// callers need it.
+#[allow(dead_code)]
 fn add_days_iso(iso: &str, days: i64) -> String {
     use std::str::FromStr;
     let parts: Vec<&str> = iso.split('-').collect();
