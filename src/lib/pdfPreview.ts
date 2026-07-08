@@ -10,6 +10,7 @@ import { loadHtml2Pdf } from "./lazy";
 import { showAlert } from "./dialogs";
 import { save } from "@tauri-apps/plugin-dialog";
 import { writeFile } from "@tauri-apps/plugin-fs";
+import { printHtmlDocument } from "./print";
 
 export type PdfPreviewOpts = {
   html: string;
@@ -134,12 +135,13 @@ export async function showPdfPreview(opts: PdfPreviewOpts): Promise<void> {
   closeBtn.addEventListener("click", cleanup);
 
   printBtn.addEventListener("click", () => {
-    try {
-      iframe.contentWindow?.focus();
-      iframe.contentWindow?.print();
-    } catch (e) {
+    // Printing an embedded PDF blob via iframe.contentWindow.print() is
+    // unreliable on macOS WKWebView (dialog often never appears). Instead we
+    // print the source HTML natively via the Tauri print command — same
+    // pixel-for-pixel output, dialog always opens.
+    void printHtmlDocument(html).catch((e) => {
       void showAlert("Print failed: " + (e as Error).message);
-    }
+    });
   });
 
   saveBtn.addEventListener("click", async () => {

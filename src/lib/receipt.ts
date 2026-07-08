@@ -5,6 +5,7 @@ import { DEFAULT_LOGO_DATA_URL, DEFAULT_SIGNATURE_DATA_URL } from "./defaults";
 import { loadHtml2Pdf } from "./lazy";
 import { issuerViewFor } from "./db";
 import { h } from "./html";
+import { printHtmlDocument } from "./print";
 
 function fmtDate(iso: string): string {
   // dd/mm/yyyy to match the existing receipt
@@ -136,35 +137,13 @@ export function buildReceiptHtml(r: Receipt, settings: SettingsMap): string {
 </div></body></html>`;
 }
 
-export function printReceipt(r: Receipt, s: SettingsMap) {
+export async function printReceipt(r: Receipt, s: SettingsMap) {
   const html = buildReceiptHtml(r, s);
-  // Use a hidden iframe inside the main window — Tauri's webview blocks window.open.
-  const existing = document.getElementById("__print_frame");
-  if (existing) existing.remove();
-  const iframe = document.createElement("iframe");
-  iframe.id = "__print_frame";
-  iframe.style.position = "fixed";
-  iframe.style.right = "0";
-  iframe.style.bottom = "0";
-  iframe.style.width = "0";
-  iframe.style.height = "0";
-  iframe.style.border = "0";
-  document.body.appendChild(iframe);
-  const doc = iframe.contentDocument || iframe.contentWindow?.document;
-  if (!doc) { void showAlert("Print failed: could not open iframe."); return; }
-  doc.open();
-  doc.write(html);
-  doc.close();
-  const fire = () => {
-    try {
-      iframe.contentWindow?.focus();
-      iframe.contentWindow?.print();
-    } catch (e) {
-      void showAlert("Print failed: " + e);
-    }
-  };
-  // Wait a tick for images (logo/signature) to lay out, then print.
-  setTimeout(fire, 350);
+  try {
+    await printHtmlDocument(html);
+  } catch (e) {
+    void showAlert("Print failed: " + (e as Error).message);
+  }
 }
 
 // Render the receipt HTML offscreen, generate a PDF Blob, and write it to

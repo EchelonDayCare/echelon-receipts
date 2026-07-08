@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { computeAging, agingToCsv, type AgingReport } from "../lib/aging";
 import { getSettings } from "../lib/db";
 import { h } from "../lib/html";
+import { printHtmlDocument } from "../lib/print";
 
 function todayIso() { return new Date().toISOString().slice(0, 10); }
 
@@ -76,11 +77,7 @@ export default function AgingReportScreen() {
         </tr></tbody>
       </table>
       </body></html>`;
-    const w = window.open("", "_blank");
-    if (!w) return;
-    w.document.write(html);
-    w.document.close();
-    setTimeout(() => w.print(), 300);
+    void printHtmlDocument(html);
   }
 
   return (

@@ -16,6 +16,7 @@ import { extractMonthAttendance, fileToMime } from "../lib/ai";
 import { h } from "../lib/html";
 import { showConfirm } from "../lib/dialogs";
 import { isBcHolidaysEnabled, setBcHolidaysEnabled } from "../lib/centreCalendar";
+import { printHtmlDocument } from "../lib/print";
 
 const MARK_CYCLE: (MonthMark | null)[] = ["P", "A", "H", "S", "V", null];
 const MONTH_NAMES = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
@@ -217,7 +218,6 @@ export default function MonthlyAttendance() {
     show(`Imported ${saved} marks`);
   }
 
-  // ─── Printable blank template ─────────────────────────────────────────
   function printBlank() {
     const monthLabel = `${MONTH_NAMES[month-1]}'${String(year).slice(-2)}`;
     // Fit strictly on one landscape page — shrink row height + font as the
@@ -287,30 +287,7 @@ export default function MonthlyAttendance() {
       </table>
       <p class="legend">Legend — P = Present · A = Absent · H = Half-day · S = Sick · V = Vacation. Weekends &amp; closed days pre-shaded.</p>
       </body></html>`;
-    // Tauri's webview blocks window.open. Use a hidden iframe attached to
-    // the current document instead — same pattern as printReceipt().
-    const existing = document.getElementById("__print_frame");
-    if (existing) existing.remove();
-    const iframe = document.createElement("iframe");
-    iframe.id = "__print_frame";
-    Object.assign(iframe.style, {
-      position: "fixed", right: "0", bottom: "0",
-      width: "0", height: "0", border: "0",
-    });
-    document.body.appendChild(iframe);
-    const doc = iframe.contentDocument || iframe.contentWindow?.document;
-    if (!doc) { show("Print failed: could not open iframe.", "err"); return; }
-    doc.open();
-    doc.write(html);
-    doc.close();
-    setTimeout(() => {
-      try {
-        iframe.contentWindow?.focus();
-        iframe.contentWindow?.print();
-      } catch (e) {
-        show("Print failed: " + e, "err");
-      }
-    }, 350);
+    void printHtmlDocument(html).catch((e) => show("Print failed: " + (e as Error).message, "err"));
   }
 
   const monthLabel = `${MONTH_NAMES[month-1]} ${year}`;
