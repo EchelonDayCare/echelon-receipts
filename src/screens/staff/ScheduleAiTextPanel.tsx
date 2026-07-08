@@ -52,8 +52,29 @@ export default function ScheduleAiTextPanel({
         setBusy("idle");
         return;
       }
-      setRows(res.shifts.map((s) => ({ ...s, include: true })));
+      // One-shift-per-person-per-day: if the AI produced multiple shifts for
+      // the same (staff, date), auto-uncheck the extras and warn the owner.
+      // The rule matches the underlying DB constraint in createShift, so the
+      // save would fail anyway — telling the user up front is friendlier.
+      const seen = new Set<string>();
+      const dupeNames: string[] = [];
+      const marked: Row[] = res.shifts.map((s) => {
+        const key = `${s.staffId ?? "?"}|${s.shiftDate}`;
+        const isDup = !!s.staffId && seen.has(key);
+        if (s.staffId) seen.add(key);
+        if (isDup) dupeNames.push(`${s.staffName} on ${s.shiftDate}`);
+        return { ...s, include: !isDup };
+      });
+      setRows(marked);
       setBusy("idle");
+      if (dupeNames.length > 0) {
+        const uniq = Array.from(new Set(dupeNames));
+        window.setTimeout(() => alert(
+          `Heads up — one staff member can only have one shift per day.\n\n` +
+          `AI produced duplicate shifts for:\n• ${uniq.join("\n• ")}\n\n` +
+          `Only the first shift for each person+day is checked. Edit or uncheck as needed before saving.`,
+        ), 50);
+      }
     } catch (e: any) {
       setErr(String(e?.message ?? e)); setBusy("idle");
     }

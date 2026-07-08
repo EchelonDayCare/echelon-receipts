@@ -112,8 +112,30 @@ export async function getShift(id: string): Promise<StaffShift | null> {
   return rows.length ? rowToShift(rows[0]) : null;
 }
 
+/**
+ * True if a live (not cancelled, not soft-deleted) shift already exists
+ * for this staff member on this date. Optionally exclude a specific shift
+ * id — used by updateShift when a date change would otherwise collide
+ * with the row being edited itself.
+ */
+export async function hasExistingShift(staffId: string, shiftDate: string, exceptId?: string): Promise<boolean> {
+  const d = await db();
+  const rows = await d.select<Array<{ n: number }>>(
+    `SELECT COUNT(*) AS n FROM staff_shifts
+     WHERE staff_id = ? AND shift_date = ?
+       AND deleted_at IS NULL AND status != 'cancelled'
+       ${exceptId ? "AND id != ?" : ""}`,
+    exceptId ? [staffId, shiftDate, exceptId] : [staffId, shiftDate],
+  );
+  return (rows[0]?.n ?? 0) > 0;
+}
+
 export async function createShift(shift: NewShift): Promise<StaffShift> {
   if (shift.endTime <= shift.startTime) throw new Error("End time must be after start time.");
+  // One-shift-per-person-per-day rule. A cancelled or soft-deleted row does
+  // not count — those are historical and shouldn't block a new plan.
+  const dupe = await hasExistingShift(shift.staffId, shift.shiftDate);
+  if (dupe) throw new Error("This staff member already has a shift on this day. Edit the existing shift instead of adding another.");
   const id = uuidv4();
   const now = nowIso();
   await execRetry(
@@ -149,6 +171,12 @@ export async function updateShift(id: string, patch: ShiftPatch, expectedVersion
     status: patch.status ?? cur.status,
   };
   if (next.endTime <= next.startTime) throw new Error("End time must be after start time.");
+  // Reinstating a cancelled shift, or moving a shift to a new date, must
+  // not collide with another live shift for the same staff+date.
+  if (next.status !== "cancelled" && (next.shiftDate !== cur.shiftDate || cur.status === "cancelled")) {
+    const dupe = await hasExistingShift(cur.staffId, next.shiftDate, id);
+    if (dupe) throw new Error("This staff member already has another shift on that day.");
+  }
   const now = nowIso();
   const res = await execRetry(
     `UPDATE staff_shifts
