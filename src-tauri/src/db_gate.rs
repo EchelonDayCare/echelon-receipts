@@ -222,6 +222,20 @@ impl DbGate {
         sql: &str,
         args: &[Value],
     ) -> Result<Vec<Map<String, Value>>, DbError> {
+        let (_cols, rows) = self.select_with_columns(sql, args).await?;
+        Ok(rows)
+    }
+
+    /// Like `select`, but also returns the column-name list from the
+    /// prepared statement. Ask Echelon uses this so empty result sets
+    /// still emit headers and column order follows the SELECT clause
+    /// even when there are zero rows (the row loop can't derive column
+    /// metadata after the fact).
+    pub async fn select_with_columns(
+        &self,
+        sql: &str,
+        args: &[Value],
+    ) -> Result<(Vec<String>, Vec<Map<String, Value>>), DbError> {
         let guard = self.inner.lock().await;
         let conn = guard.as_ref().ok_or(DbError::Locked)?;
         let mut stmt = conn.prepare(sql)?;
@@ -237,7 +251,7 @@ impl DbGate {
             }
             out.push(map);
         }
-        Ok(out)
+        Ok((col_names, out))
     }
 
     /// INSERT/UPDATE/DELETE/CREATE/DROP/PRAGMA. Returns lastInsertId +

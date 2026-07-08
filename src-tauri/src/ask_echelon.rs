@@ -488,17 +488,16 @@ fn ensure_limit(sql: &str) -> Result<String, String> {
 async fn execute_readonly(
     gate: &DbGate, sql: &str,
 ) -> Result<(Vec<String>, Vec<Vec<Value>>, bool), String> {
-    let rows = gate.select(sql, &[]).await.map_err(|e| format!("query: {e}"))?;
-    let mut columns: Vec<String> = Vec::new();
-    let mut out: Vec<Vec<Value>> = Vec::with_capacity(rows.len());
+    let (columns, rows) = gate
+        .select_with_columns(sql, &[])
+        .await
+        .map_err(|e| format!("query: {e}"))?;
+    let mut out: Vec<Vec<Value>> = Vec::with_capacity(rows.len().min(HARD_ROW_CAP));
     let mut truncated = false;
     for row in rows {
         if out.len() >= HARD_ROW_CAP {
             truncated = true;
             break;
-        }
-        if columns.is_empty() {
-            columns = row.keys().cloned().collect();
         }
         let r: Vec<Value> = columns
             .iter()
@@ -512,6 +511,38 @@ async fn execute_readonly(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── select_with_columns: order preservation + empty-set headers ─────
+    #[tokio::test]
+    async fn execute_readonly_preserves_column_order() {
+        let d = tempfile::tempdir().unwrap();
+        let gate = crate::db_gate::DbGate::new();
+        gate.open_plaintext(&d.path().join("t.db")).await.unwrap();
+        gate.execute(
+            "CREATE TABLE t(z INT, a INT, m INT); INSERT INTO t VALUES(1,2,3);",
+            &[],
+        )
+        .await
+        .unwrap();
+        let (cols, rows, _) = execute_readonly(&gate, "SELECT z, a, m FROM t")
+            .await
+            .unwrap();
+        assert_eq!(cols, vec!["z".to_string(), "a".to_string(), "m".to_string()]);
+        assert_eq!(rows.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn execute_readonly_emits_headers_on_empty_result() {
+        let d = tempfile::tempdir().unwrap();
+        let gate = crate::db_gate::DbGate::new();
+        gate.open_plaintext(&d.path().join("t.db")).await.unwrap();
+        gate.execute("CREATE TABLE t(x INT, y TEXT)", &[]).await.unwrap();
+        let (cols, rows, _) = execute_readonly(&gate, "SELECT x, y FROM t WHERE 1=0")
+            .await
+            .unwrap();
+        assert_eq!(cols, vec!["x".to_string(), "y".to_string()]);
+        assert!(rows.is_empty());
+    }
 
     // ── C-8: SQL validation must survive adversarial inputs ──────────────
     #[test]
