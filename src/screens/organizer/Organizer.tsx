@@ -13,8 +13,9 @@ import {
 } from "../../repo/followupsRepo";
 import MeetingDrawer, { type MeetingDrawerState } from "./MeetingDrawer";
 import VoiceCaptureModal from "../../components/VoiceCaptureModal";
+import OrganizerAiTextPanel from "./OrganizerAiTextPanel";
 import { getSettings } from "../../lib/db";
-import { isVoiceConfigured } from "../../lib/voice";
+import { isVoiceConfigured, isAiTextConfigured } from "../../lib/voice";
 
 const ALL_WINDOW_DAYS = 36_500;
 const WINDOWS = [
@@ -60,6 +61,7 @@ export default function Organizer() {
   const [drawer, setDrawer] = useState<MeetingDrawerState>({ mode: "closed" });
   const [voiceOpen, setVoiceOpen] = useState(false);
   const [voiceEnabled, setVoiceEnabled] = useState(false);
+  const [aiTextEnabled, setAiTextEnabled] = useState(false);
   const [newFu, setNewFu] = useState({ title: "", due: "", priority: "normal" as Priority });
 
   const refresh = async () => {
@@ -80,7 +82,10 @@ export default function Organizer() {
     let cancelled = false;
     (async () => {
       const s = await getSettings();
-      if (!cancelled) setVoiceEnabled(isVoiceConfigured(s as Record<string, string>));
+      if (!cancelled) {
+        setVoiceEnabled(isVoiceConfigured(s as Record<string, string>));
+        setAiTextEnabled(isAiTextConfigured(s as Record<string, string>));
+      }
     })();
     return () => { cancelled = true; };
   }, []);
@@ -141,6 +146,8 @@ export default function Organizer() {
         </div>
 
         {err && <div className="org-err">{err}</div>}
+
+        {aiTextEnabled && <OrganizerAiTextPanel onSaved={() => { void refresh(); }} />}
 
         {/* ── Upcoming panel ─────────────────────────────────────────── */}
         <section className="card org-panel">

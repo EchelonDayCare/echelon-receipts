@@ -156,6 +156,7 @@ pub fn run() {
             backup_crypto::decrypt_backup,
             voice::transcribe_audio,
             voice::parse_organizer_event,
+            voice::parse_staff_shifts,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

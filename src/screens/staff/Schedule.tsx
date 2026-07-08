@@ -10,8 +10,10 @@ import {
 } from "../../repo/scheduleRepo";
 import { buildWaMeUrl, buildWhatsappDeepLink, renderTemplate } from "../../lib/whatsapp";
 import { getSettings } from "../../lib/db";
+import { isAiTextConfigured } from "../../lib/voice";
 import ShiftDrawer, { loadActiveStaff, type DrawerState } from "./ShiftDrawer";
 import ScheduleSubNav from "./ScheduleSubNav";
+import ScheduleAiTextPanel from "./ScheduleAiTextPanel";
 
 type StaffLite = { id: number; name: string; whatsapp_phone_e164: string | null };
 
@@ -23,6 +25,7 @@ export default function StaffSchedule() {
   const [shifts, setShifts] = useState<StaffShift[]>([]);
   const [drawer, setDrawer] = useState<DrawerState>({ mode: "closed" });
   const [publishOpen, setPublishOpen] = useState(false);
+  const [aiTextEnabled, setAiTextEnabled] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
@@ -37,6 +40,15 @@ export default function StaffSchedule() {
   };
 
   useEffect(() => { void refresh(); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, [weekStart]);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      const s = await getSettings();
+      if (!cancelled) setAiTextEnabled(isAiTextConfigured(s as Record<string, string>));
+    })();
+    return () => { cancelled = true; };
+  }, []);
 
   const shiftsByCell = useMemo(() => {
     const map = new Map<string, StaffShift[]>();
@@ -98,6 +110,14 @@ export default function StaffSchedule() {
       </div>
 
       {err && <div style={errBox}>{err}</div>}
+
+      {aiTextEnabled && (
+        <ScheduleAiTextPanel
+          weekStartIso={weekStart}
+          roster={staff.map((s) => ({ id: String(s.id), name: s.name }))}
+          onSaved={() => { void refresh(); }}
+        />
+      )}
 
       {staff.length === 0 ? (
         <div style={{ padding: 40, border: "1px dashed var(--border, #334155)", borderRadius: 8, textAlign: "center", color: "var(--muted)" }}>

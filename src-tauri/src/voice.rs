@@ -279,3 +279,250 @@ pub async fn parse_organizer_event(args: ParseEventArgs) -> Result<ParseEventRes
         raw_json: content,
     })
 }
+
+// ─── parse_staff_shifts ─────────────────────────────────────────────────
+//
+// Free-text → array of staff shifts, constrained to a specific week and a
+// known active-staff roster. The model is *forbidden* from inventing names
+// not in the roster — unmatched names come back with staff_id=null so the
+// UI can surface them for manual fix rather than silently create bad rows.
+
+#[derive(Deserialize)]
+pub struct RosterMember {
+    pub id: String,
+    pub name: String,
+}
+
+#[derive(Deserialize)]
+pub struct ParseShiftsArgs {
+    pub text: String,
+    pub now_iso: String,
+    pub tz: String,
+    /// Monday of the target week, YYYY-MM-DD. Parser is not allowed to
+    /// emit dates outside [week_start_iso .. week_start_iso + 6d].
+    pub week_start_iso: String,
+    pub roster: Vec<RosterMember>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct ParsedShift {
+    /// Matched staff.id from the roster, or null when the name couldn't be
+    /// resolved. UI must surface null-id shifts as "needs manual match".
+    pub staff_id: Option<String>,
+    /// Verbatim name the model matched on — for UI display.
+    pub staff_name: String,
+    /// YYYY-MM-DD within the week.
+    pub shift_date: String,
+    /// HH:MM 24h.
+    pub start_time: String,
+    /// HH:MM 24h.
+    pub end_time: String,
+    /// 0 by default; 30 or 60 if user said "with lunch break" / "1h break".
+    pub break_minutes: u32,
+    pub room: Option<String>,
+    pub notes: Option<String>,
+    pub confidence: Option<f32>,
+}
+
+#[derive(Serialize)]
+pub struct ParseShiftsResult {
+    pub shifts: Vec<ParsedShift>,
+    pub latency_ms: u64,
+    pub raw_json: String,
+}
+
+#[tauri::command]
+pub async fn parse_staff_shifts(args: ParseShiftsArgs) -> Result<ParseShiftsResult, String> {
+    let text = args.text.trim();
+    if text.is_empty() {
+        return Err("Nothing to parse — the text box is empty.".to_string());
+    }
+    if text.len() > 4000 {
+        return Err("Text too long (>4000 chars). Break it into smaller chunks.".to_string());
+    }
+    if args.roster.is_empty() {
+        return Err("No active staff to schedule against. Add staff on the Staff page first.".to_string());
+    }
+
+    let api_key = crate::secrets::get_secret("azure_ai_key")?;
+
+    // Build the roster block: "id: uuid, name: Priya" — the model is
+    // instructed to echo back the id verbatim, so a name typo like "Preeya"
+    // still maps to Priya's UUID as long as the fuzzy match is unambiguous.
+    let roster_lines: Vec<String> = args.roster.iter()
+        .map(|m| format!("- id: {} | name: {}", m.id, m.name))
+        .collect();
+    let roster_block = roster_lines.join("\n");
+
+    let system_prompt = format!(
+        "You convert free-text scheduling notes into a strict JSON array of staff shifts.\n\
+         \n\
+         Current local time: {now_iso}\n\
+         User timezone: {tz}\n\
+         Target week starts (Monday): {week_start}\n\
+         Only emit dates in [Mon..Sun] of that week. Reject anything outside.\n\
+         \n\
+         Active staff roster (name → id). You MUST match every shift to one of these ids.\n\
+         If a name in the user's text is ambiguous or not in the roster, return staff_id=null\n\
+         and put the raw name in staff_name — never invent an id.\n\
+         {roster}\n\
+         \n\
+         Rules:\n\
+         - Expand multi-day phrases like \"Mon-Fri\" into one shift per day.\n\
+         - Expand \"weekdays\" to Mon..Fri. \"weekend\" to Sat..Sun.\n\
+         - Times: accept \"7-2\", \"7am to 2pm\", \"morning\", \"closing\", \"full day\".\n\
+           Default anchors when only a shift word is given:\n\
+             morning = 07:00-13:00, afternoon = 13:00-18:00, closing = 14:00-18:00, full day = 07:00-18:00.\n\
+         - break_minutes: 0 unless the user says \"with lunch\", \"1h break\", \"no lunch\" (0), etc.\n\
+         - room, notes: only fill if explicitly said. Otherwise null.\n\
+         - Never emit end_time <= start_time.\n\
+         - confidence: 0.0-1.0 self-report per shift.\n\
+         \n\
+         Return {{ \"shifts\": [...] }} — always wrap in an object, never a bare array.",
+        now_iso = args.now_iso,
+        tz = args.tz,
+        week_start = args.week_start_iso,
+        roster = roster_block,
+    );
+
+    let schema = json!({
+        "type": "object",
+        "properties": {
+            "shifts": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "staff_id":      { "type": ["string", "null"] },
+                        "staff_name":    { "type": "string" },
+                        "shift_date":    { "type": "string", "description": "YYYY-MM-DD" },
+                        "start_time":    { "type": "string", "description": "HH:MM 24h" },
+                        "end_time":      { "type": "string", "description": "HH:MM 24h" },
+                        "break_minutes": { "type": "integer" },
+                        "room":          { "type": ["string", "null"] },
+                        "notes":         { "type": ["string", "null"] },
+                        "confidence":    { "type": ["number", "null"] }
+                    },
+                    "required": ["staff_id", "staff_name", "shift_date", "start_time", "end_time", "break_minutes", "room", "notes", "confidence"],
+                    "additionalProperties": false
+                }
+            }
+        },
+        "required": ["shifts"],
+        "additionalProperties": false
+    });
+
+    let body = json!({
+        "messages": [
+            { "role": "system", "content": system_prompt },
+            { "role": "user",   "content": text }
+        ],
+        "temperature": 0,
+        "max_tokens": 1500,
+        "response_format": {
+            "type": "json_schema",
+            "json_schema": { "name": "StaffShifts", "schema": schema, "strict": true }
+        }
+    });
+
+    let url = format!(
+        "{AZURE_CHAT_ENDPOINT}/openai/deployments/{CHAT_DEPLOY}/chat/completions?api-version={CHAT_API_VER}"
+    );
+    let start = std::time::Instant::now();
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(60))
+        .build()
+        .map_err(|e| redact(format!("http client: {e}"), &api_key))?;
+    let resp = client
+        .post(&url)
+        .header("api-key", &api_key)
+        .header("Content-Type", "application/json")
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| redact(format!("request: {e}"), &api_key))?;
+
+    let status = resp.status();
+    let raw = resp.text().await.map_err(|e| redact(format!("read: {e}"), &api_key))?;
+    if !status.is_success() {
+        return Err(redact(
+            format!("http {status} @ chat/completions :: {}", truncate(&raw, 800)),
+            &api_key,
+        ));
+    }
+    let v: Value = serde_json::from_str(&raw)
+        .map_err(|e| redact(format!("chat json: {e} :: {}", truncate(&raw, 400)), &api_key))?;
+    let content = v["choices"][0]["message"]["content"].as_str().unwrap_or("").trim().to_string();
+    if content.is_empty() {
+        return Err(redact(format!("chat: empty content :: {}", truncate(&raw, 400)), &api_key));
+    }
+    #[derive(Deserialize)]
+    struct Wrapper { shifts: Vec<ParsedShift> }
+    let parsed: Wrapper = serde_json::from_str(&content)
+        .map_err(|e| redact(format!("parsed JSON: {e} :: {}", truncate(&content, 400)), &api_key))?;
+
+    // Post-process: enforce week bounds + verify staff_id is either null or
+    // a real roster id. The model *should* obey the prompt, but strict
+    // validation server-side prevents a hallucinated UUID from ever
+    // reaching the DB layer.
+    let week_start = &args.week_start_iso;
+    let week_end = add_days_iso(week_start, 6);
+    let valid_ids: std::collections::HashSet<&str> =
+        args.roster.iter().map(|m| m.id.as_str()).collect();
+    let mut cleaned: Vec<ParsedShift> = Vec::with_capacity(parsed.shifts.len());
+    for mut s in parsed.shifts {
+        if s.shift_date.as_str() < week_start.as_str() || s.shift_date.as_str() > week_end.as_str() {
+            continue;
+        }
+        if s.end_time.as_str() <= s.start_time.as_str() {
+            continue;
+        }
+        if let Some(id) = &s.staff_id {
+            if !valid_ids.contains(id.as_str()) {
+                s.staff_id = None;
+            }
+        }
+        cleaned.push(s);
+    }
+
+    Ok(ParseShiftsResult {
+        shifts: cleaned,
+        latency_ms: start.elapsed().as_millis() as u64,
+        raw_json: content,
+    })
+}
+
+// Naive ISO-date +N days (YYYY-MM-DD in, YYYY-MM-DD out). Used to compute
+// the Sunday of a week from its Monday — string math is fine because we
+// stay within a single week and the caller already sends a valid ISO date.
+fn add_days_iso(iso: &str, days: i64) -> String {
+    use std::str::FromStr;
+    let parts: Vec<&str> = iso.split('-').collect();
+    if parts.len() != 3 { return iso.to_string(); }
+    let y = i32::from_str(parts[0]).unwrap_or(1970);
+    let m = u32::from_str(parts[1]).unwrap_or(1);
+    let d = u32::from_str(parts[2]).unwrap_or(1);
+    // Rata Die-style day counter → convert, add, convert back.
+    // Small helper: month lengths.
+    fn days_in_month(y: i32, m: u32) -> u32 {
+        match m {
+            1|3|5|7|8|10|12 => 31,
+            4|6|9|11 => 30,
+            2 => if (y % 4 == 0 && y % 100 != 0) || y % 400 == 0 { 29 } else { 28 },
+            _ => 30,
+        }
+    }
+    let (mut yy, mut mm, mut dd) = (y, m, d as i64 + days);
+    loop {
+        if dd < 1 {
+            mm -= 1;
+            if mm < 1 { mm = 12; yy -= 1; }
+            dd += days_in_month(yy, mm) as i64;
+        } else if dd > days_in_month(yy, mm) as i64 {
+            dd -= days_in_month(yy, mm) as i64;
+            mm += 1;
+            if mm > 12 { mm = 1; yy += 1; }
+        } else { break; }
+    }
+    format!("{:04}-{:02}-{:02}", yy, mm, dd)
+}

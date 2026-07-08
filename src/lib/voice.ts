@@ -176,6 +176,72 @@ export function toLocalIso(d: Date): string {
   );
 }
 
+// ─── Staff-shift parsing (text → structured shifts) ──────────────────────
+//
+// Feature companion to parseOrganizerEvent, but for the Staff Schedule
+// page. Text in, array of shifts out, constrained to the passed-in week
+// and the passed-in active-staff roster.
+
+export interface ParsedShift {
+  staffId: string | null;
+  staffName: string;
+  shiftDate: string;
+  startTime: string;
+  endTime: string;
+  breakMinutes: number;
+  room: string | null;
+  notes: string | null;
+  confidence: number | null;
+}
+
+interface RustParsedShift {
+  staff_id: string | null;
+  staff_name: string;
+  shift_date: string;
+  start_time: string;
+  end_time: string;
+  break_minutes: number;
+  room: string | null;
+  notes: string | null;
+  confidence: number | null;
+}
+
+export async function parseStaffShifts(opts: {
+  text: string;
+  weekStartIso: string;
+  roster: Array<{ id: string; name: string }>;
+}): Promise<{ shifts: ParsedShift[]; latencyMs: number; rawJson: string }> {
+  const now = new Date();
+  const tz = Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
+  const res = await invoke<{ shifts: RustParsedShift[]; latency_ms: number; raw_json: string }>(
+    "parse_staff_shifts",
+    {
+      args: {
+        text: opts.text,
+        now_iso: toLocalIso(now),
+        tz,
+        week_start_iso: opts.weekStartIso,
+        roster: opts.roster,
+      },
+    },
+  );
+  return {
+    shifts: res.shifts.map((s) => ({
+      staffId: s.staff_id,
+      staffName: s.staff_name,
+      shiftDate: s.shift_date,
+      startTime: s.start_time,
+      endTime: s.end_time,
+      breakMinutes: s.break_minutes,
+      room: s.room,
+      notes: s.notes,
+      confidence: s.confidence,
+    })),
+    latencyMs: res.latency_ms,
+    rawJson: res.raw_json,
+  };
+}
+
 // ─── Audit trail ─────────────────────────────────────────────────────────
 
 async function sha256Hex(s: string): Promise<string> {
@@ -228,6 +294,15 @@ export function isVoiceConfigured(settings: Record<string, string>): boolean {
     !!(settings.azure_whisper_endpoint || "").trim() &&
     (settings.azure_whisper_key_set || "") === "1"
   );
+}
+
+/**
+ * AI *text* features (parse-only, no mic) only need the shared Azure
+ * OpenAI chat key that also drives OCR + Ask Echelon. Cheaper gate than
+ * `isVoiceConfigured` — voice requires Whisper too, text parsing does not.
+ */
+export function isAiTextConfigured(settings: Record<string, string>): boolean {
+  return (settings.azure_ai_key_set || "") === "1";
 }
 
 /** Placeholder to keep the db import used — the audit table exists as of migration 025. */
