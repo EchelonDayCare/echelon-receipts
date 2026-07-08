@@ -258,6 +258,7 @@ function UnlockScreen({
   rateLimitedSecs: number;
 }) {
   const [pin, setPin] = useState("");
+  const [showPin, setShowPin] = useState(false);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   const [mode, setMode] = useState<"pin" | "recovery">("pin");
@@ -362,17 +363,33 @@ function UnlockScreen({
         <div style={styles.logo}>🔒</div>
         <div style={styles.title}>Echelon Receipts</div>
         <div style={styles.subtitle}>Enter your PIN</div>
-        <input
-          type="password"
-          inputMode="text"
-          autoFocus
-          value={pin}
-          onChange={(e) => { setPin(e.target.value); setErr(null); }}
-          maxLength={64}
-          style={styles.pinInput}
-          placeholder="••••••"
-          disabled={disabled}
-        />
+        <div style={{ position: "relative", width: "100%" }}>
+          <input
+            type={showPin ? "text" : "password"}
+            inputMode="text"
+            autoFocus
+            value={pin}
+            onChange={(e) => { setPin(e.target.value); setErr(null); }}
+            maxLength={64}
+            style={{ ...styles.pinInput, paddingRight: 56, letterSpacing: showPin ? "0.2em" : styles.pinInput.letterSpacing }}
+            placeholder="••••••"
+            disabled={disabled}
+          />
+          <button
+            type="button"
+            onClick={() => setShowPin((v) => !v)}
+            aria-label={showPin ? "Hide PIN" : "Show PIN"}
+            title={showPin ? "Hide PIN" : "Show PIN"}
+            style={{
+              position: "absolute", right: 6, top: "50%", transform: "translateY(-50%)",
+              background: "none", border: "none", cursor: "pointer",
+              padding: "6px 8px", fontSize: 13, color: "#4a5568",
+            }}
+            tabIndex={-1}
+          >
+            {showPin ? "🙈 Hide" : "👁 Show"}
+          </button>
+        </div>
         {err && <div style={styles.error}>{err}</div>}
         {cooldown > 0 && <div style={styles.error}>Locked out for {cooldown}s</div>}
         <button type="submit" disabled={disabled || pin.length < 4} style={styles.button}>
