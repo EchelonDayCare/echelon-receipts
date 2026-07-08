@@ -93,7 +93,8 @@ export default function StaffSchedule() {
   }
 
   return (
-    <div style={{ padding: 24 }}>
+    <div style={{ padding: 24 }} className="schedule-page">
+      <style>{PRINT_CSS}</style>
       <ScheduleSubNav />
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16, gap: 12, flexWrap: "wrap" }}>
         <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
@@ -103,6 +104,7 @@ export default function StaffSchedule() {
           <button className="btn" onClick={() => setWeekStart(mondayOf(new Date()))}>This week</button>
         </div>
         <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+          <button className="btn" onClick={() => window.print()} title="Print weekly schedule (1 page)">🖨 Print</button>
           <button className="btn" onClick={() => doCopy(1)} disabled={busy}>Copy → next week</button>
           <button className="btn" onClick={() => doCopy(4)} disabled={busy}>Copy → next 4 weeks</button>
           <button className="btn primary" onClick={() => setPublishOpen(true)}>Publish week</button>
@@ -189,6 +191,54 @@ export default function StaffSchedule() {
           onSaved={() => { void refresh(); }}
         />
       )}
+
+      {/* Print-only view — hidden on screen, shown on print, fits 1 landscape page. */}
+      <div className="print-only print-schedule">
+        <div className="print-header">
+          <div className="print-title">Weekly Staff Schedule</div>
+          <div className="print-week">{weekLabel}</div>
+        </div>
+        <table className="print-grid">
+          <thead>
+            <tr>
+              <th style={{ textAlign: "left" }}>Staff</th>
+              {DAY_LABELS.map((d, i) => {
+                const iso = addDays(weekStart, i);
+                const [y, m, dd] = iso.split("-").map(Number);
+                const dt = new Date(y, m - 1, dd);
+                return <th key={d}>{d} {dt.getMonth() + 1}/{dt.getDate()}</th>;
+              })}
+              <th style={{ textAlign: "right" }}>Total</th>
+            </tr>
+          </thead>
+          <tbody>
+            {staff.map((s) => {
+              const total = hoursByStaff.get(String(s.id)) ?? 0;
+              return (
+                <tr key={s.id}>
+                  <td style={{ textAlign: "left", fontWeight: 600 }}>{s.name}</td>
+                  {DAY_LABELS.map((_, i) => {
+                    const iso = addDays(weekStart, i);
+                    const cellShifts = (shiftsByCell.get(`${s.id}|${iso}`) ?? []).filter((sh) => sh.status !== "cancelled");
+                    return (
+                      <td key={i}>
+                        {cellShifts.map((sh, ix) => (
+                          <div key={sh.id} style={{ marginTop: ix ? 2 : 0 }}>
+                            {sh.startTime}–{sh.endTime}
+                            {sh.room && <span className="print-room"> · {sh.room}</span>}
+                          </div>
+                        ))}
+                      </td>
+                    );
+                  })}
+                  <td style={{ textAlign: "right", fontWeight: 600 }}>{total.toFixed(1)}h</td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+        <div className="print-footer">Printed {new Date().toLocaleString()}</div>
+      </div>
 
       <ShiftDrawer state={drawer} onClose={() => setDrawer({ mode: "closed" })} onSaved={() => { void refresh(); }} staffList={staff} />
 
@@ -399,3 +449,55 @@ const errBox: React.CSSProperties = {
   padding: 10, borderRadius: 8, background: "rgba(220,38,38,.1)", color: "#fca5a5",
   border: "1px solid rgba(220,38,38,.35)", marginBottom: 12,
 };
+
+// Print stylesheet: hide the interactive UI, show only .print-schedule,
+// force landscape, and auto-size the grid to a single page. Font size
+// scales down as row count grows so 20+ staff still fit on one page.
+const PRINT_CSS = `
+  @media screen { .print-only { display: none !important; } }
+  @media print {
+    @page { size: landscape; margin: 8mm; }
+    html, body { background: #fff !important; color: #000 !important; }
+    body * { visibility: hidden !important; }
+    .print-only, .print-only * { visibility: visible !important; }
+    .print-only { position: absolute; left: 0; top: 0; width: 100%; }
+    .print-schedule {
+      font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+      color: #000;
+      padding: 4mm 6mm;
+    }
+    .print-header {
+      display: flex; justify-content: space-between; align-items: baseline;
+      border-bottom: 2px solid #000; padding-bottom: 4px; margin-bottom: 8px;
+    }
+    .print-title { font-size: 16pt; font-weight: 700; }
+    .print-week { font-size: 12pt; }
+    .print-grid {
+      width: 100%; border-collapse: collapse;
+      table-layout: fixed;
+      font-size: 9pt;
+    }
+    .print-grid th, .print-grid td {
+      border: 1px solid #666;
+      padding: 3px 4px;
+      vertical-align: top;
+      word-wrap: break-word;
+      overflow-wrap: break-word;
+    }
+    .print-grid th {
+      background: #eee !important;
+      -webkit-print-color-adjust: exact;
+      print-color-adjust: exact;
+      font-size: 8.5pt;
+      text-align: center;
+    }
+    .print-grid td { text-align: center; }
+    .print-room { font-size: 7pt; color: #444; }
+    .print-footer { margin-top: 6px; font-size: 8pt; color: #666; text-align: right; }
+    /* Auto-shrink font/padding when many staff to keep to 1 page */
+    .print-grid tr:nth-child(n+16) td,
+    .print-grid tr:nth-child(n+16) th { font-size: 8pt; padding: 2px 3px; }
+    .print-grid tr:nth-child(n+22) td,
+    .print-grid tr:nth-child(n+22) th { font-size: 7pt; padding: 1px 2px; }
+  }
+`;
