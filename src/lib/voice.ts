@@ -304,6 +304,74 @@ export async function parseExpense(opts: {
   };
 }
 
+// ─── Recurring bill parsing (text → recurring template rows) ────────────
+
+export interface ParsedRecurring {
+  name: string;
+  category: string;
+  subcategory: string | null;
+  vendor: string | null;
+  amount: number;
+  paymentMethod: string;
+  frequency: string; // monthly | quarterly | yearly
+  dayOfMonth: number;
+  startDate: string;
+  notes: string | null;
+  confidence: number | null;
+}
+
+interface RustParsedRecurring {
+  name: string;
+  category: string;
+  subcategory: string | null;
+  vendor: string | null;
+  amount: number;
+  payment_method: string;
+  frequency: string;
+  day_of_month: number;
+  start_date: string;
+  notes: string | null;
+  confidence: number | null;
+}
+
+export async function parseRecurringExpense(opts: {
+  text: string;
+  categories: string[];
+  paymentMethods: string[];
+}): Promise<{ recurring: ParsedRecurring[]; latencyMs: number; rawJson: string }> {
+  const now = new Date();
+  const tz = Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
+  const res = await invoke<{ recurring: RustParsedRecurring[]; latency_ms: number; raw_json: string }>(
+    "parse_recurring_expense",
+    {
+      args: {
+        text: opts.text,
+        now_iso: toLocalIso(now),
+        tz,
+        categories: opts.categories,
+        payment_methods: opts.paymentMethods,
+      },
+    },
+  );
+  return {
+    recurring: res.recurring.map((r) => ({
+      name: r.name,
+      category: r.category,
+      subcategory: r.subcategory,
+      vendor: r.vendor,
+      amount: r.amount,
+      paymentMethod: r.payment_method,
+      frequency: r.frequency,
+      dayOfMonth: r.day_of_month,
+      startDate: r.start_date,
+      notes: r.notes,
+      confidence: r.confidence,
+    })),
+    latencyMs: res.latency_ms,
+    rawJson: res.raw_json,
+  };
+}
+
 // ─── Audit trail ─────────────────────────────────────────────────────────
 
 async function sha256Hex(s: string): Promise<string> {

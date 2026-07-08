@@ -715,3 +715,193 @@ pub async fn parse_expense(args: ParseExpenseArgs) -> Result<ParseExpenseResult,
         raw_json: content,
     })
 }
+
+// ─── parse_recurring_expense ────────────────────────────────────────────
+// Recurring bills (monthly/quarterly/yearly templates). Same shape as
+// parse_expense but returns RecurringExpense-flavoured rows: name,
+// frequency, day_of_month, start_date, no reference.
+
+#[derive(Deserialize)]
+pub struct ParseRecurringArgs {
+    pub text: String,
+    pub now_iso: String,
+    pub tz: String,
+    pub categories: Vec<String>,
+    pub payment_methods: Vec<String>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct ParsedRecurring {
+    pub name: String,
+    pub category: String,
+    pub subcategory: Option<String>,
+    pub vendor: Option<String>,
+    pub amount: f64,
+    pub payment_method: String,
+    pub frequency: String,
+    pub day_of_month: i32,
+    pub start_date: String,
+    pub notes: Option<String>,
+    pub confidence: Option<f32>,
+}
+
+#[derive(Serialize)]
+pub struct ParseRecurringResult {
+    pub recurring: Vec<ParsedRecurring>,
+    pub latency_ms: u64,
+    pub raw_json: String,
+}
+
+#[tauri::command]
+pub async fn parse_recurring_expense(args: ParseRecurringArgs) -> Result<ParseRecurringResult, String> {
+    let text = args.text.trim();
+    if text.is_empty() {
+        return Err("Nothing to parse — the text box is empty.".to_string());
+    }
+    if text.len() > 4000 {
+        return Err("Text too long (>4000 chars).".to_string());
+    }
+    if args.categories.is_empty() || args.payment_methods.is_empty() {
+        return Err("No categories or payment methods provided.".to_string());
+    }
+
+    let api_key = crate::secrets::get_secret("azure_ai_key")?;
+
+    let cats = args.categories.join(", ");
+    let pays = args.payment_methods.join(", ");
+
+    let system_prompt = format!(
+        "You extract one or more RECURRING daycare-bill templates from short free-text notes. Return STRICT JSON matching the schema — no prose.\n\
+         \n\
+         Current local time: {now_iso}\n\
+         User timezone: {tz}\n\
+         \n\
+         Rules:\n\
+         - name: short human label for the bill (e.g. 'Rogers Internet', 'BC Hydro'). Required.\n\
+         - amount: positive number, dollars and cents.\n\
+         - frequency: one of exactly 'monthly', 'quarterly', 'yearly'. Default 'monthly' if unclear.\n\
+         - day_of_month: integer 1..28 for the day the bill posts. If user says 'on the 5th' -> 5. Default 1 if not stated.\n\
+         - start_date: YYYY-MM-DD. Default to today. If user says 'starting Aug', use the 1st of that month.\n\
+         - vendor: the payee, if distinct from name. Otherwise null.\n\
+         - subcategory: optional free-text refinement.\n\
+         - notes: anything the user said that doesn't fit above.\n\
+         - confidence: 0.0-1.0 self-report per row.\n\
+         - If user describes multiple recurring bills, return one entry per bill.\n\
+         \n\
+         category MUST be one of exactly these keys (never invent): {cats}\n\
+         Choose the closest fit. Use 'misc' as fallback.\n\
+         \n\
+         payment_method MUST be one of exactly these labels: {pays}\n\
+         Default to 'Direct Deposit (Bank)' unless another method is stated.\n\
+         \n\
+         Return {{ \"recurring\": [...] }} — always wrap in an object.",
+        now_iso = args.now_iso,
+        tz = args.tz,
+        cats = cats,
+        pays = pays,
+    );
+
+    let cat_enum: Vec<Value> = args.categories.iter().map(|s| json!(s)).collect();
+    let pay_enum: Vec<Value> = args.payment_methods.iter().map(|s| json!(s)).collect();
+
+    let schema = json!({
+        "type": "object",
+        "properties": {
+            "recurring": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "name":           { "type": "string" },
+                        "category":       { "type": "string", "enum": cat_enum },
+                        "subcategory":    { "type": ["string", "null"] },
+                        "vendor":         { "type": ["string", "null"] },
+                        "amount":         { "type": "number" },
+                        "payment_method": { "type": "string", "enum": pay_enum },
+                        "frequency":      { "type": "string", "enum": ["monthly", "quarterly", "yearly"] },
+                        "day_of_month":   { "type": "integer" },
+                        "start_date":     { "type": "string" },
+                        "notes":          { "type": ["string", "null"] },
+                        "confidence":     { "type": ["number", "null"] }
+                    },
+                    "required": ["name", "category", "subcategory", "vendor", "amount", "payment_method", "frequency", "day_of_month", "start_date", "notes", "confidence"],
+                    "additionalProperties": false
+                }
+            }
+        },
+        "required": ["recurring"],
+        "additionalProperties": false
+    });
+
+    let body = json!({
+        "messages": [
+            { "role": "system", "content": system_prompt },
+            { "role": "user",   "content": text }
+        ],
+        "temperature": 0,
+        "max_tokens": 1200,
+        "response_format": {
+            "type": "json_schema",
+            "json_schema": { "name": "RecurringEntries", "schema": schema, "strict": true }
+        }
+    });
+
+    let url = format!(
+        "{AZURE_CHAT_ENDPOINT}/openai/deployments/{CHAT_DEPLOY}/chat/completions?api-version={CHAT_API_VER}"
+    );
+    let start = std::time::Instant::now();
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(60))
+        .build()
+        .map_err(|e| redact(format!("http client: {e}"), &api_key))?;
+    let resp = client
+        .post(&url)
+        .header("api-key", &api_key)
+        .header("Content-Type", "application/json")
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| redact(format!("request: {e}"), &api_key))?;
+
+    let status = resp.status();
+    let raw = resp.text().await.map_err(|e| redact(format!("read: {e}"), &api_key))?;
+    if !status.is_success() {
+        return Err(redact(
+            format!("http {status} @ chat/completions :: {}", truncate(&raw, 800)),
+            &api_key,
+        ));
+    }
+    let v: Value = serde_json::from_str(&raw)
+        .map_err(|e| redact(format!("chat json: {e} :: {}", truncate(&raw, 400)), &api_key))?;
+    let content = v["choices"][0]["message"]["content"].as_str().unwrap_or("").trim().to_string();
+    if content.is_empty() {
+        return Err(redact(format!("chat: empty content :: {}", truncate(&raw, 400)), &api_key));
+    }
+    #[derive(Deserialize)]
+    struct Wrapper { recurring: Vec<ParsedRecurring> }
+    let parsed: Wrapper = serde_json::from_str(&content)
+        .map_err(|e| redact(format!("parsed JSON: {e} :: {}", truncate(&content, 400)), &api_key))?;
+
+    let cat_set: std::collections::HashSet<&str> =
+        args.categories.iter().map(|s| s.as_str()).collect();
+    let pay_set: std::collections::HashSet<&str> =
+        args.payment_methods.iter().map(|s| s.as_str()).collect();
+    let allowed_freq = ["monthly", "quarterly", "yearly"];
+    let cleaned: Vec<ParsedRecurring> = parsed.recurring.into_iter().map(|mut r| {
+        if r.day_of_month < 1 { r.day_of_month = 1; }
+        if r.day_of_month > 28 { r.day_of_month = 28; }
+        r
+    }).filter(|r| {
+        !r.name.trim().is_empty()
+        && r.amount > 0.0
+        && cat_set.contains(r.category.as_str())
+        && pay_set.contains(r.payment_method.as_str())
+        && allowed_freq.contains(&r.frequency.as_str())
+    }).collect();
+
+    Ok(ParseRecurringResult {
+        recurring: cleaned,
+        latency_ms: start.elapsed().as_millis() as u64,
+        raw_json: content,
+    })
+}

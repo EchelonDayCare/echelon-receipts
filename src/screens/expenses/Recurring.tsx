@@ -5,6 +5,9 @@ import {
   EXPENSE_CATEGORIES, PAYMENT_METHODS, FREQUENCIES, CATEGORY_LABEL,
   type RecurringExpense,
 } from "../../lib/expenses";
+import { isAiTextConfigured } from "../../lib/voice";
+import { getSettings } from "../../lib/db";
+import RecurringAiTextPanel from "./RecurringAiTextPanel";
 
 function fmt(n: number): string {
   return n.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
@@ -33,6 +36,11 @@ export default function Recurring() {
   const [ym, setYm] = useState<string>(ymToday());
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState("");
+  const [aiEnabled, setAiEnabled] = useState(false);
+
+  useEffect(() => {
+    getSettings().then((s) => setAiEnabled(isAiTextConfigured(s))).catch(() => setAiEnabled(false));
+  }, []);
 
   async function reload() {
     const list = await listRecurring(false);
@@ -125,6 +133,8 @@ export default function Recurring() {
       </div>
 
       {msg && <div style={{ marginBottom: 12, padding: 10, borderRadius: 6, background: "#dbeafe", color: "#1e3a8a", fontSize: 13 }}>{msg}</div>}
+
+      {aiEnabled && <RecurringAiTextPanel onSaved={reload} />}
 
       {editing && (
         <div style={{ background: "#fff", border: "1px solid var(--border)", borderRadius: 8, padding: 16, marginBottom: 18 }}>

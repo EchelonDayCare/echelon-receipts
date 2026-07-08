@@ -1,28 +1,27 @@
-// AI text-capture panel for the Expenses page (v2.1.2).
+// AI text-capture panel for the Recurring Bills tab (v2.1.3).
 //
-// Free-text → structured expense rows. Uses parse_expense Tauri command
-// which is constrained server-side to the EXPENSE_CATEGORIES + PAYMENT_METHODS
-// enums we pass in from the frontend (no hardcoded policy in Rust).
-// Every parsed row is reviewable + editable before save; the model never
-// writes directly.
+// Free-text → RecurringExpense template rows. Uses parse_recurring_expense
+// Tauri command with enum-constrained categories/payment methods. Review
+// grid lets the owner tweak frequency/day/start date/amount before bulk
+// save via saveRecurring.
 
 import { useState } from "react";
-import { parseExpense, type ParsedExpense } from "../../lib/voice";
+import { parseRecurringExpense, type ParsedRecurring } from "../../lib/voice";
 import {
-  saveExpense, EXPENSE_CATEGORIES, PAYMENT_METHODS, CATEGORY_LABEL,
+  saveRecurring, EXPENSE_CATEGORIES, PAYMENT_METHODS, FREQUENCIES,
 } from "../../lib/expenses";
 
-type Row = ParsedExpense & { include: boolean };
+type Row = ParsedRecurring & { include: boolean };
 
 const EXAMPLES = [
-  "$47 at Michaels yesterday for craft supplies, cash",
-  "Rogers internet $89.99 monthly auto-pay",
-  "Payroll today: $1200 Priya, $1100 Sarah, $950 Anita, direct deposit",
+  "Rogers internet $89.99 monthly on the 5th, auto-pay",
+  "BC Hydro $220 quarterly, direct deposit",
+  "Rent $4500 monthly on the 1st, cheque to landlord",
 ];
 
 const CATEGORY_VALUES = EXPENSE_CATEGORIES.map((c) => c.value);
 
-export default function ExpenseAiTextPanel({ onSaved }: { onSaved: () => void }) {
+export default function RecurringAiTextPanel({ onSaved }: { onSaved: () => void }) {
   const [expanded, setExpanded] = useState(false);
   const [text, setText] = useState("");
   const [busy, setBusy] = useState<"idle" | "parsing" | "saving">("idle");
@@ -34,17 +33,17 @@ export default function ExpenseAiTextPanel({ onSaved }: { onSaved: () => void })
     if (!t) { setErr("Type something first."); return; }
     setErr(null); setBusy("parsing"); setRows(null);
     try {
-      const res = await parseExpense({
+      const res = await parseRecurringExpense({
         text: t,
         categories: CATEGORY_VALUES,
         paymentMethods: PAYMENT_METHODS,
       });
-      if (res.expenses.length === 0) {
-        setErr("AI couldn't find any expenses in that text. Try including an amount + what it was for.");
+      if (res.recurring.length === 0) {
+        setErr("AI couldn't find any recurring bills in that text. Try: '<name> $<amount> monthly'.");
         setBusy("idle");
         return;
       }
-      setRows(res.expenses.map((e) => ({ ...e, include: true })));
+      setRows(res.recurring.map((r) => ({ ...r, include: true })));
       setBusy("idle");
     } catch (e: any) {
       setErr(String(e?.message ?? e)); setBusy("idle");
@@ -53,7 +52,7 @@ export default function ExpenseAiTextPanel({ onSaved }: { onSaved: () => void })
 
   async function save() {
     if (!rows) return;
-    const toSave = rows.filter((r) => r.include && r.amount > 0 && r.category && r.paymentMethod && r.date);
+    const toSave = rows.filter((r) => r.include && r.amount > 0 && r.name.trim() && r.category && r.paymentMethod);
     if (toSave.length === 0) { setErr("Nothing to save — every row is either excluded or missing required fields."); return; }
     const skipped = rows.length - toSave.length;
     setBusy("saving"); setErr(null);
@@ -61,19 +60,23 @@ export default function ExpenseAiTextPanel({ onSaved }: { onSaved: () => void })
     const failed: string[] = [];
     for (const r of toSave) {
       try {
-        await saveExpense({
-          date: r.date,
+        await saveRecurring({
+          name: r.name,
           category: r.category,
           subcategory: r.subcategory || null,
           vendor: r.vendor || null,
           amount: r.amount,
           payment_method: r.paymentMethod,
-          reference: r.reference || null,
+          frequency: r.frequency,
+          day_of_month: r.dayOfMonth,
+          start_date: r.startDate,
+          end_date: null,
+          active: 1,
           notes: r.notes || null,
         });
         ok++;
       } catch (e: any) {
-        failed.push(`${r.vendor || r.category} $${r.amount}: ${String(e?.message ?? e)}`);
+        failed.push(`${r.name}: ${String(e?.message ?? e)}`);
       }
     }
     setBusy("idle");
@@ -83,7 +86,7 @@ export default function ExpenseAiTextPanel({ onSaved }: { onSaved: () => void })
       const msg = skipped > 0 ? `Saved ${ok}. Skipped ${skipped}.` : `Saved ${ok}.`;
       setErr(null);
       onSaved();
-      setText(""); setRows(null);
+      setText(""); setRows(null); setExpanded(false);
       window.setTimeout(() => alert(msg), 50);
     }
   }
@@ -96,7 +99,7 @@ export default function ExpenseAiTextPanel({ onSaved }: { onSaved: () => void })
     return (
       <div style={styles.strip}>
         <button style={styles.stripBtn} onClick={() => setExpanded(true)}>
-          ✨ Type in plain English → AI logs expenses
+          ✨ Type in plain English → AI creates recurring bills
         </button>
       </div>
     );
@@ -105,10 +108,10 @@ export default function ExpenseAiTextPanel({ onSaved }: { onSaved: () => void })
   return (
     <div style={styles.card}>
       <div style={styles.header}>
-        <div style={styles.title}>✨ AI Expense Capture</div>
+        <div style={styles.title}>✨ AI Recurring Bill Capture</div>
         <button style={styles.closeBtn} onClick={() => { setText(""); setRows(null); setErr(null); setExpanded(false); }} title="Close">✕</button>
       </div>
-      <div style={styles.subLabel}>Type expenses in plain English — paste receipts, list multiple, describe recurring bills. AI turns them into rows you review before saving.</div>
+      <div style={styles.subLabel}>Describe recurring bills in plain English — one per line works too. Review + tweak before saving.</div>
 
       {!rows && (
         <>
@@ -116,7 +119,7 @@ export default function ExpenseAiTextPanel({ onSaved }: { onSaved: () => void })
             style={styles.textarea}
             value={text}
             onChange={(e) => setText(e.target.value)}
-            placeholder='e.g. "$47 at Michaels yesterday, craft supplies, cash" or paste a whole receipt list'
+            placeholder='e.g. "Rogers internet $89.99 monthly on the 5th, auto-pay"'
             rows={3}
             disabled={busy === "parsing"}
           />
@@ -140,13 +143,11 @@ export default function ExpenseAiTextPanel({ onSaved }: { onSaved: () => void })
       {rows && (
         <div>
           <div style={styles.reviewHeader}>
-            Review {rows.length} parsed expense{rows.length === 1 ? "" : "s"}. Uncheck to skip; edit any field before saving.
+            Review {rows.length} parsed bill{rows.length === 1 ? "" : "s"}. Uncheck to skip; edit before saving.
           </div>
           <div style={styles.rowsWrap}>
             {rows.map((r, i) => {
-              const needsCat = !r.category || !CATEGORY_VALUES.includes(r.category);
-              const needsPay = !r.paymentMethod || !PAYMENT_METHODS.includes(r.paymentMethod);
-              const bad = needsCat || needsPay || !(r.amount > 0);
+              const bad = !r.name.trim() || !r.category || !r.paymentMethod || !(r.amount > 0);
               return (
                 <div key={i} style={{ ...styles.row, background: bad ? "#fef3c7" : "#f8fafc", opacity: r.include ? 1 : 0.5 }}>
                   <input
@@ -157,28 +158,22 @@ export default function ExpenseAiTextPanel({ onSaved }: { onSaved: () => void })
                   />
                   <div style={styles.rowGrid}>
                     <input
-                      type="date"
-                      style={{ ...styles.input, width: 130 }}
-                      value={r.date}
-                      onChange={(e) => updateRow(i, { date: e.target.value })}
+                      type="text"
+                      style={{ ...styles.input, minWidth: 160 }}
+                      value={r.name}
+                      onChange={(e) => updateRow(i, { name: e.target.value })}
+                      placeholder="Bill name (e.g. Rogers Internet)"
                     />
                     <select
                       style={{ ...styles.input, minWidth: 160 }}
                       value={r.category}
                       onChange={(e) => updateRow(i, { category: e.target.value })}
                     >
-                      <option value="">{needsCat ? "⚠ pick category…" : "— pick —"}</option>
+                      <option value="">— category —</option>
                       {EXPENSE_CATEGORIES.map((c) => (
                         <option key={c.value} value={c.value}>{c.label}</option>
                       ))}
                     </select>
-                    <input
-                      type="text"
-                      style={{ ...styles.input, minWidth: 140 }}
-                      value={r.vendor || ""}
-                      onChange={(e) => updateRow(i, { vendor: e.target.value })}
-                      placeholder="Vendor"
-                    />
                     <input
                       type="number"
                       step="0.01"
@@ -188,19 +183,46 @@ export default function ExpenseAiTextPanel({ onSaved }: { onSaved: () => void })
                       placeholder="Amount"
                     />
                     <select
+                      style={{ ...styles.input, minWidth: 120 }}
+                      value={r.frequency}
+                      onChange={(e) => updateRow(i, { frequency: e.target.value })}
+                    >
+                      {FREQUENCIES.map((f) => <option key={f.value} value={f.value}>{f.label}</option>)}
+                    </select>
+                    <label style={styles.mini}>
+                      Day
+                      <input
+                        type="number"
+                        min={1}
+                        max={28}
+                        style={{ ...styles.input, width: 60 }}
+                        value={r.dayOfMonth}
+                        onChange={(e) => updateRow(i, { dayOfMonth: Math.max(1, Math.min(28, parseInt(e.target.value || "1", 10))) })}
+                      />
+                    </label>
+                    <label style={styles.mini}>
+                      Starts
+                      <input
+                        type="date"
+                        style={{ ...styles.input, width: 140 }}
+                        value={r.startDate}
+                        onChange={(e) => updateRow(i, { startDate: e.target.value })}
+                      />
+                    </label>
+                    <select
                       style={{ ...styles.input, minWidth: 130 }}
                       value={r.paymentMethod}
                       onChange={(e) => updateRow(i, { paymentMethod: e.target.value })}
                     >
-                      <option value="">{needsPay ? "⚠ payment…" : "— pick —"}</option>
+                      <option value="">— payment —</option>
                       {PAYMENT_METHODS.map((p) => <option key={p} value={p}>{p}</option>)}
                     </select>
                     <input
                       type="text"
-                      style={{ ...styles.input, flex: 1, minWidth: 160 }}
-                      value={r.notes || ""}
-                      onChange={(e) => updateRow(i, { notes: e.target.value })}
-                      placeholder="Notes"
+                      style={{ ...styles.input, flex: 1, minWidth: 140 }}
+                      value={r.vendor || ""}
+                      onChange={(e) => updateRow(i, { vendor: e.target.value })}
+                      placeholder="Vendor (optional)"
                     />
                     {r.confidence != null && r.confidence < 0.7 && (
                       <span style={styles.lowConf} title="Model wasn't sure">⚠</span>
@@ -212,14 +234,12 @@ export default function ExpenseAiTextPanel({ onSaved }: { onSaved: () => void })
           </div>
           <div style={styles.actions}>
             <button style={styles.primaryBtn} onClick={save} disabled={busy === "saving"}>
-              {busy === "saving" ? "Saving…" : `✓ Save ${rows.filter((r) => r.include).length} expense${rows.filter((r) => r.include).length === 1 ? "" : "s"}`}
+              {busy === "saving" ? "Saving…" : `✓ Save ${rows.filter((r) => r.include).length} recurring bill${rows.filter((r) => r.include).length === 1 ? "" : "s"}`}
             </button>
             <button style={styles.linkBtn} onClick={() => { setRows(null); }} disabled={busy === "saving"}>
               Back to text
             </button>
           </div>
-          {/* Hidden lookup, keeps CATEGORY_LABEL import used for future tooltips */}
-          <div style={{ display: "none" }}>{Object.keys(CATEGORY_LABEL).length}</div>
         </div>
       )}
 
@@ -235,13 +255,13 @@ const styles: Record<string, React.CSSProperties> = {
     background: "linear-gradient(90deg, #faf5ff, #f5f3ff)", color: "#5b21b6",
     fontSize: 14, fontWeight: 500, cursor: "pointer", textAlign: "left",
   },
-  closeBtn: { border: "none", background: "transparent", cursor: "pointer", fontSize: 16, color: "#888" },
   card: {
     margin: "8px 0 16px", padding: 16, borderRadius: 12,
     background: "linear-gradient(180deg, #faf5ff, #fff)", border: "1px solid #ddd6fe",
   },
   header: { display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 4 },
   title: { fontWeight: 600, fontSize: 15, color: "#5b21b6" },
+  closeBtn: { border: "none", background: "transparent", cursor: "pointer", fontSize: 16, color: "#888" },
   subLabel: { fontSize: 12, color: "#666", marginBottom: 10 },
   textarea: {
     width: "100%", padding: 10, borderRadius: 8, border: "1px solid #ddd", fontFamily: "inherit",
@@ -266,6 +286,7 @@ const styles: Record<string, React.CSSProperties> = {
     borderRadius: 6, fontSize: 13,
   },
   rowGrid: { display: "flex", flexWrap: "wrap", gap: 6, alignItems: "center", flex: 1 },
+  mini: { display: "flex", alignItems: "center", gap: 4, fontSize: 12, color: "#555" },
   input: { padding: "4px 6px", borderRadius: 4, border: "1px solid #ddd", fontSize: 13, fontFamily: "inherit" },
   lowConf: { color: "#c2410c", fontSize: 14, marginLeft: 4 },
   err: { fontSize: 13, color: "#991b1b", padding: 8, background: "#fee2e2", borderRadius: 6, marginTop: 8 },

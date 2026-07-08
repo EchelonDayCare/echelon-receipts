@@ -5,6 +5,9 @@ import {
   saveExpense, getExpense, deleteExpense,
 } from "../../lib/expenses";
 import { showConfirm } from "../../lib/dialogs";
+import { isAiTextConfigured } from "../../lib/voice";
+import { getSettings } from "../../lib/db";
+import ExpenseAiTextPanel from "./ExpenseAiTextPanel";
 
 function todayStr(): string {
   const d = new Date();
@@ -26,6 +29,11 @@ export default function ExpenseForm() {
   const [notes, setNotes] = useState("");
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
+  const [aiEnabled, setAiEnabled] = useState(false);
+
+  useEffect(() => {
+    getSettings().then((s) => setAiEnabled(isAiTextConfigured(s))).catch(() => setAiEnabled(false));
+  }, []);
 
   useEffect(() => {
     if (editing && id) {
@@ -74,6 +82,7 @@ export default function ExpenseForm() {
   return (
     <div style={{ padding: 24, maxWidth: 720 }}>
       <h1 style={{ marginTop: 0 }}>{editing ? "Edit Expense" : "Add Expense"}</h1>
+      {!editing && aiEnabled && <ExpenseAiTextPanel onSaved={() => nav("/expenses/list")} />}
       {err && <div style={{ background: "#fee2e2", border: "1px solid #ef4444", color: "#991b1b", padding: 10, borderRadius: 6, marginBottom: 12 }}>{err}</div>}
 
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14 }}>
