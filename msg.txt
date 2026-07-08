@@ -1,3 +1,0 @@
-chore(release): bump version to 2.2.1
-
-Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>
