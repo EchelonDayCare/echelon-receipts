@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { SetupPinModal } from "./AppGate";
+import { emailRecoveryCode } from "../lib/emailRecovery";
 
 // v2.0.0 device security settings tile — drop into Settings.tsx.
 //
@@ -115,6 +116,21 @@ export default function SecuritySettingsSection() {
 function RecoveryCodeModal({ code, onDone }: { code: string; onDone: () => void }) {
   const [confirmed, setConfirmed] = useState(false);
   const [copied, setCopied] = useState(false);
+  const [emailStatus, setEmailStatus] = useState<"idle" | "sending" | "sent" | "err">("idle");
+  const [emailMsg, setEmailMsg] = useState<string | null>(null);
+
+  const doEmail = async () => {
+    setEmailStatus("sending"); setEmailMsg(null);
+    const r = await emailRecoveryCode(code);
+    if (r.ok) {
+      setEmailStatus("sent");
+      setEmailMsg(`Sent to ${r.recipient}. Keep this email — it's your worst-case escape hatch.`);
+    } else {
+      setEmailStatus("err");
+      setEmailMsg(r.error);
+    }
+  };
+
   return (
     <div style={overlay}>
       <div style={{ ...card, minWidth: 480, maxWidth: 560 }}>
@@ -153,7 +169,24 @@ function RecoveryCodeModal({ code, onDone }: { code: string; onDone: () => void 
           >
             Print
           </button>
+          <button
+            type="button"
+            style={{ ...btn, flex: 1 }}
+            onClick={doEmail}
+            disabled={emailStatus === "sending" || emailStatus === "sent"}
+            title="Send this code to the daycare email as a fallback safety net"
+          >
+            {emailStatus === "sending" ? "Sending…" : emailStatus === "sent" ? "Emailed ✓" : "Email to me"}
+          </button>
         </div>
+        {emailMsg && (
+          <div style={{
+            fontSize: 12, padding: 8, borderRadius: 6, marginTop: 4,
+            background: emailStatus === "sent" ? "#dcfce7" : "#fee2e2",
+            color: emailStatus === "sent" ? "#166534" : "#991b1b",
+            border: emailStatus === "sent" ? "1px solid #86efac" : "1px solid #fca5a5",
+          }}>{emailMsg}</div>
+        )}
         <label style={{ fontSize: 13, color: "#333", marginTop: 12, display: "flex", gap: 8, alignItems: "flex-start" }}>
           <input
             type="checkbox"

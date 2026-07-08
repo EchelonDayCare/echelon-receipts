@@ -404,6 +404,11 @@ function UnlockScreen({
             Forgot PIN? Use recovery code
           </button>
         )}
+        {hasRecovery && (
+          <div style={{ fontSize: 11, color: "#999", marginTop: 4, textAlign: "center", lineHeight: 1.4 }}>
+            Tip: check your email inbox for "Echelon Recovery Code" if you didn't save the printed copy.
+          </div>
+        )}
       </form>
     </FullScreenCentered>
   );
