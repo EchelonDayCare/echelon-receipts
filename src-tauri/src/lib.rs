@@ -157,6 +157,7 @@ pub fn run() {
             voice::transcribe_audio,
             voice::parse_organizer_event,
             voice::parse_staff_shifts,
+            voice::parse_expense,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -4,6 +4,9 @@ import {
   listExpenses, EXPENSE_CATEGORIES, PAYMENT_METHODS, CATEGORY_LABEL,
   type Expense,
 } from "../../lib/expenses";
+import { isAiTextConfigured } from "../../lib/voice";
+import { getSettings } from "../../lib/db";
+import ExpenseAiTextPanel from "./ExpenseAiTextPanel";
 
 function fmt(n: number): string {
   return n.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
@@ -24,6 +27,11 @@ export default function ExpenseList() {
   const [payment, setPayment] = useState("");
   const [q, setQ] = useState("");
   const [rows, setRows] = useState<Expense[]>([]);
+  const [aiEnabled, setAiEnabled] = useState(false);
+
+  useEffect(() => {
+    getSettings().then((s) => setAiEnabled(isAiTextConfigured(s))).catch(() => setAiEnabled(false));
+  }, []);
 
   async function reload() {
     const list = await listExpenses({
@@ -62,6 +70,8 @@ export default function ExpenseList() {
           <Link to="/expenses/new" className="btn">+ Add Expense</Link>
         </div>
       </div>
+
+      {aiEnabled && <ExpenseAiTextPanel onSaved={reload} />}
 
       <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginBottom: 14, alignItems: "flex-end" }}>
         <label>From<br /><input type="date" value={from} onChange={(e) => setFrom(e.target.value)} /></label>

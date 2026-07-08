@@ -242,6 +242,68 @@ export async function parseStaffShifts(opts: {
   };
 }
 
+// ─── Expense parsing (text → structured expense rows) ────────────────────
+
+export interface ParsedExpense {
+  date: string;
+  category: string;
+  subcategory: string | null;
+  vendor: string | null;
+  amount: number;
+  paymentMethod: string;
+  reference: string | null;
+  notes: string | null;
+  confidence: number | null;
+}
+
+interface RustParsedExpense {
+  date: string;
+  category: string;
+  subcategory: string | null;
+  vendor: string | null;
+  amount: number;
+  payment_method: string;
+  reference: string | null;
+  notes: string | null;
+  confidence: number | null;
+}
+
+export async function parseExpense(opts: {
+  text: string;
+  categories: string[];
+  paymentMethods: string[];
+}): Promise<{ expenses: ParsedExpense[]; latencyMs: number; rawJson: string }> {
+  const now = new Date();
+  const tz = Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
+  const res = await invoke<{ expenses: RustParsedExpense[]; latency_ms: number; raw_json: string }>(
+    "parse_expense",
+    {
+      args: {
+        text: opts.text,
+        now_iso: toLocalIso(now),
+        tz,
+        categories: opts.categories,
+        payment_methods: opts.paymentMethods,
+      },
+    },
+  );
+  return {
+    expenses: res.expenses.map((e) => ({
+      date: e.date,
+      category: e.category,
+      subcategory: e.subcategory,
+      vendor: e.vendor,
+      amount: e.amount,
+      paymentMethod: e.payment_method,
+      reference: e.reference,
+      notes: e.notes,
+      confidence: e.confidence,
+    })),
+    latencyMs: res.latency_ms,
+    rawJson: res.raw_json,
+  };
+}
+
 // ─── Audit trail ─────────────────────────────────────────────────────────
 
 async function sha256Hex(s: string): Promise<string> {

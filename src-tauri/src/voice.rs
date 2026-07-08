@@ -531,3 +531,187 @@ fn add_days_iso(iso: &str, days: i64) -> String {
     }
     format!("{:04}-{:02}-{:02}", yy, mm, dd)
 }
+
+// ─── parse_expense ──────────────────────────────────────────────────────
+//
+// Free-text → single (or several) expense rows. Categories and payment
+// methods are passed in from the frontend as an enumeration, so the
+// backend never hardcodes a policy — schema changes on the TS side flow
+// through automatically. Model must pick from the allowed enum, or
+// null if genuinely unable to classify.
+
+#[derive(Deserialize)]
+pub struct ParseExpenseArgs {
+    pub text: String,
+    pub now_iso: String,
+    pub tz: String,
+    /// Category enum values, e.g. ["rent_lease","payroll",...]. Must match
+    /// EXPENSE_CATEGORIES in src/lib/expenses.ts exactly — no free-text.
+    pub categories: Vec<String>,
+    /// Payment method labels, e.g. ["Cash","Visa Credit Card",...].
+    pub payment_methods: Vec<String>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct ParsedExpense {
+    pub date: String,
+    pub category: String,
+    pub subcategory: Option<String>,
+    pub vendor: Option<String>,
+    pub amount: f64,
+    pub payment_method: String,
+    pub reference: Option<String>,
+    pub notes: Option<String>,
+    pub confidence: Option<f32>,
+}
+
+#[derive(Serialize)]
+pub struct ParseExpenseResult {
+    pub expenses: Vec<ParsedExpense>,
+    pub latency_ms: u64,
+    pub raw_json: String,
+}
+
+#[tauri::command]
+pub async fn parse_expense(args: ParseExpenseArgs) -> Result<ParseExpenseResult, String> {
+    let text = args.text.trim();
+    if text.is_empty() {
+        return Err("Nothing to parse — the text box is empty.".to_string());
+    }
+    if text.len() > 4000 {
+        return Err("Text too long (>4000 chars). Enter one expense at a time.".to_string());
+    }
+    if args.categories.is_empty() || args.payment_methods.is_empty() {
+        return Err("No categories or payment methods provided.".to_string());
+    }
+
+    let api_key = crate::secrets::get_secret("azure_ai_key")?;
+
+    let cats = args.categories.join(", ");
+    let pays = args.payment_methods.join(", ");
+
+    let system_prompt = format!(
+        "You extract one or more daycare-expense entries from short free-text notes. Return STRICT JSON matching the schema — no prose.\n\
+         \n\
+         Current local time: {now_iso}\n\
+         User timezone: {tz}\n\
+         \n\
+         Rules:\n\
+         - Resolve relative dates: 'today', 'yesterday', 'last Friday', 'July 3', 'a week ago' -> YYYY-MM-DD.\n\
+         - If no date is stated, default to today.\n\
+         - amount: positive number, no currency symbol, dollars and cents.\n\
+         - vendor: the merchant / person paid, if stated. Otherwise null.\n\
+         - subcategory: optional free-text refinement, e.g. 'Costco snacks' under food_groceries.\n\
+         - reference: cheque #, invoice #, order # if stated. Otherwise null.\n\
+         - notes: anything the user said that doesn't fit above (e.g. 'reimbursed by grant').\n\
+         - confidence: 0.0-1.0 self-report per row.\n\
+         - If the user describes multiple purchases, return one entry per purchase.\n\
+         \n\
+         category MUST be one of exactly these keys (never invent): {cats}\n\
+         Choose the closest fit. Use 'misc' as fallback.\n\
+         \n\
+         payment_method MUST be one of exactly these labels: {pays}\n\
+         Default to 'Cash' unless another method is stated.\n\
+         \n\
+         Return {{ \"expenses\": [...] }} — always wrap in an object.",
+        now_iso = args.now_iso,
+        tz = args.tz,
+        cats = cats,
+        pays = pays,
+    );
+
+    let cat_enum: Vec<Value> = args.categories.iter().map(|s| json!(s)).collect();
+    let pay_enum: Vec<Value> = args.payment_methods.iter().map(|s| json!(s)).collect();
+
+    let schema = json!({
+        "type": "object",
+        "properties": {
+            "expenses": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "date":           { "type": "string" },
+                        "category":       { "type": "string", "enum": cat_enum },
+                        "subcategory":    { "type": ["string", "null"] },
+                        "vendor":         { "type": ["string", "null"] },
+                        "amount":         { "type": "number" },
+                        "payment_method": { "type": "string", "enum": pay_enum },
+                        "reference":      { "type": ["string", "null"] },
+                        "notes":          { "type": ["string", "null"] },
+                        "confidence":     { "type": ["number", "null"] }
+                    },
+                    "required": ["date", "category", "subcategory", "vendor", "amount", "payment_method", "reference", "notes", "confidence"],
+                    "additionalProperties": false
+                }
+            }
+        },
+        "required": ["expenses"],
+        "additionalProperties": false
+    });
+
+    let body = json!({
+        "messages": [
+            { "role": "system", "content": system_prompt },
+            { "role": "user",   "content": text }
+        ],
+        "temperature": 0,
+        "max_tokens": 1200,
+        "response_format": {
+            "type": "json_schema",
+            "json_schema": { "name": "ExpenseEntries", "schema": schema, "strict": true }
+        }
+    });
+
+    let url = format!(
+        "{AZURE_CHAT_ENDPOINT}/openai/deployments/{CHAT_DEPLOY}/chat/completions?api-version={CHAT_API_VER}"
+    );
+    let start = std::time::Instant::now();
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(60))
+        .build()
+        .map_err(|e| redact(format!("http client: {e}"), &api_key))?;
+    let resp = client
+        .post(&url)
+        .header("api-key", &api_key)
+        .header("Content-Type", "application/json")
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| redact(format!("request: {e}"), &api_key))?;
+
+    let status = resp.status();
+    let raw = resp.text().await.map_err(|e| redact(format!("read: {e}"), &api_key))?;
+    if !status.is_success() {
+        return Err(redact(
+            format!("http {status} @ chat/completions :: {}", truncate(&raw, 800)),
+            &api_key,
+        ));
+    }
+    let v: Value = serde_json::from_str(&raw)
+        .map_err(|e| redact(format!("chat json: {e} :: {}", truncate(&raw, 400)), &api_key))?;
+    let content = v["choices"][0]["message"]["content"].as_str().unwrap_or("").trim().to_string();
+    if content.is_empty() {
+        return Err(redact(format!("chat: empty content :: {}", truncate(&raw, 400)), &api_key));
+    }
+    #[derive(Deserialize)]
+    struct Wrapper { expenses: Vec<ParsedExpense> }
+    let parsed: Wrapper = serde_json::from_str(&content)
+        .map_err(|e| redact(format!("parsed JSON: {e} :: {}", truncate(&content, 400)), &api_key))?;
+
+    // Server-side sanity: drop rows with non-positive amount or category
+    // not in the allowed list (double-check the enum enforcement).
+    let cat_set: std::collections::HashSet<&str> =
+        args.categories.iter().map(|s| s.as_str()).collect();
+    let pay_set: std::collections::HashSet<&str> =
+        args.payment_methods.iter().map(|s| s.as_str()).collect();
+    let cleaned: Vec<ParsedExpense> = parsed.expenses.into_iter().filter(|e| {
+        e.amount > 0.0 && cat_set.contains(e.category.as_str()) && pay_set.contains(e.payment_method.as_str())
+    }).collect();
+
+    Ok(ParseExpenseResult {
+        expenses: cleaned,
+        latency_ms: start.elapsed().as_millis() as u64,
+        raw_json: content,
+    })
+}
