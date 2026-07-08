@@ -383,11 +383,11 @@ function UnlockScreen({
             style={{
               position: "absolute", right: 6, top: "50%", transform: "translateY(-50%)",
               background: "none", border: "none", cursor: "pointer",
-              padding: "6px 8px", fontSize: 13, color: "#4a5568",
+              padding: "6px 10px", fontSize: 18, lineHeight: 1, color: "#4a5568",
             }}
             tabIndex={-1}
           >
-            {showPin ? "🙈 Hide" : "👁 Show"}
+            {showPin ? "🙈" : "👁"}
           </button>
         </div>
         {err && <div style={styles.error}>{err}</div>}
