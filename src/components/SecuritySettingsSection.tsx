@@ -23,6 +23,7 @@ export default function SecuritySettingsSection() {
   const [changeOpen, setChangeOpen] = useState(false);
   const [recoveryOpen, setRecoveryOpen] = useState(false);
   const [recoveryCode, setRecoveryCode] = useState<string | null>(null);
+  const [proofOpen, setProofOpen] = useState(false);
 
   const refresh = () => {
     invoke<V2State>("v2_state").then(setState).catch((e) =>
@@ -43,19 +44,19 @@ export default function SecuritySettingsSection() {
     }
   };
 
-  const generateRecovery = async () => {
+  const generateRecovery = () => {
     const warning = state.hasRecovery
       ? "You already have a recovery code. Generating a new one INVALIDATES the previous one. Continue?"
       : "You will see a 48-character recovery code. Anyone with this code can decrypt your data — store it OFFLINE (printed, in a safe). Continue?";
     if (!confirm(warning)) return;
-    try {
-      const code = await invoke<string>("v2_generate_recovery");
-      setRecoveryCode(code);
-      setRecoveryOpen(true);
-      refresh();
-    } catch (e) {
-      alert(`Recovery generation failed: ${e}`);
-    }
+    setProofOpen(true);
+  };
+
+  const runGenerateRecovery = async (proof: { kind: "pin"; pin: string } | { kind: "recovery"; code: string }) => {
+    const code = await invoke<string>("v2_generate_recovery", { proof });
+    setRecoveryCode(code);
+    setRecoveryOpen(true);
+    refresh();
   };
 
   return (
@@ -107,6 +108,17 @@ export default function SecuritySettingsSection() {
         <RecoveryCodeModal
           code={recoveryCode}
           onDone={() => { setRecoveryOpen(false); setRecoveryCode(null); }}
+        />
+      )}
+      {proofOpen && (
+        <StepUpProofModal
+          title="Confirm it's you"
+          subtitle="Enter your current PIN (or recovery code) to generate a new recovery code."
+          onCancel={() => setProofOpen(false)}
+          onSubmit={async (proof) => {
+            await runGenerateRecovery(proof);
+            setProofOpen(false);
+          }}
         />
       )}
     </div>
@@ -221,10 +233,14 @@ function ChangePinModal({ onDone, onCancel }: { onDone: () => void; onCancel: ()
   const [confirm, setConfirm] = useState("");
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
-  // Set an initial PIN without knowing the old one — only allowed while
-  // the app is already unlocked (i.e. after unlocking via recovery code).
+  // Set a fresh PIN without knowing the old one — the user must present
+  // their recovery code as the step-up proof (they've forgotten the PIN,
+  // so PIN-proof isn't available).
   const [forgotOld, setForgotOld] = useState(false);
-  const canSubmit = (forgotOld || oldPin.length >= 4) && newPin.length >= 6 && newPin === confirm && !busy;
+  const [recoveryProof, setRecoveryProof] = useState("");
+  const canSubmit = newPin.length >= 6 && newPin === confirm && !busy && (
+    forgotOld ? recoveryProof.trim().length > 0 : oldPin.length >= 4
+  );
 
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -232,14 +248,20 @@ function ChangePinModal({ onDone, onCancel }: { onDone: () => void; onCancel: ()
     setBusy(true); setErr(null);
     try {
       if (forgotOld) {
-        await invoke("v2_reset_pin", { newPin });
+        await invoke("v2_reset_pin", {
+          proof: { kind: "recovery", code: recoveryProof.trim() },
+          newPin,
+        });
       } else {
         await invoke("v2_change_pin", { oldPin, newPin });
       }
       onDone();
     } catch (e: any) {
       const msg = String(e?.message ?? e);
-      setErr(/wrong pin/i.test(msg) ? "Current PIN is wrong." : msg);
+      if (/wrong pin/i.test(msg)) setErr("Current PIN is wrong.");
+      else if (/recovery/i.test(msg)) setErr("Recovery code is invalid.");
+      else if (/pin too short/i.test(msg)) setErr("New PIN must be at least 6 characters.");
+      else setErr(msg);
     } finally {
       setBusy(false);
     }
@@ -262,16 +284,26 @@ function ChangePinModal({ onDone, onCancel }: { onDone: () => void; onCancel: ()
           </>
         )}
         {forgotOld && (
-          <div style={{ padding: 10, background: "#fef3c7", border: "1px solid #fbbf24", borderRadius: 6, fontSize: 12, color: "#92400e" }}>
-            You're already unlocked, so we can set a fresh PIN without the old one. This rewraps the same encrypted database under your new PIN.
-            <button
-              type="button"
-              onClick={() => setForgotOld(false)}
-              style={{ background: "none", border: "none", color: "#92400e", fontSize: 12, textDecoration: "underline", cursor: "pointer", padding: 0, marginLeft: 6 }}
-            >
-              Undo
-            </button>
-          </div>
+          <>
+            <div style={{ padding: 10, background: "#fef3c7", border: "1px solid #fbbf24", borderRadius: 6, fontSize: 12, color: "#92400e" }}>
+              Enter your <b>recovery code</b> to authorise resetting the PIN. This rewraps the same encrypted database under your new PIN.
+              <button
+                type="button"
+                onClick={() => { setForgotOld(false); setRecoveryProof(""); }}
+                style={{ background: "none", border: "none", color: "#92400e", fontSize: 12, textDecoration: "underline", cursor: "pointer", padding: 0, marginLeft: 6 }}
+              >
+                Undo
+              </button>
+            </div>
+            <label style={label}>Recovery code</label>
+            <textarea
+              value={recoveryProof}
+              onChange={(e) => { setRecoveryProof(e.target.value); setErr(null); }}
+              style={{ ...input, letterSpacing: 1, minHeight: 60, fontFamily: "ui-monospace, monospace" }}
+              placeholder="XXXX-XXXX-XXXX-…"
+              autoFocus
+            />
+          </>
         )}
         <label style={label}>New PIN (6+ chars)</label>
         <input type="password" value={newPin} onChange={(e) => { setNewPin(e.target.value); setErr(null); }} style={input} autoFocus={forgotOld} />
@@ -318,3 +350,91 @@ const input: React.CSSProperties = {
   letterSpacing: 4, fontFamily: "monospace",
 };
 const errStyle: React.CSSProperties = { color: "#c00", fontSize: 13 };
+
+function StepUpProofModal({
+  title, subtitle, onCancel, onSubmit,
+}: {
+  title: string;
+  subtitle: string;
+  onCancel: () => void;
+  onSubmit: (proof: { kind: "pin"; pin: string } | { kind: "recovery"; code: string }) => Promise<void>;
+}) {
+  const [kind, setKind] = useState<"pin" | "recovery">("pin");
+  const [pin, setPin] = useState("");
+  const [code, setCode] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+  const canSubmit = !busy && (kind === "pin" ? pin.length >= 4 : code.trim().length > 0);
+
+  const submit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!canSubmit) return;
+    setBusy(true); setErr(null);
+    try {
+      await onSubmit(kind === "pin" ? { kind: "pin", pin } : { kind: "recovery", code: code.trim() });
+    } catch (e: any) {
+      const msg = String(e?.message ?? e);
+      if (/wrong pin/i.test(msg)) setErr("PIN is wrong.");
+      else if (/recovery/i.test(msg)) setErr("Recovery code is invalid.");
+      else if (/rate.?limit/i.test(msg)) setErr("Too many attempts. Please wait and try again.");
+      else setErr(msg);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div style={overlay}>
+      <form onSubmit={submit} style={card}>
+        <div style={{ fontSize: 18, fontWeight: 600 }}>{title}</div>
+        <div style={{ fontSize: 13, color: "#555" }}>{subtitle}</div>
+        <div style={{ display: "flex", gap: 8, marginTop: 4 }}>
+          <button
+            type="button"
+            onClick={() => { setKind("pin"); setErr(null); }}
+            style={{ ...btn, flex: 1, background: kind === "pin" ? "#2c5282" : "#f5f5f5", color: kind === "pin" ? "#fff" : "#000" }}
+          >
+            Use PIN
+          </button>
+          <button
+            type="button"
+            onClick={() => { setKind("recovery"); setErr(null); }}
+            style={{ ...btn, flex: 1, background: kind === "recovery" ? "#2c5282" : "#f5f5f5", color: kind === "recovery" ? "#fff" : "#000" }}
+          >
+            Use recovery code
+          </button>
+        </div>
+        {kind === "pin" ? (
+          <>
+            <label style={label}>Current PIN</label>
+            <input
+              type="password"
+              value={pin}
+              onChange={(e) => { setPin(e.target.value); setErr(null); }}
+              style={input}
+              autoFocus
+            />
+          </>
+        ) : (
+          <>
+            <label style={label}>Recovery code</label>
+            <textarea
+              value={code}
+              onChange={(e) => { setCode(e.target.value); setErr(null); }}
+              style={{ ...input, letterSpacing: 1, minHeight: 60, fontFamily: "ui-monospace, monospace" }}
+              placeholder="XXXX-XXXX-XXXX-…"
+              autoFocus
+            />
+          </>
+        )}
+        {err && <div style={errStyle}>{err}</div>}
+        <div style={{ display: "flex", gap: 10, marginTop: 8 }}>
+          <button type="button" onClick={onCancel} style={{ ...btn, flex: 1 }}>Cancel</button>
+          <button type="submit" disabled={!canSubmit} style={{ ...btnPrimary, flex: 1 }}>
+            {busy ? "Verifying…" : "Confirm"}
+          </button>
+        </div>
+      </form>
+    </div>
+  );
+}

@@ -22,6 +22,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use subtle::ConstantTimeEq;
 use tauri::Manager;
 use zeroize::Zeroizing;
 
@@ -73,6 +74,9 @@ pub enum AuthError {
 
     #[error("recovery not configured")]
     RecoveryMissing,
+
+    #[error("PIN must be at least 6 characters")]
+    PinTooShort,
 }
 
 impl serde::Serialize for AuthError {
@@ -104,6 +108,25 @@ struct Inner {
 
     /// If Some(t), reject unlock attempts until now >= t.
     lockout_until: Option<Instant>,
+
+    /// Separate counter for step-up proof attempts (PIN reset / recovery
+    /// generation). Kept apart from `attempts` so a failed sensitive-op
+    /// proof cannot lock the user out of the normal unlock flow, and
+    /// vice versa.
+    step_up_attempts: Vec<Instant>,
+    step_up_lockout_until: Option<Instant>,
+}
+
+/// Proof of ownership required to change sensitive authentication state
+/// (reset PIN, regenerate recovery code). The proof must unwrap to the
+/// same MDK currently backing the unlocked session — see
+/// `verify_step_up` for the binding check that prevents envelope-tamper
+/// attacks against an unlocked session.
+#[derive(serde::Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum StepUpProof {
+    Pin { pin: String },
+    Recovery { code: String },
 }
 
 // Rate-limit policy: after this many failures in ATTEMPT_WINDOW,
@@ -181,6 +204,103 @@ impl AuthState {
         if !cool.is_zero() {
             g.lockout_until = Some(now + cool);
         }
+    }
+
+    /// Step-up-proof rate limit. Independent counter from unlock so a
+    /// failed proof cannot lock users out of the normal unlock path.
+    fn check_step_up_rate_limit(&self) -> Result<(), AuthError> {
+        let mut g = self.inner.lock().unwrap();
+        if let Some(until) = g.step_up_lockout_until {
+            let now = Instant::now();
+            if now < until {
+                return Err(AuthError::RateLimited {
+                    retry_after_secs: (until - now).as_secs().max(1),
+                });
+            } else {
+                g.step_up_lockout_until = None;
+            }
+        }
+        Ok(())
+    }
+
+    fn record_step_up_failure(&self) {
+        let mut g = self.inner.lock().unwrap();
+        let now = Instant::now();
+        g.step_up_attempts.retain(|t| now.duration_since(*t) < ATTEMPT_WINDOW);
+        g.step_up_attempts.push(now);
+        let n = g.step_up_attempts.len();
+        let cool = cool_off_for(n);
+        if !cool.is_zero() {
+            g.step_up_lockout_until = Some(now + cool);
+        }
+    }
+
+    /// Verify a fresh proof of ownership. Succeeds only if the proof
+    /// unwraps to the same MDK currently backing the unlocked session.
+    ///
+    /// Rationale for the MDK-binding step: if `security.json` were
+    /// tampered while the app is unlocked (e.g. a malicious process
+    /// injected a forged recovery slot whose secret the attacker knows),
+    /// naive slot-unwrap would accept the forged proof. Requiring the
+    /// unwrapped MDK to match the *live* session MDK closes that gap —
+    /// the attacker must know a credential that unwraps to the real DB
+    /// key, not just to some new envelope entry.
+    ///
+    /// Uses a separate rate-limit counter from unlock so a failed
+    /// sensitive-op proof cannot lock users out of the normal unlock
+    /// path.
+    fn verify_step_up(
+        &self,
+        env: &crate::security::SecurityEnvelope,
+        proof: &StepUpProof,
+    ) -> Result<(), AuthError> {
+        self.check_step_up_rate_limit()?;
+
+        let device_secret = device_secret::get_or_create()?;
+        let unwrapped: Mdk = match proof {
+            StepUpProof::Pin { pin } => {
+                let slot = env
+                    .find_slot(SlotKind::Pin)
+                    .ok_or(AuthError::NotSetUp)?
+                    .clone();
+                match security::unwrap_mdk(&slot, pin.as_bytes(), &device_secret) {
+                    Ok(m) => m,
+                    Err(SecurityError::Authentication) => {
+                        self.record_step_up_failure();
+                        return Err(AuthError::WrongPin);
+                    }
+                    Err(e) => return Err(e.into()),
+                }
+            }
+            StepUpProof::Recovery { code } => {
+                let slot = env
+                    .find_slot(SlotKind::Recovery)
+                    .ok_or(AuthError::RecoveryMissing)?
+                    .clone();
+                let bytes = parse_recovery_code(code)?;
+                match security::unwrap_mdk(&slot, &bytes, b"") {
+                    Ok(m) => m,
+                    Err(SecurityError::Authentication) => {
+                        self.record_step_up_failure();
+                        return Err(AuthError::RecoveryInvalid);
+                    }
+                    Err(e) => return Err(e.into()),
+                }
+            }
+        };
+
+        // Bind: the unwrapped MDK must equal the live session MDK.
+        let session = self.clone_mdk().ok_or(AuthError::NotSetUp)?;
+        // Constant-time comparison — never leak timing on the key bytes.
+        if unwrapped.as_bytes().ct_eq(session.as_bytes()).unwrap_u8() != 1 {
+            self.record_step_up_failure();
+            // Opaque error — don't reveal *which* half failed.
+            return Err(match proof {
+                StepUpProof::Pin { .. } => AuthError::WrongPin,
+                StepUpProof::Recovery { .. } => AuthError::RecoveryInvalid,
+            });
+        }
+        Ok(())
     }
 }
 
@@ -377,6 +497,9 @@ pub async fn v2_create_pin(
     gate: tauri::State<'_, DbGate>,
     pin: String,
 ) -> Result<(), AuthError> {
+    if pin.chars().count() < 6 {
+        return Err(AuthError::PinTooShort);
+    }
     let env_path = envelope_path(&app)?;
 
     // Allow retry if a prior setup wizard crashed. recover_on_startup
@@ -503,6 +626,9 @@ pub async fn v2_change_pin(
     old_pin: String,
     new_pin: String,
 ) -> Result<(), AuthError> {
+    if new_pin.chars().count() < 6 {
+        return Err(AuthError::PinTooShort);
+    }
     let env_path = envelope_path(&app)?;
     let mut env = security::load_envelope(&env_path)?;
     let slot = env
@@ -533,23 +659,33 @@ pub async fn v2_change_pin(
     Ok(())
 }
 
-/// Set a new PIN without requiring the old one, using the MDK already
-/// loaded in the current session. Used when the user has forgotten
-/// their PIN and unlocked via recovery code — they can pick a fresh
-/// PIN without needing to guess the old one. Requires the app to be
-/// currently unlocked (v2_state.isUnlocked == true).
+/// Set a new PIN. Requires a fresh proof of ownership (current PIN or
+/// recovery code) even when the app is already unlocked — the walk-up
+/// attacker on an unlocked machine would otherwise be able to lock the
+/// owner out permanently by resetting the PIN. `verify_step_up` also
+/// binds the proof to the live session MDK so envelope tampering
+/// against an unlocked session can't be used to satisfy the check.
+///
+/// Server-side length check on `new_pin` so a compromised or malicious
+/// frontend can't ship a 1-char PIN via direct IPC.
 #[tauri::command]
 pub async fn v2_reset_pin(
     app: tauri::AppHandle,
     auth: tauri::State<'_, AuthState>,
+    proof: StepUpProof,
     new_pin: String,
 ) -> Result<(), AuthError> {
-    let mdk = auth.clone_mdk().ok_or(AuthError::NotSetUp)?;
+    if new_pin.chars().count() < 6 {
+        return Err(AuthError::PinTooShort);
+    }
     let env_path = envelope_path(&app)?;
     let mut env = security::load_envelope(&env_path)?;
     if env.find_slot(SlotKind::Pin).is_none() {
         return Err(AuthError::NotSetUp);
     }
+    auth.verify_step_up(&env, &proof)?;
+
+    let mdk = auth.clone_mdk().ok_or(AuthError::NotSetUp)?;
     let device_secret = device_secret::get_or_create()?;
     let new_slot = security::wrap_mdk(
         SlotKind::Pin,
@@ -612,7 +748,13 @@ fn parse_recovery_code(code: &str) -> Result<Zeroizing<Vec<u8>>, AuthError> {
 
 /// Generate a new recovery code, wrap a fresh copy of the MDK with it
 /// (no device-bound secret), and persist the resulting slot in the
-/// envelope. Requires the user to already be unlocked (session MDK).
+/// envelope. Requires a step-up proof (current PIN or existing recovery
+/// code) so a walk-up attacker on an unlocked machine cannot mint a new
+/// recovery code and use it to defeat the reset-PIN step-up check.
+///
+/// The setup wizard satisfies this by passing the just-created PIN as
+/// the proof — the freshly-wrapped session MDK matches, so the binding
+/// check inside `verify_step_up` succeeds.
 ///
 /// Returns the human-readable code exactly ONCE. Callers must show it
 /// to the user immediately and warn that it will not be recoverable.
@@ -620,7 +762,12 @@ fn parse_recovery_code(code: &str) -> Result<Zeroizing<Vec<u8>>, AuthError> {
 pub async fn v2_generate_recovery(
     app: tauri::AppHandle,
     auth: tauri::State<'_, AuthState>,
+    proof: StepUpProof,
 ) -> Result<String, AuthError> {
+    let env_path = envelope_path(&app)?;
+    let mut env = security::load_envelope(&env_path)?;
+    auth.verify_step_up(&env, &proof)?;
+
     // We need the current session MDK to wrap a copy of it under the
     // recovery code. Fail if the app is locked.
     let mdk_bytes: [u8; 32] = {
@@ -646,8 +793,6 @@ pub async fn v2_generate_recovery(
         ArgonParams::default(),
     )?;
 
-    let env_path = envelope_path(&app)?;
-    let mut env = security::load_envelope(&env_path)?;
     env.upsert_slot(slot);
     security::save_envelope(&env_path, &env)?;
 
@@ -695,6 +840,13 @@ pub async fn v2_unlock_with_recovery(
 mod tests {
     use super::*;
     use rusqlite::Connection;
+    use std::sync::Mutex as StdMutex;
+
+    /// Serialises tests that touch the global device_secret keychain
+    /// entry. Without this, `device_secret::delete()` inside one test
+    /// races with `get_or_create()` inside another, causing spurious
+    /// unwrap failures.
+    static DEVICE_SECRET_LOCK: StdMutex<()> = StdMutex::new(());
 
     /// Full end-to-end: plaintext DB -> setup with PIN -> encrypted DB
     /// -> lock -> unlock -> change PIN -> unlock with new PIN.
@@ -702,6 +854,7 @@ mod tests {
     /// + DbGate directly against a tempdir).
     #[tokio::test]
     async fn full_setup_unlock_change_pin_cycle() {
+        let _guard = DEVICE_SECRET_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         let d = tempfile::tempdir().unwrap();
         let db = d.path().join("echelon.db");
         let env_path = d.path().join("security.json");
@@ -830,5 +983,96 @@ mod tests {
         // File header must not be plaintext SQLite magic.
         let header = std::fs::read(&dst).unwrap();
         assert!(!header.starts_with(b"SQLite format 3\0"));
+    }
+
+    #[test]
+    fn verify_step_up_pin_success_and_failure() {
+        let _guard = DEVICE_SECRET_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let device_secret = device_secret::get_or_create().unwrap();
+        let mdk = Mdk::generate();
+        let slot = security::wrap_mdk(
+            SlotKind::Pin,
+            &mdk,
+            b"654321",
+            &device_secret,
+            ArgonParams { m_cost_kib: 1024, t_cost: 1, p_cost: 1 },
+        )
+        .unwrap();
+        let mut env = SecurityEnvelope::new_empty();
+        env.upsert_slot(slot);
+
+        let auth = AuthState::default();
+        auth.set_mdk(mdk);
+
+        // Correct PIN → ok.
+        auth.verify_step_up(&env, &StepUpProof::Pin { pin: "654321".into() })
+            .expect("correct PIN should verify");
+
+        // Wrong PIN → WrongPin.
+        let err = auth
+            .verify_step_up(&env, &StepUpProof::Pin { pin: "000000".into() })
+            .unwrap_err();
+        assert!(matches!(err, AuthError::WrongPin), "got {err:?}");
+    }
+
+    /// Regression: a tampered envelope with a rogue slot that unwraps to
+    /// a DIFFERENT MDK must NOT satisfy step-up. This is the whole point
+    /// of binding the unwrapped MDK to the live session MDK.
+    #[test]
+    fn verify_step_up_rejects_forged_slot_with_wrong_mdk() {
+        let _guard = DEVICE_SECRET_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let device_secret = device_secret::get_or_create().unwrap();
+
+        // Real MDK for the session.
+        let session_mdk = Mdk::generate();
+        let real_slot = security::wrap_mdk(
+            SlotKind::Pin,
+            &session_mdk,
+            b"aaaaaa",
+            &device_secret,
+            ArgonParams { m_cost_kib: 1024, t_cost: 1, p_cost: 1 },
+        )
+        .unwrap();
+
+        // Attacker forges a Recovery slot wrapping a DIFFERENT MDK under
+        // a secret they know. If verify_step_up only checked "does this
+        // unwrap?" it would accept this. It must reject on MDK mismatch.
+        let attacker_mdk = Mdk::generate();
+        assert_ne!(session_mdk.as_bytes(), attacker_mdk.as_bytes());
+        let forged_recovery_bytes = [7u8; RECOVERY_BYTES];
+        let forged_slot = security::wrap_mdk(
+            SlotKind::Recovery,
+            &attacker_mdk,
+            &forged_recovery_bytes,
+            b"",
+            ArgonParams { m_cost_kib: 1024, t_cost: 1, p_cost: 1 },
+        )
+        .unwrap();
+
+        let mut env = SecurityEnvelope::new_empty();
+        env.upsert_slot(real_slot);
+        env.upsert_slot(forged_slot);
+
+        let auth = AuthState::default();
+        auth.set_mdk(session_mdk);
+
+        // The forged recovery unwraps successfully (crypto layer is happy),
+        // but the MDK it produces is not the session MDK → reject.
+        let forged_code_str = {
+            let mut s = String::new();
+            for b in forged_recovery_bytes.iter() {
+                s.push_str(&format!("{:02X}", b));
+            }
+            s
+        };
+        let err = auth
+            .verify_step_up(&env, &StepUpProof::Recovery { code: forged_code_str })
+            .unwrap_err();
+        assert!(matches!(err, AuthError::RecoveryInvalid), "got {err:?}");
+
+        // Sanity: real PIN still works (proves we're not just rejecting
+        // everything).
+        auth.verify_step_up(&env, &StepUpProof::Pin { pin: "aaaaaa".into() })
+            .expect("real PIN must still verify");
     }
 }

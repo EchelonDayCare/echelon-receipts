@@ -434,8 +434,13 @@ export function SetupPinModal({ onDone, onCancel }: { onDone: () => void; onCanc
     try {
       await invoke("v2_create_pin", { pin });
       // Mandatory: generate recovery code immediately so the user cannot
-      // complete setup without seeing (and acknowledging) it.
-      const code = await invoke<string>("v2_generate_recovery");
+      // complete setup without seeing (and acknowledging) it. Since
+      // v2.1.1 v2_generate_recovery requires a step-up proof; the PIN we
+      // just wrapped the MDK with satisfies both the unwrap and the
+      // MDK-binding check.
+      const code = await invoke<string>("v2_generate_recovery", {
+        proof: { kind: "pin", pin },
+      });
       setRecoveryCode(code);
       setPhase("recovery");
     } catch (e: any) {
