@@ -36,6 +36,53 @@ fn redact(s: String, secret: &str) -> String {
     s.replace(secret, "***")
 }
 
+// Downscale a large photo before sending to a vision model. Handwritten
+// attendance grids read fine at ~1600px on the longest side; larger
+// images just burn tokens and latency. Non-image formats (application/pdf)
+// pass through unchanged. Falls back to the original bytes on decode
+// failure — we never want a resize error to break OCR entirely.
+fn downscale_for_vision(image_b64: &str, mime_type: &str) -> (String, String) {
+    const MAX_DIM: u32 = 1600;
+    const JPEG_QUALITY: u8 = 85;
+    if !mime_type.starts_with("image/") {
+        return (image_b64.to_string(), mime_type.to_string());
+    }
+    let bytes = match base64::engine::general_purpose::STANDARD.decode(image_b64.as_bytes()) {
+        Ok(b) => b,
+        Err(_) => return (image_b64.to_string(), mime_type.to_string()),
+    };
+    let orig_size = bytes.len();
+    let img = match image::load_from_memory(&bytes) {
+        Ok(i) => i,
+        Err(e) => {
+            eprintln!("[month-ocr] downscale: image decode failed ({e}) — sending original bytes");
+            return (image_b64.to_string(), mime_type.to_string());
+        }
+    };
+    let (w, h) = (img.width(), img.height());
+    let long = w.max(h);
+    let resized = if long > MAX_DIM {
+        img.resize(MAX_DIM, MAX_DIM, image::imageops::FilterType::Lanczos3)
+    } else {
+        img
+    };
+    let mut out = std::io::Cursor::new(Vec::<u8>::new());
+    if let Err(e) = resized.write_with_encoder(
+        image::codecs::jpeg::JpegEncoder::new_with_quality(&mut out, JPEG_QUALITY)
+    ) {
+        eprintln!("[month-ocr] downscale: jpeg encode failed ({e}) — sending original bytes");
+        return (image_b64.to_string(), mime_type.to_string());
+    }
+    let new_bytes = out.into_inner();
+    let new_b64 = base64::engine::general_purpose::STANDARD.encode(&new_bytes);
+    eprintln!(
+        "[month-ocr] downscale: {}x{} → {}x{}, {} KB → {} KB",
+        w, h, resized.width(), resized.height(),
+        orig_size / 1024, new_bytes.len() / 1024,
+    );
+    (new_b64, "image/jpeg".to_string())
+}
+
 // Shared helper — POSTs a document (image/pdf) + JSON schema to Mistral Document AI
 // and returns the parsed `document_annotation` string.
 async fn call_mistral_doc_ai(
@@ -541,11 +588,18 @@ pub async fn extract_month_attendance(args: ExtractMonthAttendanceArgs) -> Resul
         args.target_month, known_hint,
     );
 
+    // Downscale once up-front so both providers get the same compact input.
+    // Photos from phones are typically 3000-4000px — we don't need that
+    // resolution to read handwritten grid marks.
+    let (image_b64, mime_type) = downscale_for_vision(&args.image_b64, &args.mime_type);
+
     // Run both providers in parallel. Primary carries reasoning_effort;
     // secondary is a fast model providing a second opinion. Cost/latency:
     // total wall clock = slower of the two (~5-15s for gpt-5.4, ~3-5s
     // for gpt-4.1).
     let key_ref = &key;
+    let img_ref = image_b64.as_str();
+    let mime_ref = mime_type.as_str();
     let schema_a = schema.clone();
     let schema_b = schema.clone();
     let sys_a = system_prompt.clone();
@@ -555,7 +609,7 @@ pub async fn extract_month_attendance(args: ExtractMonthAttendanceArgs) -> Resul
     let primary_fut = async {
         let started = std::time::Instant::now();
         let res = call_gpt_vision_json(
-            key_ref, VISION_DEPLOY_PRIMARY, &args.image_b64, &args.mime_type,
+            key_ref, VISION_DEPLOY_PRIMARY, img_ref, mime_ref,
             schema_a, "MonthAttendanceExtraction", &sys_a, &user_a,
             Some("medium"),
         ).await;
@@ -564,7 +618,7 @@ pub async fn extract_month_attendance(args: ExtractMonthAttendanceArgs) -> Resul
     let secondary_fut = async {
         let started = std::time::Instant::now();
         let res = call_gpt_vision_json(
-            key_ref, VISION_DEPLOY_SECONDARY, &args.image_b64, &args.mime_type,
+            key_ref, VISION_DEPLOY_SECONDARY, img_ref, mime_ref,
             schema_b, "MonthAttendanceExtraction", &sys_b, &user_b,
             None,
         ).await;
