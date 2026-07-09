@@ -10,7 +10,7 @@ import { db, getSettings } from "../../lib/db";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { showAlert, showConfirm, showPrompt } from "../../lib/dialogs";
 
-type StaffLite = { id: number; name: string; whatsapp_phone_e164: string | null; active: boolean };
+type StaffLite = { id: number; name: string; whatsapp_phone_e164: string | null; active: boolean; terminated_at: string | null };
 
 const ROOM_PRESETS = ["Infant", "Toddler", "3-5", "Support", "Prep"];
 
@@ -298,8 +298,8 @@ export async function notifyShiftCancel(args: {
 // use by both the drawer and the grid.
 export async function loadActiveStaff(): Promise<StaffLite[]> {
   const d = await db();
-  const rows = await d.select<{ id: number; name: string; whatsapp_phone_e164: string | null; active: number }[]>(
-    "SELECT id, name, whatsapp_phone_e164, active FROM staff WHERE active = 1 ORDER BY name",
+  const rows = await d.select<{ id: number; name: string; whatsapp_phone_e164: string | null; active: number; terminated_at: string | null }[]>(
+    "SELECT id, name, whatsapp_phone_e164, active, terminated_at FROM staff WHERE active = 1 ORDER BY name",
   );
   return rows.map(r => ({ ...r, active: !!r.active }));
 }
@@ -319,8 +319,8 @@ export async function loadStaffWithShiftsInWeek(weekStartISO: string): Promise<S
   const end = new Date(start);
   end.setDate(start.getDate() + 6);
   const endISO = end.toISOString().slice(0, 10);
-  const rows = await d.select<{ id: number; name: string; whatsapp_phone_e164: string | null; active: number }[]>(
-    `SELECT s.id, s.name, s.whatsapp_phone_e164, s.active
+  const rows = await d.select<{ id: number; name: string; whatsapp_phone_e164: string | null; active: number; terminated_at: string | null }[]>(
+    `SELECT s.id, s.name, s.whatsapp_phone_e164, s.active, s.terminated_at
        FROM staff s
       WHERE s.active = 1
          OR EXISTS (

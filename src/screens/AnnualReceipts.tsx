@@ -70,7 +70,7 @@ export default function AnnualReceipts() {
       }));
     } finally { setLoading(false); }
   }
-  useEffect(() => { refresh(); /* eslint-disable-next-line */ }, [year]);
+  useEffect(() => { refresh();   }, [year]);
 
   const grandTotal = rows.reduce((a, r) => a + r.group.total, 0);
 

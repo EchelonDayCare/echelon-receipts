@@ -16,6 +16,7 @@ import {
 import { extractMonthAttendance, fileToMime } from "../lib/ai";
 import { h } from "../lib/html";
 import { showConfirm, showPrompt } from "../lib/dialogs";
+import { inactiveLabel } from "../lib/inactiveLabel";
 import { isBcHolidaysEnabled, setBcHolidaysEnabled } from "../lib/centreCalendar";
 import { printHtmlDocument } from "../lib/print";
 import { OcrProgressBanner, MONTH_OCR_STAGES } from "../components/OcrProgressBanner";
@@ -95,7 +96,7 @@ export default function MonthlyAttendance() {
     setCalendar(cal);
     setDaycareName(s.daycare_name || "");
   }
-  useEffect(() => { refresh(); /* eslint-disable-next-line */ }, [year, month]);
+  useEffect(() => { refresh();   }, [year, month]);
   useEffect(() => { listYears().then(setDataYears).catch(() => {}); }, []);
 
   // Seed weekend rows the first time a month is opened so the header
@@ -110,7 +111,7 @@ export default function MonthlyAttendance() {
       const holidayAdded = (await isBcHolidaysEnabled()) ? await seedBcHolidays(year, month) : 0;
       if (added + holidayAdded > 0) setCalendar(await calendarForMonth(year, month));
     })();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+     
   }, [year, month]);
 
   // Keyboard shortcuts for the OCR review modal:
@@ -393,7 +394,7 @@ export default function MonthlyAttendance() {
     const padY = Math.max(1, Math.floor(rowH / 8));
     const rowsHtml = cells.map((c) => `
       <tr${c.active ? "" : ' style="opacity:0.6"'}>
-        <td class="name">${h(c.student_name)}${c.active ? "" : ' <span style="font-style:italic;color:#6b7280">(inactive)</span>'}</td>
+        <td class="name">${h(c.student_name)}${c.active ? "" : ` <span style="font-style:italic;color:#6b7280">${h(inactiveLabel("student", c.withdrawn_at))}</span>`}</td>
         ${dayNums.map((d) => {
           const iso = isoDay(year, month, d);
           const closed = closedByIso.get(iso);
@@ -674,7 +675,7 @@ export default function MonthlyAttendance() {
                   title={c.active ? undefined : "Inactive — historical marks preserved for compliance"}
                 >
                   {c.student_name}
-                  {!c.active && <span style={{ marginLeft: 6, color: "var(--muted)", fontStyle: "italic", fontSize: 11 }}>(inactive)</span>}
+                  {!c.active && <span style={{ marginLeft: 6, color: "var(--muted)", fontStyle: "italic", fontSize: 11 }}>{inactiveLabel("student", c.withdrawn_at)}</span>}
                 </td>
                 {dayNums.map((d) => {
                   const iso = isoDay(year, month, d);

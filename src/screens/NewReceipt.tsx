@@ -46,7 +46,7 @@ export default function NewReceipt() {
     setAmount(s.default_fee || "485");
     setReceiptNo(await nextReceiptNo());
   }
-  useEffect(() => { refresh(); /* eslint-disable-next-line */ }, []);
+  useEffect(() => { refresh();   }, []);
   useEffect(() => { (async () => setStudents(await listStudents(year)))(); }, [year]);
   useEffect(() => {
     if (isRefund) {
@@ -104,6 +104,15 @@ export default function NewReceipt() {
     }
     const pen = parseFloat(pending || "0") || 0;
     const bk = (breakdown && !isRefund) ? breakdown : null;
+
+    // Refund receipts appear on the parent's CRA tax summary and reduce
+    // the annual total, so parents need a reason on the printed PDF. The
+    // email step already enforced this — hoisting it here so save-only
+    // (no-email) refunds are also caught.
+    if (isRefund && !(comments && comments.trim())) {
+      void showAlert("Refund receipts require a reason in Comments — parents will see this on the CRA PDF.");
+      return;
+    }
 
     // CRA-correctness guard: if subsidies are enabled and a breakdown is
     // computed, the parent-pays amount on the receipt must equal the breakdown,

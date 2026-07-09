@@ -66,7 +66,7 @@ export default function HealthCheck({ settings }: Props) {
       out.push({ key: "smtp", label: "Email (SMTP)", state: "error",
         detail: "Sender email or SMTP host is missing — receipts can be saved but not emailed." });
     } else {
-      let storedPwd = settings.smtp_password_set === "1";
+      const storedPwd = settings.smtp_password_set === "1";
       if (!storedPwd) {
         out.push({ key: "smtp", label: "Email (SMTP)", state: "warn",
           detail: `Host configured (${settings.smtp_host}) but no app password stored. Use 'Send Test Email' below to verify.` });
@@ -129,7 +129,7 @@ export default function HealthCheck({ settings }: Props) {
   }
 
   // Only re-run when the fields HealthCheck actually inspects change.
-  useEffect(() => { run(); /* eslint-disable-next-line */ }, [
+  useEffect(() => { run();   }, [
     settings.daycare_name,
     settings.business_number,
     settings.smtp_host,

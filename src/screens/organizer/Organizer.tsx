@@ -73,7 +73,7 @@ export default function Organizer() {
       setUpcoming(up); setMeetings(mt); setFollowups(fu); setDoneFollowups(doneFu);
     } catch (e: any) { setErr(String(e?.message ?? e)); }
   };
-  useEffect(() => { void refresh(); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, [windowDays]);
+  useEffect(() => { void refresh();   }, [windowDays]);
 
   // Gate the Voice mic button on Whisper being fully configured. On Luxmi's
   // tenant Azure Policy blocks disableLocalAuth=false so `azure_whisper_key_set`

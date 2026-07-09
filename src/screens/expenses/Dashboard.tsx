@@ -45,7 +45,7 @@ export default function ExpensesDashboard() {
     setDueRecurring(due);
   }
 
-  useEffect(() => { reload(); /* eslint-disable-next-line */ }, [ym]);
+  useEffect(() => { reload();   }, [ym]);
 
   const monthTotal = totals.reduce((a, r) => a + r.total, 0);
 

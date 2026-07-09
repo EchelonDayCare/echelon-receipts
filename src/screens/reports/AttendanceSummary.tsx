@@ -214,7 +214,7 @@ export default function AttendanceAnalytics() {
       setChildMarks([]);
     }
   }
-  useEffect(() => { refresh(); /* eslint-disable-next-line */ }, [dateFrom, dateTo, selectedStudent]);
+  useEffect(() => { refresh();   }, [dateFrom, dateTo, selectedStudent]);
 
   // ─── Derived ─────────────────────────────────────────────────────
   const totals = useMemo(() => {
@@ -238,7 +238,7 @@ export default function AttendanceAnalytics() {
 
   // ─── Actions ─────────────────────────────────────────────────────
   function exportCsv() {
-    let lines: string[] = [];
+    const lines: string[] = [];
     if (mode === "centre") {
       lines.push("Student,Present (P),Half (H),Absent (A),Sick (S),Vacation (V),Total marks,Attendance rate %");
       studentTotals.forEach((t) => {
@@ -492,10 +492,6 @@ function ChildView(props: {
 }) {
   const { student, marks, monthlyBuckets, dateFrom, dateTo, studentTotals } = props;
 
-  if (!student) {
-    return <p style={{ color: "var(--muted)" }}>Pick a child.</p>;
-  }
-
   const marksByDate = useMemo(() => {
     const m = new Map<string, MonthMark>();
     for (const x of marks) m.set(x.work_date, x.mark);
@@ -505,17 +501,22 @@ function ChildView(props: {
   // Per-month split for this child
   const perMonth = useMemo(() => {
     return monthlyBuckets.map((b) => {
-      let p = 0, h = 0, a = 0, s = 0, v = 0;
+      let p = 0;
+      let a = 0;
       for (const m of marks) {
         if (m.work_date.slice(0, 7) !== b.ym) continue;
         if (m.mark === "P") p++;
         else if (m.mark === "A") a++;
       }
       const denom = b.days_open;
-      const rate = denom > 0 ? Math.min(1, (p + 0.5 * h) / denom) : 0;
-      return { ym: b.ym, p, h, a, s, v, days_open: b.days_open, rate };
+      const rate = denom > 0 ? Math.min(1, p / denom) : 0;
+      return { ym: b.ym, p, h: 0, a, s: 0, v: 0, days_open: b.days_open, rate };
     });
   }, [monthlyBuckets, marks]);
+
+  if (!student) {
+    return <p style={{ color: "var(--muted)" }}>Pick a child.</p>;
+  }
 
   // Rank position within centre for context
   const rank = studentTotals.findIndex((t) => t.student_id === student.student_id) + 1;

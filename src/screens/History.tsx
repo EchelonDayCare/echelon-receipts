@@ -4,7 +4,8 @@ import { useNavigate } from "react-router-dom";
 import { openPath } from "@tauri-apps/plugin-opener";
 import { writeFile, exists, mkdir } from "@tauri-apps/plugin-fs";
 import { tempDir, join } from "@tauri-apps/api/path";
-import { getSettings, listReceipts, voidReceipt, ReceiptInDepositError, markEmailed, listStudents } from "../lib/db";
+import { invoke } from "@tauri-apps/api/core";
+import { getSettings, listReceipts, voidReceipt, voidReceiptWithOverride, ReceiptInDepositError, markEmailed, listStudents } from "../lib/db";
 import type { Receipt, SettingsMap, Student } from "../types";
 import { printReceipt, saveReceiptPdf } from "../lib/receipt";
 import { sendReceiptEmail, parseRecipients, sendSubsidyStatementEmail } from "../lib/email";
@@ -48,7 +49,7 @@ export default function History() {
     }));
   }
   // Refresh receipt list when search/year/month change.
-  useEffect(() => { refresh(); /* eslint-disable-next-line */ }, [debouncedSearch, year, month]);
+  useEffect(() => { refresh();   }, [debouncedSearch, year, month]);
 
   // Settings + student emails only depend on the dataset, not the query.
   useEffect(() => {
@@ -106,7 +107,7 @@ export default function History() {
 
               const doOpenPdf = async () => {
                 try {
-                  let p = await saveReceiptPdf(r, settings);
+                  const p = await saveReceiptPdf(r, settings);
                   if (!p) {
                     // fallback temp file (use print as it generates html)
                     await printReceipt(r, settings);
@@ -177,11 +178,35 @@ export default function History() {
                   await voidReceipt(r.id, trimmed);
                 } catch (e: any) {
                   if (e instanceof ReceiptInDepositError) {
-                    const ok = await showConfirm(
-                      `${e.message}\n\nOpen the Deposits page now?`,
-                      { kind: "warning", okLabel: "Open Deposits", cancelLabel: "Not now" },
+                    const choice = await showConfirm(
+                      `${e.message}\n\nOpen the Deposits page now, or use a supervisor PIN to force-void this receipt (recorded in audit log)?`,
+                      { kind: "warning", okLabel: "Open Deposits", cancelLabel: "Force-void (PIN)" },
                     );
-                    if (ok) navigate(`/students/deposits?highlight=${e.depositId}`);
+                    if (choice) {
+                      navigate(`/students/deposits?highlight=${e.depositId}`);
+                      return;
+                    }
+                    const pin = await showPrompt(
+                      "Supervisor PIN required to void a receipt inside an active deposit.\n\nThis will be recorded in the audit log with your reason above.",
+                      "",
+                    );
+                    if (pin == null) return;
+                    const pinTrim = pin.trim();
+                    if (!pinTrim) { void showAlert("PIN required."); return; }
+                    try {
+                      await invoke("v2_verify_supervisor_pin", { proof: { kind: "pin", pin: pinTrim } });
+                    } catch (verifyErr: any) {
+                      void showAlert(`Supervisor PIN rejected: ${String(verifyErr?.message ?? verifyErr)}`);
+                      return;
+                    }
+                    const actor = (settings?.sender_name || "supervisor") as string;
+                    try {
+                      await voidReceiptWithOverride(r.id, trimmed, actor);
+                    } catch (ovrErr: any) {
+                      void showAlert(`Override failed: ${String(ovrErr?.message ?? ovrErr)}`);
+                      return;
+                    }
+                    refresh();
                     return;
                   }
                   void showAlert(`Could not void receipt: ${String(e?.message ?? e)}`);

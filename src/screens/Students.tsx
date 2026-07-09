@@ -68,7 +68,7 @@ export default function Students() {
     setStudents(await listStudents(year, false));
     setSettings(await getSettings());
   }
-  useEffect(() => { refresh(); /* eslint-disable-next-line */ }, [year]);
+  useEffect(() => { refresh();   }, [year]);
 
   async function openAccb(s: Student) {
     const entries = await listAccbForStudent(s.id);
@@ -323,8 +323,18 @@ export default function Students() {
                   setEditing(null);
                   nav("/waitlist/enrolled");
                   return;
-                } catch (e) {
-                  console.warn("[waitlist] markConverted failed:", e);
+                } catch (e: any) {
+                  // The child was created successfully but the waitlist
+                  // link update failed. Stay on Students, tell the user
+                  // exactly what happened, and leave the waitlist id
+                  // pending so a retry (edit → Save again) will re-attempt
+                  // the link without duplicating the roster row.
+                  await showAlert(
+                    `Student saved, but couldn't mark waitlist entry as enrolled:\n\n${String(e?.message ?? e)}\n\nOpen the waitlist and mark it manually, or Save again to retry.`,
+                    { kind: "warning" },
+                  );
+                  refresh();
+                  return;
                 }
               }
               setEditing(null); refresh();

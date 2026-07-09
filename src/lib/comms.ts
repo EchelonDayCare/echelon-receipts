@@ -227,7 +227,7 @@ export async function resolveRecipients(f: RecipientFilter, activeYear?: number)
           father_name: null, mother_name: null, email: r.email,
           year: new Date().getFullYear(), active: 1,
           created_at: new Date().toISOString(),
-          person_id: null, gross_override: null,
+          person_id: null, gross_override: null, withdrawn_at: null,
         };
         return { student: shim, parentName: r.name || "Parent", emails: parseRecipients(r.email) };
       })

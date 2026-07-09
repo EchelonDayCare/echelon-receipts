@@ -77,7 +77,7 @@ export default function StaffScreen() {
     setRows(await listHoursForMonth(year, month));
     setSettings(await getSettings());
   }
-  useEffect(() => { refresh(); /* eslint-disable-next-line */ }, [year, month]);
+  useEffect(() => { refresh();   }, [year, month]);
 
   const activeStaff = useMemo(() => staff.filter((s) => s.active === 1), [staff]);
   const totals = useMemo(() => {

@@ -47,7 +47,7 @@ export default function ExpenseList() {
     });
     setRows(list);
   }
-  useEffect(() => { reload(); /* eslint-disable-next-line */ }, [from, to, category, payment, q]);
+  useEffect(() => { reload();   }, [from, to, category, payment, q]);
 
   const total = rows.reduce((a, r) => a + r.amount, 0);
 

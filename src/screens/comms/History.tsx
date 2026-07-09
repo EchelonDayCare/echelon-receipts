@@ -26,7 +26,7 @@ export default function History() {
   const [detail, setDetail] = useState<CommLogEntry | null>(null);
 
   const refresh = () => listCommunications({ kind, status, from, to, search }).then(setRows);
-  useEffect(() => { refresh(); /* eslint-disable-next-line */ }, [kind, status, from, to]);
+  useEffect(() => { refresh();   }, [kind, status, from, to]);
 
   return (
     <div style={{ padding: 24, maxWidth: 1200 }}>

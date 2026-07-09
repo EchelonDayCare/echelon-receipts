@@ -129,7 +129,7 @@ export default function Compose() {
     return () => { cancelled = true; };
   }, [filter, mode, year, students.length, selectedIds, adhoc]);
 
-  function useTemplate(tId: string) {
+  function applyTemplate(tId: string) {
     if (!tId) return;
     const t = templates.find((x) => x.id === Number(tId));
     if (!t) return;
@@ -264,7 +264,7 @@ export default function Compose() {
       <div className="card" style={{ padding: 16, marginBottom: 16 }}>
         <div style={{ display: "flex", gap: 12, alignItems: "center", marginBottom: 12 }}>
           <label style={{ fontWeight: 600 }}>Template:</label>
-          <select onChange={(e) => useTemplate(e.target.value)} defaultValue="">
+          <select onChange={(e) => applyTemplate(e.target.value)} defaultValue="">
             <option value="">— none —</option>
             {templates.map((t) => <option key={t.id} value={t.id}>{t.name}{t.is_builtin ? " (built-in)" : ""}</option>)}
           </select>

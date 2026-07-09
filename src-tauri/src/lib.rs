@@ -125,6 +125,7 @@ pub fn run() {
             auth::v2_lock,
             auth::v2_change_pin,
             auth::v2_reset_pin,
+            auth::v2_verify_supervisor_pin,
             auth::v2_generate_recovery,
             auth::v2_unlock_with_recovery,
             email::send_email,

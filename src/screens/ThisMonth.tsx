@@ -89,7 +89,7 @@ export default function ThisMonth() {
     setRows(next);
     setLoading(false);
   }
-  useEffect(() => { refresh(); /* eslint-disable-next-line */ }, [month, year]);
+  useEffect(() => { refresh();   }, [month, year]);
 
   const counts = useMemo(() => {
     let issued = 0, sent = 0, missingEmail = 0, pending = 0;

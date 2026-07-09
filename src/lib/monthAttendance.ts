@@ -43,6 +43,7 @@ export interface MonthCell {
   student_id: number;
   student_name: string;
   active: boolean;
+  withdrawn_at: string | null;
   marks: Record<string, MonthMark>; // day-of-month "1".."31" -> mark
 }
 
@@ -67,7 +68,7 @@ export async function monthGrid(year: number, month: number): Promise<MonthCell[
   const d = await db();
   const ym = `${year}-${String(month).padStart(2, "0")}`;
   const rows = await d.select<any[]>(
-    `SELECT s.id AS student_id, s.name AS student_name, s.active AS active,
+    `SELECT s.id AS student_id, s.name AS student_name, s.active AS active, s.withdrawn_at AS withdrawn_at,
             a.work_date, a.status, a.hours_decimal, a.attendance_mark
        FROM students s
        LEFT JOIN child_attendance a
@@ -87,6 +88,7 @@ export async function monthGrid(year: number, month: number): Promise<MonthCell[
         student_id: r.student_id,
         student_name: r.student_name,
         active: !!r.active,
+        withdrawn_at: r.withdrawn_at ?? null,
         marks: {},
       });
     }

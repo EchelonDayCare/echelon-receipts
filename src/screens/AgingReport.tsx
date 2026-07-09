@@ -15,7 +15,7 @@ export default function AgingReportScreen() {
     setRep(await computeAging(asOf));
     setDaycareName((await getSettings()).daycare_name || "");
   }
-  useEffect(() => { refresh(); /* eslint-disable-next-line */ }, [asOf]);
+  useEffect(() => { refresh();   }, [asOf]);
 
   function exportCsv() {
     if (!rep) return;

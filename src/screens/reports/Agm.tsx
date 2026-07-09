@@ -118,7 +118,7 @@ function BoardPackage() {
     setRows(out);
   }
 
-  useEffect(() => { load(); /* eslint-disable-next-line */ }, [mode]);
+  useEffect(() => { load();   }, [mode]);
 
   function exportCsv() {
     const lines = ["Year,Active Students,Total Enrolled,Receipts,Gross Fees,CCFRI,ACCB,Parent Paid,Refunds"];

@@ -1392,6 +1392,74 @@ Thanks,
         AND (body LIKE '%{{start_date}}%' OR body LIKE '%{{reply_by}}%')`
   );
 
+  // ─── Migration 030 — Withdrawal/termination stamps + audit log (v2.2.7) ──
+  // Sprint B: two related concerns.
+  //   (1) When students or staff are flipped active=0, we want to know WHEN
+  //       so the roster/grid can render "(withdrew Mar 14)" rather than a
+  //       plain "(inactive)" that hides the effective date from parents
+  //       and payroll audits. Existing rows get a NULL stamp — the label
+  //       falls back to plain "(inactive)" for them.
+  //   (2) audit_log gives us an append-only trail for privileged actions
+  //       (starting with supervisor-override void of deposited receipts).
+  //       Rule: NEVER delete rows from this table; older rows can be
+  //       archived by year but not truncated.
+  await addCol("students", "withdrawn_at", "TEXT");
+  await addCol("staff", "terminated_at", "TEXT");
+  if (!(await tableExists("audit_log"))) {
+    console.warn("[ensureSchema] creating audit_log");
+    await d.execute(`CREATE TABLE audit_log (
+      id           INTEGER PRIMARY KEY AUTOINCREMENT,
+      ts           TEXT NOT NULL DEFAULT (datetime('now')),
+      actor        TEXT,
+      action       TEXT NOT NULL,
+      target_type  TEXT NOT NULL,
+      target_id    INTEGER,
+      before_json  TEXT,
+      after_json   TEXT,
+      reason       TEXT
+    )`);
+    await d.execute("CREATE INDEX ix_audit_action_ts ON audit_log(action, ts DESC)");
+    await d.execute("CREATE INDEX ix_audit_target   ON audit_log(target_type, target_id)");
+  }
+  // Stamp the transition automatically so we don't have to remember to
+  // set it in every UI callsite. Guarded on OLD.active=1 → NEW.active=0
+  // and only writes when the column is still NULL, so a re-activation
+  // followed by another withdrawal produces a fresh stamp.
+  await d.execute(
+    `CREATE TRIGGER IF NOT EXISTS trg_students_withdrew
+       AFTER UPDATE OF active ON students
+       WHEN OLD.active = 1 AND NEW.active = 0
+     BEGIN
+       UPDATE students SET withdrawn_at = datetime('now')
+        WHERE id = NEW.id AND withdrawn_at IS NULL;
+     END`
+  );
+  await d.execute(
+    `CREATE TRIGGER IF NOT EXISTS trg_students_reactivated
+       AFTER UPDATE OF active ON students
+       WHEN OLD.active = 0 AND NEW.active = 1
+     BEGIN
+       UPDATE students SET withdrawn_at = NULL WHERE id = NEW.id;
+     END`
+  );
+  await d.execute(
+    `CREATE TRIGGER IF NOT EXISTS trg_staff_terminated
+       AFTER UPDATE OF active ON staff
+       WHEN OLD.active = 1 AND NEW.active = 0
+     BEGIN
+       UPDATE staff SET terminated_at = datetime('now')
+        WHERE id = NEW.id AND terminated_at IS NULL;
+     END`
+  );
+  await d.execute(
+    `CREATE TRIGGER IF NOT EXISTS trg_staff_reactivated
+       AFTER UPDATE OF active ON staff
+       WHEN OLD.active = 0 AND NEW.active = 1
+     BEGIN
+       UPDATE staff SET terminated_at = NULL WHERE id = NEW.id;
+     END`
+  );
+
   await logIntegrityWarnings(d);
 }
 
@@ -1854,8 +1922,8 @@ export async function voidReceipt(id: number, reason?: string) {
   const d = await db();
   // Guard: refuse to void a receipt that is part of an active (non-voided)
   // deposit slip. The bank slip's totals are computed from its member
-  // receipts, so silently voiding one would break reconciliation. The
-  // supervisor override for edge cases is deferred to Sprint B.
+  // receipts, so silently voiding one would break reconciliation. Use
+  // `voidReceiptWithOverride` for the supervisor-PIN emergency path.
   const linked = await d.select<Array<{ deposit_id: number; deposit_voided: number | null }>>(
     `SELECT r.deposit_id, dp.voided AS deposit_voided
        FROM receipts r
@@ -1871,6 +1939,67 @@ export async function voidReceipt(id: number, reason?: string) {
     "UPDATE receipts SET voided=1, void_reason=?, voided_at=datetime('now') WHERE id=?",
     [reason ?? null, id]
   );
+}
+
+// Append an immutable audit_log row. Callers must include enough context
+// (before_json / after_json) that the action can be understood without
+// hitting the live DB, since referenced rows may be edited later.
+// audit_log rows are NEVER deleted by app code; retention is out-of-band.
+export async function logAudit(entry: {
+  actor: string;
+  action: string;
+  target_type: string;
+  target_id: string;
+  before_json?: string | null;
+  after_json?: string | null;
+  reason?: string | null;
+}): Promise<void> {
+  await execRetry(
+    `INSERT INTO audit_log (ts, actor, action, target_type, target_id, before_json, after_json, reason)
+     VALUES (datetime('now'), ?, ?, ?, ?, ?, ?, ?)`,
+    [
+      entry.actor,
+      entry.action,
+      entry.target_type,
+      entry.target_id,
+      entry.before_json ?? null,
+      entry.after_json ?? null,
+      entry.reason ?? null,
+    ],
+  );
+}
+
+// Supervisor-override void: bypasses the ReceiptInDepositError guard for
+// emergency corrections. Caller MUST have already verified the supervisor
+// PIN via v2_verify_supervisor_pin. Writes a full audit_log entry with
+// the pre-void receipt row for CRA/reconciliation forensics.
+export async function voidReceiptWithOverride(
+  id: number,
+  reason: string,
+  actor: string,
+): Promise<void> {
+  const trimmed = (reason || "").trim();
+  if (trimmed.length < 5) {
+    throw new Error("Override reason must be at least 5 characters.");
+  }
+  const d = await db();
+  const before = await d.select<any[]>("SELECT * FROM receipts WHERE id=?", [id]);
+  const beforeRow = before[0];
+  if (!beforeRow) throw new Error(`Receipt #${id} not found.`);
+  await execRetry(
+    "UPDATE receipts SET voided=1, void_reason=?, voided_at=datetime('now') WHERE id=?",
+    [trimmed, id],
+  );
+  const after = await d.select<any[]>("SELECT * FROM receipts WHERE id=?", [id]);
+  await logAudit({
+    actor,
+    action: "void_receipt_deposited_override",
+    target_type: "receipt",
+    target_id: String(id),
+    before_json: JSON.stringify(beforeRow),
+    after_json: JSON.stringify(after[0] ?? null),
+    reason: trimmed,
+  });
 }
 export async function markEmailed(id: number, recipients: string[]) {
   await execRetry(
@@ -2065,32 +2194,41 @@ export async function recordAnnualReceipt(opts: {
   const hash = annualPayloadHash(group);
   const settings = await getSettings();
   const snap = JSON.stringify(buildIssuerSnapshot(settings));
-  // Serialize the insert + supersede so they aren't interleaved with any other
-  // write. If the supersede UPDATE fails, the new AR exists alongside the old
-  // one — both would show as "current" and the parent could get two T778s.
+  // Serialize + wrap in BEGIN IMMEDIATE / COMMIT so the INSERT and the
+  // supersede UPDATE either both apply or neither does. Without the tx,
+  // an app crash between the two statements would leave two "current"
+  // annual receipts for the same person+year — the parent could file
+  // both with CRA and the audit trail loses the supersession link.
   return serializeWrite(async () => {
     const d = await db();
-    const res = await d.execute(
-      `INSERT INTO annual_receipts
-        (ar_number, person_id, student_name, father_name, mother_name,
-         calendar_year, recipient_label, total_amount, receipt_count,
-         receipt_ids_json, payload_hash, notes, issuer_snapshot_json)
-       VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-      [
-        arNumber, group.person_id, group.student_name,
-        group.father_name, group.mother_name,
-        year, recipientLabel, roundMoney(group.total), group.count,
-        JSON.stringify(ids), hash, opts.notes ?? null, snap,
-      ]
-    );
-    const newId = res.lastInsertId as number;
-    if (opts.supersede) {
-      await d.execute(
-        `UPDATE annual_receipts SET superseded_by=? WHERE id=?`,
-        [newId, opts.supersede.id]
+    await d.execute("BEGIN IMMEDIATE");
+    try {
+      const res = await d.execute(
+        `INSERT INTO annual_receipts
+          (ar_number, person_id, student_name, father_name, mother_name,
+           calendar_year, recipient_label, total_amount, receipt_count,
+           receipt_ids_json, payload_hash, notes, issuer_snapshot_json)
+         VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+        [
+          arNumber, group.person_id, group.student_name,
+          group.father_name, group.mother_name,
+          year, recipientLabel, roundMoney(group.total), group.count,
+          JSON.stringify(ids), hash, opts.notes ?? null, snap,
+        ]
       );
+      const newId = res.lastInsertId as number;
+      if (opts.supersede) {
+        await d.execute(
+          `UPDATE annual_receipts SET superseded_by=? WHERE id=?`,
+          [newId, opts.supersede.id]
+        );
+      }
+      await d.execute("COMMIT");
+      return newId;
+    } catch (e) {
+      try { await d.execute("ROLLBACK"); } catch { /* rollback best-effort */ }
+      throw e;
     }
-    return newId;
   });
 }
 

@@ -12,12 +12,13 @@ import { buildWaMeUrl, buildWhatsappDeepLink, renderTemplate } from "../../lib/w
 import { getSettings } from "../../lib/db";
 import { isAiTextConfigured } from "../../lib/voice";
 import { showAlert, showConfirm } from "../../lib/dialogs";
+import { inactiveLabel } from "../../lib/inactiveLabel";
 import ShiftDrawer, { loadStaffWithShiftsInWeek, notifyShiftCancel, type DrawerState } from "./ShiftDrawer";
 import ScheduleAiTextPanel from "./ScheduleAiTextPanel";
 import { bcHolidayLookup } from "../../lib/bcHolidays";
 import { isBcHolidaysEnabled, getDisabledBcHolidayIds } from "../../lib/centreCalendar";
 
-type StaffLite = { id: number; name: string; whatsapp_phone_e164: string | null; active: boolean };
+type StaffLite = { id: number; name: string; whatsapp_phone_e164: string | null; active: boolean; terminated_at: string | null };
 
 const DAY_LABELS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
 
@@ -50,7 +51,7 @@ export default function StaffSchedule() {
     } catch (e: any) { setErr(String(e?.message ?? e)); }
   };
 
-  useEffect(() => { void refresh(); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, [weekStart]);
+  useEffect(() => { void refresh();   }, [weekStart]);
 
   useEffect(() => {
     let cancelled = false;
@@ -196,7 +197,7 @@ export default function StaffSchedule() {
                     <td style={{ padding: 8, verticalAlign: "top" }}>
                       <div style={{ fontWeight: 600 }} title={inactive ? "Inactive — historical shifts preserved" : undefined}>
                         {s.name}
-                        {inactive && <span style={{ marginLeft: 6, color: "var(--muted)", fontStyle: "italic", fontSize: 11 }}>(inactive)</span>}
+                        {inactive && <span style={{ marginLeft: 6, color: "var(--muted)", fontStyle: "italic", fontSize: 11 }}>{inactiveLabel("staff", s.terminated_at)}</span>}
                       </div>
                       {!s.whatsapp_phone_e164 && !inactive && <div style={{ fontSize: 10, color: "#d97706" }}>No WhatsApp</div>}
                     </td>

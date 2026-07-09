@@ -112,9 +112,9 @@ export function parseBirthday(raw: string): string | null {
   }
   const parts = s.match(/^(\d{1,2})[\/\-\.](\d{1,2})[\/\-\.](\d{2,4})/);
   if (!parts) return null;
-  let a = Number(parts[1]), b = Number(parts[2]);
+  const a = Number(parts[1]), b = Number(parts[2]);
   const yr = Number(parts[3]);
-  let year = yr < 100 ? (yr < 30 ? 2000 + yr : 1900 + yr) : yr;
+  const year = yr < 100 ? (yr < 30 ? 2000 + yr : 1900 + yr) : yr;
   let day: number, month: number;
   if (a > 12 && b <= 12) { day = a; month = b; }
   else if (b > 12 && a <= 12) { month = a; day = b; }

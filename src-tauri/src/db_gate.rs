@@ -136,6 +136,22 @@ impl DbGate {
         }
     }
 
+    /// Run a closure with the live connection. Blocks other DB users for
+    /// the duration of the closure (the DbGate is a single-connection
+    /// mutex). Used by cross-cutting features (vault ZIP export etc.)
+    /// that need to read/write via rusqlite APIs the JS layer can't
+    /// express — instead of opening a second `Connection::open` on the
+    /// same file, which would bypass the SQLCipher key and fail on an
+    /// encrypted DB.
+    pub async fn with_conn<F, R>(&self, f: F) -> Result<R, DbError>
+    where
+        F: FnOnce(&Connection) -> Result<R, DbError>,
+    {
+        let guard = self.inner.lock().await;
+        let conn = guard.as_ref().ok_or(DbError::Locked)?;
+        f(conn)
+    }
+
     pub async fn is_open(&self) -> bool {
         self.inner.lock().await.is_some()
     }

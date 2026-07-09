@@ -703,6 +703,23 @@ pub async fn v2_reset_pin(
     Ok(())
 }
 
+/// Verify a supervisor PIN (or recovery code) without changing any
+/// secrets. Used by high-impact overrides (e.g. voiding a deposited
+/// receipt) that need proof-of-presence but not a full re-unlock.
+/// Reuses the same rate-limit + envelope-binding logic as
+/// `verify_step_up`, so brute-forcing here also feeds the lockout.
+#[tauri::command]
+pub async fn v2_verify_supervisor_pin(
+    app: tauri::AppHandle,
+    auth: tauri::State<'_, AuthState>,
+    proof: StepUpProof,
+) -> Result<(), AuthError> {
+    let env_path = envelope_path(&app)?;
+    let env = security::load_envelope(&env_path)?;
+    auth.verify_step_up(&env, &proof)?;
+    Ok(())
+}
+
 // ────────────────────────────────────────────────────────────────────────
 // Recovery kit
 // ────────────────────────────────────────────────────────────────────────

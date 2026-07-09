@@ -55,7 +55,7 @@ export default function WaitlistList() {
     })();
   }, []);
 
-  useEffect(() => { void refresh(); /* eslint-disable-next-line */ }, [statuses, search]);
+  useEffect(() => { void refresh();   }, [statuses, search]);
 
   const filtered = useMemo(() => {
     const ctx = { siblingStudentActive: siblingActive };

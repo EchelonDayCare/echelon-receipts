@@ -1,9 +1,10 @@
 import { useEffect, useState } from "react";
 import { getSettings } from "../../lib/db";
 import { listAllCredentialsWithStaff, credStatus, daysUntil, type CredStatus } from "../../lib/credentials";
+import { inactiveLabel } from "../../lib/inactiveLabel";
 import type { StaffCredential, SettingsMap } from "../../types";
 
-type Row = StaffCredential & { staff_name: string; staff_active: number };
+type Row = StaffCredential & { staff_name: string; staff_active: number; staff_terminated_at: string | null };
 
 const STATUS_LABEL: Record<CredStatus, string> = {
   expired: "EXPIRED",
@@ -108,7 +109,14 @@ export default function CredentialsCompliance() {
               const days = daysUntil(r.expiry_date);
               return (
                 <tr key={r.id}>
-                  <td style={{ padding: 6, border: "1px solid var(--border)", fontWeight: 600 }}>{r.staff_name}</td>
+                  <td style={{ padding: 6, border: "1px solid var(--border)", fontWeight: 600 }}>
+                    {r.staff_name}
+                    {!r.staff_active && (
+                      <span style={{ marginLeft: 6, fontWeight: 400, fontStyle: "italic", color: "var(--muted)", fontSize: 12 }}>
+                        {inactiveLabel("staff", r.staff_terminated_at)}
+                      </span>
+                    )}
+                  </td>
                   <td style={{ padding: 6, border: "1px solid var(--border)" }}>{r.type}</td>
                   <td style={{ padding: 6, border: "1px solid var(--border)" }}>{r.issued_date || "—"}</td>
                   <td style={{ padding: 6, border: "1px solid var(--border)" }}>{r.expiry_date || "—"}</td>

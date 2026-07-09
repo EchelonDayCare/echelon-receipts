@@ -97,7 +97,7 @@ export default function WaitlistSettings() {
     setBusy("test");
     setTestResult(null);
     try {
-      let payload: string | null = jsonText.trim() ? jsonText : null;
+      const payload: string | null = jsonText.trim() ? jsonText : null;
       if (payload) {
         const r = await invoke<{ ok: boolean; row_count: number; error: string | null }>(
           "waitlist_test_connection",

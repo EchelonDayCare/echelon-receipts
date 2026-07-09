@@ -10,6 +10,7 @@ import {
   upsertCredential,
   deleteCredential,
 } from "../lib/credentials";
+import { inactiveLabel } from "../lib/inactiveLabel";
 import { getSettings } from "../lib/db";
 import type { Staff, StaffCredential } from "../types";
 import { open } from "@tauri-apps/plugin-dialog";
@@ -19,7 +20,7 @@ import { matchStudentByName } from "../lib/attendance";
 import { invoke } from "@tauri-apps/api/core";
 import { OcrProgressBanner, CREDENTIAL_OCR_STAGES } from "../components/OcrProgressBanner";
 
-interface Row extends StaffCredential { staff_name: string }
+interface Row extends StaffCredential { staff_name: string; staff_active: number; staff_terminated_at: string | null }
 
 const today = () => new Date().toISOString().slice(0, 10);
 
@@ -29,6 +30,7 @@ export default function StaffCredentials() {
   const [alertDays, setAlertDays] = useState(60);
   const [editing, setEditing] = useState<Partial<Row> | null>(null);
   const [filter, setFilter] = useState<"all" | "expiring" | "expired">("all");
+  const [showArchived, setShowArchived] = useState(false);
   const [ocrBusy, setOcrBusy] = useState(false);
   const [ocrBanner, setOcrBanner] = useState<string | null>(null);
 
@@ -36,9 +38,9 @@ export default function StaffCredentials() {
     const s = await getSettings();
     setAlertDays(Number(s.staff_cred_alert_days || "60"));
     setStaff(await listStaff(false));
-    setRows(await listAllCredentialsWithStaff());
+    setRows(await listAllCredentialsWithStaff(showArchived));
   }
-  useEffect(() => { refresh(); }, []);
+  useEffect(() => { refresh(); }, [showArchived]);
 
   const filtered = useMemo(() => {
     if (filter === "all") return rows;
@@ -341,7 +343,7 @@ export default function StaffCredentials() {
 
       {staff.length > 0 && (
         <div className="card" style={{ padding: 0 }}>
-          <div style={{ display: "flex", gap: 6, padding: "10px 14px", borderBottom: "1px solid var(--border)" }}>
+          <div style={{ display: "flex", gap: 6, padding: "10px 14px", borderBottom: "1px solid var(--border)", alignItems: "center" }}>
             {(["all", "expiring", "expired"] as const).map((k) => (
               <button
                 key={k}
@@ -352,6 +354,10 @@ export default function StaffCredentials() {
                 {k === "all" ? "All" : k === "expiring" ? "Expiring soon" : "Expired"}
               </button>
             ))}
+            <label style={{ marginLeft: "auto", fontSize: 13, display: "flex", alignItems: "center", gap: 6 }} title="Show credentials for archived (inactive) staff — useful for handoff and historical audits.">
+              <input type="checkbox" checked={showArchived} onChange={(e) => setShowArchived(e.target.checked)} />
+              Show archived staff
+            </label>
           </div>
           {filtered.length === 0 ? (
             <p style={{ padding: 24, margin: 0, color: "var(--muted)" }}>No credentials match this filter.</p>
@@ -378,8 +384,15 @@ export default function StaffCredentials() {
                               : st === "ok" ? `OK (${d}d)`
                               : "No date";
                   return (
-                    <tr key={r.id}>
-                      <td>{r.staff_name}</td>
+                    <tr key={r.id} style={r.staff_active ? undefined : { opacity: 0.65 }}>
+                      <td>
+                        {r.staff_name}
+                        {!r.staff_active && (
+                          <span style={{ marginLeft: 6, fontStyle: "italic", color: "var(--muted)", fontSize: 12 }}>
+                            {inactiveLabel("staff", r.staff_terminated_at)}
+                          </span>
+                        )}
+                      </td>
                       <td>{r.type}</td>
                       <td>{r.issued_date || "—"}</td>
                       <td>{r.expiry_date || "—"}</td>

@@ -6,14 +6,15 @@
 // the browser sandbox is painful, and (b) the zip crate handles OS filename
 // sanitization cleanly on both Windows and macOS.
 //
-// The JS caller passes an already-resolved list of {blob_key, path_in_zip}
-// entries. This module does not query the DB — it just reads blobs by key
-// via the same sqlite file the plugin manages.
+// v2.x note: reads MUST go through the app's DbGate — opening a second
+// `Connection::open` on echelon.db bypasses the SQLCipher key we hold in
+// memory and will produce "file is not a database" on the encrypted DB.
 use std::fs::File;
 use std::io::Write;
-use std::path::PathBuf;
 use serde::Deserialize;
 use zip::write::SimpleFileOptions;
+
+use crate::db_gate::{DbError, DbGate};
 
 #[derive(Debug, Deserialize)]
 pub struct ZipEntryInput {
@@ -24,26 +25,33 @@ pub struct ZipEntryInput {
 #[tauri::command]
 pub async fn documents_export_zip(
     app_handle: tauri::AppHandle,
+    db_gate: tauri::State<'_, DbGate>,
     entries: Vec<ZipEntryInput>,
     dest_path: String,
 ) -> Result<u64, String> {
-    // Locate the app data dir where tauri-plugin-sql keeps echelon.db.
-    let db_path: PathBuf = tauri::Manager::path(&app_handle)
-        .app_data_dir()
-        .map_err(|e| format!("app_data_dir: {e}"))?
-        .join("echelon.db");
-    if !db_path.exists() {
-        return Err(format!("database not found at {}", db_path.display()));
-    }
-
-    let conn = rusqlite::Connection::open_with_flags(
-        &db_path,
-        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
-    ).map_err(|e| format!("open sqlite: {e}"))?;
-
-    // H-8: don't trust an arbitrary caller-supplied destination — constrain
-    // writes to the app data dir / Documents / Downloads and reject symlinks.
+    // H-8: constrain writes to the app data dir / Documents / Downloads
+    // and reject symlinks before we start reading blobs.
     let dest_path = crate::path_guard::validate_new_file_dest(&app_handle, &dest_path)?;
+
+    // Pull all blobs up-front via the encrypted connection, then release
+    // the DB lock before we spend time writing the ZIP. Failing here is
+    // the common case (missing key, bad blob), so we haven't created the
+    // destination file yet.
+    let fetched: Vec<(String, Vec<u8>)> = db_gate
+        .with_conn(|conn| {
+            let mut stmt = conn.prepare("SELECT content FROM blobs WHERE blob_key = ?")?;
+            let mut out = Vec::with_capacity(entries.len());
+            for entry in &entries {
+                let content: Vec<u8> = stmt
+                    .query_row([&entry.blob_key], |row| row.get::<_, Vec<u8>>(0))
+                    .map_err(DbError::from)?;
+                out.push((entry.path_in_zip.clone(), content));
+            }
+            Ok(out)
+        })
+        .await
+        .map_err(|e| format!("read blobs: {e:?}"))?;
+
     let out_file = File::create(&dest_path).map_err(|e| format!("create zip: {e}"))?;
     let mut zip = zip::ZipWriter::new(out_file);
     let opts = SimpleFileOptions::default()
@@ -53,17 +61,8 @@ pub async fn documents_export_zip(
     let mut total: u64 = 0;
     let mut used_names: std::collections::HashSet<String> = std::collections::HashSet::new();
 
-    for entry in entries {
-        // Fetch blob content.
-        let mut stmt = conn
-            .prepare("SELECT content FROM blobs WHERE blob_key = ?")
-            .map_err(|e| format!("prepare: {e}"))?;
-        let content: Vec<u8> = stmt
-            .query_row([&entry.blob_key], |row| row.get::<_, Vec<u8>>(0))
-            .map_err(|e| format!("blob {} missing: {e}", entry.blob_key))?;
-
-        // Ensure unique filename in the ZIP (append " (2)", " (3)", etc.).
-        let mut name = sanitize(&entry.path_in_zip);
+    for (path_in_zip, content) in fetched {
+        let mut name = sanitize(&path_in_zip);
         if used_names.contains(&name) {
             let (stem, ext) = split_ext(&name);
             let mut i = 2u32;

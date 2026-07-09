@@ -6,6 +6,7 @@ export interface Student {
   email: string | null;
   year: number;
   active: number;
+  withdrawn_at: string | null;
   created_at: string;
   person_id: string | null;
   gross_override: number | null;
@@ -97,6 +98,7 @@ export interface Staff {
   role: string | null;
   hourly_rate: number | null;
   active: number;
+  terminated_at: string | null;
   whatsapp_phone_e164: string | null;
   created_at: string;
   archived_at: string | null;

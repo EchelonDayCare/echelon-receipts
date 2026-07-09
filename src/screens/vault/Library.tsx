@@ -81,7 +81,7 @@ export default function VaultLibrary() {
     } catch (e: any) { setErr(String(e?.message ?? e)); }
   };
 
-  useEffect(() => { void refresh(); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, [filter]);
+  useEffect(() => { void refresh();   }, [filter]);
 
   // Keep state in sync with URL params so sidebar links (which change the
   // URL but don't remount this component) actually apply their filter.

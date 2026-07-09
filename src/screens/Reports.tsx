@@ -56,7 +56,7 @@ export default function Reports() {
     setSettings(s);
     setSubsidy(sub);
   }
-  useEffect(() => { if (modeLoaded) refresh(); /* eslint-disable-next-line */ }, [year, mode, modeLoaded]);
+  useEffect(() => { if (modeLoaded) refresh();   }, [year, mode, modeLoaded]);
 
   const monthlyOrdered = (() => {
     if (mode !== "fiscal_sep_aug") return monthly;
