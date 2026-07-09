@@ -255,9 +255,13 @@ export default function MonthlyAttendance() {
     // Sat/Sun or stat-holiday days even if the model emits them. Seed the
     // target month first — the calendar may be a different month than the
     // grid currently on screen, and holidays only seed on month change so
-    // they can silently be missing on first import.
+    // they can silently be missing on first import. We deliberately seed
+    // BC holidays here regardless of the master "Apply BC statutory
+    // holidays" toggle: the OCR filter should always guard against writing
+    // Canada Day etc. Per-holiday opt-outs in getDisabledBcHolidayIds()
+    // are still honoured inside seedBcHolidays.
     await seedWeekends(ry, rm);
-    if (await isBcHolidaysEnabled()) await seedBcHolidays(ry, rm);
+    await seedBcHolidays(ry, rm);
     const targetCalendar = await calendarForMonth(ry, rm);
     const closedIso = new Set(targetCalendar.filter((c) => !c.is_open).map((c) => c.day));
     // Filter now so the confirm count matches what actually gets written.
