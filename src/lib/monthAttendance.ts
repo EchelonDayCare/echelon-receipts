@@ -93,6 +93,21 @@ export async function monthGrid(year: number, month: number): Promise<MonthCell[
 //     rows; on monthly-only rows it deletes the row as before.
 export async function setMark(studentId: number, workDate: string, mark: MonthMark | null): Promise<void> {
   const d = await db();
+  // Closed-day guard: refuse to write P/A on a day the centre is closed
+  // (weekends, seeded stat holidays, or any manually-closed day). Callers
+  // that need to clear a mark on a closed day can still pass mark=null.
+  if (mark !== null) {
+    const cal = await d.select<Array<{ is_open: number }>>(
+      "SELECT is_open FROM centre_calendar WHERE day=?",
+      [workDate],
+    );
+    if (cal.length > 0 && !cal[0].is_open) {
+      // Silent no-op — grid UI already visually disables closed cells; this
+      // is defense-in-depth against imports or race conditions that slip
+      // past the review-modal filter.
+      return;
+    }
+  }
   const existing = await d.select<Array<{ in_time: string | null; out_time: string | null }>>(
     "SELECT in_time, out_time FROM child_attendance WHERE student_id=? AND work_date=?",
     [studentId, workDate]
@@ -169,9 +184,14 @@ export async function seedWeekends(year: number, month: number): Promise<number>
   return added;
 }
 
-// Seed BC statutory holidays for a given month as closed days. Idempotent
-// via INSERT OR IGNORE — a user-set open/close override for that iso day
-// is preserved (INSERT is a no-op when the row exists).
+// Seed BC statutory holidays for a given month as closed days. Uses an
+// UPSERT so that a pre-existing row for the same day gets FORCED to
+// closed — otherwise a stale `is_open=1` row (from an older build that
+// used INSERT OR IGNORE, or from an accidental manual toggle) would let
+// P/A marks slip through the closed-day import filter for Canada Day
+// etc. Users can still opt-out per-holiday via
+// getDisabledBcHolidayIds(); disabled holidays are skipped entirely so
+// their DB rows (if any) are left alone.
 export async function seedBcHolidays(year: number, month: number): Promise<number> {
   const { bcStatHolidays } = await import("./bcHolidays");
   const { getDisabledBcHolidayIds } = await import("./centreCalendar");
@@ -182,7 +202,8 @@ export async function seedBcHolidays(year: number, month: number): Promise<numbe
     if (excluded.has(h.id)) continue;
     if (!h.iso.startsWith(mmPrefix)) continue;
     const r = await execRetry(
-      `INSERT OR IGNORE INTO centre_calendar(day, is_open, reason) VALUES(?, 0, ?)`,
+      `INSERT INTO centre_calendar(day, is_open, reason) VALUES(?, 0, ?)
+       ON CONFLICT(day) DO UPDATE SET is_open=0, reason=excluded.reason`,
       [h.iso, h.name],
     );
     if ((r as any)?.rowsAffected) added++;
