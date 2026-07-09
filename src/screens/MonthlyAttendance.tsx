@@ -252,10 +252,13 @@ export default function MonthlyAttendance() {
     if (!Number.isFinite(ry) || !Number.isFinite(rm)) { show("Bad month from OCR", "err"); return; }
     const rowsToImport = ocrReview.rows.filter((r) => !r.skip && r.matchedId);
     // Closed-day guard: build the ISO set now so we never write marks on
-    // Sat/Sun or stat-holiday days even if the model emits them.
-    const targetCalendar = (ry === year && rm === month)
-      ? calendar
-      : await calendarForMonth(ry, rm);
+    // Sat/Sun or stat-holiday days even if the model emits them. Seed the
+    // target month first — the calendar may be a different month than the
+    // grid currently on screen, and holidays only seed on month change so
+    // they can silently be missing on first import.
+    await seedWeekends(ry, rm);
+    if (await isBcHolidaysEnabled()) await seedBcHolidays(ry, rm);
+    const targetCalendar = await calendarForMonth(ry, rm);
     const closedIso = new Set(targetCalendar.filter((c) => !c.is_open).map((c) => c.day));
     // Filter now so the confirm count matches what actually gets written.
     const filteredRows = rowsToImport.map((r) => ({
