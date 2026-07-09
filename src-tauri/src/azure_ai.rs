@@ -12,13 +12,13 @@ use serde_json::json;
 const MISTRAL_DOC_AI_URL: &str = "https://ai-nse.services.ai.azure.com/providers/mistral/azure/ocr";
 const MISTRAL_DOC_AI_MODEL: &str = "mistral-document-ai-2512";
 
-// GPT-4.1 vision — used for the monthly attendance grid because Mistral
-// Document AI struggles with tightly-packed hand-drawn X/dash marks on
-// this specific form (v2.2.6 field report). GPT-4.1 is already deployed
-// on the same Azure OpenAI resource and reused across the app.
+// GPT-5.4 vision — reasoning-capable model on the same Azure OpenAI
+// resource. Tested against gpt-4.1 for this specific grid-OCR task and
+// picks up column-3 marks + differentiates X vs dash more reliably at
+// the cost of higher latency (~5-15s vs ~2-3s).
 const AZURE_OPENAI_ENDPOINT: &str = "https://ai-nse.openai.azure.com";
-const GPT41_DEPLOY: &str = "gpt-4.1";
-const GPT41_API_VER: &str = "2025-04-01-preview";
+const VISION_DEPLOY: &str = "gpt-5.4";
+const VISION_API_VER: &str = "2025-04-01-preview";
 
 fn truncate(s: &str, n: usize) -> String {
     // char-boundary safe. Rust panics on non-boundary byte-slice indexing, and
@@ -121,7 +121,7 @@ async fn call_gpt41_vision_json(
         .map_err(|e| format!("file base64: {e}"))?;
 
     let url = format!(
-        "{AZURE_OPENAI_ENDPOINT}/openai/deployments/{GPT41_DEPLOY}/chat/completions?api-version={GPT41_API_VER}"
+        "{AZURE_OPENAI_ENDPOINT}/openai/deployments/{VISION_DEPLOY}/chat/completions?api-version={VISION_API_VER}"
     );
     let data_url = format!("data:{mime_type};base64,{file_b64}");
     let body = json!({
@@ -132,8 +132,8 @@ async fn call_gpt41_vision_json(
                 { "type": "image_url", "image_url": { "url": data_url, "detail": "high" } }
             ]}
         ],
-        "temperature": 0.0,
-        "max_completion_tokens": 8000,
+        "reasoning_effort": "high",
+        "max_completion_tokens": 16000,
         "response_format": {
             "type": "json_schema",
             "json_schema": { "name": name, "schema": schema, "strict": true }
@@ -160,7 +160,7 @@ async fn call_gpt41_vision_json(
         let text = resp.text().await.map_err(|e| redact(format!("read: {e}"), api_key))?;
         let retriable = matches!(status.as_u16(), 429 | 503 | 504);
         if !status.is_success() {
-            last_err = Err(redact(format!("http {status} @ gpt-4.1 vision :: {}", truncate(&text, 800)), api_key));
+            last_err = Err(redact(format!("http {status} @ {VISION_DEPLOY} vision :: {}", truncate(&text, 800)), api_key));
             if retriable && attempt < MAX_ATTEMPTS {
                 let backoff = BASE_BACKOFF_MS * 4u64.pow(attempt - 1);
                 tokio::time::sleep(std::time::Duration::from_millis(backoff)).await;
