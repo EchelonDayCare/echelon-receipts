@@ -65,18 +65,18 @@ function toIso(d: Date): string {
  * checkboxes. Order matches bcStatHolidays() output order (Jan..Dec).
  */
 export const BC_HOLIDAY_CATALOG: { id: string; label: string }[] = [
-  { id: "new_years",       label: "New Year's Day" },
+  { id: "new_years",       label: "New Year's Day (Jan 1)" },
   { id: "family_day",      label: "Family Day (3rd Mon Feb)" },
-  { id: "good_friday",     label: "Good Friday" },
-  { id: "victoria_day",    label: "Victoria Day" },
-  { id: "canada_day",      label: "Canada Day" },
+  { id: "good_friday",     label: "Good Friday (Fri before Easter)" },
+  { id: "victoria_day",    label: "Victoria Day (Mon on/before May 24)" },
+  { id: "canada_day",      label: "Canada Day (Jul 1)" },
   { id: "bc_day",          label: "BC Day (1st Mon Aug)" },
   { id: "labour_day",      label: "Labour Day (1st Mon Sep)" },
-  { id: "truth_recon",     label: "National Day for Truth & Reconciliation" },
-  { id: "thanksgiving",    label: "Thanksgiving" },
-  { id: "remembrance_day", label: "Remembrance Day" },
-  { id: "christmas",       label: "Christmas Day" },
-  { id: "boxing_day",      label: "Boxing Day" },
+  { id: "truth_recon",     label: "National Day for Truth & Reconciliation (Sep 30)" },
+  { id: "thanksgiving",    label: "Thanksgiving (2nd Mon Oct)" },
+  { id: "remembrance_day", label: "Remembrance Day (Nov 11)" },
+  { id: "christmas",       label: "Christmas Day (Dec 25)" },
+  { id: "boxing_day",      label: "Boxing Day (Dec 26)" },
 ];
 
 /** All BC-observed closures for the given calendar year, in date order. */
