@@ -1354,6 +1354,26 @@ Thanks,
       WHERE attendance_mark IS NULL`,
   );
 
+  // ─── Migration 028 — Organizer Notes (v2.2.6) ─────────────────────────
+  // Simple, searchable notes with no due date and no reminders. Purpose:
+  // capture small facts you might need to look up later (e.g. "Signed up
+  // on XYZ for courses", "Locker code 42-19-8"). Body is a single TEXT
+  // column and search is a plain LIKE — no FTS5, expected volume is small.
+  if (!(await tableExists("organizer_notes"))) {
+    console.warn("[ensureSchema] creating organizer_notes");
+    await d.execute(`CREATE TABLE organizer_notes (
+      id           TEXT PRIMARY KEY,
+      body         TEXT NOT NULL,
+      created_at   TEXT NOT NULL,
+      updated_at   TEXT NOT NULL,
+      version      INTEGER NOT NULL DEFAULT 1,
+      deleted_at   TEXT
+    )`);
+    await d.execute(
+      "CREATE INDEX ix_organizer_notes_updated ON organizer_notes(updated_at DESC) WHERE deleted_at IS NULL",
+    );
+  }
+
   await logIntegrityWarnings(d);
 }
 

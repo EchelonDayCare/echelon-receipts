@@ -11,6 +11,9 @@ import {
   listOpenFollowups, listRecentDoneFollowups, createFollowup, toggleFollowupDone, softDeleteFollowup,
   type Followup, type Priority,
 } from "../../repo/followupsRepo";
+import {
+  listNotes, createNote, updateNote, softDeleteNote, type Note,
+} from "../../repo/notesRepo";
 import MeetingDrawer, { type MeetingDrawerState } from "./MeetingDrawer";
 import VoiceCaptureModal from "../../components/VoiceCaptureModal";
 import OrganizerAiTextPanel from "./OrganizerAiTextPanel";
@@ -63,16 +66,30 @@ export default function Organizer() {
   const [voiceEnabled, setVoiceEnabled] = useState(false);
   const [aiTextEnabled, setAiTextEnabled] = useState(false);
   const [newFu, setNewFu] = useState({ title: "", due: "", priority: "normal" as Priority });
+  const [notes, setNotes] = useState<Note[]>([]);
+  const [noteQuery, setNoteQuery] = useState("");
+  const [newNote, setNewNote] = useState("");
+  const [editingNote, setEditingNote] = useState<{ id: string; body: string; version: number } | null>(null);
 
   const refresh = async () => {
     try {
-      const [up, mt, fu, doneFu] = await Promise.all([
+      const [up, mt, fu, doneFu, nt] = await Promise.all([
         listUpcoming(windowDays), listRecentMeetings(5), listOpenFollowups(), listRecentDoneFollowups(20),
+        listNotes(noteQuery),
       ]);
-      setUpcoming(up); setMeetings(mt); setFollowups(fu); setDoneFollowups(doneFu);
+      setUpcoming(up); setMeetings(mt); setFollowups(fu); setDoneFollowups(doneFu); setNotes(nt);
     } catch (e: any) { setErr(String(e?.message ?? e)); }
   };
   useEffect(() => { void refresh(); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, [windowDays]);
+
+  // Re-run notes query on debounced text change (300ms). Keeps the rest of the
+  // panels untouched — we only refetch the notes list.
+  useEffect(() => {
+    const t = setTimeout(async () => {
+      try { setNotes(await listNotes(noteQuery)); } catch (e: any) { setErr(String(e?.message ?? e)); }
+    }, 300);
+    return () => clearTimeout(t);
+  }, [noteQuery]);
 
   // Gate the Voice mic button on Whisper being fully configured. On Luxmi's
   // tenant Azure Policy blocks disableLocalAuth=false so `azure_whisper_key_set`
@@ -107,6 +124,34 @@ export default function Organizer() {
       await createFollowup({ title: newFu.title.trim(), dueDate: newFu.due || null, priority: newFu.priority });
       setNewFu({ title: "", due: "", priority: "normal" });
       await refresh();
+    } catch (e: any) { setErr(String(e?.message ?? e)); }
+  }
+
+  async function addNote() {
+    const body = newNote.trim();
+    if (!body) return;
+    try {
+      await createNote(body);
+      setNewNote("");
+      setNotes(await listNotes(noteQuery));
+    } catch (e: any) { setErr(String(e?.message ?? e)); }
+  }
+  async function saveEditingNote() {
+    if (!editingNote) return;
+    const body = editingNote.body.trim();
+    if (!body) return;
+    try {
+      await updateNote(editingNote.id, body, editingNote.version);
+      setEditingNote(null);
+      setNotes(await listNotes(noteQuery));
+    } catch (e: any) { setErr(String(e?.message ?? e)); }
+  }
+  async function removeNote(n: Note) {
+    if (!confirm("Delete this note?")) return;
+    try {
+      await softDeleteNote(n.id, n.version);
+      if (editingNote?.id === n.id) setEditingNote(null);
+      setNotes(await listNotes(noteQuery));
     } catch (e: any) { setErr(String(e?.message ?? e)); }
   }
 
@@ -241,9 +286,90 @@ export default function Organizer() {
             </div>
           )}
         </section>
+        {/* ── Notes panel ────────────────────────────────────────────── */}
+        <section className="card org-panel">
+          <div className="org-panel-head">
+            <h2>Notes</h2>
+            <input
+              type="search"
+              placeholder="Search notes…"
+              value={noteQuery}
+              onChange={(e) => setNoteQuery(e.target.value)}
+              style={{ maxWidth: 240 }}
+            />
+          </div>
+          <div style={{ display: "flex", gap: 8, alignItems: "flex-start", marginBottom: 10 }}>
+            <textarea
+              placeholder='Jot a note… e.g. "Signed up on XYZ for courses"'
+              value={newNote}
+              onChange={(e) => setNewNote(e.target.value)}
+              onKeyDown={(e) => {
+                if ((e.metaKey || e.ctrlKey) && e.key === "Enter") { e.preventDefault(); void addNote(); }
+              }}
+              rows={2}
+              style={{ flex: 1, minWidth: 0, resize: "vertical" }}
+            />
+            <button className="btn" onClick={addNote} disabled={!newNote.trim()}>＋ Add note</button>
+          </div>
+          {notes.length === 0 ? (
+            <div className="empty">
+              {noteQuery.trim() ? `No notes matching "${noteQuery.trim()}".` : "No notes yet. Jot the first one above 📝"}
+            </div>
+          ) : (
+            <ul className="org-fu-list" style={{ gap: 8 }}>
+              {notes.map((n) => {
+                const isEditing = editingNote?.id === n.id;
+                return (
+                  <li key={n.id} className="org-fu" style={{ alignItems: "flex-start" }}>
+                    <div className="org-fu-body" style={{ minWidth: 0 }}>
+                      {isEditing ? (
+                        <>
+                          <textarea
+                            value={editingNote!.body}
+                            onChange={(e) => setEditingNote({ ...editingNote!, body: e.target.value })}
+                            onKeyDown={(e) => {
+                              if ((e.metaKey || e.ctrlKey) && e.key === "Enter") { e.preventDefault(); void saveEditingNote(); }
+                              if (e.key === "Escape") { e.preventDefault(); setEditingNote(null); }
+                            }}
+                            rows={3}
+                            style={{ width: "100%", resize: "vertical" }}
+                            autoFocus
+                          />
+                          <div style={{ display: "flex", gap: 6, marginTop: 6 }}>
+                            <button className="btn sm" onClick={saveEditingNote} disabled={!editingNote!.body.trim()}>Save</button>
+                            <button className="btn link sm" onClick={() => setEditingNote(null)}>Cancel</button>
+                          </div>
+                        </>
+                      ) : (
+                        <>
+                          <div
+                            className="org-fu-title"
+                            style={{ whiteSpace: "pre-wrap", wordBreak: "break-word" }}
+                            onClick={() => setEditingNote({ id: n.id, body: n.body, version: n.version })}
+                            title="Click to edit"
+                          >
+                            {n.body}
+                          </div>
+                          <div className="org-fu-meta">updated {n.updatedAt.slice(0, 16).replace("T", " ")}</div>
+                        </>
+                      )}
+                    </div>
+                    {!isEditing && (
+                      <div style={{ display: "flex", gap: 4 }}>
+                        <button className="btn link sm" title="Edit"
+                          onClick={() => setEditingNote({ id: n.id, body: n.body, version: n.version })}>
+                          ✎
+                        </button>
+                        <button className="btn link danger sm" title="Delete" onClick={() => removeNote(n)}>✕</button>
+                      </div>
+                    )}
+                  </li>
+                );
+              })}
+            </ul>
+          )}
+        </section>
       </div>
-
-      {/* ── Follow-ups sidebar ───────────────────────────────────────── */}
       <aside className="org-side">
         <section className="card org-panel">
           <div className="org-panel-head">
