@@ -367,7 +367,7 @@ Common tasks and where to do them:\n\
   Upload a paper attendance sheet: Students → Attendance → \"Upload sheet\" → either \"Import from Downloads\" (picks the newest scan) or choose manually. Review the extracted grid before saving.\n\
   Mark a specific day open or closed: Students → Attendance → \"Centre Calendar\" (top-right of the month) → click the day → toggle Open/Closed.\n\
   Change which stat holidays apply: Config → Stat Holidays → tick/untick the 12 BC holidays (year-on-year).\n\
-  Add a staff member: Config → Staff → \"+ Add Staff\". Then Staff → Hours will show them.\n\
+  Add a staff member: Staff → Hours → \"+ Add staff\" (top-right of the Staff list card). New staff appear immediately in the Hours table and in the Credentials, Schedule and Meeting Notes tabs.\n\
   Log staff hours from a sign-in sheet: Staff → Hours → \"Upload sheet\". Same dual-button flow as attendance.\n\
   Build a staff schedule: Staff → Schedule → click a cell to add a shift. Publish week to lock changes.\n\
   Create meeting notes: Staff → Meeting Notes → \"+ New meeting\". Or paste raw notes into the AI panel to auto-fill title/attendees/actions.\n\
