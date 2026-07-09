@@ -317,7 +317,7 @@ export default function StaffCredentials() {
         </div>
       )}
 
-      <div className="row" style={{ gap: 10, marginBottom: 14, flexWrap: "nowrap" }}>
+      <div className="row" style={{ gap: 10, marginBottom: 14, gridTemplateColumns: "repeat(3, minmax(0, 1fr))" }}>
         <SummaryCard label="Total records" value={summary.total} tone="info" />
         <SummaryCard label="Expiring soon" value={summary.expiring} tone="warn" onClick={() => setFilter("expiring")} />
         <SummaryCard label="Expired" value={summary.expired} tone="danger" onClick={() => setFilter("expired")} />
