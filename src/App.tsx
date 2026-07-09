@@ -43,6 +43,7 @@ const StaffScheduleAudit = lazy(() => import("./screens/staff/ScheduleAudit"));
 const StaffScheduleConfirmations = lazy(() => import("./screens/staff/ScheduleConfirmations"));
 const StaffMeetings = lazy(() => import("./screens/staff/Meetings"));
 const OrganizerScreen = lazy(() => import("./screens/organizer/Organizer"));
+const OrganizerNotes = lazy(() => import("./screens/organizer/Notes"));
 const NotificationsHistory = lazy(() => import("./screens/Notifications"));
 const Deposits = lazy(() => import("./screens/Deposits"));
 import { runCloudBackupIfDue } from "./lib/cloudBackup";
@@ -330,6 +331,7 @@ function Shell({ logo, name, staffEnabled }: { logo: string; name: string; staff
         name={name}
         items={[
           { to: "/organizer", label: "Dashboard" },
+          { to: "/organizer/notes", label: "Notes" },
         ]}
       />
     );
@@ -430,6 +432,7 @@ function Shell({ logo, name, staffEnabled }: { logo: string; name: string; staff
 
           {/* Organizer */}
           <Route path="/organizer" element={<OrganizerScreen />} />
+          <Route path="/organizer/notes" element={<OrganizerNotes />} />
 
           {/* Notifications history — accessible only via the bell footer */}
           <Route path="/notifications" element={<NotificationsHistory />} />

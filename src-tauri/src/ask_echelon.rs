@@ -353,7 +353,7 @@ Top-level nav (left sidebar):\n\
   Reports → Overview / Monthly / Aging / Subsidy / Enrollment / Attendance / Credentials / Drills / AGM\n\
   Communications → Compose / Templates / History / Directory / Scheduled\n\
   Waitlist → Overview / List / Enrolled / Archived\n\
-  Vault (document library), Organizer (calendar/AI notes/quick notes), Ask Echelon\n\
+  Vault (document library), Organizer → Dashboard / Notes, Ask Echelon\n\
   Config (Settings) → Identity / Receipts & Email / Folders / Staff / Backups / Security / Stat Holidays / Notifications / Waitlist / About\n\
 \n\
 Common tasks and where to do them:\n\
@@ -382,7 +382,7 @@ Common tasks and where to do them:\n\
   Change PIN: Config → Security → \"Change PIN\".\n\
   Set up email (SMTP): Config → Receipts & Email → enter host / port / from address / password. Use \"Send test email\".\n\
   Set up Azure AI (needed for OCR + statement import): Config → Staff → \"Azure AI Foundry key\".\n\
-  Jot a quick note (no reminder needed): Organizer → Notes panel (below Recent meetings) → type in the textarea → \"+ Add note\". Search from the search box at the top of the panel. Click a note to edit inline, or use ✎/✕.\n\
+  Jot a quick note (no reminder needed): Organizer → Notes → type in the textarea → \"+ Add note\". Search using the search box top-right. Click a note to edit inline, or use ✎/✕.\n\
 ";
 
 async fn howto_answer(api_key: &str, question: &str) -> Result<(String, String), String> {
