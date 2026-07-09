@@ -10,7 +10,7 @@ import { getSettings, listYears } from "../lib/db";
 import { matchStudentByName } from "../lib/attendance";
 import {
   monthGrid, setMark, calendarForMonth, seedWeekends, seedBcHolidays, setCalendarDay,
-  daysOpenInMonth, MARK_LABEL, MARK_COLOR,
+  daysOpenInMonth, MARK_LABEL, MARK_COLOR, clearMonthMarks,
   type MonthMark, type MonthCell, type CalendarDay,
 } from "../lib/monthAttendance";
 import { extractMonthAttendance, fileToMime } from "../lib/ai";
@@ -251,14 +251,35 @@ export default function MonthlyAttendance() {
     const [ry, rm] = ocrReview.month.split("-").map((x) => parseInt(x, 10));
     if (!Number.isFinite(ry) || !Number.isFinite(rm)) { show("Bad month from OCR", "err"); return; }
     const rowsToImport = ocrReview.rows.filter((r) => !r.skip && r.matchedId);
-    const totalMarks = rowsToImport.reduce((n, r) => n + Object.keys(r.marks).length, 0);
-    const ok = await showConfirm(`Import ${totalMarks} marks for ${rowsToImport.length} children into ${MONTH_NAMES[rm-1]} ${ry}?`);
+    // Closed-day guard: build the ISO set now so we never write marks on
+    // Sat/Sun or stat-holiday days even if the model emits them.
+    const targetCalendar = (ry === year && rm === month)
+      ? calendar
+      : await calendarForMonth(ry, rm);
+    const closedIso = new Set(targetCalendar.filter((c) => !c.is_open).map((c) => c.day));
+    // Filter now so the confirm count matches what actually gets written.
+    const filteredRows = rowsToImport.map((r) => ({
+      ...r,
+      marks: Object.fromEntries(
+        Object.entries(r.marks).filter(([dStr]) => {
+          const d = parseInt(dStr, 10);
+          if (!Number.isFinite(d) || d < 1 || d > 31) return false;
+          return !closedIso.has(isoDay(ry, rm, d));
+        }),
+      ) as Record<string, MonthMark>,
+    }));
+    const totalMarks = filteredRows.reduce((n, r) => n + Object.keys(r.marks).length, 0);
+    const ok = await showConfirm(
+      `Replace all attendance marks for ${MONTH_NAMES[rm-1]} ${ry} with ${totalMarks} new marks across ${filteredRows.length} children?\n\n` +
+      `Existing marks for this month will be cleared first. Days flagged as closed (weekends, stat holidays) will remain empty.`,
+    );
     if (!ok) return;
+    // Replace-not-merge: wipe the entire month first.
+    await clearMonthMarks(ry, rm);
     let saved = 0;
-    for (const r of rowsToImport) {
+    for (const r of filteredRows) {
       for (const [dStr, mark] of Object.entries(r.marks)) {
         const d = parseInt(dStr, 10);
-        if (!Number.isFinite(d) || d < 1 || d > 31) continue;
         await setMark(r.matchedId!, isoDay(ry, rm, d), mark);
         saved++;
       }
@@ -268,7 +289,7 @@ export default function MonthlyAttendance() {
     }
     setOcrReview(null);
     if (ry !== year || rm !== month) { setYear(ry); setMonthState(rm); } else { await refresh(); }
-    show(`Imported ${saved} marks`);
+    show(`Imported ${saved} marks (month cleared first)`);
   }
 
   function printBlank() {

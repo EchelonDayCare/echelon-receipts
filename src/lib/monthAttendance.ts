@@ -199,6 +199,32 @@ export async function setCalendarDay(day: string, isOpen: boolean, reason: strin
   );
 }
 
+// Wipe every attendance mark for a given month across all students. Rows
+// carrying daily in/out evidence keep their in_time/out_time (only the
+// monthly attendance_mark + status are cleared); rows that were purely
+// mark-only get deleted. Used by re-import to guarantee replace-not-merge
+// semantics — a fresh OCR pass fully supersedes the previous month state.
+export async function clearMonthMarks(year: number, month: number): Promise<number> {
+  const ym = `${year}-${String(month).padStart(2, "0")}`;
+  const like = `${ym}-%`;
+  // 1. Rows with daily in/out evidence: keep the row, null the mark.
+  await execRetry(
+    `UPDATE child_attendance
+        SET attendance_mark = NULL, status = NULL
+      WHERE work_date LIKE ?
+        AND (in_time IS NOT NULL OR out_time IS NOT NULL)`,
+    [like],
+  );
+  // 2. Mark-only rows: drop them entirely so the grid renders blank.
+  const del = await execRetry(
+    `DELETE FROM child_attendance
+      WHERE work_date LIKE ?
+        AND in_time IS NULL AND out_time IS NULL`,
+    [like],
+  );
+  return (del as any)?.rowsAffected ?? 0;
+}
+
 export function daysOpenInMonth(year: number, month: number, calendar: CalendarDay[]): number {
   const daysInMonth = new Date(year, month, 0).getDate();
   const closedSet = new Set(calendar.filter((c) => !c.is_open).map((c) => c.day));
