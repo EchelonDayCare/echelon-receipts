@@ -557,7 +557,7 @@ pub async fn extract_month_attendance(args: ExtractMonthAttendanceArgs) -> Resul
         let res = call_gpt_vision_json(
             key_ref, VISION_DEPLOY_PRIMARY, &args.image_b64, &args.mime_type,
             schema_a, "MonthAttendanceExtraction", &sys_a, &user_a,
-            Some("high"),
+            Some("medium"),
         ).await;
         (started.elapsed().as_millis() as u64, res)
     };
