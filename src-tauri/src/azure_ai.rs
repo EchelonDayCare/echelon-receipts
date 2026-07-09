@@ -326,17 +326,25 @@ pub async fn extract_month_attendance(args: ExtractMonthAttendanceArgs) -> Resul
                         "child_name": { "type": "string",
                             "description": format!("Exact child name as written. Known children: {known_hint}") },
                         "marks": {
-                            "type": "object",
-                            "description": "Object mapping day-of-month (as string '1'..'31') to a single-character mark. VISUAL RULES (apply strictly, in order):\n\
-                                (1) 'P' = ONLY when the cell contains a clear CROSS or X shape (two strokes crossing) OR a checkmark ✓ OR an asterisk/star ✱ ★ OR the hand-written letter 'P'. Two diagonal strokes that intersect = P.\n\
-                                (2) 'A' = ANY horizontal line (dash '-', en-dash, hyphen, minus sign, single stroke roughly parallel to the row) OR a hand-written 'A'. A single stroke is NEVER P — only two crossing strokes are P.\n\
-                                (3) BLANK / EMPTY / UNFILLED cells: OMIT the day key entirely. Do NOT emit 'A' for a truly empty cell — the sheet has many future/not-yet-filled days and marking them absent corrupts the record.\n\
-                                (4) The wide vertical bands labelled 'Saturday & Sunday' between weeks are NOT day columns — do NOT emit anything for cells inside those bands. Skip them entirely.\n\
-                                (5) Any column that carries a vertical multi-row text label like 'Stat Holiday', 'Holiday', 'Statutory Holiday', 'Closed', 'Public Holiday' is NOT a day column for attendance purposes — do NOT emit anything for cells inside those columns. Skip them entirely.\n\
-                                (6) COLUMN ALIGNMENT: use the numeric day labels ('1', '2', '3', … '31') at the top of the sheet as ground truth for which cell corresponds to which day. After each Saturday & Sunday band or Stat Holiday column, the next numbered column is the following weekday — do NOT let visual bands shift your column count.\n\
-                                (7) When uncertain between P and A for a cell that clearly has ink, prefer 'A'. When uncertain whether a cell has ink at all, prefer OMITTING (rule 3).\n\
-                                (8) Every emitted value must be exactly 'P' or 'A'. Emit one row per child. Emit ONLY the day keys where the cell has an actual mark; omit blank/closed/weekend day keys.",
-                            "additionalProperties": { "type": "string", "enum": ["P","A"] }
+                            "type": "array",
+                            "description": "One entry per day where the cell has an actual P/A mark. Omit blank cells and cells inside Saturday/Sunday bands or Stat Holiday columns.",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "day":  { "type": "string", "description": "Day-of-month as string, '1'..'31'." },
+                                    "mark": { "type": "string", "enum": ["P","A"], "description": "\
+                                        VISUAL RULES (apply strictly, in order):\n\
+                                        (1) 'P' = ONLY when the cell contains a clear CROSS or X shape (two strokes crossing) OR a checkmark ✓ OR an asterisk/star ✱ ★ OR the hand-written letter 'P'. Two diagonal strokes that intersect = P.\n\
+                                        (2) 'A' = ANY horizontal line (dash '-', en-dash, hyphen, minus sign, single stroke roughly parallel to the row) OR a hand-written 'A'. A single stroke is NEVER P — only two crossing strokes are P.\n\
+                                        (3) BLANK / EMPTY / UNFILLED cells: OMIT this array entry entirely. Do NOT emit 'A' for a truly empty cell — the sheet has many future/not-yet-filled days and marking them absent corrupts the record.\n\
+                                        (4) The wide vertical bands labelled 'Saturday & Sunday' between weeks are NOT day columns — do NOT emit anything for cells inside those bands. Skip them entirely.\n\
+                                        (5) Any column that carries a vertical multi-row text label like 'Stat Holiday', 'Holiday', 'Statutory Holiday', 'Closed', 'Public Holiday' is NOT a day column — do NOT emit anything for cells inside those columns. Skip them entirely.\n\
+                                        (6) COLUMN ALIGNMENT: use the numeric day labels ('1', '2', '3', … '31') at the top of the sheet as ground truth for which cell corresponds to which day. After each Saturday & Sunday band or Stat Holiday column, the next numbered column is the following weekday — do NOT let visual bands shift your column count.\n\
+                                        (7) When uncertain between P and A for a cell that clearly has ink, prefer 'A'. When uncertain whether a cell has ink at all, prefer OMITTING (rule 3)." }
+                                },
+                                "required": ["day", "mark"],
+                                "additionalProperties": false
+                            }
                         }
                     },
                     "required": ["child_name", "marks"],
@@ -384,9 +392,9 @@ pub async fn extract_month_attendance(args: ExtractMonthAttendanceArgs) -> Resul
         let name = r["child_name"].as_str().unwrap_or("").trim().to_string();
         if name.is_empty() || is_placeholder_name(&name) { continue; }
         let mut marks: std::collections::BTreeMap<String, String> = std::collections::BTreeMap::new();
-        if let Some(obj) = r["marks"].as_object() {
-            for (k, v) in obj {
-                let raw = v.as_str().unwrap_or("").trim().to_uppercase();
+        if let Some(arr) = r["marks"].as_array() {
+            for entry in arr {
+                let raw = entry["mark"].as_str().unwrap_or("").trim().to_uppercase();
                 // v2.2.2: model schema is P/A only, but be defensive against
                 // stray legacy letters — collapse H/S/V to A on the fly so a
                 // model hiccup can't corrupt the DB.
@@ -395,8 +403,8 @@ pub async fn extract_month_attendance(args: ExtractMonthAttendanceArgs) -> Resul
                     "A" | "H" | "S" | "V" => "A".to_string(),
                     _ => continue,
                 };
-                // Normalise key: strip leading zeros ("01" -> "1"), reject non-numeric.
-                let n: u32 = match k.trim().parse() { Ok(x) => x, Err(_) => continue };
+                let k = entry["day"].as_str().unwrap_or("").trim().to_string();
+                let n: u32 = match k.parse() { Ok(x) => x, Err(_) => continue };
                 if !(1..=31).contains(&n) { continue; }
                 marks.insert(n.to_string(), val);
             }
