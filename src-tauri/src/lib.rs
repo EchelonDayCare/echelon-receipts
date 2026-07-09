@@ -136,6 +136,7 @@ pub fn run() {
             azure_ai::extract_attendance,
             azure_ai::extract_month_attendance,
             azure_ai::extract_visa_statement,
+            azure_ai::extract_credential,
             ask_echelon::ask_echelon,
             consensus::extract_timesheet_consensus,
             inbox::inbox_list_recent,

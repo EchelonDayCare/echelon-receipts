@@ -400,3 +400,90 @@ fn is_placeholder_name(name: &str) -> bool {
     }
     false
 }
+
+// ─── Staff credential document extraction ───────────────────────────────
+// Reads photos/scans/PDFs of ECE certificates, First Aid cards, Criminal
+// Record Checks, TB clearances, immunization records, orientation sign-offs.
+// Extracts a structured record the user can review before saving.
+
+#[derive(Deserialize)]
+pub struct ExtractCredentialArgs {
+    pub file_b64: String,
+    pub mime_type: String,
+    // Roster of staff names on file, used for fuzzy-matching the certificate
+    // holder without asking the LLM to invent a name.
+    pub known_staff_names: Vec<String>,
+    // The credential-type catalog we already track, so the model chooses one
+    // of the canonical labels instead of inventing "First Aid Cert v3".
+    pub known_credential_types: Vec<String>,
+}
+
+#[derive(Serialize)]
+pub struct ExtractCredentialResult {
+    pub staff_name_guess: Option<String>,
+    pub credential_type_guess: Option<String>,
+    pub issuer: Option<String>,
+    pub issued_date: Option<String>,
+    pub expiry_date: Option<String>,
+    pub certificate_number: Option<String>,
+    pub notes: Option<String>,
+    pub raw_text: String,
+}
+
+#[tauri::command]
+pub async fn extract_credential(args: ExtractCredentialArgs) -> Result<ExtractCredentialResult, String> {
+    // We keep the schema strict + list the known types so the model is nudged
+    // toward one of our canonical labels; "Other" is allowed for anything
+    // outside the catalog.
+    let types_hint = if args.known_credential_types.is_empty() {
+        "ECE Certificate, Criminal Record Check, Child Care First Aid, TB Clearance, Immunization Record, Policy / Orientation Sign-off, Other".to_string()
+    } else {
+        format!("{}, Other", args.known_credential_types.join(", "))
+    };
+    let names_hint = if args.known_staff_names.is_empty() {
+        "".to_string()
+    } else {
+        format!(" Prefer matching the certificate holder to one of these staff names when possible: {}.", args.known_staff_names.join(", "))
+    };
+
+    let schema = json!({
+        "type": "object",
+        "properties": {
+            "staff_name_guess":       { "type": ["string", "null"], "description": format!("Full name of the certificate holder, or the closest match from the roster.{}", names_hint) },
+            "credential_type_guess":  { "type": ["string", "null"], "description": format!("One of: {}", types_hint) },
+            "issuer":                 { "type": ["string", "null"], "description": "Issuing body / organization (e.g. Justice Institute of BC, Red Cross, ECEBC, Ministry of Public Safety)." },
+            "issued_date":            { "type": ["string", "null"], "description": "Date issued in YYYY-MM-DD. Null if not printed on the document." },
+            "expiry_date":            { "type": ["string", "null"], "description": "Expiry / renewal-due date in YYYY-MM-DD. Null if not printed." },
+            "certificate_number":     { "type": ["string", "null"], "description": "Certificate / registration / file number exactly as printed, else null." },
+            "notes":                  { "type": ["string", "null"], "description": "One short line combining anything useful the user should see (course name, sub-modules like CPR-C, etc.). Null if there is nothing extra." }
+        },
+        "required": ["staff_name_guess", "credential_type_guess", "issuer", "issued_date", "expiry_date", "certificate_number", "notes"],
+        "additionalProperties": false
+    });
+
+    let key_for_redact = crate::secrets::get_secret("azure_ai_key")?;
+    let annotation = call_mistral_doc_ai(
+        &key_for_redact, &args.file_b64, &args.mime_type, schema, "CredentialExtraction"
+    ).await?;
+
+    let parsed: serde_json::Value = serde_json::from_str(&annotation)
+        .map_err(|e| redact(format!("model output not JSON: {e} :: {}", truncate(&annotation, 400)), &key_for_redact))?;
+
+    fn s(v: &serde_json::Value) -> Option<String> {
+        v.as_str().map(|x| x.trim().to_string()).filter(|x| !x.is_empty() && x.to_lowercase() != "null")
+    }
+    // Placeholder-name scrub: the model sometimes writes generic role labels
+    // ("Staff Member", "Employee") when the holder line is blurry.
+    let staff_name_guess = s(&parsed["staff_name_guess"]).filter(|n| !is_placeholder_name(n));
+
+    Ok(ExtractCredentialResult {
+        staff_name_guess,
+        credential_type_guess: s(&parsed["credential_type_guess"]),
+        issuer: s(&parsed["issuer"]),
+        issued_date: s(&parsed["issued_date"]).filter(|d| d.len() >= 10),
+        expiry_date: s(&parsed["expiry_date"]).filter(|d| d.len() >= 10),
+        certificate_number: s(&parsed["certificate_number"]),
+        notes: s(&parsed["notes"]),
+        raw_text: annotation,
+    })
+}

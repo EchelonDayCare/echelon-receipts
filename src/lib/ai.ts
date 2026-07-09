@@ -89,3 +89,32 @@ export async function extractMonthAttendance(opts: {
     },
   });
 }
+
+// ─── Staff credential OCR ───────────────────────────────────────────────
+export interface ExtractCredentialResult {
+  staff_name_guess: string | null;
+  credential_type_guess: string | null;
+  issuer: string | null;
+  issued_date: string | null;   // YYYY-MM-DD
+  expiry_date: string | null;   // YYYY-MM-DD
+  certificate_number: string | null;
+  notes: string | null;
+  raw_text: string;
+}
+
+export async function extractCredential(opts: {
+  fileBytes: Uint8Array;
+  mimeType: string;
+  knownStaffNames: string[];
+  knownCredentialTypes: string[];
+}): Promise<ExtractCredentialResult> {
+  const file_b64 = bytesToB64(opts.fileBytes);
+  return await invoke<ExtractCredentialResult>("extract_credential", {
+    args: {
+      file_b64,
+      mime_type: opts.mimeType,
+      known_staff_names: opts.knownStaffNames,
+      known_credential_types: opts.knownCredentialTypes,
+    },
+  });
+}

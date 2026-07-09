@@ -12,6 +12,10 @@ import {
 } from "../lib/credentials";
 import { getSettings } from "../lib/db";
 import type { Staff, StaffCredential } from "../types";
+import { open } from "@tauri-apps/plugin-dialog";
+import { readFile } from "@tauri-apps/plugin-fs";
+import { extractCredential, fileToMime } from "../lib/ai";
+import { matchStudentByName } from "../lib/attendance";
 
 interface Row extends StaffCredential { staff_name: string }
 
@@ -23,6 +27,8 @@ export default function StaffCredentials() {
   const [alertDays, setAlertDays] = useState(60);
   const [editing, setEditing] = useState<Partial<Row> | null>(null);
   const [filter, setFilter] = useState<"all" | "expiring" | "expired">("all");
+  const [ocrBusy, setOcrBusy] = useState(false);
+  const [ocrBanner, setOcrBanner] = useState<string | null>(null);
 
   async function refresh() {
     const s = await getSettings();
@@ -66,6 +72,7 @@ export default function StaffCredentials() {
         file_path: editing.file_path || null,
       });
       setEditing(null);
+      setOcrBanner(null);
       await refresh();
     } catch (e: any) {
       void showAlert("Save failed: " + (e?.message || e));
@@ -80,6 +87,77 @@ export default function StaffCredentials() {
 
   function openNew() {
     setEditing({ staff_id: staff[0]?.id, type: DEFAULT_CRED_TYPES[0].type, issued_date: today(), expiry_date: defaultExpiryFromIssue(today(), DEFAULT_CRED_TYPES[0].cadenceYears) });
+  }
+
+  // AI upload — reads a credential document, prefills the edit modal for
+  // review, and lets the user save with one click. Same OCR pattern as the
+  // Monthly Attendance sheet and Visa statement imports.
+  async function pickAndExtractCredential() {
+    if (ocrBusy) return;
+    if (staff.length === 0) {
+      void showAlert("Add a staff member first on the Hours tab.");
+      return;
+    }
+    const picked = await open({
+      multiple: false,
+      filters: [{ name: "Credential document", extensions: ["jpg","jpeg","png","webp","heic","pdf"] }],
+    });
+    const path = typeof picked === "string" ? picked : null;
+    if (!path) return;
+    setOcrBusy(true);
+    setOcrBanner("Reading credential…");
+    try {
+      const bytes = await readFile(path);
+      const mime = fileToMime(path);
+      const knownTypes = DEFAULT_CRED_TYPES.map((t) => t.type);
+      const res = await extractCredential({
+        fileBytes: bytes as Uint8Array,
+        mimeType: mime,
+        knownStaffNames: staff.map((s) => s.name),
+        knownCredentialTypes: knownTypes,
+      });
+
+      // Map the guessed staff name to a real staff id — fall back to the first
+      // staff so the modal still opens for manual reassignment.
+      const nameMatch = res.staff_name_guess
+        ? matchStudentByName(res.staff_name_guess, staff.map((s) => ({ id: s.id, name: s.name })))
+        : null;
+      const staff_id = nameMatch?.id ?? staff[0].id;
+
+      // Map the guessed type to a catalog entry; anything else keeps its raw
+      // value + drops the "Other" pill (user can edit).
+      const typeGuess = (res.credential_type_guess || "").trim();
+      const catalogHit = DEFAULT_CRED_TYPES.find((d) => d.type.toLowerCase() === typeGuess.toLowerCase());
+      const type = catalogHit ? catalogHit.type : (typeGuess || DEFAULT_CRED_TYPES[0].type);
+
+      // If we don't have an expiry but do have an issue date and a known
+      // cadence, derive the expiry so the user doesn't have to.
+      let expiry = res.expiry_date || "";
+      if (!expiry && res.issued_date && catalogHit) {
+        expiry = defaultExpiryFromIssue(res.issued_date, catalogHit.cadenceYears);
+      }
+
+      const notesParts: string[] = [];
+      if (res.certificate_number) notesParts.push(`Cert #${res.certificate_number}`);
+      if (res.issuer) notesParts.push(res.issuer);
+      if (res.notes) notesParts.push(res.notes);
+
+      setEditing({
+        staff_id,
+        type,
+        issued_date: res.issued_date || "",
+        expiry_date: expiry,
+        notes: notesParts.join(" · ") || "",
+      });
+
+      const staffLabel = nameMatch ? nameMatch.name : "(pick staff)";
+      setOcrBanner(`Read: ${type} for ${staffLabel}${res.expiry_date ? ` (expires ${res.expiry_date})` : ""}. Review and Save.`);
+    } catch (e: any) {
+      setOcrBanner(null);
+      void showAlert("Couldn't read credential: " + (e?.message || e));
+    } finally {
+      setOcrBusy(false);
+    }
   }
 
   function onTypeChange(newType: string) {
@@ -118,10 +196,21 @@ export default function StaffCredentials() {
             Warns when anything expires within <strong>{alertDays} days</strong> (change in Configuration → Staff).
           </p>
         </div>
-        <button className="btn" onClick={openNew} disabled={staff.length === 0}>+ Add credential</button>
+        <div style={{ display: "flex", gap: 8 }}>
+          <button className="btn ghost" onClick={pickAndExtractCredential} disabled={ocrBusy || staff.length === 0} title="Upload a certificate — AI will pre-fill the form">
+            {ocrBusy ? "Reading…" : "📄 Upload credential"}
+          </button>
+          <button className="btn" onClick={openNew} disabled={staff.length === 0}>+ Add credential</button>
+        </div>
       </div>
 
-      <div className="row" style={{ gap: 10, marginBottom: 14 }}>
+      {ocrBanner && (
+        <div className="card" style={{ padding: "10px 14px", marginBottom: 12, background: "#eff6ff", borderColor: "#93c5fd", color: "#1e3a8a" }}>
+          <span style={{ fontSize: 14 }}>✨ {ocrBanner}</span>
+        </div>
+      )}
+
+      <div className="row" style={{ gap: 10, marginBottom: 14, flexWrap: "nowrap" }}>
         <SummaryCard label="Total records" value={summary.total} tone="info" />
         <SummaryCard label="Expiring soon" value={summary.expiring} tone="warn" onClick={() => setFilter("expiring")} />
         <SummaryCard label="Expired" value={summary.expired} tone="danger" onClick={() => setFilter("expired")} />
@@ -265,7 +354,7 @@ function SummaryCard({ label, value, tone, onClick }: { label: string; value: nu
     <button
       onClick={onClick}
       style={{
-        flex: 1, textAlign: "left", padding: "14px 16px", border: "1px solid var(--border)",
+        flex: 1, minWidth: 0, textAlign: "left", padding: "14px 16px", border: "1px solid var(--border)",
         borderRadius: 10, background: bg, color, cursor: onClick ? "pointer" : "default", font: "inherit",
       }}
     >

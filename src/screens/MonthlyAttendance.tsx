@@ -348,7 +348,7 @@ export default function MonthlyAttendance() {
   return (
     <div>
       <h1>Monthly Attendance</h1>
-      <p className="subtitle">Name × day-of-month grid. Click a cell to cycle P → A → H → S → V → blank. Matches the paper sign-in sheet.</p>
+      <p className="subtitle">Name × day-of-month grid. Click a cell to cycle P → A → blank. Matches the paper sign-in sheet.</p>
 
       <div className="toolbar">
         <label style={{ fontSize: 13, color: "var(--muted)" }}>Year:</label>
@@ -365,7 +365,7 @@ export default function MonthlyAttendance() {
         <button className="btn secondary" onClick={printBlank} disabled={cells.length === 0}>Print Blank Template</button>
       </div>
 
-      <div className="kpi">
+      <div className="kpi" style={{ gridTemplateColumns: "repeat(4, minmax(0, 1fr))" }}>
         <div className="card"><div className="lbl">Children ({year})</div><div className="val">{cells.length}</div></div>
         <div className="card"><div className="lbl">Days Centre open</div><div className="val">{opensCount}</div></div>
         <div className="card"><div className="lbl">Total P marks</div><div className="val">{cells.reduce((n,c) => n + Object.values(c.marks).filter(m => m==="P").length, 0)}</div></div>
@@ -379,7 +379,7 @@ export default function MonthlyAttendance() {
           <div style={{ flex: 1, minWidth: 240 }}>
             <h3 style={{ margin: "0 0 4px" }}>Upload {monthLabel} sheet</h3>
             <p style={{ margin: 0, color: "var(--muted)", fontSize: 13 }}>
-              Snap or scan the completed monthly attendance sheet. Azure AI reads each child's row of P / A / H / S / V marks; you review and import.
+              Snap or scan the completed monthly attendance sheet. Azure AI reads each child's row of P / A marks; you review and import.
             </p>
             {cells.length === 0 && (
               <p style={{ margin: "6px 0 0", color: "var(--danger)", fontSize: 13 }}>Add at least one student to the {year} roster before uploading.</p>
