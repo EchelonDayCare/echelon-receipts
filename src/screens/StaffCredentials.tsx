@@ -1,4 +1,4 @@
-import { showAlert, showConfirm } from "../lib/dialogs";
+import { showAlert, showConfirm, showPrompt } from "../lib/dialogs";
 import { useEffect, useMemo, useState } from "react";
 import { listStaff } from "../lib/staff";
 import {
@@ -16,6 +16,7 @@ import { open } from "@tauri-apps/plugin-dialog";
 import { readFile } from "@tauri-apps/plugin-fs";
 import { extractCredential, fileToMime } from "../lib/ai";
 import { matchStudentByName } from "../lib/attendance";
+import { invoke } from "@tauri-apps/api/core";
 
 interface Row extends StaffCredential { staff_name: string }
 
@@ -92,18 +93,11 @@ export default function StaffCredentials() {
   // AI upload — reads a credential document, prefills the edit modal for
   // review, and lets the user save with one click. Same OCR pattern as the
   // Monthly Attendance sheet and Visa statement imports.
-  async function pickAndExtractCredential() {
-    if (ocrBusy) return;
+  async function runExtractOnPath(path: string) {
     if (staff.length === 0) {
       void showAlert("Add a staff member first on the Hours tab.");
       return;
     }
-    const picked = await open({
-      multiple: false,
-      filters: [{ name: "Credential document", extensions: ["jpg","jpeg","png","webp","heic","pdf"] }],
-    });
-    const path = typeof picked === "string" ? picked : null;
-    if (!path) return;
     setOcrBusy(true);
     setOcrBanner("Reading credential…");
     try {
@@ -160,6 +154,68 @@ export default function StaffCredentials() {
     }
   }
 
+  async function pickAndExtractCredential() {
+    if (ocrBusy) return;
+    if (staff.length === 0) {
+      void showAlert("Add a staff member first on the Hours tab.");
+      return;
+    }
+    const picked = await open({
+      multiple: false,
+      filters: [{ name: "Credential document", extensions: ["jpg","jpeg","png","webp","heic","pdf"] }],
+    });
+    const path = typeof picked === "string" ? picked : null;
+    if (!path) return;
+    await runExtractOnPath(path);
+  }
+
+  // AirDrop / save-from-iPad workflow: pick up images dropped into ~/Downloads
+  // within the last 10 minutes. Mirrors Staff Hours + Monthly Attendance.
+  async function importLatestFromDownloads() {
+    if (ocrBusy) return;
+    if (staff.length === 0) {
+      void showAlert("Add a staff member first on the Hours tab.");
+      return;
+    }
+    try {
+      const items = await invoke<Array<{ path: string; name: string; modified_secs_ago: number; size: number }>>(
+        "inbox_list_recent",
+        { withinMinutes: 10, limit: 5 },
+      );
+      if (!items.length) {
+        void showAlert("No image files found in Downloads from the last 10 minutes. AirDrop from iPad and try again.");
+        return;
+      }
+      const fmtMin = (secs: number) => Math.max(1, Math.round(secs / 60));
+      const fmtMb = (b: number) => (b / (1024 * 1024)).toFixed(1);
+      let picked = items[0];
+      if (items.length === 1) {
+        const ok = await showConfirm(
+          `Import "${picked.name}" (${fmtMin(picked.modified_secs_ago)} min ago, ${fmtMb(picked.size)} MB) for OCR?`,
+        );
+        if (!ok) return;
+      } else {
+        const list = items
+          .map((it, i) => `${i + 1}. ${it.name}  (${fmtMin(it.modified_secs_ago)} min ago, ${fmtMb(it.size)} MB)`)
+          .join("\n");
+        const ans = await showPrompt(
+          `Multiple recent images in Downloads:\n\n${list}\n\nWhich number to import?`,
+          "1",
+        );
+        if (ans === null) return;
+        const n = Number(ans.trim());
+        if (!Number.isInteger(n) || n < 1 || n > items.length) {
+          void showAlert(`Enter a number from 1 to ${items.length}.`);
+          return;
+        }
+        picked = items[n - 1];
+      }
+      await runExtractOnPath(picked.path);
+    } catch (e: any) {
+      void showAlert("Couldn't read Downloads: " + (e?.message || e));
+    }
+  }
+
   function onTypeChange(newType: string) {
     setEditing((e) => {
       if (!e) return e;
@@ -196,13 +252,64 @@ export default function StaffCredentials() {
             Warns when anything expires within <strong>{alertDays} days</strong> (change in Configuration → Staff).
           </p>
         </div>
-        <div style={{ display: "flex", gap: 8 }}>
-          <button className="btn ghost" onClick={pickAndExtractCredential} disabled={ocrBusy || staff.length === 0} title="Upload a certificate — AI will pre-fill the form">
-            {ocrBusy ? "Reading…" : "📄 Upload credential"}
-          </button>
-          <button className="btn" onClick={openNew} disabled={staff.length === 0}>+ Add credential</button>
-        </div>
+        <button className="btn" onClick={openNew} disabled={staff.length === 0}>+ Add credential</button>
       </div>
+
+      {/* Prominent AI upload panel — mirrors the Monthly Attendance sheet panel.
+          Same green gradient + NEW pill + AirDrop-from-Downloads shortcut. */}
+      <section className="card" style={{ marginBottom: 16, background: "linear-gradient(180deg, #ecfdf5 0%, #ffffff 65%)", borderColor: "#a7f3d0" }}>
+        <div style={{ display: "flex", gap: 18, alignItems: "center", flexWrap: "wrap" }}>
+          <div style={{ width: 56, height: 56, borderRadius: 12, background: "#d1fae5", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 28, flexShrink: 0 }}>🎓</div>
+          <div style={{ flex: 1, minWidth: 240 }}>
+            <h3 style={{ margin: "0 0 4px" }}>Upload a credential</h3>
+            <p style={{ margin: 0, color: "var(--muted)", fontSize: 13 }}>
+              Snap or scan a certificate (ECE, First Aid, CRC, TB, immunization). Azure AI reads staff name, credential type, issue &amp; expiry dates and pre-fills the form for you.
+            </p>
+            {staff.length === 0 && (
+              <p style={{ margin: "6px 0 0", color: "var(--danger)", fontSize: 13 }}>Add a staff member on the Hours tab first.</p>
+            )}
+          </div>
+          <div style={{ display: "flex", flexDirection: "column", gap: 10, alignItems: "stretch" }}>
+            <button
+              onClick={importLatestFromDownloads}
+              disabled={ocrBusy || staff.length === 0}
+              title="Picks the newest image AirDropped or saved to ~/Downloads in the last 10 min"
+              style={{
+                position: "relative",
+                padding: "16px 22px",
+                fontSize: 16,
+                fontWeight: 700,
+                background: "linear-gradient(180deg, #16a34a 0%, #15803d 100%)",
+                color: "white",
+                border: "none",
+                borderRadius: 12,
+                cursor: ocrBusy ? "not-allowed" : "pointer",
+                boxShadow: "0 4px 14px rgba(22, 163, 74, 0.35)",
+                opacity: (ocrBusy || staff.length === 0) ? 0.55 : 1,
+                minWidth: 260,
+              }}
+            >
+              <span style={{
+                position: "absolute", top: -8, right: -8,
+                background: "#f59e0b", color: "white", fontSize: 10,
+                padding: "2px 7px", borderRadius: 10, fontWeight: 800, letterSpacing: 0.5,
+              }}>NEW</span>
+              <div style={{ fontSize: 22, marginBottom: 2 }}>📥 Import from Downloads</div>
+              <div style={{ fontSize: 11, fontWeight: 400, opacity: 0.9 }}>
+                AirDrop from iPad → click here
+              </div>
+            </button>
+            <button
+              className="btn secondary"
+              onClick={pickAndExtractCredential}
+              disabled={ocrBusy || staff.length === 0}
+              style={{ fontSize: 13 }}
+            >
+              {ocrBusy ? "Reading credential…" : "…or choose file manually"}
+            </button>
+          </div>
+        </div>
+      </section>
 
       {ocrBanner && (
         <div className="card" style={{ padding: "10px 14px", marginBottom: 12, background: "#eff6ff", borderColor: "#93c5fd", color: "#1e3a8a" }}>
