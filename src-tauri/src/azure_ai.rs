@@ -12,6 +12,14 @@ use serde_json::json;
 const MISTRAL_DOC_AI_URL: &str = "https://ai-nse.services.ai.azure.com/providers/mistral/azure/ocr";
 const MISTRAL_DOC_AI_MODEL: &str = "mistral-document-ai-2512";
 
+// GPT-4.1 vision — used for the monthly attendance grid because Mistral
+// Document AI struggles with tightly-packed hand-drawn X/dash marks on
+// this specific form (v2.2.6 field report). GPT-4.1 is already deployed
+// on the same Azure OpenAI resource and reused across the app.
+const AZURE_OPENAI_ENDPOINT: &str = "https://ai-nse.openai.azure.com";
+const GPT41_DEPLOY: &str = "gpt-4.1";
+const GPT41_API_VER: &str = "2025-04-01-preview";
+
 fn truncate(s: &str, n: usize) -> String {
     // char-boundary safe. Rust panics on non-boundary byte-slice indexing, and
     // Azure/Mistral responses routinely contain multi-byte characters
@@ -96,6 +104,75 @@ async fn call_mistral_doc_ai(
         return v["document_annotation"].as_str()
             .map(|s| s.to_string())
             .ok_or_else(|| redact(format!("no document_annotation in response: {}", truncate(&text, 400)), api_key));
+    }
+    last_err
+}
+
+// Shared helper — POSTs an image + JSON schema to GPT-4.1 vision (Azure
+// OpenAI chat/completions with `response_format: json_schema`) and returns
+// the strict JSON string from `choices[0].message.content`. Used by the
+// monthly-attendance flow where handwriting differentiation matters.
+async fn call_gpt41_vision_json(
+    api_key: &str, file_b64: &str, mime_type: &str,
+    schema: serde_json::Value, name: &str, system_prompt: &str, user_prompt: &str,
+) -> Result<String, String> {
+    base64::engine::general_purpose::STANDARD
+        .decode(file_b64.as_bytes())
+        .map_err(|e| format!("file base64: {e}"))?;
+
+    let url = format!(
+        "{AZURE_OPENAI_ENDPOINT}/openai/deployments/{GPT41_DEPLOY}/chat/completions?api-version={GPT41_API_VER}"
+    );
+    let data_url = format!("data:{mime_type};base64,{file_b64}");
+    let body = json!({
+        "messages": [
+            { "role": "system", "content": system_prompt },
+            { "role": "user", "content": [
+                { "type": "text", "text": user_prompt },
+                { "type": "image_url", "image_url": { "url": data_url, "detail": "high" } }
+            ]}
+        ],
+        "temperature": 0.0,
+        "max_completion_tokens": 8000,
+        "response_format": {
+            "type": "json_schema",
+            "json_schema": { "name": name, "schema": schema, "strict": true }
+        }
+    });
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(180))
+        .build()
+        .map_err(|e| redact(format!("http client: {e}"), api_key))?;
+
+    const MAX_ATTEMPTS: u32 = 3;
+    const BASE_BACKOFF_MS: u64 = 100;
+    let mut last_err: Result<String, String> = Err("no attempt".to_string());
+    for attempt in 1..=MAX_ATTEMPTS {
+        let resp = client.post(&url)
+            .header("api-key", api_key)
+            .header("Content-Type", "application/json")
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| redact(format!("request: {e}"), api_key))?;
+        let status = resp.status();
+        let text = resp.text().await.map_err(|e| redact(format!("read: {e}"), api_key))?;
+        let retriable = matches!(status.as_u16(), 429 | 503 | 504);
+        if !status.is_success() {
+            last_err = Err(redact(format!("http {status} @ gpt-4.1 vision :: {}", truncate(&text, 800)), api_key));
+            if retriable && attempt < MAX_ATTEMPTS {
+                let backoff = BASE_BACKOFF_MS * 4u64.pow(attempt - 1);
+                tokio::time::sleep(std::time::Duration::from_millis(backoff)).await;
+                continue;
+            }
+            return last_err;
+        }
+        let v: serde_json::Value = serde_json::from_str(&text)
+            .map_err(|e| redact(format!("json: {e}"), api_key))?;
+        return v["choices"][0]["message"]["content"].as_str()
+            .map(|s| s.to_string())
+            .ok_or_else(|| redact(format!("no message content in response: {}", truncate(&text, 400)), api_key));
     }
     last_err
 }
@@ -272,8 +349,27 @@ pub async fn extract_month_attendance(args: ExtractMonthAttendanceArgs) -> Resul
     });
 
     let key_for_redact = crate::secrets::get_secret("azure_ai_key")?;
-    let annotation = call_mistral_doc_ai(
-        &key_for_redact, &args.image_b64, &args.mime_type, schema, "MonthAttendanceExtraction"
+    // v2.2.7: swap from Mistral Document AI to GPT-4.1 vision. Mistral was
+    // truncating rows past column 3 and misreading hand-drawn X vs dash
+    // marks on this specific grid. GPT-4.1 has better handwriting
+    // comprehension and honours the column-alignment rules more reliably.
+    let system_prompt = "You are a strict OCR service. You read a handwritten daycare monthly attendance grid and emit ONLY strict JSON matching the provided schema. Do NOT add prose. Do NOT invent marks. Follow the visual rules in the user prompt exactly.";
+    let user_prompt = format!(
+        "This is a photograph of a paper monthly attendance sheet for {}. \
+         Rows are children (names in the leftmost column). Columns are days \
+         1..31 numbered along the top row. Between weeks there are wider \
+         vertical bands labelled 'Saturday & Sunday' that separate work weeks. \
+         Some columns are labelled 'Stat Holiday' vertically to indicate a \
+         closed day. Emit strict JSON per the schema. Follow the visual \
+         rules encoded on the marks.description carefully — especially: \
+         omit day keys for blank cells, skip weekend/stat-holiday columns, \
+         use the numeric day labels at the top as ground truth for column \
+         alignment. Known children on this centre roster: {}.",
+        args.target_month, known_hint,
+    );
+    let annotation = call_gpt41_vision_json(
+        &key_for_redact, &args.image_b64, &args.mime_type, schema,
+        "MonthAttendanceExtraction", system_prompt, &user_prompt,
     ).await?;
 
     let parsed: serde_json::Value = serde_json::from_str(&annotation)
