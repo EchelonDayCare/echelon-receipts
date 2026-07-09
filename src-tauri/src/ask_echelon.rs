@@ -290,12 +290,27 @@ async fn sample_rows_json(gate: &DbGate, sql: &str, redact: bool) -> Result<Vec<
 fn is_howto_question(q: &str) -> bool {
     let l = q.to_lowercase();
     let l = l.trim();
-    // Purely data-shaped "how many/much" questions must stay in the SQL path.
+    // Purely data-shaped questions must stay in the SQL path.
     if l.starts_with("how many") || l.starts_with("how much") { return false; }
+    // Data-shape signals that override any nav prefix — "where is the biggest expense",
+    // "where's the highest revenue", etc. should route to SQL, not to UI-nav.
+    let data_signals = [
+        "most", "highest", "largest", "top", "biggest", "lowest", "smallest",
+        "outstanding", "owing", "revenue", "expense", "expenses", "balance",
+        "count", "total", "sum", "average", "avg",
+    ];
+    for sig in &data_signals {
+        // Word-boundary-ish check: surround with spaces so "top" doesn't match "topic".
+        let padded = format!(" {} ", sig);
+        let l_padded = format!(" {} ", l);
+        if l_padded.contains(&padded) { return false; }
+    }
     // "how do I / how can I / how to" → UI steps.
     if l.starts_with("how do i") || l.starts_with("how can i") || l.starts_with("how to") { return true; }
-    if l.starts_with("where do i") || l.starts_with("where can i") || l.starts_with("where is the")
-        || l.starts_with("where's the") || l.starts_with("where to") || l.starts_with("where do you")
+    // "where do I / where can I / where do you" — require a UI-verb signal.
+    // Dropped "where is the", "where's the", "where to" because they collide with
+    // data questions like "where is the biggest expense coming from?".
+    if l.starts_with("where do i") || l.starts_with("where can i") || l.starts_with("where do you")
         { return true; }
     // Explicit UI-shaped verbs at the start.
     for verb in &[
