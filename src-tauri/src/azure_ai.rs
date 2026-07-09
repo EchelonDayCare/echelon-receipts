@@ -250,7 +250,12 @@ pub async fn extract_month_attendance(args: ExtractMonthAttendanceArgs) -> Resul
                             "description": format!("Exact child name as written. Known children: {known_hint}") },
                         "marks": {
                             "type": "object",
-                            "description": "Object mapping day-of-month (as string '1'..'31') to a single-character mark: 'P' = present (any X, ✓, ✱, asterisk, star, or hand-written 'P'), 'A' = absent (any dash '-', en-dash, hyphen, blank inside a numbered day column, or hand-written 'A'). CRITICAL: (1) The 4 wide vertical bands labelled 'Saturday & Sunday' between weeks are NOT day columns — do NOT emit anything for cells inside those bands. (2) Do NOT invent a mark for a day the child's row does not clearly indicate — omit it. (3) Every emitted mark must be exactly 'P' or 'A' — no other letters. (4) Emit one row per child even if some marks are missing.",
+                            "description": "Object mapping day-of-month (as string '1'..'31') to a single-character mark. VISUAL RULES (apply strictly, in order):\n\
+                                (1) 'P' = ONLY when the cell contains a clear CROSS or X shape (two strokes crossing) OR a checkmark ✓ OR an asterisk/star ✱ ★ OR the hand-written letter 'P'. Two diagonal strokes that intersect = P.\n\
+                                (2) 'A' = ANY horizontal line (dash '-', en-dash, hyphen, minus sign, single stroke roughly parallel to the row) OR a hand-written 'A' OR a completely blank/empty cell inside a numbered day column.\n\
+                                (3) When uncertain between P and A, prefer 'A'. A single stroke is NEVER P — only two crossing strokes are P.\n\
+                                (4) The 4 wide vertical bands labelled 'Saturday & Sunday' between weeks are NOT day columns — do NOT emit anything for cells inside those bands.\n\
+                                (5) Every emitted mark must be exactly 'P' or 'A'. Emit one row per child, and one entry per numbered day column (1..N where N is 28/29/30/31 for the month). Do NOT skip days — if the cell is blank, emit 'A'.",
                             "additionalProperties": { "type": "string", "enum": ["P","A"] }
                         }
                     },
