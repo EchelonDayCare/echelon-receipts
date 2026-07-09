@@ -10,7 +10,7 @@ import { getSettings, listYears } from "../lib/db";
 import { matchStudentByName } from "../lib/attendance";
 import {
   monthGrid, setMark, calendarForMonth, seedWeekends, seedBcHolidays, setCalendarDay,
-  daysOpenInMonth, MARK_LABEL, MARK_COLOR, clearMonthMarks,
+  daysOpenInMonth, MARK_LABEL, MARK_COLOR, clearMonthMarks, countMarksInMonth,
   type MonthMark, type MonthCell, type CalendarDay,
 } from "../lib/monthAttendance";
 import { extractMonthAttendance, fileToMime } from "../lib/ai";
@@ -18,6 +18,7 @@ import { h } from "../lib/html";
 import { showConfirm, showPrompt } from "../lib/dialogs";
 import { isBcHolidaysEnabled, setBcHolidaysEnabled } from "../lib/centreCalendar";
 import { printHtmlDocument } from "../lib/print";
+import { OcrProgressBanner, MONTH_OCR_STAGES } from "../components/OcrProgressBanner";
 
 const MARK_CYCLE: (MonthMark | null)[] = ["P", "A", null];
 const MONTH_NAMES = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
@@ -63,6 +64,9 @@ export default function MonthlyAttendance() {
 
   // OCR state
   const [ocrBusy, setOcrBusy] = useState(false);
+  // Post-import breadcrumb — small badge near month picker showing which
+  // sheet just landed. Auto-clears when the user changes month/year.
+  const [justImported, setJustImported] = useState<null | { month: string; ts: number; marks: number }>(null);
   const [ocrReview, setOcrReview] = useState<null | {
     month: string;
     daysOpen: number | null;
@@ -97,6 +101,10 @@ export default function MonthlyAttendance() {
   // Seed weekend rows the first time a month is opened so the header
   // "days open" figure and the greyed-cell hinting Just Work.
   useEffect(() => {
+    // Auto-clear the "just imported" breadcrumb when the user navigates
+    // to a different month/year — it only makes sense on the sheet that
+    // was just written to.
+    setJustImported(null);
     (async () => {
       const added = await seedWeekends(year, month);
       const holidayAdded = (await isBcHolidaysEnabled()) ? await seedBcHolidays(year, month) : 0;
@@ -104,6 +112,24 @@ export default function MonthlyAttendance() {
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [year, month]);
+
+  // Keyboard shortcuts for the OCR review modal:
+  //   Enter → confirm import   Esc → cancel
+  // Only bind while the modal is open so it doesn't collide with cell nav.
+  useEffect(() => {
+    if (!ocrReview) return;
+    const onKey = (e: KeyboardEvent) => {
+      const t = e.target as HTMLElement | null;
+      // Don't hijack typing in the roster-picker inputs inside the modal.
+      const tag = t?.tagName;
+      if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return;
+      if (e.key === "Enter") { e.preventDefault(); void importOcr(); }
+      else if (e.key === "Escape") { e.preventDefault(); setOcrReview(null); }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [ocrReview]);
 
   function show(msg: string, tone: "ok" | "err" = "ok") {
     setToast({ msg, tone });
@@ -307,11 +333,17 @@ export default function MonthlyAttendance() {
       ) as Record<string, MonthMark>,
     }));
     const totalMarks = filteredRows.reduce((n, r) => n + Object.keys(r.marks).length, 0);
-    const ok = await showConfirm(
-      `Replace all attendance marks for ${MONTH_NAMES[rm-1]} ${ry} with ${totalMarks} new marks across ${filteredRows.length} children?\n\n` +
-      `Existing marks for this month will be cleared first. Days flagged as closed (weekends, stat holidays) will remain empty.`,
-    );
-    if (!ok) return;
+    // Smart confirm: skip the scary "REPLACE ALL" dialog when there's
+    // nothing to replace (empty month) — the user just wants their marks
+    // imported. Only interrupt when we'd actually destroy existing data.
+    const existing = await countMarksInMonth(ry, rm);
+    if (existing > 0) {
+      const ok = await showConfirm(
+        `Replace ${existing} existing mark${existing === 1 ? "" : "s"} in ${MONTH_NAMES[rm-1]} ${ry} with ${totalMarks} new mark${totalMarks === 1 ? "" : "s"} across ${filteredRows.length} children?\n\n` +
+        `Closed days (weekends, stat holidays) stay empty.`,
+      );
+      if (!ok) return;
+    }
     // Replace-not-merge: wipe the entire month first.
     await clearMonthMarks(ry, rm);
     let saved = 0;
@@ -326,6 +358,7 @@ export default function MonthlyAttendance() {
       // Nothing to persist explicitly; calendar drives days_open. Skip.
     }
     setOcrReview(null);
+    setJustImported({ month: `${MONTH_NAMES[rm-1]} ${ry}`, ts: Date.now(), marks: saved });
     if (ry !== year || rm !== month) { setYear(ry); setMonthState(rm); } else { await refresh(); }
     show(`Imported ${saved} marks (month cleared first)`);
   }
@@ -408,6 +441,33 @@ export default function MonthlyAttendance() {
     <div>
       <h1>Monthly Attendance</h1>
       <p className="subtitle">Name × day-of-month grid. Click a cell to cycle P → A → blank. Matches the paper sign-in sheet.</p>
+
+      {/* Breadcrumb after a successful OCR import — makes it obvious which
+          month you're now looking at and that fresh data just landed. */}
+      {justImported && (
+        <div style={{
+          marginBottom: 12, padding: "8px 12px",
+          background: "#ecfdf5", border: "1px solid #a7f3d0", borderRadius: 8,
+          color: "#065f46", fontSize: 13,
+          display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12,
+        }}>
+          <span>
+            ✅ Viewing <b>{justImported.month}</b> — just imported {justImported.marks} mark{justImported.marks === 1 ? "" : "s"} from your sheet.
+          </span>
+          <button
+            onClick={() => setJustImported(null)}
+            style={{ background: "transparent", border: 0, color: "#065f46", cursor: "pointer", fontSize: 16, lineHeight: 1 }}
+            title="Dismiss"
+          >×</button>
+        </div>
+      )}
+
+      {/* Long-wait progress banner for the dual-model OCR call. */}
+      <OcrProgressBanner
+        active={ocrBusy}
+        stages={MONTH_OCR_STAGES}
+        hint="Two AI vision models run in parallel; the review panel opens as soon as they finish."
+      />
 
       <div className="toolbar">
         <label style={{ fontSize: 13, color: "var(--muted)" }}>Year:</label>
@@ -751,9 +811,13 @@ export default function MonthlyAttendance() {
                 ))}
               </tbody>
             </table>
-            <div style={{ marginTop: 14, display: "flex", justifyContent: "flex-end", gap: 8 }}>
+            <div style={{ marginTop: 14, display: "flex", justifyContent: "flex-end", alignItems: "center", gap: 8 }}>
+              <span style={{ marginRight: "auto", fontSize: 12, color: "var(--muted)" }}>
+                <kbd style={{ padding: "1px 6px", border: "1px solid #cbd5e1", borderRadius: 4, background: "#f8fafc" }}>Enter</kbd> to import ·{" "}
+                <kbd style={{ padding: "1px 6px", border: "1px solid #cbd5e1", borderRadius: 4, background: "#f8fafc" }}>Esc</kbd> to cancel
+              </span>
               <button className="btn secondary" onClick={() => setOcrReview(null)}>Cancel</button>
-              <button className="btn primary" onClick={importOcr}>Import marks</button>
+              <button className="btn primary" onClick={importOcr} autoFocus>Import marks</button>
             </div>
           </div>
         </div>

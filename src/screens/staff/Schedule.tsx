@@ -103,9 +103,9 @@ export default function StaffSchedule() {
     finally { setBusy(false); }
   }
 
-  async function doDeleteShift(sh: StaffShift) {
-    if (!(await showConfirm(
-      `Delete this shift?\n\n${sh.shiftDate} · ${sh.startTime}–${sh.endTime}${sh.room ? " · " + sh.room : ""}\n\nThis cannot be undone.`,
+  async function doDeleteShift(sh: StaffShift, skipConfirm = false) {
+    if (!skipConfirm && !(await showConfirm(
+      `Delete this shift?\n\n${sh.shiftDate} · ${sh.startTime}–${sh.endTime}${sh.room ? " · " + sh.room : ""}\n\nThis cannot be undone.\n\nTip: Shift-click the ✕ to skip this confirmation.`,
       { kind: "warning" }
     ))) return;
     try {
@@ -193,8 +193,8 @@ export default function StaffSchedule() {
                                 </button>
                                 <button
                                   className="shift-delete"
-                                  onClick={(e) => { e.stopPropagation(); void doDeleteShift(sh); }}
-                                  title="Delete shift"
+                                  onClick={(e) => { e.stopPropagation(); void doDeleteShift(sh, e.shiftKey); }}
+                                  title="Delete shift (Shift-click to skip confirm)"
                                   aria-label="Delete shift"
                                 >✕</button>
                               </div>
@@ -491,10 +491,12 @@ const PRINT_CSS = `
     width: 18px; height: 18px; padding: 0; line-height: 1;
     border-radius: 999px; border: 1px solid #dc2626;
     background: #fff; color: #dc2626; font-size: 11px; font-weight: 700;
-    cursor: pointer; display: none; box-shadow: 0 1px 3px rgba(0,0,0,.15);
+    cursor: pointer; display: block; opacity: 0.45;
+    transition: opacity 120ms ease, background 120ms ease, color 120ms ease;
+    box-shadow: 0 1px 3px rgba(0,0,0,.15);
   }
-  .shift-cell:hover .shift-delete { display: block; }
-  .shift-cell .shift-delete:hover { background: #dc2626; color: #fff; }
+  .shift-cell:hover .shift-delete { opacity: 1; }
+  .shift-cell .shift-delete:hover { background: #dc2626; color: #fff; opacity: 1; }
   @media print { .shift-delete { display: none !important; } }
   @media print {
     @page { size: landscape; margin: 8mm; }

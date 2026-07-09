@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import { getSettings, listStudents, listYears } from "../../lib/db";
 import type { Student, SettingsMap } from "../../types";
@@ -66,6 +66,13 @@ export default function Compose() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // Preserve "students" mode selection when the user tabs to another mode
+  // and back (e.g. flips to "year" to check a count, then returns). Keyed
+  // by year because rosters differ by year. Only relevant to "students"
+  // mode; other modes derive their recipient list from filters.
+  const savedSelections = useRef<Map<number, Set<number>>>(new Map());
+  const prevKey = useRef<string>("");
+
   useEffect(() => {
     (async () => {
       const list = mode === "all_active"
@@ -73,9 +80,21 @@ export default function Compose() {
         : await listStudents(year, false);
       setStudents(list);
     })();
-    // Reset selection when the visible roster changes — otherwise stale IDs
-    // from a previous year/mode silently leak into "selected students" sends.
-    setSelectedIds(new Set());
+    const key = `${mode}|${year}`;
+    // Stash the outgoing "students|<year>" selection before we swap it out.
+    if (prevKey.current.startsWith("students|")) {
+      const prevYear = parseInt(prevKey.current.split("|")[1] ?? "0", 10);
+      if (selectedIds.size > 0) savedSelections.current.set(prevYear, new Set(selectedIds));
+      else savedSelections.current.delete(prevYear);
+    }
+    prevKey.current = key;
+    // Restore prior selection for this (students, year) pair; otherwise empty.
+    if (mode === "students") {
+      setSelectedIds(new Set(savedSelections.current.get(year) ?? []));
+    } else {
+      setSelectedIds(new Set());
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [mode, year]);
 
   const filteredStudents = useMemo(() => {

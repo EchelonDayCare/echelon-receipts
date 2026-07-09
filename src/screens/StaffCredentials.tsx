@@ -17,6 +17,7 @@ import { readFile } from "@tauri-apps/plugin-fs";
 import { extractCredential, fileToMime } from "../lib/ai";
 import { matchStudentByName } from "../lib/attendance";
 import { invoke } from "@tauri-apps/api/core";
+import { OcrProgressBanner, CREDENTIAL_OCR_STAGES } from "../components/OcrProgressBanner";
 
 interface Row extends StaffCredential { staff_name: string }
 
@@ -254,6 +255,13 @@ export default function StaffCredentials() {
         </div>
         <button className="btn" onClick={openNew} disabled={staff.length === 0}>+ Add credential</button>
       </div>
+
+      {/* Long-wait progress banner for the credential OCR call. */}
+      <OcrProgressBanner
+        active={ocrBusy}
+        stages={CREDENTIAL_OCR_STAGES}
+        hint="Reading a certificate typically takes 10-30 seconds."
+      />
 
       {/* Prominent AI upload panel — mirrors the Monthly Attendance sheet panel.
           Same green gradient + NEW pill + AirDrop-from-Downloads shortcut. */}

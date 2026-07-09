@@ -250,6 +250,22 @@ export async function clearMonthMarks(year: number, month: number): Promise<numb
   return (del as any)?.rowsAffected ?? 0;
 }
 
+// Count marks that already exist for a given month. Used to decide whether
+// to prompt the user before re-importing (skip the confirm when the month
+// is empty — nothing to lose). Counts BOTH monthly attendance_mark and
+// evidence rows with a status, so a re-import warning fires even if the
+// existing state was from daily check-in/out.
+export async function countMarksInMonth(year: number, month: number): Promise<number> {
+  const like = `${year}-${String(month).padStart(2, "0")}-%`;
+  const r = await (await db()).select<{ n: number }[]>(
+    `SELECT COUNT(*) AS n FROM child_attendance
+       WHERE work_date LIKE ?
+         AND (attendance_mark IS NOT NULL OR status IS NOT NULL)`,
+    [like],
+  );
+  return r[0]?.n ?? 0;
+}
+
 export function daysOpenInMonth(year: number, month: number, calendar: CalendarDay[]): number {
   const daysInMonth = new Date(year, month, 0).getDate();
   const closedSet = new Set(calendar.filter((c) => !c.is_open).map((c) => c.day));
