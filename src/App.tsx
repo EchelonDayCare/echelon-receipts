@@ -232,7 +232,10 @@ function Shell({ logo, name, staffEnabled }: { logo: string; name: string; staff
           { to: "/config/folders", label: "Folders" },
           { to: "/config/staff", label: "Staff" },
           { to: "/config/backups", label: "Backups" },
+          { to: "/config/security", label: "Security" },
+          { to: "/config/holidays", label: "Stat Holidays" },
           { to: "/config/notifications", label: "Notifications" },
+          { to: "/config/waitlist", label: "Waitlist" },
           { to: "/config/about", label: "About" },
         ]}
       />
