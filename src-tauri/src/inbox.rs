@@ -8,7 +8,7 @@ use std::time::SystemTime;
 
 use serde::Serialize;
 
-const IMAGE_EXTS: &[&str] = &["jpg", "jpeg", "png", "webp", "heic", "heif", "pdf"];
+const IMAGE_EXTS: &[&str] = &["jpg", "jpeg", "png", "webp", "heic", "heif"];
 
 #[derive(Serialize, Clone)]
 pub struct InboxItem {

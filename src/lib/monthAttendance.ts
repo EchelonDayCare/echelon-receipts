@@ -228,10 +228,14 @@ export async function setCalendarDay(day: string, isOpen: boolean, reason: strin
 export async function clearMonthMarks(year: number, month: number): Promise<number> {
   const ym = `${year}-${String(month).padStart(2, "0")}`;
   const like = `${ym}-%`;
-  // 1. Rows with daily in/out evidence: keep the row, null the mark.
+  // FIX-3: preserve `status` on evidence rows. The reporting bucket
+  // classifier (rowToBucket in attendanceBucket.ts) falls back to `status`
+  // when `attendance_mark` is null; nulling it here would silently
+  // reclassify historical days that carry real in/out evidence.
+  // 1. Rows with daily in/out evidence: keep the row + status, null the mark only.
   await execRetry(
     `UPDATE child_attendance
-        SET attendance_mark = NULL, status = NULL
+        SET attendance_mark = NULL
       WHERE work_date LIKE ?
         AND (in_time IS NOT NULL OR out_time IS NOT NULL)`,
     [like],

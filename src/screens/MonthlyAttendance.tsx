@@ -217,7 +217,7 @@ export default function MonthlyAttendance() {
   async function pickAndExtract() {
     const picked = await open({
       multiple: false,
-      filters: [{ name: "Attendance sheet", extensions: ["jpg","jpeg","png","webp","heic","pdf"] }],
+      filters: [{ name: "Attendance sheet", extensions: ["jpg","jpeg","png","webp","heic"] }],
     });
     const path = typeof picked === "string" ? picked : null;
     if (!path) return;
@@ -290,13 +290,18 @@ export default function MonthlyAttendance() {
     await seedBcHolidays(ry, rm);
     const targetCalendar = await calendarForMonth(ry, rm);
     const closedIso = new Set(targetCalendar.filter((c) => !c.is_open).map((c) => c.day));
-    // Filter now so the confirm count matches what actually gets written.
+    // FIX-4: bound days by actual month length so an OCR hallucination
+    // like "31" on a 30-day month can't skirt the closed-day set. `month`
+    // here is 1-indexed (see setMonthState / MONTH_NAMES[month-1]), so
+    // new Date(year, month, 0) is day 0 of the NEXT month = last day of THIS
+    // month. E.g. rm=2 for Feb → new Date(y,2,0).getDate() = 28 or 29.
+    const daysInMonth = new Date(ry, rm, 0).getDate();
     const filteredRows = rowsToImport.map((r) => ({
       ...r,
       marks: Object.fromEntries(
         Object.entries(r.marks).filter(([dStr]) => {
           const d = parseInt(dStr, 10);
-          if (!Number.isFinite(d) || d < 1 || d > 31) return false;
+          if (!Number.isFinite(d) || d < 1 || d > daysInMonth) return false;
           return !closedIso.has(isoDay(ry, rm, d));
         }),
       ) as Record<string, MonthMark>,

@@ -590,7 +590,15 @@ pub async fn extract_month_attendance(args: ExtractMonthAttendanceArgs) -> Resul
 
     // Downscale once up-front so both providers get the same compact input.
     // Photos from phones are typically 3000-4000px — we don't need that
-    // resolution to read handwritten grid marks.
+    // resolution to read handwritten grid marks. Note: PDFs are rejected
+    // earlier because Azure GPT-4 vision refuses application/pdf on the
+    // chat completions image_url endpoint.
+    if args.mime_type.eq_ignore_ascii_case("application/pdf") {
+        return Err(
+            "PDF uploads aren't supported for monthly attendance yet — please export the sheet as JPG or PNG and try again."
+                .to_string(),
+        );
+    }
     let (image_b64, mime_type) = downscale_for_vision(&args.image_b64, &args.mime_type);
 
     // Run both providers in parallel. Primary carries reasoning_effort;
@@ -608,20 +616,37 @@ pub async fn extract_month_attendance(args: ExtractMonthAttendanceArgs) -> Resul
     let user_b = user_prompt.clone();
     let primary_fut = async {
         let started = std::time::Instant::now();
-        let res = call_gpt_vision_json(
-            key_ref, VISION_DEPLOY_PRIMARY, img_ref, mime_ref,
-            schema_a, "MonthAttendanceExtraction", &sys_a, &user_a,
-            Some("medium"),
-        ).await;
+        // FIX-1: bound primary at 300s so a hung gpt-5.4 can't drag the
+        // whole join past 5 min. Secondary is bounded at 120s below.
+        // Both bounds are wall-clock, not per-attempt.
+        let res = match tokio::time::timeout(
+            std::time::Duration::from_secs(300),
+            call_gpt_vision_json(
+                key_ref, VISION_DEPLOY_PRIMARY, img_ref, mime_ref,
+                schema_a, "MonthAttendanceExtraction", &sys_a, &user_a,
+                Some("medium"),
+            ),
+        ).await {
+            Ok(r) => r,
+            Err(_) => Err(format!("primary ({VISION_DEPLOY_PRIMARY}) timed out after 300s")),
+        };
         (started.elapsed().as_millis() as u64, res)
     };
     let secondary_fut = async {
         let started = std::time::Instant::now();
-        let res = call_gpt_vision_json(
-            key_ref, VISION_DEPLOY_SECONDARY, img_ref, mime_ref,
-            schema_b, "MonthAttendanceExtraction", &sys_b, &user_b,
-            None,
-        ).await;
+        // FIX-1: bound secondary at 120s. gpt-4.1 usually finishes in 20-40s;
+        // 120s is a soft cap that prevents a stuck secondary from blocking join.
+        let res = match tokio::time::timeout(
+            std::time::Duration::from_secs(120),
+            call_gpt_vision_json(
+                key_ref, VISION_DEPLOY_SECONDARY, img_ref, mime_ref,
+                schema_b, "MonthAttendanceExtraction", &sys_b, &user_b,
+                None,
+            ),
+        ).await {
+            Ok(r) => r,
+            Err(_) => Err(format!("secondary ({VISION_DEPLOY_SECONDARY}) timed out after 120s")),
+        };
         (started.elapsed().as_millis() as u64, res)
     };
     let ((p_ms, p_res), (s_ms, s_res)) = tokio::join!(primary_fut, secondary_fut);

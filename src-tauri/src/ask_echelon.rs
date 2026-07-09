@@ -652,6 +652,11 @@ fn sql_references_a_user_table(sql: &str, tables: &[String]) -> bool {
     if tables.is_empty() { return false; }
     let stripped = strip_sql_string_literals(sql);
     let lower = stripped.to_lowercase();
+    // Defense-in-depth: refuse SQL that has no FROM clause at all. This
+    // blocks the "SELECT 1939 AS students" bypass where a real table name
+    // is used only as an alias — the token would otherwise match a real
+    // table but the query touches no user data.
+    if !contains_word(&lower, "from") { return false; }
     for t in tables {
         let t_lower = t.to_lowercase();
         // Bracket the table name with non-identifier characters so `students`
@@ -662,6 +667,21 @@ fn sql_references_a_user_table(sql: &str, tables: &[String]) -> bool {
             let after_ok = end == lower.len() || !is_ident_char(lower.as_bytes()[end] as char);
             if before_ok && after_ok { return true; }
         }
+    }
+    false
+}
+
+// Whole-word case-insensitive substring check. Used for keyword presence
+// tests where identifier-adjacent characters would produce false positives
+// (e.g. matching "from" inside "fromage_id").
+fn contains_word(haystack_lower: &str, needle_lower: &str) -> bool {
+    for (idx, _) in haystack_lower.match_indices(needle_lower) {
+        let before_ok = idx == 0
+            || !is_ident_char(haystack_lower.as_bytes()[idx - 1] as char);
+        let end = idx + needle_lower.len();
+        let after_ok = end == haystack_lower.len()
+            || !is_ident_char(haystack_lower.as_bytes()[end] as char);
+        if before_ok && after_ok { return true; }
     }
     false
 }
@@ -757,6 +777,11 @@ mod tests {
             &tables
         ));
         assert!(!sql_references_a_user_table("SELECT 42", &tables));
+        // Defense-in-depth: table name used only as an alias must NOT pass.
+        // Without the FROM-keyword check this bypasses because "students"
+        // is a bare identifier post-strip.
+        assert!(!sql_references_a_user_table("SELECT 1939 AS students", &tables));
+        assert!(!sql_references_a_user_table("SELECT 1 AS receipts, 2 AS staff", &tables));
     }
 
     #[test]
