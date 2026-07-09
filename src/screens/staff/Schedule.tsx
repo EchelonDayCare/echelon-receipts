@@ -13,7 +13,6 @@ import { getSettings } from "../../lib/db";
 import { isAiTextConfigured } from "../../lib/voice";
 import { showConfirm } from "../../lib/dialogs";
 import ShiftDrawer, { loadActiveStaff, type DrawerState } from "./ShiftDrawer";
-import ScheduleSubNav from "./ScheduleSubNav";
 import ScheduleAiTextPanel from "./ScheduleAiTextPanel";
 import { bcHolidayLookup } from "../../lib/bcHolidays";
 import { isBcHolidaysEnabled, getDisabledBcHolidayIds } from "../../lib/centreCalendar";
@@ -118,7 +117,6 @@ export default function StaffSchedule() {
   return (
     <div style={{ padding: 24 }} className="schedule-page">
       <style>{PRINT_CSS}</style>
-      <ScheduleSubNav />
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16, gap: 12, flexWrap: "wrap" }}>
         <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
           <button className="btn" onClick={() => setWeekStart(addDays(weekStart, -7))}>‹</button>
