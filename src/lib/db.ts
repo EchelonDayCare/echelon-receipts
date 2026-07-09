@@ -505,7 +505,7 @@ async function ensureSchema(d: Database): Promise<void> {
         "Hi {{parent_name}},\n\nWe've planned a field trip to {{trip_name}} on {{trip_date}}. Departure: {{depart_time}}, return: {{return_time}}. Transportation: {{transport}}. Additional cost: $ .\n\nPlease sign and return the attached permission form by {{signup_deadline}} so {{student_name}} can join.\n\nThank you,\n{{daycare_name}}",
         "general"],
       ["Waitlist – Spot Offered", "Great news — a spot is available for {{student_name}} at {{daycare_name}}",
-        "Hi {{parent_name}},\n\nWe're delighted to let you know that a spot has opened up for {{student_name}} at {{daycare_name}}. Based on your application we can offer a start date of {{start_date}}.\n\nTo accept, please reply to this email by {{reply_by}} and we'll send you the enrollment paperwork and first-month invoice. If we don't hear back by that date the spot will be released to the next family on the waitlist.\n\nHappy to answer any questions before you decide — just reply here or call {{contact_phone}}.\n\nWarmly,\n{{daycare_name}}\n{{contact_email}} | {{contact_phone}}",
+        "Hi {{parent_name}},\n\nWe're delighted to let you know that a spot has opened up for {{student_name}} at {{daycare_name}}. Based on your application we can offer a start date of [proposed start date].\n\nTo accept, please reply to this email by [reply-by date] and we'll send you the enrollment paperwork and first-month invoice. If we don't hear back by that date the spot will be released to the next family on the waitlist.\n\nHappy to answer any questions before you decide — just reply here or call {{contact_phone}}.\n\nWarmly,\n{{daycare_name}}\n{{contact_email}} | {{contact_phone}}",
         "waitlist"],
       ["Waitlist – Still Waiting Check-in", "Checking in about {{student_name}}'s waitlist spot",
         "Hi {{parent_name}},\n\nJust a quick note to let you know {{student_name}} is still on our waitlist at {{daycare_name}}. We don't have an opening yet, but you're still in our list and we wanted to make sure you're still interested.\n\nCould you reply to confirm:\n  1. Yes, please keep {{student_name}} on the waitlist.\n  2. Our situation has changed — please remove us.\n\nAlso let us know if your preferred start date has changed. If we don't hear back within two weeks we'll assume option 2 and archive the application (you can always re-apply).\n\nThank you,\n{{daycare_name}}\n{{contact_email}} | {{contact_phone}}",
@@ -527,7 +527,7 @@ async function ensureSchema(d: Database): Promise<void> {
   // starters to DBs created before v1.3.x.
   const laterBuiltins: Array<[string, string, string, string]> = [
     ["Waitlist – Spot Offered", "Great news — a spot is available for {{student_name}} at {{daycare_name}}",
-      "Hi {{parent_name}},\n\nWe're delighted to let you know that a spot has opened up for {{student_name}} at {{daycare_name}}. Based on your application we can offer a start date of {{start_date}}.\n\nTo accept, please reply to this email by {{reply_by}} and we'll send you the enrollment paperwork and first-month invoice. If we don't hear back by that date the spot will be released to the next family on the waitlist.\n\nHappy to answer any questions before you decide — just reply here or call {{contact_phone}}.\n\nWarmly,\n{{daycare_name}}\n{{contact_email}} | {{contact_phone}}",
+      "Hi {{parent_name}},\n\nWe're delighted to let you know that a spot has opened up for {{student_name}} at {{daycare_name}}. Based on your application we can offer a start date of [proposed start date].\n\nTo accept, please reply to this email by [reply-by date] and we'll send you the enrollment paperwork and first-month invoice. If we don't hear back by that date the spot will be released to the next family on the waitlist.\n\nHappy to answer any questions before you decide — just reply here or call {{contact_phone}}.\n\nWarmly,\n{{daycare_name}}\n{{contact_email}} | {{contact_phone}}",
       "waitlist"],
     ["Waitlist – Still Waiting Check-in", "Checking in about {{student_name}}'s waitlist spot",
       "Hi {{parent_name}},\n\nJust a quick note to let you know {{student_name}} is still on our waitlist at {{daycare_name}}. We don't have an opening yet, but you're still in our list and we wanted to make sure you're still interested.\n\nCould you reply to confirm:\n  1. Yes, please keep {{student_name}} on the waitlist.\n  2. Our situation has changed — please remove us.\n\nAlso let us know if your preferred start date has changed. If we don't hear back within two weeks we'll assume option 2 and archive the application (you can always re-apply).\n\nThank you,\n{{daycare_name}}\n{{contact_email}} | {{contact_phone}}",
@@ -1373,6 +1373,24 @@ Thanks,
       "CREATE INDEX ix_organizer_notes_updated ON organizer_notes(updated_at DESC) WHERE deleted_at IS NULL",
     );
   }
+
+  // ─── Migration 029 — Fix "Waitlist – Spot Offered" template tokens (v2.2.6) ──
+  // Old built-in body used {{start_date}} and {{reply_by}} which are NOT in
+  // the Communications token set — renderCommsTemplate replaced them with
+  // empty strings, giving parents mail like "…start date of ." and
+  // "…reply by  and we'll send…". Rewrite affected rows to use literal
+  // [proposed start date] / [reply-by date] placeholders that the sender
+  // fills in Compose. Only touches is_builtin=1 rows so any hand-edited
+  // custom variant is preserved.
+  await d.execute(
+    `UPDATE message_templates
+        SET body = REPLACE(REPLACE(body,
+              '{{start_date}}', '[proposed start date]'),
+              '{{reply_by}}',   '[reply-by date]')
+      WHERE is_builtin = 1
+        AND name = 'Waitlist – Spot Offered'
+        AND (body LIKE '%{{start_date}}%' OR body LIKE '%{{reply_by}}%')`
+  );
 
   await logIntegrityWarnings(d);
 }
