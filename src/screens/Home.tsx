@@ -263,7 +263,16 @@ export default function Home() {
         style={{ display: "flex", flexDirection: "column", alignItems: "stretch", gap: 12, textAlign: "left" }}
       >
         <div style={{ display: "flex", alignItems: "center", gap: 14 }}>
-          <div className="home-hero-icon" aria-hidden>🤖</div>
+          <button
+            type="button"
+            onClick={() => nav("/ask")}
+            className="home-hero-icon"
+            aria-label="Open Ask Echelon"
+            title="Open Ask Echelon"
+            style={{ background: "transparent", border: 0, padding: 0, cursor: "pointer" }}
+          >
+            🤖
+          </button>
           <div className="home-hero-copy" style={{ flex: 1, minWidth: 0 }}>
             <div className="home-hero-eyebrow">AI Assistant</div>
             <h2 style={{ marginBottom: 6 }}>Ask Echelon</h2>
