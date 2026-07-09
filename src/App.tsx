@@ -66,7 +66,7 @@ function ModuleSidebar({
   accent: string;
   logo: string;
   name: string;
-  items: { to: string; label: string; match?: (path: string, search: string) => boolean }[];
+  items: { to: string; label: string; match?: (path: string, search: string) => boolean; header?: boolean }[];
 }) {
   const nav = useNavigate();
   const [ver, setVer] = useState("");
@@ -110,6 +110,23 @@ function ModuleSidebar({
       </button>
       <nav>
         {items.map((it) => {
+          if (it.header) {
+            return (
+              <div
+                key={`h-${it.label}`}
+                style={{
+                  fontSize: 10,
+                  fontWeight: 700,
+                  letterSpacing: ".08em",
+                  textTransform: "uppercase",
+                  color: "rgba(148,163,184,.75)",
+                  padding: "14px 12px 4px",
+                }}
+              >
+                {it.label}
+              </div>
+            );
+          }
           const isActive = it.match
             ? it.match(loc.pathname, loc.search)
             : loc.pathname === it.to.split("?")[0] && loc.search === (it.to.includes("?") ? "?" + it.to.split("?")[1] : "");
@@ -164,14 +181,26 @@ function Shell({ logo, name, staffEnabled }: { logo: string; name: string; staff
           name={name}
           items={[
             { to: "/notifications", label: "All", match: (p, s) => p === "/notifications" && !s.includes("category=") },
+
+            { to: "", label: "Priority", header: true },
             { to: "/notifications?category=staff_credential_expiring", label: "Staff credentials", match: (p, s) => p === "/notifications" && s.includes("category=staff_credential") },
             { to: "/notifications?category=drill_overdue", label: "Drills", match: (p, s) => p === "/notifications" && s.includes("category=drill_overdue") },
+
+            { to: "", label: "Compliance", header: true },
             { to: "/notifications?category=document_expiring", label: "Vault documents", match: (p, s) => p === "/notifications" && s.includes("category=document_") },
+            { to: "/notifications?category=agm_deadline", label: "AGM deadline", match: (p, s) => p === "/notifications" && s.includes("category=agm_deadline") },
+            { to: "/notifications?category=tslip_deadline", label: "T-slip deadline", match: (p, s) => p === "/notifications" && s.includes("category=tslip_deadline") },
+            { to: "/notifications?category=ccfri_claim_due", label: "CCFRI claims", match: (p, s) => p === "/notifications" && s.includes("category=ccfri_claim_due") },
+
+            { to: "", label: "Operations", header: true },
             { to: "/notifications?category=receipt_aging", label: "Receipts", match: (p, s) => p === "/notifications" && s.includes("category=receipt_aging") },
             { to: "/notifications?category=schedule_not_published", label: "Schedule", match: (p, s) => p === "/notifications" && s.includes("category=schedule_") },
             { to: "/notifications?category=meeting_action_due", label: "Meetings & follow-ups", match: (p, s) => p === "/notifications" && (s.includes("category=meeting_") || s.includes("category=followup_")) },
             { to: "/notifications?category=waitlist_new_application", label: "Waitlist", match: (p, s) => p === "/notifications" && s.includes("category=waitlist_") },
+
+            { to: "", label: "System", header: true },
             { to: "/notifications?category=backup_stale", label: "Backups", match: (p, s) => p === "/notifications" && s.includes("category=backup_") },
+            { to: "/notifications?category=system_error", label: "System errors", match: (p, s) => p === "/notifications" && s.includes("category=system_error") },
           ]}
         />
         <main className="content">
