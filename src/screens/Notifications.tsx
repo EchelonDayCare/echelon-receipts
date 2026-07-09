@@ -19,7 +19,6 @@ const ALL_CATEGORIES = [
   "document_expired",
   "receipt_aging",
   "schedule_not_published",
-  "schedule_change_ack_missing",
   "meeting_action_due",
   "followup_due",
   "waitlist_offer_expiring",

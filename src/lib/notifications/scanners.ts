@@ -315,35 +315,11 @@ export async function scanSchedulePublish(): Promise<NotificationInput[]> {
   return out;
 }
 
-// ─── Scanner: schedule change ack missing ─────────────────────────────
-export async function scanScheduleConfirmations(): Promise<NotificationInput[]> {
-  const d = await db();
-  const cutoff = new Date(Date.now() - 4 * 3600_000).toISOString();
-  const rows = await d.select<{ id: string; staff_id: string; week_start_date: string; published_at: string }[]>(
-    `SELECT p.id, p.staff_id, p.week_start_date, p.published_at
-       FROM staff_weekly_publish p
-      WHERE p.deleted_at IS NULL AND p.acknowledged_at IS NULL
-        AND p.published_at < ?`,
-    [cutoff],
-  );
-  const out: NotificationInput[] = [];
-  for (const r of rows) {
-    const ageHrs = Math.round((Date.now() - new Date(r.published_at).getTime()) / 3600_000);
-    const tier = ageHrs >= 48 ? "48h" : ageHrs >= 24 ? "24h" : "4h";
-    const sev: Severity = tier === "48h" ? "critical" : tier === "24h" ? "warning" : "info";
-    out.push({
-      category: "schedule_change_ack_missing",
-      severity: sev,
-      title: `Awaiting confirmation`,
-      body: `Week of ${r.week_start_date} · published ${ageHrs}h ago`,
-      source_kind: "staff_weekly",
-      source_id: r.id,
-      action_route: "/staff/schedule",
-      dedup_key: `schedule_change_ack_missing:staff_weekly:${r.id}`,
-    });
-  }
-  return out;
-}
+// ─── Scanner: schedule change ack missing (REMOVED) ───────────────────
+// The owner's workflow is: build → review → publish → done. There's no
+// "wait for staff acknowledgment" step, so this scanner is retired.
+// Registered as noop below so any existing rows in the category get
+// reconciled away on the next scan by softDeleteResolved.
 
 // ─── Scanner: meeting actions due ─────────────────────────────────────
 export async function scanMeetingActions(): Promise<NotificationInput[]> {
@@ -685,7 +661,7 @@ export const SCANNERS: ScannerDef[] = [
   { id: "docExpired",        category: "document_expired",           label: "Vault document expired",    run: noop },
   { id: "receiptAging",      category: "receipt_aging",              label: "Receipt with pending balance aging", run: scanReceiptsAging },
   { id: "schedulePublish",   category: "schedule_not_published",     label: "Schedule not yet published", run: scanSchedulePublish },
-  { id: "scheduleAck",       category: "schedule_change_ack_missing",label: "Schedule confirmation missing", run: scanScheduleConfirmations },
+  { id: "scheduleAck",       category: "schedule_change_ack_missing",label: "Schedule confirmation missing", run: noop },
   { id: "meetingAction",     category: "meeting_action_due",         label: "Meeting action item due",   run: scanMeetingActions },
   { id: "followup",          category: "followup_due",               label: "Follow-up due",             run: scanFollowups },
   { id: "waitlistOffer",     category: "waitlist_offer_expiring",    label: "Waitlist offer aging",      run: scanWaitlistOffers },

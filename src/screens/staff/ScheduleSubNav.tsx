@@ -7,7 +7,6 @@ import { NavLink } from "react-router-dom";
 const TABS = [
   { to: "/staff/schedule", label: "Week grid", end: true },
   { to: "/staff/schedule/audit", label: "Audit" },
-  { to: "/staff/schedule/confirmations", label: "Confirmations" },
 ];
 
 export default function ScheduleSubNav() {

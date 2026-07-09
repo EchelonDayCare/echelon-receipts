@@ -40,7 +40,6 @@ const WaitlistArchived = lazy(() => import("./screens/waitlist/Archived"));
 const VaultLibrary = lazy(() => import("./screens/vault/Library"));
 const StaffSchedule = lazy(() => import("./screens/staff/Schedule"));
 const StaffScheduleAudit = lazy(() => import("./screens/staff/ScheduleAudit"));
-const StaffScheduleConfirmations = lazy(() => import("./screens/staff/ScheduleConfirmations"));
 const StaffMeetings = lazy(() => import("./screens/staff/Meetings"));
 const OrganizerScreen = lazy(() => import("./screens/organizer/Organizer"));
 const OrganizerNotes = lazy(() => import("./screens/organizer/Notes"));
@@ -408,7 +407,6 @@ function Shell({ logo, name, staffEnabled }: { logo: string; name: string; staff
           <Route path="/staff/hours" element={<StaffScreen />} />
           <Route path="/staff/schedule" element={<StaffSchedule />} />
           <Route path="/staff/schedule/audit" element={<StaffScheduleAudit />} />
-          <Route path="/staff/schedule/confirmations" element={<StaffScheduleConfirmations />} />
           <Route path="/staff/credentials" element={<StaffCredentials />} />
           <Route path="/staff/meetings" element={<StaffMeetings />} />
 
