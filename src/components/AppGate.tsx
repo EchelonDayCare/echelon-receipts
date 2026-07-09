@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { showAlert } from "../lib/dialogs";
 
 // v2.0.0 AppLock overlay + Setup Wizard gate.
 //
@@ -535,7 +536,7 @@ function MandatoryRecoveryStep({ code, onDone }: { code: string; onDone: () => v
             style={{ ...styles.button, flex: 1, background: "#eee", color: "#333" }}
             onClick={async () => {
               try { await navigator.clipboard.writeText(code); setCopied(true); }
-              catch { alert("Copy failed — write it down manually."); }
+              catch { void showAlert("Copy failed — write it down manually.", { kind: "warning" }); }
             }}
           >
             {copied ? "Copied ✓" : "Copy to clipboard"}

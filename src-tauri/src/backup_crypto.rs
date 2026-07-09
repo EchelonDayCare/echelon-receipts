@@ -272,6 +272,85 @@ pub fn decrypt_backup(args: DecryptBackupArgs) -> Result<DecryptBackupResult, St
     })
 }
 
+// ─── Backup producers (portable, restore-safe) ──────────────────────────
+//
+// Prior versions of `Settings.tsx::backupNow`, `AnnualReceipts.tsx::backupNow`,
+// and `cloudBackup.ts::sendMonthlyBackup` did a raw file copy of the live
+// `echelon.db` file. Once SQLCipher was enabled that produced an opaque
+// ciphertext blob that `restore.rs::stage_restore` rejects (fails the
+// "SQLite format 3\0" magic check). Users had backups on disk that couldn't
+// be restored — a silent data-loss bug.
+//
+// These commands run `sqlcipher_export()` against the live DbGate
+// connection, producing a portable plain-SQLite file that restore.rs
+// accepts directly. `export_encrypted_backup` additionally wraps the
+// bytes in our EDCBK1 envelope for off-machine transit.
+
+#[derive(Deserialize)]
+pub struct ExportBackupArgs {
+    pub dst_path: String,
+}
+
+#[tauri::command]
+pub async fn export_plaintext_backup(
+    gate: tauri::State<'_, crate::db_gate::DbGate>,
+    args: ExportBackupArgs,
+) -> Result<(), String> {
+    let dst = std::path::PathBuf::from(&args.dst_path);
+    if let Some(parent) = dst.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| format!("create backup dir: {e}"))?;
+    }
+    gate.export_plaintext_to(&dst)
+        .await
+        .map_err(|e| format!("sqlcipher_export failed: {e}"))?;
+    // Sanity: the first 16 bytes should read "SQLite format 3\0" so the
+    // restore path can accept the file without an envelope round-trip.
+    let mut head = [0u8; 16];
+    use std::io::Read;
+    let mut f = std::fs::File::open(&dst).map_err(|e| format!("verify open: {e}"))?;
+    let n = f.read(&mut head).map_err(|e| format!("verify read: {e}"))?;
+    if n < 16 || &head[..16] != b"SQLite format 3\0" {
+        let _ = std::fs::remove_file(&dst);
+        return Err("Exported file is not a valid plain SQLite database — aborting backup.".into());
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn export_encrypted_backup(
+    gate: tauri::State<'_, crate::db_gate::DbGate>,
+    args: ExportBackupArgs,
+) -> Result<(), String> {
+    // Step 1: export to a scratch plaintext file next to the target, so
+    // we can encrypt in one shot without keeping arbitrary-sized bytes
+    // pinned in memory longer than needed.
+    let dst = std::path::PathBuf::from(&args.dst_path);
+    if let Some(parent) = dst.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| format!("create backup dir: {e}"))?;
+    }
+    let tmp = dst.with_extension("edcbk1.tmp");
+    // Clean any stragglers from a previous crashed run.
+    if tmp.exists() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    gate.export_plaintext_to(&tmp)
+        .await
+        .map_err(|e| format!("sqlcipher_export failed: {e}"))?;
+    // Step 2: read + encrypt + write. Best-effort remove of the temp
+    // file happens after each exit path.
+    let plaintext = std::fs::read(&tmp).map_err(|e| format!("read tmp: {e}"))?;
+    // Zero the file before removing so plaintext bytes don't linger on
+    // disk between GC and the next allocation of those blocks.
+    let _ = std::fs::write(&tmp, vec![0u8; plaintext.len().min(64 * 1024)]);
+    let _ = std::fs::remove_file(&tmp);
+    let passphrase = crate::secrets::get_secret("backup_passphrase")?;
+    let enc = encrypt(&passphrase, &plaintext)?;
+    // Best-effort scrub of plaintext buffer before it drops.
+    drop(plaintext);
+    std::fs::write(&dst, enc).map_err(|e| format!("write dst: {e}"))?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

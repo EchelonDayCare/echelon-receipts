@@ -5,6 +5,7 @@
 //   3. Follow-ups (quick-add + open + recent done)
 import { useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
+import { showConfirm } from "../../lib/dialogs";
 import { listUpcoming, type UpcomingItem, type UpcomingSource } from "../../repo/organizerRepo";
 import { listRecentMeetings, type Meeting } from "../../repo/meetingsRepo";
 import {
@@ -295,7 +296,7 @@ export default function Organizer() {
                         {f.dueDate && <div className="org-fu-meta">due {f.dueDate}</div>}
                       </div>
                       <button className="btn link danger" title="Delete"
-                        onClick={async () => { if (confirm("Delete?")) { await softDeleteFollowup(f.id, f.version); await refresh(); } }}>
+                        onClick={async () => { if (await showConfirm("Delete?")) { await softDeleteFollowup(f.id, f.version); await refresh(); } }}>
                         ✕
                       </button>
                     </li>

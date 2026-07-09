@@ -11,6 +11,7 @@
 import { useMemo, useState } from "react";
 import { parseStaffShifts, type ParsedShift } from "../../lib/voice";
 import { createShift } from "../../repo/scheduleRepo";
+import { showAlert } from "../../lib/dialogs";
 
 type Row = ParsedShift & { include: boolean; err?: string };
 
@@ -69,10 +70,11 @@ export default function ScheduleAiTextPanel({
       setBusy("idle");
       if (dupeNames.length > 0) {
         const uniq = Array.from(new Set(dupeNames));
-        window.setTimeout(() => alert(
+        window.setTimeout(() => void showAlert(
           `Heads up — one staff member can only have one shift per day.\n\n` +
           `AI produced duplicate shifts for:\n• ${uniq.join("\n• ")}\n\n` +
           `Only the first shift for each person+day is checked. Edit or uncheck as needed before saving.`,
+          { kind: "warning" },
         ), 50);
       }
     } catch (e: any) {
@@ -113,7 +115,7 @@ export default function ScheduleAiTextPanel({
       setErr(null);
       onSaved();
       setText(""); setRows(null);
-      window.setTimeout(() => alert(msg), 50);
+      window.setTimeout(() => void showAlert(msg), 50);
     }
   }
 

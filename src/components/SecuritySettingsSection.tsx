@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { SetupPinModal } from "./AppGate";
 import { emailRecoveryCode } from "../lib/emailRecovery";
+import { showAlert, showConfirm } from "../lib/dialogs";
 
 // v2.0.0 device security settings tile — drop into Settings.tsx.
 //
@@ -35,20 +36,20 @@ export default function SecuritySettingsSection() {
   if (!state) return null;
 
   const lock = async () => {
-    if (!confirm("Lock the app now? You'll need to enter your PIN to continue.")) return;
+    if (!(await showConfirm("Lock the app now? You'll need to enter your PIN to continue."))) return;
     try {
       await invoke("v2_lock");
       window.location.reload();
     } catch (e) {
-      alert(`Lock failed: ${e}`);
+      void showAlert(`Lock failed: ${e}`, { kind: "error" });
     }
   };
 
-  const generateRecovery = () => {
+  const generateRecovery = async () => {
     const warning = state.hasRecovery
       ? "You already have a recovery code. Generating a new one INVALIDATES the previous one. Continue?"
       : "You will see a 48-character recovery code. Anyone with this code can decrypt your data — store it OFFLINE (printed, in a safe). Continue?";
-    if (!confirm(warning)) return;
+    if (!(await showConfirm(warning, { kind: "warning" }))) return;
     setProofOpen(true);
   };
 
@@ -169,7 +170,7 @@ function RecoveryCodeModal({ code, onDone }: { code: string; onDone: () => void 
             style={{ ...btn, flex: 1 }}
             onClick={async () => {
               try { await navigator.clipboard.writeText(code); setCopied(true); }
-              catch { alert("Copy failed — write it down manually."); }
+              catch { void showAlert("Copy failed — write it down manually.", { kind: "warning" }); }
             }}
           >
             {copied ? "Copied ✓" : "Copy to clipboard"}

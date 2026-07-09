@@ -11,13 +11,13 @@ import {
 import { buildWaMeUrl, buildWhatsappDeepLink, renderTemplate } from "../../lib/whatsapp";
 import { getSettings } from "../../lib/db";
 import { isAiTextConfigured } from "../../lib/voice";
-import { showConfirm } from "../../lib/dialogs";
-import ShiftDrawer, { loadActiveStaff, type DrawerState } from "./ShiftDrawer";
+import { showAlert, showConfirm } from "../../lib/dialogs";
+import ShiftDrawer, { loadStaffWithShiftsInWeek, notifyShiftCancel, type DrawerState } from "./ShiftDrawer";
 import ScheduleAiTextPanel from "./ScheduleAiTextPanel";
 import { bcHolidayLookup } from "../../lib/bcHolidays";
 import { isBcHolidaysEnabled, getDisabledBcHolidayIds } from "../../lib/centreCalendar";
 
-type StaffLite = { id: number; name: string; whatsapp_phone_e164: string | null };
+type StaffLite = { id: number; name: string; whatsapp_phone_e164: string | null; active: boolean };
 
 const DAY_LABELS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
 
@@ -43,7 +43,7 @@ export default function StaffSchedule() {
   const refresh = async () => {
     try {
       const [staffRows, shiftRows] = await Promise.all([
-        loadActiveStaff(), listShiftsForWeek(weekStart),
+        loadStaffWithShiftsInWeek(weekStart), listShiftsForWeek(weekStart),
       ]);
       setStaff(staffRows);
       setShifts(shiftRows);
@@ -110,6 +110,32 @@ export default function StaffSchedule() {
     ))) return;
     try {
       await softDeleteShift(sh.id, sh.version);
+      // WhatsApp cancel offer — only for today-or-future shifts, only
+      // when the primary confirm ran (Shift-click intentionally bypasses
+      // both prompts), and only for staff with a number on file.
+      // notifyShiftCancel itself gates the second confirm.
+      if (!skipConfirm) {
+        const today = new Date();
+        const todayISO = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, "0")}-${String(today.getDate()).padStart(2, "0")}`;
+        if (sh.shiftDate >= todayISO) {
+          const s = staff.find((x) => String(x.id) === sh.staffId);
+          if (s && s.whatsapp_phone_e164 && s.active) {
+            const sendIt = await showConfirm(
+              `Send ${s.name.split(/\s+/)[0]} a WhatsApp cancellation for this shift?`,
+              { okLabel: "Send message", cancelLabel: "Skip" }
+            );
+            if (sendIt) {
+              await notifyShiftCancel({
+                staff: s,
+                shiftDate: sh.shiftDate,
+                startTime: sh.startTime,
+                endTime: sh.endTime,
+                room: sh.room ?? null,
+              });
+            }
+          }
+        }
+      }
       await refresh();
     } catch (e: any) { setErr(String(e?.message ?? e)); }
   }
@@ -163,11 +189,16 @@ export default function StaffSchedule() {
               {staff.map((s) => {
                 const total = hoursByStaff.get(String(s.id)) ?? 0;
                 const overtime = total > 40;
+                const inactive = !s.active;
+                const inactiveMsg = `${s.name} is inactive. Reactivate them in Staff → Hours before editing shifts. Existing shifts remain visible for payroll reconciliation.`;
                 return (
-                  <tr key={s.id}>
+                  <tr key={s.id} style={inactive ? { opacity: 0.55 } : undefined}>
                     <td style={{ padding: 8, verticalAlign: "top" }}>
-                      <div style={{ fontWeight: 600 }}>{s.name}</div>
-                      {!s.whatsapp_phone_e164 && <div style={{ fontSize: 10, color: "#d97706" }}>No WhatsApp</div>}
+                      <div style={{ fontWeight: 600 }} title={inactive ? "Inactive — historical shifts preserved" : undefined}>
+                        {s.name}
+                        {inactive && <span style={{ marginLeft: 6, color: "var(--muted)", fontStyle: "italic", fontSize: 11 }}>(inactive)</span>}
+                      </div>
+                      {!s.whatsapp_phone_e164 && !inactive && <div style={{ fontSize: 10, color: "#d97706" }}>No WhatsApp</div>}
                     </td>
                     {DAY_LABELS.map((_, i) => {
                       const iso = addDays(weekStart, i);
@@ -176,25 +207,36 @@ export default function StaffSchedule() {
                         <td key={i} style={{ padding: 0, verticalAlign: "top", minWidth: 110 }}>
                           {cellShifts.length === 0 ? (
                             <button
-                              onClick={() => setDrawer({ mode: "new", staffId: String(s.id), shiftDate: iso })}
+                              onClick={() => {
+                                if (inactive) { void showAlert(inactiveMsg); return; }
+                                setDrawer({ mode: "new", staffId: String(s.id), shiftDate: iso });
+                              }}
                               style={emptyCellStyle}
-                              title="Add shift"
+                              title={inactive ? "Inactive staff" : "Add shift"}
+                              disabled={inactive}
                             >+ Add</button>
                           ) : (
                             cellShifts.map((sh) => (
                               <div key={sh.id} className="shift-cell" style={{ position: "relative" }}>
                                 <button
-                                  onClick={() => setDrawer({ mode: "edit", shift: sh })}
+                                  onClick={() => {
+                                    if (inactive) { void showAlert(inactiveMsg); return; }
+                                    setDrawer({ mode: "edit", shift: sh });
+                                  }}
                                   style={cellStyle(sh.status)}
-                                  title={`${sh.startTime}–${sh.endTime}${sh.room ? ` · ${sh.room}` : ""}`}
+                                  title={inactive ? "Inactive staff — read only" : `${sh.startTime}–${sh.endTime}${sh.room ? ` · ${sh.room}` : ""}`}
                                 >
                                   <div>{sh.startTime}–{sh.endTime}</div>
                                   {sh.room && <div style={{ fontSize: 10, opacity: 0.85 }}>{sh.room}</div>}
                                 </button>
                                 <button
                                   className="shift-delete"
-                                  onClick={(e) => { e.stopPropagation(); void doDeleteShift(sh, e.shiftKey); }}
-                                  title="Delete shift (Shift-click to skip confirm)"
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    if (inactive) { void showAlert(inactiveMsg); return; }
+                                    void doDeleteShift(sh, e.shiftKey);
+                                  }}
+                                  title={inactive ? "Inactive staff — read only" : "Delete shift (Shift-click to skip confirm)"}
                                   aria-label="Delete shift"
                                 >✕</button>
                               </div>

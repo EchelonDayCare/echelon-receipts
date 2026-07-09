@@ -2,6 +2,7 @@
 import { useEffect, useState } from "react";
 import { marked } from "marked";
 import DOMPurify from "dompurify";
+import { showAlert, showConfirm } from "../../lib/dialogs";
 import {
   createMeeting, updateMeeting, softDeleteMeeting,
   listActions, createAction, toggleActionDone, softDeleteAction,
@@ -79,7 +80,7 @@ export default function MeetingDrawer({ state, onClose, onSaved }: {
   }
 
   async function addAction() {
-    if (!current) { alert("Save the meeting first."); return; }
+    if (!current) { void showAlert("Save the meeting first."); return; }
     if (!newAction.description.trim()) return;
     try {
       await createAction(current.id, newAction.description.trim(), newAction.owner || undefined, newAction.due || null);
@@ -95,14 +96,14 @@ export default function MeetingDrawer({ state, onClose, onSaved }: {
     onSaved();
   }
   async function delAct(id: string, version: number) {
-    if (!confirm("Delete this action item?")) return;
+    if (!(await showConfirm("Delete this action item?"))) return;
     await softDeleteAction(id, version);
     if (current) setActions(await listActions(current.id));
     onSaved();
   }
   async function deleteThis() {
     if (!current) return;
-    if (!confirm("Delete this meeting? Action items are also removed from view.")) return;
+    if (!(await showConfirm("Delete this meeting? Action items are also removed from view.", { kind: "warning" }))) return;
     await softDeleteMeeting(current.id, current.version);
     onSaved();
     onClose();

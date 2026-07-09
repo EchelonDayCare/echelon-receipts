@@ -7,6 +7,7 @@
 
 import { useState } from "react";
 import { parseRecurringExpense, type ParsedRecurring } from "../../lib/voice";
+import { showAlert } from "../../lib/dialogs";
 import {
   saveRecurring, EXPENSE_CATEGORIES, PAYMENT_METHODS, FREQUENCIES,
 } from "../../lib/expenses";
@@ -87,7 +88,7 @@ export default function RecurringAiTextPanel({ onSaved }: { onSaved: () => void 
       setErr(null);
       onSaved();
       setText(""); setRows(null); setExpanded(false);
-      window.setTimeout(() => alert(msg), 50);
+      window.setTimeout(() => void showAlert(msg), 50);
     }
   }
 

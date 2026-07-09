@@ -154,9 +154,23 @@ export default function MonthlyAttendance() {
 
   async function onCellClick(studentId: number, day: number, current: MonthMark | undefined) {
     const iso = isoDay(year, month, day);
+    // Client-side pre-check — avoid a round-trip when we already know the
+    // day is closed. Mirrors the server-side guard in setMark().
+    if (closedByIso.has(iso)) {
+      show("Centre closed on this day — open it in the Centre Calendar first.", "err");
+      return;
+    }
     const next = nextMark(current);
-    await setMark(studentId, iso, next);
-    // Optimistic update.
+    const res = await setMark(studentId, iso, next);
+    // Only apply the optimistic UI update when the write actually persisted.
+    // The closed-day guard is defence-in-depth and can trip even after the
+    // client-side pre-check (race with a Calendar toggle in another tab).
+    if (!res.saved) {
+      show(res.reason === "closed"
+        ? "Centre closed on this day — open it in the Centre Calendar first."
+        : "Mark not saved.", "err");
+      return;
+    }
     setCells((prev) => prev.map((c) => {
       if (c.student_id !== studentId) return c;
       const marks = { ...c.marks };
@@ -347,11 +361,13 @@ export default function MonthlyAttendance() {
     // Replace-not-merge: wipe the entire month first.
     await clearMonthMarks(ry, rm);
     let saved = 0;
+    let skipped = 0;
     for (const r of filteredRows) {
       for (const [dStr, mark] of Object.entries(r.marks)) {
         const d = parseInt(dStr, 10);
-        await setMark(r.matchedId!, isoDay(ry, rm, d), mark);
-        saved++;
+        const res = await setMark(r.matchedId!, isoDay(ry, rm, d), mark);
+        if (res.saved) saved++;
+        else skipped++;
       }
     }
     if (ocrReview.daysOpen != null) {
@@ -360,7 +376,8 @@ export default function MonthlyAttendance() {
     setOcrReview(null);
     setJustImported({ month: `${MONTH_NAMES[rm-1]} ${ry}`, ts: Date.now(), marks: saved });
     if (ry !== year || rm !== month) { setYear(ry); setMonthState(rm); } else { await refresh(); }
-    show(`Imported ${saved} marks (month cleared first)`);
+    const suffix = skipped > 0 ? ` (${skipped} skipped — closed days)` : "";
+    show(`Imported ${saved} marks (month cleared first)${suffix}`);
   }
 
   function printBlank() {
@@ -375,8 +392,8 @@ export default function MonthlyAttendance() {
     const nameFontPx = fontPx + 1;
     const padY = Math.max(1, Math.floor(rowH / 8));
     const rowsHtml = cells.map((c) => `
-      <tr>
-        <td class="name">${h(c.student_name)}</td>
+      <tr${c.active ? "" : ' style="opacity:0.6"'}>
+        <td class="name">${h(c.student_name)}${c.active ? "" : ' <span style="font-style:italic;color:#6b7280">(inactive)</span>'}</td>
         ${dayNums.map((d) => {
           const iso = isoDay(year, month, d);
           const closed = closedByIso.get(iso);
@@ -648,11 +665,17 @@ export default function MonthlyAttendance() {
           </thead>
           <tbody>
             {cells.length === 0 && (
-              <tr><td colSpan={nDays + 1} style={{ padding: 20, textAlign: "center", color: "var(--muted)" }}>No active students in the {year} roster.</td></tr>
+              <tr><td colSpan={nDays + 1} style={{ padding: 20, textAlign: "center", color: "var(--muted)" }}>No students in the {year} roster (or with marks this month).</td></tr>
             )}
             {cells.map((c) => (
-              <tr key={c.student_id}>
-                <td style={{ position: "sticky", left: 0, background: "#fff", padding: "6px 10px", borderBottom: "1px solid var(--border, #f3f4f6)", whiteSpace: "nowrap" }}>{c.student_name}</td>
+              <tr key={c.student_id} style={{ opacity: c.active ? 1 : 0.55 }}>
+                <td
+                  style={{ position: "sticky", left: 0, background: "#fff", padding: "6px 10px", borderBottom: "1px solid var(--border, #f3f4f6)", whiteSpace: "nowrap" }}
+                  title={c.active ? undefined : "Inactive — historical marks preserved for compliance"}
+                >
+                  {c.student_name}
+                  {!c.active && <span style={{ marginLeft: 6, color: "var(--muted)", fontStyle: "italic", fontSize: 11 }}>(inactive)</span>}
+                </td>
                 {dayNums.map((d) => {
                   const iso = isoDay(year, month, d);
                   const closed = closedByIso.has(iso);

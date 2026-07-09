@@ -2,7 +2,8 @@ import { showAlert, showConfirm } from "../lib/dialogs";
 import { useEffect, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import { openPath } from "@tauri-apps/plugin-opener";
-import { copyFile, exists, mkdir, writeFile } from "@tauri-apps/plugin-fs";
+import { exists, mkdir, writeFile } from "@tauri-apps/plugin-fs";
+import { invoke } from "@tauri-apps/api/core";
 import { appDataDir, join, tempDir } from "@tauri-apps/api/path";
 import {
   annualGroupsForYear, getSettings, setSetting, nextAnnualReceiptNumber,
@@ -90,10 +91,12 @@ export default function AnnualReceipts() {
         ? await join(settings.pdf_folder, "Backups")
         : await join(await appDataDir(), "Backups");
       if (!(await exists(folder))) await mkdir(folder, { recursive: true });
-      const src = await join(await appDataDir(), "echelon.db");
       const stamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
       const dst = await join(folder, `echelon-pre-annual-${year}-${stamp}.db`);
-      await copyFile(src, dst);
+      // Portable plaintext export via sqlcipher_export. Raw copyFile of
+      // echelon.db was ciphertext once SQLCipher was enabled, breaking
+      // the "safety backup before supersede" invariant.
+      await invoke("export_plaintext_backup", { args: { dst_path: dst } });
       const isoNow = new Date().toISOString();
       await setSetting("last_backup_at", isoNow);
       await setSetting("last_backup_path", dst);

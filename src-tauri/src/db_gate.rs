@@ -151,6 +151,45 @@ impl DbGate {
         Ok(())
     }
 
+    /// Export the live database (encrypted or plaintext) to `dst` as a
+    /// portable plaintext SQLite file. Uses SQLCipher's `sqlcipher_export`
+    /// which walks the sqlite_master and copies schema + all rows into
+    /// the attached destination with an empty key (⇒ plain SQLite).
+    ///
+    /// This is the ONLY correct way to hand a SQLCipher-encrypted DB to
+    /// a machine that can't decrypt it: a raw file copy of `echelon.db`
+    /// yields opaque ciphertext bytes that `restore.rs` will reject.
+    ///
+    /// Callers MUST hold the DB lock via the app's normal write path
+    /// and MUST wipe `dst` on failure — this function overwrites but
+    /// doesn't clean up.
+    pub async fn export_plaintext_to(&self, dst: &Path) -> Result<(), DbError> {
+        let guard = self.inner.lock().await;
+        let conn = guard.as_ref().ok_or(DbError::Locked)?;
+        // Checkpoint first so every committed transaction is in the
+        // main file (sqlcipher_export reads main, not WAL frames the
+        // way SQLite normally does at query time).
+        conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")?;
+        // Remove any stale destination — sqlcipher_export appends to an
+        // existing DB, which would silently mix old + new rows.
+        if dst.exists() {
+            std::fs::remove_file(dst)?;
+        }
+        let dst_str = dst.to_string_lossy().replace('\'', "''");
+        // Empty KEY '' ⇒ plain SQLite output. This works whether the
+        // source is encrypted or plaintext; sqlcipher_export is defined
+        // when the bundled-sqlcipher feature is compiled in.
+        let attach = format!("ATTACH DATABASE '{}' AS plain_export KEY ''", dst_str);
+        conn.execute_batch(&attach)?;
+        // Best-effort DETACH on failure so we don't leave the handle
+        // dangling. The subsequent operation is idempotent.
+        let export_res = conn.execute_batch("SELECT sqlcipher_export('plain_export')");
+        let detach_res = conn.execute_batch("DETACH DATABASE plain_export");
+        export_res?;
+        detach_res?;
+        Ok(())
+    }
+
     /// Apply embedded schema migrations idempotently. Called at
     /// startup. Backfills from `_sqlx_migrations` (the tracking table
     /// tauri-plugin-sql used in v1.x) so users upgrading from v1.8.1

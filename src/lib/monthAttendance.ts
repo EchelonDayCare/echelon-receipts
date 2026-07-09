@@ -42,6 +42,7 @@ export function legacyStatusToMark(s: string | null | undefined): MonthMark | nu
 export interface MonthCell {
   student_id: number;
   student_name: string;
+  active: boolean;
   marks: Record<string, MonthMark>; // day-of-month "1".."31" -> mark
 }
 
@@ -56,23 +57,38 @@ export interface CalendarDay {
 //   1. `attendance_mark` if set → authoritative monthly view.
 //   2. Otherwise fall back to legacyStatusToMark(status).
 // Daily writers clear `attendance_mark` on every write, so it's never stale.
+//
+// Roster policy: include every active student for the fiscal year, PLUS
+// any inactive student who still has an attendance row for this month.
+// Withdrawing a mid-year student must not erase their historical months
+// (compliance requirement — CRA daycare receipts need full presence
+// history). Inactive rows are flagged so the UI can dim them.
 export async function monthGrid(year: number, month: number): Promise<MonthCell[]> {
   const d = await db();
   const ym = `${year}-${String(month).padStart(2, "0")}`;
   const rows = await d.select<any[]>(
-    `SELECT s.id AS student_id, s.name AS student_name,
+    `SELECT s.id AS student_id, s.name AS student_name, s.active AS active,
             a.work_date, a.status, a.hours_decimal, a.attendance_mark
        FROM students s
        LEFT JOIN child_attendance a
               ON a.student_id = s.id AND a.work_date LIKE ?
-      WHERE s.year = ? AND s.active = 1
-      ORDER BY s.name COLLATE NOCASE, a.work_date`,
-    [`${ym}-%`, year]
+      WHERE s.year = ?
+        AND (s.active = 1
+             OR EXISTS (SELECT 1 FROM child_attendance a2
+                         WHERE a2.student_id = s.id
+                           AND a2.work_date LIKE ?))
+      ORDER BY s.active DESC, s.name COLLATE NOCASE, a.work_date`,
+    [`${ym}-%`, year, `${ym}-%`]
   );
   const map = new Map<number, MonthCell>();
   for (const r of rows) {
     if (!map.has(r.student_id)) {
-      map.set(r.student_id, { student_id: r.student_id, student_name: r.student_name, marks: {} });
+      map.set(r.student_id, {
+        student_id: r.student_id,
+        student_name: r.student_name,
+        active: !!r.active,
+        marks: {},
+      });
     }
     if (!r.work_date) continue;
     const day = String(parseInt(r.work_date.slice(8, 10), 10));
@@ -91,7 +107,13 @@ export async function monthGrid(year: number, month: number): Promise<MonthCell[
 //     screens render consistently.
 //   - Clearing (mark=null) removes only attendance_mark on evidence-bearing
 //     rows; on monthly-only rows it deletes the row as before.
-export async function setMark(studentId: number, workDate: string, mark: MonthMark | null): Promise<void> {
+// Return type carries a `saved` flag so callers can distinguish "wrote"
+// from "silently rejected because the day is closed". A false value is
+// the signal for UIs to avoid optimistic state updates and surface a
+// toast instead. Callers that only care about persistence can ignore it.
+export type SetMarkResult = { saved: boolean; reason?: "closed" };
+
+export async function setMark(studentId: number, workDate: string, mark: MonthMark | null): Promise<SetMarkResult> {
   const d = await db();
   // Closed-day guard: refuse to write P/A on a day the centre is closed
   // (weekends, seeded stat holidays, or any manually-closed day). Callers
@@ -102,10 +124,8 @@ export async function setMark(studentId: number, workDate: string, mark: MonthMa
       [workDate],
     );
     if (cal.length > 0 && !cal[0].is_open) {
-      // Silent no-op — grid UI already visually disables closed cells; this
-      // is defense-in-depth against imports or race conditions that slip
-      // past the review-modal filter.
-      return;
+      // Return a structured skip signal — the UI decides whether to warn.
+      return { saved: false, reason: "closed" };
     }
   }
   const existing = await d.select<Array<{ in_time: string | null; out_time: string | null }>>(
@@ -126,7 +146,7 @@ export async function setMark(studentId: number, workDate: string, mark: MonthMa
         [studentId, workDate]
       );
     }
-    return;
+    return { saved: true };
   }
 
   if (hasDailyEvidence) {
@@ -135,7 +155,7 @@ export async function setMark(studentId: number, workDate: string, mark: MonthMa
       "UPDATE child_attendance SET attendance_mark=? WHERE student_id=? AND work_date=?",
       [mark, studentId, workDate]
     );
-    return;
+    return { saved: true };
   }
 
   const status = markToLegacyStatus(mark);
@@ -152,6 +172,7 @@ export async function setMark(studentId: number, workDate: string, mark: MonthMa
        attendance_mark = excluded.attendance_mark`,
     [studentId, workDate, hours, status, mark]
   );
+  return { saved: true };
 }
 
 // ---- Centre calendar --------------------------------------------------

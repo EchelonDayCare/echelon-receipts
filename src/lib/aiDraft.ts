@@ -270,7 +270,7 @@ async function azureChat(
   if (settings.agm_ai_enabled === "0") {
     throw new Error("AGM AI drafting is disabled. Enable it in Settings → AGM AI.");
   }
-  const apiKey = await invoke<string | null>("keychain_get", { key: "azure_ai_key" });
+  const apiKey = await invoke<string | null>("get_azure_ai_key");
   if (!apiKey) throw new Error("Azure AI key not found in keychain.");
 
   const url = `${AZURE_ENDPOINT}/openai/deployments/${CHAT_DEPLOY}/chat/completions?api-version=${CHAT_API_VER}`;

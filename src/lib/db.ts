@@ -1836,7 +1836,37 @@ export async function getReceipt(id: number): Promise<Receipt | null> {
   const rows = await (await db()).select<Receipt[]>("SELECT * FROM receipts WHERE id=?", [id]);
   return rows[0] ?? null;
 }
+// Error thrown when voiding a receipt that belongs to an active deposit
+// slip. Detected by string match at the callsite (History.tsx) so we can
+// route the user to the deposit that must be voided first.
+export class ReceiptInDepositError extends Error {
+  depositId: number;
+  constructor(depositId: number) {
+    super(
+      `This receipt was included in deposit slip #${depositId}. Void the deposit slip first (Students → Deposits), then void the receipt.`,
+    );
+    this.name = "ReceiptInDepositError";
+    this.depositId = depositId;
+  }
+}
+
 export async function voidReceipt(id: number, reason?: string) {
+  const d = await db();
+  // Guard: refuse to void a receipt that is part of an active (non-voided)
+  // deposit slip. The bank slip's totals are computed from its member
+  // receipts, so silently voiding one would break reconciliation. The
+  // supervisor override for edge cases is deferred to Sprint B.
+  const linked = await d.select<Array<{ deposit_id: number; deposit_voided: number | null }>>(
+    `SELECT r.deposit_id, dp.voided AS deposit_voided
+       FROM receipts r
+       LEFT JOIN deposits dp ON dp.id = r.deposit_id
+      WHERE r.id = ?`,
+    [id],
+  );
+  const row = linked[0];
+  if (row && row.deposit_id != null && row.deposit_voided === 0) {
+    throw new ReceiptInDepositError(row.deposit_id);
+  }
   await execRetry(
     "UPDATE receipts SET voided=1, void_reason=?, voided_at=datetime('now') WHERE id=?",
     [reason ?? null, id]

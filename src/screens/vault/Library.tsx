@@ -5,6 +5,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { useSearchParams, Link } from "react-router-dom";
 import { invoke } from "@tauri-apps/api/core";
 import { save as saveDialog } from "@tauri-apps/plugin-dialog";
+import { showAlert } from "../../lib/dialogs";
 import {
   listDocuments, listAllTags, recordEvent, resolveLinkedNames,
   DOC_CATEGORIES, type DocCategory, type Document, type DocFilter, type LinkedKind,
@@ -126,7 +127,7 @@ export default function VaultLibrary() {
       });
       const bytesWritten = await invoke<number>("documents_export_zip", { entries, destPath: dest });
       for (const doc of chosen) await recordEvent(doc.id, "exported", { path: dest });
-      alert(`Wrote ${chosen.length} files, ${(bytesWritten / 1024).toFixed(1)} KB total.`);
+      void showAlert(`Wrote ${chosen.length} files, ${(bytesWritten / 1024).toFixed(1)} KB total.`);
     } catch (e: any) { setErr(String(e?.message ?? e)); }
     finally { setBusy(false); }
   }

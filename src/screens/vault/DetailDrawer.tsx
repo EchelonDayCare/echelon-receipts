@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 import { save as saveDialog } from "@tauri-apps/plugin-dialog";
 import { writeFile } from "@tauri-apps/plugin-fs";
+import { showConfirm } from "../../lib/dialogs";
 import {
   getDocument, getBlob, getVersionHistory, listDocumentEvents,
   softDeleteDocument, restoreDocument, recordEvent,
@@ -83,7 +84,7 @@ export default function DetailDrawer({
 
   async function del() {
     if (!doc) return;
-    if (!confirm(`Delete "${doc.title}"? You can restore it from the Deleted filter within 30 days.`)) return;
+    if (!(await showConfirm(`Delete "${doc.title}"? You can restore it from the Deleted filter within 30 days.`, { kind: "warning" }))) return;
     setBusy(true);
     try {
       await softDeleteDocument(doc.id);

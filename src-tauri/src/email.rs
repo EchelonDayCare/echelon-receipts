@@ -127,14 +127,27 @@ pub fn keychain_set(key: String, value: String) -> Result<(), String> {
     entry.set_password(&value).map_err(|e| e.to_string())
 }
 
-#[tauri::command]
-pub fn keychain_get(key: String) -> Result<Option<String>, String> {
-    let entry = keyring::Entry::new(KEYRING_SERVICE, &key).map_err(|e| e.to_string())?;
+// Internal-only keychain read. Deliberately NOT exposed as a `#[tauri::command]`
+// so a malicious renderer (or a prompt-injection into a print HTML) can't
+// fish arbitrary secrets out of the OS keyring. Callers on the Rust side
+// use this helper; the JS side uses a scoped command (see `get_azure_ai_key`).
+pub(crate) fn keychain_get_internal(key: &str) -> Result<Option<String>, String> {
+    let entry = keyring::Entry::new(KEYRING_SERVICE, key).map_err(|e| e.to_string())?;
     match entry.get_password() {
         Ok(p) => Ok(Some(p)),
         Err(keyring::Error::NoEntry) => Ok(None),
         Err(e) => Err(e.to_string()),
     }
+}
+
+// Scoped, single-purpose keychain read. The renderer needs the Azure AI key
+// to make Azure OpenAI calls directly (chat/completion with AbortSignal —
+// see src/lib/aiDraft.ts). This command hard-codes the key name so a
+// compromised renderer cannot pivot into other secrets (SMTP password,
+// backup passphrase, etc.).
+#[tauri::command]
+pub fn get_azure_ai_key() -> Result<Option<String>, String> {
+    keychain_get_internal("azure_ai_key")
 }
 
 #[tauri::command]

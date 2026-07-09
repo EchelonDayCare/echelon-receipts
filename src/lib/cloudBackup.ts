@@ -1,9 +1,9 @@
 // Cloud backup: emails the SQLite DB to the configured recipient via SMTP.
 // Schedule: on first app open of a calendar month, back up the *previous* month.
 import { invoke } from "@tauri-apps/api/core";
-import { readFile } from "@tauri-apps/plugin-fs";
+import { readFile, remove } from "@tauri-apps/plugin-fs";
 import { appDataDir, join } from "@tauri-apps/api/path";
-import { getSettings, setSetting, checkpointWal } from "./db";
+import { getSettings, setSetting } from "./db";
 import type { SettingsMap } from "../types";
 
 function bytesToBase64(bytes: Uint8Array): string {
@@ -68,17 +68,21 @@ export async function sendCloudBackup(forMonthKey: string): Promise<CloudBackupR
     };
   }
 
-  // Flush the WAL into the main .db file before reading, otherwise recent
-  // commits live only in echelon.db-wal and the email backup is incomplete.
-  // A restore from a non-checkpointed snapshot would silently lose them.
-  await checkpointWal();
-
-  const dbPath = await join(await appDataDir(), "echelon.db");
-  const bytes = await readFile(dbPath);
-  const plaintextB64 = bytesToBase64(bytes);
-  const { encrypted_b64: encryptedB64 } = await invoke<{ encrypted_b64: string }>("encrypt_backup", {
-    args: { plaintext_b64: plaintextB64 },
-  });
+  // Produce a portable, encrypted archive by running sqlcipher_export to
+  // a scratch plaintext file, wrapping it in the EDCBK1 envelope, and
+  // deleting the scratch file. The pre-v2.2.7 code path read echelon.db
+  // directly — once SQLCipher was enabled, that meant we wrapped raw
+  // ciphertext in the envelope, producing archives that could not be
+  // restored on any machine (decrypt → still ciphertext → header check
+  // fails). One combined command minimises the window where plaintext
+  // bytes exist on disk.
+  const tmpPath = await join(await appDataDir(), "Backups", `cloud-scratch-${forMonthKey}.edcbk1`);
+  await invoke("export_encrypted_backup", { args: { dst_path: tmpPath } });
+  const encBytes = await readFile(tmpPath);
+  // Best-effort cleanup — if the delete fails the file is still an
+  // encrypted envelope, not plaintext, so no confidentiality regression.
+  try { await remove(tmpPath); } catch {}
+  const encryptedB64 = bytesToBase64(encBytes);
   const stamp = new Date().toISOString().slice(0, 19).replace(/[:T]/g, "-");
   const daycare = s.daycare_name || "Echelon Daycare";
   const sender = (s.sender_email || s.contact_email || "").trim();
@@ -98,7 +102,7 @@ export async function sendCloudBackup(forMonthKey: string): Promise<CloudBackupR
         `Automatic monthly backup of the Echelon Receipts database (encrypted).\n\n` +
         `Covers data up to: ${new Date().toISOString().slice(0, 10)}\n` +
         `Backup month tag: ${forMonthKey}\n` +
-        `File: echelon-${forMonthKey}.db.enc (${(bytes.length / 1024).toFixed(1)} KB, encrypted)\n\n` +
+        `File: echelon-${forMonthKey}.db.enc (${(encBytes.length / 1024).toFixed(1)} KB, encrypted)\n\n` +
         `To restore: use Settings → Backups → "Restore from backup file…" and select this ` +
         `attachment — you will be prompted for your backup passphrase. Keep this email AND your ` +
         `backup passphrase safe; without the passphrase this backup cannot be decrypted.`,
@@ -113,7 +117,7 @@ export async function sendCloudBackup(forMonthKey: string): Promise<CloudBackupR
   await setSetting("last_cloud_backup_at", nowIso);
   await setSetting("last_cloud_backup_recipient", recipient);
   await setSetting("last_backup_error", ""); // clear stale failure flag
-  return { ok: true, monthKey: forMonthKey, recipient, bytes: bytes.length };
+  return { ok: true, monthKey: forMonthKey, recipient, bytes: encBytes.length };
 }
 
 // Runs on every app start. If we haven't backed up this calendar month yet,

@@ -8,6 +8,7 @@
 
 import { useState } from "react";
 import { parseExpense, type ParsedExpense } from "../../lib/voice";
+import { showAlert } from "../../lib/dialogs";
 import {
   saveExpense, EXPENSE_CATEGORIES, PAYMENT_METHODS, CATEGORY_LABEL,
 } from "../../lib/expenses";
@@ -84,7 +85,7 @@ export default function ExpenseAiTextPanel({ onSaved }: { onSaved: () => void })
       setErr(null);
       onSaved();
       setText(""); setRows(null);
-      window.setTimeout(() => alert(msg), 50);
+      window.setTimeout(() => void showAlert(msg), 50);
     }
   }
 

@@ -3,7 +3,7 @@ import { useEffect, useState } from "react";
 import { useParams, useNavigate, NavLink } from "react-router-dom";
 import { open } from "@tauri-apps/plugin-dialog";
 import { invoke } from "@tauri-apps/api/core";
-import { copyFile, mkdir, exists, readFile } from "@tauri-apps/plugin-fs";
+import { mkdir, exists, readFile } from "@tauri-apps/plugin-fs";
 import { appDataDir, join } from "@tauri-apps/api/path";
 import { getVersion } from "@tauri-apps/api/app";
 import { getSettings, setSetting, setSettings as setSettingsBulk, checkpointWal } from "../lib/db";
@@ -221,12 +221,12 @@ export default function Settings() {
         ? await join(s.pdf_folder, "Backups")
         : await join(await appDataDir(), "Backups");
       if (!(await exists(folder))) await mkdir(folder, { recursive: true });
-      // Checkpoint WAL so the .db file we copy is complete.
-      await checkpointWal();
-      const src = await join(await appDataDir(), "echelon.db");
       const stamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
       const dst = await join(folder, `echelon-${stamp}.db`);
-      await copyFile(src, dst);
+      // Portable plain-SQLite export via sqlcipher_export — the raw
+      // copy of `echelon.db` produced by v2.2.x was SQLCipher-encrypted
+      // ciphertext that stage_restore refused to load.
+      await invoke("export_plaintext_backup", { args: { dst_path: dst } });
       const now = new Date().toISOString();
       await setSetting("last_backup_at", now);
       await setSetting("last_backup_path", dst);
@@ -265,21 +265,43 @@ export default function Settings() {
         filters: [{ name: "SQLite database / encrypted backup", extensions: ["db", "sqlite", "sqlite3", "enc"] }],
       });
       if (!picked || Array.isArray(picked)) return;
-      const isEncrypted = picked.toLowerCase().endsWith(".enc");
+      // Format detection by magic bytes, not extension — a user could
+      // rename an .enc to .db and lose data. Read first 16 bytes only.
+      const head = await readFile(picked);
+      const first16 = head.slice(0, 16);
+      const dec = new TextDecoder("latin1");
+      const headStr = dec.decode(first16);
+      const isEnvelope = first16.length >= 8 && dec.decode(first16.slice(0, 6)) === "EDCBK1";
+      const isPlainSqlite = headStr === "SQLite format 3\0";
       let passphrase: string | undefined;
-      if (isEncrypted) {
+      if (isEnvelope) {
         const entered = await showPrompt(
-          "This looks like an encrypted backup (.enc). Enter the backup passphrase to decrypt it:"
+          "This is an encrypted Echelon backup. Enter the backup passphrase to decrypt it:"
         );
-        if (entered == null) return; // user cancelled
+        if (entered == null) return;
         passphrase = entered.trim();
-      } else {
+      } else if (isPlainSqlite) {
         void showAlert(
-          "⚠️ This file is not an encrypted (.enc) backup. If it's a pre-v1.6 cloud backup email " +
-          "attachment (plaintext .db), it will still be restored as-is, but new cloud backups are " +
-          "encrypted — set a backup passphrase in this tab to protect future backups.",
+          "This file is a plain SQLite database. It will be restored as-is. " +
+          "For future backups, set a backup passphrase in this tab so backups are encrypted.",
           { kind: "warning" }
         );
+      } else {
+        // Almost certainly a v2.2.x raw SQLCipher file that used to be
+        // silently accepted by the old .enc-suffix heuristic. Refuse
+        // early with actionable guidance — the stage_restore side would
+        // otherwise fail with an opaque "header mismatch" error.
+        void showAlert(
+          "This file is not a recognised backup format.\n\n" +
+          "• Plain SQLite backups start with \"SQLite format 3\".\n" +
+          "• Encrypted Echelon backups start with \"EDCBK1\".\n\n" +
+          "If this is an older backup made before v2.2.7, it may be an " +
+          "encrypted-in-place SQLCipher copy that cannot be restored " +
+          "directly. Please make a fresh backup from your current " +
+          "installation before proceeding.",
+          { kind: "error" }
+        );
+        return;
       }
       const ok = await showConfirm(
         `⚠️  This will REPLACE your current database with:\n\n${picked}\n\n` +

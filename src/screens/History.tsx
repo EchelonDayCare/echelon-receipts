@@ -1,9 +1,10 @@
 import { showAlert, showConfirm, showPrompt } from "../lib/dialogs";
 import { useEffect, useMemo, useState } from "react";
+import { useNavigate } from "react-router-dom";
 import { openPath } from "@tauri-apps/plugin-opener";
 import { writeFile, exists, mkdir } from "@tauri-apps/plugin-fs";
 import { tempDir, join } from "@tauri-apps/api/path";
-import { getSettings, listReceipts, voidReceipt, markEmailed, listStudents } from "../lib/db";
+import { getSettings, listReceipts, voidReceipt, ReceiptInDepositError, markEmailed, listStudents } from "../lib/db";
 import type { Receipt, SettingsMap, Student } from "../types";
 import { printReceipt, saveReceiptPdf } from "../lib/receipt";
 import { sendReceiptEmail, parseRecipients, sendSubsidyStatementEmail } from "../lib/email";
@@ -24,6 +25,7 @@ function statusFor(r: Receipt): { key: StatusKey; label: string } {
 }
 
 export default function History() {
+  const navigate = useNavigate();
   const [rows, setRows] = useState<Receipt[]>([]);
   const [search, setSearch] = useState("");
   const [debouncedSearch, setDebouncedSearch] = useState("");
@@ -171,7 +173,20 @@ export default function History() {
                 if (reason == null) return; // cancelled
                 const trimmed = reason.trim();
                 if (!trimmed) { void showAlert("A reason is required to void a receipt."); return; }
-                await voidReceipt(r.id, trimmed);
+                try {
+                  await voidReceipt(r.id, trimmed);
+                } catch (e: any) {
+                  if (e instanceof ReceiptInDepositError) {
+                    const ok = await showConfirm(
+                      `${e.message}\n\nOpen the Deposits page now?`,
+                      { kind: "warning", okLabel: "Open Deposits", cancelLabel: "Not now" },
+                    );
+                    if (ok) navigate(`/students/deposits?highlight=${e.depositId}`);
+                    return;
+                  }
+                  void showAlert(`Could not void receipt: ${String(e?.message ?? e)}`);
+                  return;
+                }
                 refresh();
               };
 

@@ -1,4 +1,5 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { useSearchParams } from "react-router-dom";
 import {
   listUndepositedReceipts, createDeposit, listDeposits, getDepositWithReceipts,
   voidDeposit, getSettings,
@@ -17,6 +18,9 @@ function todayIso(): string {
 }
 
 export default function Deposits() {
+  const [searchParams] = useSearchParams();
+  const highlightId = searchParams.get("highlight");
+  const highlightRef = useRef<HTMLTableRowElement | null>(null);
   const [pending, setPending] = useState<Receipt[]>([]);
   const [past, setPast] = useState<Deposit[]>([]);
   const [selected, setSelected] = useState<Set<number>>(new Set());
@@ -32,6 +36,14 @@ export default function Deposits() {
     setPending(u); setPast(d); setSettings(s);
   }
   useEffect(() => { refresh(); }, []);
+
+  // Scroll to the highlighted deposit once loaded (from a History void
+  // attempt that was blocked because this deposit still exists).
+  useEffect(() => {
+    if (!highlightId || past.length === 0) return;
+    const el = highlightRef.current;
+    if (el) el.scrollIntoView({ behavior: "smooth", block: "center" });
+  }, [highlightId, past]);
 
   const totals = useMemo(() => {
     let count = 0, sum = 0;
@@ -161,8 +173,19 @@ export default function Deposits() {
               </tr>
             </thead>
             <tbody>
-              {past.map(d => (
-                <tr key={d.id} style={{ borderBottom: "1px solid #eee", opacity: d.voided ? 0.55 : 1 }}>
+              {past.map(d => {
+                const isHighlight = String(d.id) === highlightId;
+                return (
+                <tr
+                  key={d.id}
+                  ref={isHighlight ? highlightRef : undefined}
+                  style={{
+                    borderBottom: "1px solid #eee",
+                    opacity: d.voided ? 0.55 : 1,
+                    background: isHighlight ? "#fef3c7" : undefined,
+                    outline: isHighlight ? "2px solid #f59e0b" : undefined,
+                  }}
+                >
                   <td style={{ padding: 6 }}>{d.id}</td>
                   <td style={{ padding: 6 }}>{d.deposit_date}</td>
                   <td style={{ padding: 6, textAlign: "right" }}>{d.cheque_count}</td>
@@ -176,7 +199,8 @@ export default function Deposits() {
                     )}
                   </td>
                 </tr>
-              ))}
+                );
+              })}
             </tbody>
           </table>
         )}

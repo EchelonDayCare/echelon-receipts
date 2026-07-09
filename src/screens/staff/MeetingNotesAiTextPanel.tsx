@@ -10,6 +10,7 @@ import { useState } from "react";
 import { parseMeetingNotes, type ParsedMeeting } from "../../lib/voice";
 import { createMeeting, addAction } from "../../lib/meetings";
 import type { Staff } from "../../types";
+import { showAlert } from "../../lib/dialogs";
 
 type Row = ParsedMeeting & { include: boolean; resolvedAttendeeIds: number[] };
 
@@ -99,7 +100,7 @@ export default function MeetingNotesAiTextPanel({
       setErr(null);
       onSaved();
       setText(""); setRows(null); setExpanded(false);
-      window.setTimeout(() => alert(`Saved ${ok} meeting${ok === 1 ? "" : "s"}.`), 50);
+      window.setTimeout(() => void showAlert(`Saved ${ok} meeting${ok === 1 ? "" : "s"}.`), 50);
     }
   }
 

@@ -3,6 +3,7 @@
 // Dashboard stays focused on time-sensitive items and Notes has room
 // to breathe. Data model + repo live in src/repo/notesRepo.ts.
 import { useEffect, useState } from "react";
+import { showConfirm } from "../../lib/dialogs";
 import {
   listNotes, createNote, updateNote, softDeleteNote, type Note,
 } from "../../repo/notesRepo";
@@ -42,7 +43,7 @@ export default function OrganizerNotes() {
     } catch (e: any) { setErr(String(e?.message ?? e)); }
   }
   async function remove(n: Note) {
-    if (!confirm("Delete this note?")) return;
+    if (!(await showConfirm("Delete this note?"))) return;
     try {
       await softDeleteNote(n.id, n.version);
       if (editing?.id === n.id) setEditing(null);

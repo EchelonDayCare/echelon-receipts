@@ -3,7 +3,7 @@ import {
   BarChart, Bar, LineChart, Line, PieChart, Pie, Cell,
   XAxis, YAxis, Tooltip, Legend, ResponsiveContainer,
 } from "recharts";
-import { showAlert, showConfirm } from "../lib/dialogs";
+import { showAlert, showConfirm, showPrompt } from "../lib/dialogs";
 import {
   askEchelon, saveQuery, deleteSavedQuery, listSavedQueries, resultToCsv,
   logQuestion, topAskedQuestions,
@@ -128,7 +128,7 @@ export default function AskEchelon() {
 
   async function onSaveReport() {
     if (!result) return;
-    const label = window.prompt("Save this question as a report?", question.trim());
+    const label = await showPrompt("Save this question as a report?", question.trim());
     if (!label || !label.trim()) return;
     await saveQuery(label.trim(), result.sql, result.chart_hint);
     setSaved(await listSavedQueries());
