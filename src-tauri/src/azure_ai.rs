@@ -12,12 +12,12 @@ use serde_json::json;
 const MISTRAL_DOC_AI_URL: &str = "https://ai-nse.services.ai.azure.com/providers/mistral/azure/ocr";
 const MISTRAL_DOC_AI_MODEL: &str = "mistral-document-ai-2512";
 
-// GPT-5.4 vision — reasoning-capable model on the same Azure OpenAI
-// resource. Tested against gpt-4.1 for this specific grid-OCR task and
-// picks up column-3 marks + differentiates X vs dash more reliably at
-// the cost of higher latency (~5-15s vs ~2-3s).
+// GPT vision — used for the monthly attendance grid because Mistral
+// Document AI truncated rows and confused X vs dash. gpt-5.4 does the
+// heavy lifting (reasoning); gpt-4.1 is a second opinion for consensus.
 const AZURE_OPENAI_ENDPOINT: &str = "https://ai-nse.openai.azure.com";
-const VISION_DEPLOY: &str = "gpt-5.4";
+const VISION_DEPLOY_PRIMARY: &str = "gpt-5.4";   // reasoning model
+const VISION_DEPLOY_SECONDARY: &str = "gpt-4.1"; // fast model, second opinion
 const VISION_API_VER: &str = "2025-04-01-preview";
 
 fn truncate(s: &str, n: usize) -> String {
@@ -112,19 +112,20 @@ async fn call_mistral_doc_ai(
 // OpenAI chat/completions with `response_format: json_schema`) and returns
 // the strict JSON string from `choices[0].message.content`. Used by the
 // monthly-attendance flow where handwriting differentiation matters.
-async fn call_gpt41_vision_json(
-    api_key: &str, file_b64: &str, mime_type: &str,
+async fn call_gpt_vision_json(
+    api_key: &str, deployment: &str, file_b64: &str, mime_type: &str,
     schema: serde_json::Value, name: &str, system_prompt: &str, user_prompt: &str,
+    reasoning_effort: Option<&str>,
 ) -> Result<String, String> {
     base64::engine::general_purpose::STANDARD
         .decode(file_b64.as_bytes())
         .map_err(|e| format!("file base64: {e}"))?;
 
     let url = format!(
-        "{AZURE_OPENAI_ENDPOINT}/openai/deployments/{VISION_DEPLOY}/chat/completions?api-version={VISION_API_VER}"
+        "{AZURE_OPENAI_ENDPOINT}/openai/deployments/{deployment}/chat/completions?api-version={VISION_API_VER}"
     );
     let data_url = format!("data:{mime_type};base64,{file_b64}");
-    let body = json!({
+    let mut body = json!({
         "messages": [
             { "role": "system", "content": system_prompt },
             { "role": "user", "content": [
@@ -132,16 +133,20 @@ async fn call_gpt41_vision_json(
                 { "type": "image_url", "image_url": { "url": data_url, "detail": "high" } }
             ]}
         ],
-        "reasoning_effort": "high",
         "max_completion_tokens": 16000,
         "response_format": {
             "type": "json_schema",
             "json_schema": { "name": name, "schema": schema, "strict": true }
         }
     });
+    if let Some(effort) = reasoning_effort {
+        body["reasoning_effort"] = json!(effort);
+    } else {
+        body["temperature"] = json!(0.0);
+    }
 
     let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(180))
+        .timeout(std::time::Duration::from_secs(240))
         .build()
         .map_err(|e| redact(format!("http client: {e}"), api_key))?;
 
@@ -160,7 +165,7 @@ async fn call_gpt41_vision_json(
         let text = resp.text().await.map_err(|e| redact(format!("read: {e}"), api_key))?;
         let retriable = matches!(status.as_u16(), 429 | 503 | 504);
         if !status.is_success() {
-            last_err = Err(redact(format!("http {status} @ {VISION_DEPLOY} vision :: {}", truncate(&text, 800)), api_key));
+            last_err = Err(redact(format!("http {status} @ {deployment} vision :: {}", truncate(&text, 800)), api_key));
             if retriable && attempt < MAX_ATTEMPTS {
                 let backoff = BASE_BACKOFF_MS * 4u64.pow(attempt - 1);
                 tokio::time::sleep(std::time::Duration::from_millis(backoff)).await;
@@ -303,6 +308,170 @@ pub struct ExtractMonthAttendanceResult {
     pub days_centre_open: Option<u32>,
     pub rows: Vec<ExtractedMonthAttendanceRow>,
     pub raw_text: String,
+    /// Cells where the two vision models disagreed. UI should highlight
+    /// these so the human reviewer can double-check before importing.
+    #[serde(default)]
+    pub uncertain_cells: Vec<MonthUncertainCell>,
+    /// Per-provider metadata for the diagnostic panel + trust indicator.
+    #[serde(default)]
+    pub providers: Vec<MonthProviderMeta>,
+}
+
+#[derive(Serialize)]
+pub struct MonthUncertainCell {
+    pub child_name: String,
+    pub day: String,
+    /// Ordered list of what each provider saw. Same order as `providers`.
+    /// "P" | "A" | "-" (blank / not emitted).
+    pub votes: Vec<String>,
+    /// The value we picked (primary provider wins tie-break).
+    pub picked: String,
+}
+
+#[derive(Serialize)]
+pub struct MonthProviderMeta {
+    pub provider: String,      // deployment name
+    pub ok: bool,
+    pub latency_ms: u64,
+    pub row_count: usize,
+    pub mark_count: usize,
+    pub error: Option<String>,
+}
+
+// Parse a single provider's raw JSON annotation into (month, days_open, rows).
+fn parse_month_annotation(
+    annotation: &str, target_month: &str,
+) -> Result<(String, Option<u32>, Vec<ExtractedMonthAttendanceRow>), String> {
+    let parsed: serde_json::Value = serde_json::from_str(annotation)
+        .map_err(|e| format!("model output not JSON: {e} :: {}", truncate(annotation, 400)))?;
+    let month = parsed["month"].as_str().unwrap_or(target_month).trim().to_string();
+    let days_centre_open = parsed["days_centre_open"].as_u64().map(|n| n as u32);
+    let rows_json = parsed["rows"].as_array().cloned().unwrap_or_default();
+    let mut rows: Vec<ExtractedMonthAttendanceRow> = Vec::with_capacity(rows_json.len());
+    for r in rows_json {
+        let name = r["child_name"].as_str().unwrap_or("").trim().to_string();
+        if name.is_empty() || is_placeholder_name(&name) { continue; }
+        let mut marks: std::collections::BTreeMap<String, String> = std::collections::BTreeMap::new();
+        if let Some(arr) = r["marks"].as_array() {
+            for entry in arr {
+                let raw = entry["mark"].as_str().unwrap_or("").trim().to_uppercase();
+                let val = match raw.as_str() {
+                    "P" => "P".to_string(),
+                    "A" | "H" | "S" | "V" => "A".to_string(),
+                    _ => continue,
+                };
+                let k = entry["day"].as_str().unwrap_or("").trim().to_string();
+                let n: u32 = match k.parse() { Ok(x) => x, Err(_) => continue };
+                if !(1..=31).contains(&n) { continue; }
+                marks.insert(n.to_string(), val);
+            }
+        }
+        if marks.is_empty() { continue; }
+        rows.push(ExtractedMonthAttendanceRow { child_name: name, marks });
+    }
+    Ok((month, days_centre_open, rows))
+}
+
+// Case-insensitive name normalisation for matching child rows across
+// providers ("Adella Buitrago" vs "adella buitrago's" vs "  Adella  Buitrago ").
+fn norm_child_name(s: &str) -> String {
+    s.trim()
+        .trim_end_matches('\'')
+        .trim_end_matches('s')
+        .trim_end_matches('\'')
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_lowercase()
+}
+
+// Merge two providers' row sets into a single consensus row set. Primary
+// wins on conflict; secondary's marks that the primary doesn't have are
+// discarded (flagged as uncertain). Every disagreement is surfaced.
+fn merge_month_consensus(
+    primary: &[ExtractedMonthAttendanceRow],
+    secondary: &[ExtractedMonthAttendanceRow],
+) -> (Vec<ExtractedMonthAttendanceRow>, Vec<MonthUncertainCell>) {
+    use std::collections::BTreeMap;
+    let mut sec_index: BTreeMap<String, &ExtractedMonthAttendanceRow> = BTreeMap::new();
+    for row in secondary { sec_index.insert(norm_child_name(&row.child_name), row); }
+    let mut merged: Vec<ExtractedMonthAttendanceRow> = Vec::with_capacity(primary.len());
+    let mut uncertain: Vec<MonthUncertainCell> = Vec::new();
+    let mut primary_keys: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    for prow in primary {
+        let key = norm_child_name(&prow.child_name);
+        primary_keys.insert(key.clone());
+        let secr = sec_index.get(&key).copied();
+        let mut merged_marks: BTreeMap<String, String> = BTreeMap::new();
+        // Union of day keys across both.
+        let mut all_days: std::collections::BTreeSet<String> = prow.marks.keys().cloned().collect();
+        if let Some(sr) = secr {
+            for k in sr.marks.keys() { all_days.insert(k.clone()); }
+        }
+        for day in all_days {
+            let p_mark = prow.marks.get(&day).cloned();
+            let s_mark = secr.and_then(|sr| sr.marks.get(&day).cloned());
+            match (p_mark.as_deref(), s_mark.as_deref()) {
+                (Some(a), Some(b)) if a == b => {
+                    // Both agree: high confidence.
+                    merged_marks.insert(day, a.to_string());
+                }
+                (Some(a), Some(b)) => {
+                    // Both spoke but differ: primary wins, flag.
+                    merged_marks.insert(day.clone(), a.to_string());
+                    uncertain.push(MonthUncertainCell {
+                        child_name: prow.child_name.clone(),
+                        day: day.clone(),
+                        votes: vec![a.to_string(), b.to_string()],
+                        picked: a.to_string(),
+                    });
+                }
+                (Some(a), None) => {
+                    // Only primary saw a mark: take it but flag.
+                    merged_marks.insert(day.clone(), a.to_string());
+                    uncertain.push(MonthUncertainCell {
+                        child_name: prow.child_name.clone(),
+                        day: day.clone(),
+                        votes: vec![a.to_string(), "-".to_string()],
+                        picked: a.to_string(),
+                    });
+                }
+                (None, Some(b)) => {
+                    // Only secondary saw a mark: primary said blank. Do NOT
+                    // write the mark (avoid over-marking) but surface for
+                    // review so the user can choose to add it manually.
+                    uncertain.push(MonthUncertainCell {
+                        child_name: prow.child_name.clone(),
+                        day: day.clone(),
+                        votes: vec!["-".to_string(), b.to_string()],
+                        picked: "-".to_string(),
+                    });
+                }
+                (None, None) => { /* unreachable */ }
+            }
+        }
+        if !merged_marks.is_empty() {
+            merged.push(ExtractedMonthAttendanceRow {
+                child_name: prow.child_name.clone(),
+                marks: merged_marks,
+            });
+        }
+    }
+    // Secondary rows the primary missed entirely: surface every mark as
+    // "primary=blank, secondary=X" for review, do NOT auto-import.
+    for srow in secondary {
+        let key = norm_child_name(&srow.child_name);
+        if primary_keys.contains(&key) { continue; }
+        for (day, mark) in &srow.marks {
+            uncertain.push(MonthUncertainCell {
+                child_name: srow.child_name.clone(),
+                day: day.clone(),
+                votes: vec!["-".to_string(), mark.to_string()],
+                picked: "-".to_string(),
+            });
+        }
+    }
+    (merged, uncertain)
 }
 
 #[tauri::command]
@@ -356,12 +525,8 @@ pub async fn extract_month_attendance(args: ExtractMonthAttendanceArgs) -> Resul
         "additionalProperties": false
     });
 
-    let key_for_redact = crate::secrets::get_secret("azure_ai_key")?;
-    // v2.2.7: swap from Mistral Document AI to GPT-4.1 vision. Mistral was
-    // truncating rows past column 3 and misreading hand-drawn X vs dash
-    // marks on this specific grid. GPT-4.1 has better handwriting
-    // comprehension and honours the column-alignment rules more reliably.
-    let system_prompt = "You are a strict OCR service. You read a handwritten daycare monthly attendance grid and emit ONLY strict JSON matching the provided schema. Do NOT add prose. Do NOT invent marks. Follow the visual rules in the user prompt exactly.";
+    let key = crate::secrets::get_secret("azure_ai_key")?;
+    let system_prompt = "You are a strict OCR service. You read a handwritten daycare monthly attendance grid and emit ONLY strict JSON matching the provided schema. Do NOT add prose. Do NOT invent marks. Follow the visual rules in the user prompt exactly.".to_string();
     let user_prompt = format!(
         "This is a photograph of a paper monthly attendance sheet for {}. \
          Rows are children (names in the leftmost column). Columns are days \
@@ -369,50 +534,99 @@ pub async fn extract_month_attendance(args: ExtractMonthAttendanceArgs) -> Resul
          vertical bands labelled 'Saturday & Sunday' that separate work weeks. \
          Some columns are labelled 'Stat Holiday' vertically to indicate a \
          closed day. Emit strict JSON per the schema. Follow the visual \
-         rules encoded on the marks.description carefully — especially: \
-         omit day keys for blank cells, skip weekend/stat-holiday columns, \
+         rules encoded on the mark.description carefully — especially: \
+         omit day entries for blank cells, skip weekend/stat-holiday columns, \
          use the numeric day labels at the top as ground truth for column \
          alignment. Known children on this centre roster: {}.",
         args.target_month, known_hint,
     );
-    let annotation = call_gpt41_vision_json(
-        &key_for_redact, &args.image_b64, &args.mime_type, schema,
-        "MonthAttendanceExtraction", system_prompt, &user_prompt,
-    ).await?;
 
-    let parsed: serde_json::Value = serde_json::from_str(&annotation)
-        .map_err(|e| redact(format!("model output not JSON: {e} :: {}", truncate(&annotation, 400)), &key_for_redact))?;
+    // Run both providers in parallel. Primary carries reasoning_effort;
+    // secondary is a fast model providing a second opinion. Cost/latency:
+    // total wall clock = slower of the two (~5-15s for gpt-5.4, ~3-5s
+    // for gpt-4.1).
+    let key_ref = &key;
+    let schema_a = schema.clone();
+    let schema_b = schema.clone();
+    let sys_a = system_prompt.clone();
+    let user_a = user_prompt.clone();
+    let sys_b = system_prompt.clone();
+    let user_b = user_prompt.clone();
+    let primary_fut = async {
+        let started = std::time::Instant::now();
+        let res = call_gpt_vision_json(
+            key_ref, VISION_DEPLOY_PRIMARY, &args.image_b64, &args.mime_type,
+            schema_a, "MonthAttendanceExtraction", &sys_a, &user_a,
+            Some("high"),
+        ).await;
+        (started.elapsed().as_millis() as u64, res)
+    };
+    let secondary_fut = async {
+        let started = std::time::Instant::now();
+        let res = call_gpt_vision_json(
+            key_ref, VISION_DEPLOY_SECONDARY, &args.image_b64, &args.mime_type,
+            schema_b, "MonthAttendanceExtraction", &sys_b, &user_b,
+            None,
+        ).await;
+        (started.elapsed().as_millis() as u64, res)
+    };
+    let ((p_ms, p_res), (s_ms, s_res)) = tokio::join!(primary_fut, secondary_fut);
 
-    let month = parsed["month"].as_str().unwrap_or(&args.target_month).trim().to_string();
-    let days_centre_open = parsed["days_centre_open"].as_u64().map(|n| n as u32);
+    // If primary hard-failed, bail — nothing to display.
+    let primary_annotation = match p_res {
+        Ok(a) => a,
+        Err(e) => return Err(redact(format!("primary ({VISION_DEPLOY_PRIMARY}) failed: {e}"), &key)),
+    };
+    let (month, days_centre_open, primary_rows) =
+        parse_month_annotation(&primary_annotation, &args.target_month)
+            .map_err(|e| redact(e, &key))?;
 
-    let rows_json = parsed["rows"].as_array().cloned().unwrap_or_default();
-    let mut rows: Vec<ExtractedMonthAttendanceRow> = Vec::with_capacity(rows_json.len());
-    for r in rows_json {
-        let name = r["child_name"].as_str().unwrap_or("").trim().to_string();
-        if name.is_empty() || is_placeholder_name(&name) { continue; }
-        let mut marks: std::collections::BTreeMap<String, String> = std::collections::BTreeMap::new();
-        if let Some(arr) = r["marks"].as_array() {
-            for entry in arr {
-                let raw = entry["mark"].as_str().unwrap_or("").trim().to_uppercase();
-                // v2.2.2: model schema is P/A only, but be defensive against
-                // stray legacy letters — collapse H/S/V to A on the fly so a
-                // model hiccup can't corrupt the DB.
-                let val = match raw.as_str() {
-                    "P" => "P".to_string(),
-                    "A" | "H" | "S" | "V" => "A".to_string(),
-                    _ => continue,
-                };
-                let k = entry["day"].as_str().unwrap_or("").trim().to_string();
-                let n: u32 = match k.parse() { Ok(x) => x, Err(_) => continue };
-                if !(1..=31).contains(&n) { continue; }
-                marks.insert(n.to_string(), val);
-            }
-        }
-        if marks.is_empty() { continue; }
-        rows.push(ExtractedMonthAttendanceRow { child_name: name, marks });
-    }
-    Ok(ExtractMonthAttendanceResult { month, days_centre_open, rows, raw_text: annotation })
+    // Secondary is best-effort — degrade to primary-only if it failed.
+    let (secondary_rows, secondary_err): (Vec<ExtractedMonthAttendanceRow>, Option<String>) = match s_res {
+        Ok(ann) => match parse_month_annotation(&ann, &args.target_month) {
+            Ok((_, _, rows)) => (rows, None),
+            Err(e) => (Vec::new(), Some(redact(e, &key))),
+        },
+        Err(e) => (Vec::new(), Some(redact(e, &key))),
+    };
+
+    let (rows, uncertain_cells) = if secondary_rows.is_empty() && secondary_err.is_some() {
+        // No consensus available — pass through primary as-is.
+        (primary_rows.clone(), Vec::new())
+    } else {
+        merge_month_consensus(&primary_rows, &secondary_rows)
+    };
+
+    let primary_mark_count: usize = primary_rows.iter().map(|r| r.marks.len()).sum();
+    let secondary_mark_count: usize = secondary_rows.iter().map(|r| r.marks.len()).sum();
+
+    let providers = vec![
+        MonthProviderMeta {
+            provider: VISION_DEPLOY_PRIMARY.to_string(),
+            ok: true,
+            latency_ms: p_ms,
+            row_count: primary_rows.len(),
+            mark_count: primary_mark_count,
+            error: None,
+        },
+        MonthProviderMeta {
+            provider: VISION_DEPLOY_SECONDARY.to_string(),
+            ok: secondary_err.is_none(),
+            latency_ms: s_ms,
+            row_count: secondary_rows.len(),
+            mark_count: secondary_mark_count,
+            error: secondary_err,
+        },
+    ];
+
+    Ok(ExtractMonthAttendanceResult {
+        month,
+        days_centre_open,
+        rows,
+        raw_text: primary_annotation,
+        uncertain_cells,
+        providers,
+    })
 }
 
 // ─── Visa / credit-card statement extraction ────────────────────────────

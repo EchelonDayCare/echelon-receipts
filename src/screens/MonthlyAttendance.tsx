@@ -71,9 +71,14 @@ export default function MonthlyAttendance() {
       matchedId: number | null;
       matchedName: string | null;
       marks: Record<string, MonthMark>;
+      /** Days flagged as low-confidence by the consensus merger (models disagreed). */
+      uncertainDays: Set<string>;
       skip: boolean;
     }[];
     unmatched: string[];
+    /** Cells where the primary model saw blank but the secondary saw a mark. */
+    missedByPrimary: { childName: string; day: string; secondaryMark: string }[];
+    providers: { provider: string; ok: boolean; latency_ms: number; row_count: number; mark_count: number; error: string | null }[];
   }>(null);
 
   async function refresh() {
@@ -163,6 +168,20 @@ export default function MonthlyAttendance() {
         knownStudentNames: knownNames,
       });
       const roster = cells.map((c) => ({ id: c.student_id, name: c.student_name }));
+      // Bucket uncertain cells by child name for quick lookup while building review rows.
+      const uncertainByChild = new Map<string, Set<string>>();
+      const missedByPrimary: { childName: string; day: string; secondaryMark: string }[] = [];
+      for (const u of res.uncertain_cells ?? []) {
+        // "primary blank + secondary marked" — surface separately so user can add manually.
+        if (u.picked === "-" && u.votes[1] && u.votes[1] !== "-") {
+          missedByPrimary.push({ childName: u.child_name, day: u.day, secondaryMark: u.votes[1] });
+          continue;
+        }
+        // Anything else = disagreement or primary-only — flag the day on that child row.
+        let s = uncertainByChild.get(u.child_name);
+        if (!s) { s = new Set<string>(); uncertainByChild.set(u.child_name, s); }
+        s.add(u.day);
+      }
       const review = res.rows.map((r) => {
         const match = matchStudentByName(r.child_name, roster);
         return {
@@ -170,6 +189,7 @@ export default function MonthlyAttendance() {
           matchedId: match?.id ?? null,
           matchedName: match?.name ?? null,
           marks: r.marks as Record<string, MonthMark>,
+          uncertainDays: uncertainByChild.get(r.child_name) ?? new Set<string>(),
           skip: !match,
         };
       });
@@ -179,8 +199,14 @@ export default function MonthlyAttendance() {
         daysOpen: res.days_centre_open,
         rows: review,
         unmatched,
+        missedByPrimary,
+        providers: res.providers ?? [],
       });
-      show(`OCR read ${review.length} rows${unmatched.length ? `; ${unmatched.length} unmatched` : ""}`);
+      const uncertainCount = (res.uncertain_cells ?? []).length;
+      show(
+        `OCR read ${review.length} rows${unmatched.length ? `; ${unmatched.length} unmatched` : ""}` +
+        (uncertainCount ? `; ${uncertainCount} cells flagged for review` : ""),
+      );
     } catch (e: any) {
       show(String(e?.message || e), "err");
     } finally {
@@ -650,6 +676,36 @@ export default function MonthlyAttendance() {
                 </div>
               );
             })()}
+            {/* Consensus diagnostic strip — how each vision model performed + how many cells disagreed. */}
+            {ocrReview.providers.length > 0 && (
+              <div style={{ marginBottom: 10, padding: 8, background: "#f0f9ff", border: "1px solid #bae6fd", borderRadius: 6, fontSize: 12, color: "#0c4a6e" }}>
+                <div style={{ fontWeight: 600, marginBottom: 4 }}>Model consensus</div>
+                <div style={{ display: "flex", gap: 14, flexWrap: "wrap" }}>
+                  {ocrReview.providers.map((p) => (
+                    <div key={p.provider}>
+                      <b>{p.provider}</b>: {p.ok ? `${p.mark_count} marks / ${p.row_count} rows` : `failed`}
+                      {" "}<span style={{ opacity: 0.6 }}>({(p.latency_ms/1000).toFixed(1)}s)</span>
+                      {p.error && <span style={{ color: "#b91c1c" }}> — {p.error.slice(0, 80)}</span>}
+                    </div>
+                  ))}
+                </div>
+                {ocrReview.rows.some((r) => r.uncertainDays.size > 0) && (
+                  <div style={{ marginTop: 4 }}>
+                    <span style={{ background: "#fef3c7", padding: "1px 4px", borderRadius: 3, fontWeight: 600 }}>⚠ Highlighted marks below</span>
+                    {" "}= the two models disagreed. Double-check before importing.
+                  </div>
+                )}
+                {ocrReview.missedByPrimary.length > 0 && (
+                  <div style={{ marginTop: 4 }}>
+                    <b>{ocrReview.missedByPrimary.length}</b> potential mark(s) that the secondary model saw but the primary didn't — not imported. Review manually if needed:
+                    {" "}<span style={{ fontStyle: "italic" }}>
+                      {ocrReview.missedByPrimary.slice(0, 8).map((m) => `${m.childName} d${m.day}(${m.secondaryMark})`).join(", ")}
+                      {ocrReview.missedByPrimary.length > 8 && ` … +${ocrReview.missedByPrimary.length - 8} more`}
+                    </span>
+                  </div>
+                )}
+              </div>
+            )}
             <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
               <thead>
                 <tr style={{ background: "#f9fafb" }}>
@@ -666,7 +722,19 @@ export default function MonthlyAttendance() {
                     <td style={{ padding: 6 }}>{r.matchedName ?? <em style={{ color: "var(--danger)" }}>no match</em>}</td>
                     <td style={{ padding: 6, fontFamily: "monospace" }}>
                       {Object.entries(r.marks).sort((a,b)=>parseInt(a[0])-parseInt(b[0]))
-                        .map(([d,m]) => `${d}:${m}`).join(" · ")}
+                        .map(([d,m]) => {
+                          const flagged = r.uncertainDays.has(d);
+                          return (
+                            <span key={d} style={{
+                              padding: flagged ? "1px 4px" : 0,
+                              background: flagged ? "#fef3c7" : "transparent",
+                              borderRadius: 3,
+                              marginRight: 4,
+                            }} title={flagged ? "Models disagreed on this day" : undefined}>
+                              {d}:{m}{flagged ? "⚠" : ""}
+                            </span>
+                          );
+                        })}
                     </td>
                     <td style={{ padding: 6, textAlign: "center" }}>
                       <input type="checkbox" checked={!r.skip} disabled={!r.matchedId}

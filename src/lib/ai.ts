@@ -66,11 +66,31 @@ export interface ExtractedMonthAttendanceRow {
   child_name: string;
   marks: Record<string, "P" | "A" | "H" | "S" | "V">;
 }
+export interface MonthUncertainCell {
+  child_name: string;
+  day: string;
+  /** Ordered by provider: [primary_vote, secondary_vote]. "-" = provider saw blank/omitted. */
+  votes: string[];
+  /** Value the merger picked (may be "-" meaning "no mark written"). */
+  picked: string;
+}
+export interface MonthProviderMeta {
+  provider: string;
+  ok: boolean;
+  latency_ms: number;
+  row_count: number;
+  mark_count: number;
+  error: string | null;
+}
 export interface ExtractMonthAttendanceResult {
   month: string;
   days_centre_open: number | null;
   rows: ExtractedMonthAttendanceRow[];
   raw_text: string;
+  /** Cells where the two vision providers disagreed. Highlight these in the review modal. */
+  uncertain_cells?: MonthUncertainCell[];
+  /** Per-provider metadata (deployment name, latency, row/mark counts). */
+  providers?: MonthProviderMeta[];
 }
 
 export async function extractMonthAttendance(opts: {
