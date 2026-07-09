@@ -35,7 +35,7 @@ export async function listNotes(query?: string, limit = 200): Promise<Note[]> {
     );
     return rows.map(rowToObj);
   }
-  const like = `%${q.replace(/[%_]/g, (m) => "\\" + m)}%`;
+  const like = `%${q.replace(/[\\%_]/g, (m) => "\\" + m)}%`;
   const rows = await d.select<Row[]>(
     `SELECT * FROM organizer_notes
        WHERE deleted_at IS NULL AND body LIKE ? ESCAPE '\\'

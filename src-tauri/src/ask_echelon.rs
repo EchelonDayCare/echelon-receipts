@@ -638,12 +638,20 @@ fn ensure_limit(sql: &str) -> Result<String, String> {
 // `SELECT 'World War 2 started in 1939' AS answer`, which is syntactically
 // a valid SELECT but has nothing to do with the daycare's data.
 //
-// Match is a case-insensitive whole-word check against the SQL text. False
-// positives here (a table name buried in a string literal) are harmless —
-// the query would then also reference that table via FROM.
+// Match is a case-insensitive whole-word check against the SQL text with
+// string literals stripped first. The stripping matters because the LLM
+// can emit off-topic answers as pure literals like
+//   SELECT 'staff meeting about WWII' AS answer
+// where the word "staff" happens to also be a real table name. Without
+// stripping, that spurious match would defeat the whole guard. After
+// stripping, no FROM/JOIN clause references a real table and the guard
+// refuses. Note: a real query that references a table via FROM will
+// still leave the bare identifier outside any quotes, so it survives
+// stripping and passes.
 fn sql_references_a_user_table(sql: &str, tables: &[String]) -> bool {
     if tables.is_empty() { return false; }
-    let lower = sql.to_lowercase();
+    let stripped = strip_sql_string_literals(sql);
+    let lower = stripped.to_lowercase();
     for t in tables {
         let t_lower = t.to_lowercase();
         // Bracket the table name with non-identifier characters so `students`
@@ -656,6 +664,45 @@ fn sql_references_a_user_table(sql: &str, tables: &[String]) -> bool {
         }
     }
     false
+}
+
+// Replace the contents of every '...' or "..." literal with spaces, keeping
+// the outer quotes so byte offsets stay similar. Handles doubled-quote
+// escapes ('' inside '...' and "" inside "..."), which are the only quote
+// escape SQLite supports. Backslash escapes are NOT SQL; we intentionally
+// don't handle them so a `\'` inside a literal doesn't accidentally end
+// the literal early and unmask content we'd rather scrub.
+fn strip_sql_string_literals(sql: &str) -> String {
+    let mut out = String::with_capacity(sql.len());
+    let mut chars = sql.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\'' || c == '"' {
+            let quote = c;
+            out.push(quote);
+            while let Some(&next) = chars.peek() {
+                if next == quote {
+                    chars.next();
+                    // Doubled quote inside literal ('' or "") is an escape,
+                    // not the closer — replace both and continue scrubbing.
+                    if chars.peek() == Some(&quote) {
+                        chars.next();
+                        out.push(' ');
+                        out.push(' ');
+                        continue;
+                    }
+                    out.push(quote);
+                    break;
+                }
+                chars.next();
+                // Replace inner char with a space so word-boundary logic
+                // still sees a separator.
+                out.push(' ');
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
 }
 
 fn is_ident_char(c: char) -> bool {
@@ -718,6 +765,38 @@ mod tests {
         assert!(sql_references_a_user_table("SELECT COUNT(*) FROM students", &tables));
         assert!(sql_references_a_user_table("SELECT * FROM (SELECT * FROM receipts WHERE voided=0) LIMIT 500", &tables));
         assert!(sql_references_a_user_table("select s.name from Students s join staff st on 1=1", &tables));
+    }
+
+    #[test]
+    fn scope_guard_ignores_table_names_inside_string_literals() {
+        // Off-topic SQL where the model happened to include a real table
+        // name inside a string literal. This must NOT pass — otherwise the
+        // guard is trivially bypassable because table names like `staff`,
+        // `receipts`, `students`, `expenses` are common English words.
+        let tables = vec![
+            "students".to_string(),
+            "receipts".to_string(),
+            "staff".to_string(),
+            "expenses".to_string(),
+        ];
+        assert!(!sql_references_a_user_table(
+            "SELECT 'staff meeting notes about WWII' AS answer",
+            &tables,
+        ));
+        assert!(!sql_references_a_user_table(
+            r#"SELECT "receipts of history are ancient" AS a"#,
+            &tables,
+        ));
+        // Doubled-quote escape inside a literal is still content, not code.
+        assert!(!sql_references_a_user_table(
+            "SELECT 'she said ''students are smart'' quote' AS a",
+            &tables,
+        ));
+        // A real query with a table name AND a string literal must still pass.
+        assert!(sql_references_a_user_table(
+            "SELECT name FROM students WHERE name = 'staff'",
+            &tables,
+        ));
     }
 
     #[test]
