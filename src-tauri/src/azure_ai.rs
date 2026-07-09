@@ -146,7 +146,7 @@ async fn call_gpt_vision_json(
     }
 
     let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(240))
+        .timeout(std::time::Duration::from_secs(600))
         .build()
         .map_err(|e| redact(format!("http client: {e}"), api_key))?;
 
@@ -571,23 +571,43 @@ pub async fn extract_month_attendance(args: ExtractMonthAttendanceArgs) -> Resul
         (started.elapsed().as_millis() as u64, res)
     };
     let ((p_ms, p_res), (s_ms, s_res)) = tokio::join!(primary_fut, secondary_fut);
+    eprintln!(
+        "[month-ocr] primary={} in {}ms ok={}, secondary={} in {}ms ok={}",
+        VISION_DEPLOY_PRIMARY, p_ms, p_res.is_ok(),
+        VISION_DEPLOY_SECONDARY, s_ms, s_res.is_ok(),
+    );
+    if let Err(ref e) = p_res { eprintln!("[month-ocr] primary error: {}", truncate(e, 600)); }
+    if let Err(ref e) = s_res { eprintln!("[month-ocr] secondary error: {}", truncate(e, 600)); }
 
-    // If primary hard-failed, bail — nothing to display.
-    let primary_annotation = match p_res {
-        Ok(a) => a,
-        Err(e) => return Err(redact(format!("primary ({VISION_DEPLOY_PRIMARY}) failed: {e}"), &key)),
+    // If primary hard-failed, try to fall back to the secondary — otherwise bail.
+    let (primary_annotation, primary_ok, primary_err_str): (String, bool, Option<String>) = match p_res {
+        Ok(a) => (a, true, None),
+        Err(e) => {
+            let err_str = redact(e, &key);
+            eprintln!("[month-ocr] primary failed — falling back to secondary only");
+            match &s_res {
+                Ok(a) => (a.clone(), false, Some(err_str)),
+                Err(_) => return Err(format!("both providers failed. primary ({VISION_DEPLOY_PRIMARY}): {err_str}")),
+            }
+        }
     };
     let (month, days_centre_open, primary_rows) =
         parse_month_annotation(&primary_annotation, &args.target_month)
             .map_err(|e| redact(e, &key))?;
 
-    // Secondary is best-effort — degrade to primary-only if it failed.
-    let (secondary_rows, secondary_err): (Vec<ExtractedMonthAttendanceRow>, Option<String>) = match s_res {
-        Ok(ann) => match parse_month_annotation(&ann, &args.target_month) {
-            Ok((_, _, rows)) => (rows, None),
+    // Secondary is best-effort — degrade to primary-only if it failed OR if
+    // we already promoted secondary into primary above.
+    let (secondary_rows, secondary_err): (Vec<ExtractedMonthAttendanceRow>, Option<String>) = if primary_ok {
+        match s_res {
+            Ok(ann) => match parse_month_annotation(&ann, &args.target_month) {
+                Ok((_, _, rows)) => (rows, None),
+                Err(e) => (Vec::new(), Some(redact(e, &key))),
+            },
             Err(e) => (Vec::new(), Some(redact(e, &key))),
-        },
-        Err(e) => (Vec::new(), Some(redact(e, &key))),
+        }
+    } else {
+        // Secondary was already promoted to primary — no cross-check available.
+        (Vec::new(), Some("primary timed out; no second opinion available".to_string()))
     };
 
     let (rows, uncertain_cells) = if secondary_rows.is_empty() && secondary_err.is_some() {
@@ -603,11 +623,11 @@ pub async fn extract_month_attendance(args: ExtractMonthAttendanceArgs) -> Resul
     let providers = vec![
         MonthProviderMeta {
             provider: VISION_DEPLOY_PRIMARY.to_string(),
-            ok: true,
+            ok: primary_ok,
             latency_ms: p_ms,
-            row_count: primary_rows.len(),
-            mark_count: primary_mark_count,
-            error: None,
+            row_count: if primary_ok { primary_rows.len() } else { 0 },
+            mark_count: if primary_ok { primary_mark_count } else { 0 },
+            error: primary_err_str,
         },
         MonthProviderMeta {
             provider: VISION_DEPLOY_SECONDARY.to_string(),
