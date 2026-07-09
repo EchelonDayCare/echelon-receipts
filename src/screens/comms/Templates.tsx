@@ -43,7 +43,7 @@ export default function Templates() {
       <p style={{ color: "var(--muted)", marginTop: -8 }}>
         Reusable subject + body for group emails.
         <br />
-        Built-in starters are always available. Templates support the same merge tokens as Compose.
+        Built-in starters are always available and can be edited (name stays fixed so they're easy to find). Templates support the same merge tokens as Compose.
       </p>
 
       <table style={{ width: "100%", borderCollapse: "collapse", marginTop: 16 }}>
@@ -65,7 +65,7 @@ export default function Templates() {
               <td style={{ padding: 8 }}>{t.kind}</td>
               <td style={{ padding: 8, color: "var(--muted)" }}>{t.subject}</td>
               <td style={{ padding: 8 }}>
-                <button className="btn link" onClick={() => setEditing(t)}>{t.is_builtin ? "View" : "Edit"}</button>
+                <button className="btn link" onClick={() => setEditing(t)}>Edit</button>
                 <button className="btn link" onClick={() => duplicate(t)}>Duplicate</button>
                 {!t.is_builtin && <button className="btn link danger" onClick={() => onDelete(t)}>Delete</button>}
               </td>
@@ -77,24 +77,27 @@ export default function Templates() {
       {editing && (
         <div onClick={() => setEditing(null)} style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,.4)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 100 }}>
           <div onClick={(e) => e.stopPropagation()} style={{ background: "#fff", padding: 24, borderRadius: 8, width: "90%", maxWidth: 700, maxHeight: "90vh", overflow: "auto" }}>
-            <h2 style={{ marginTop: 0 }}>{editing.id ? (editing.is_builtin ? "View" : "Edit") : "New"} template</h2>
+            <h2 style={{ marginTop: 0 }}>{editing.id ? "Edit" : "New"} template{editing.is_builtin ? " (built-in)" : ""}</h2>
             <label style={{ display: "block", fontWeight: 600, marginBottom: 4 }}>Name</label>
-            <input value={editing.name} onChange={(e) => setEditing({ ...editing, name: e.target.value })} readOnly={!!editing.is_builtin} style={{ width: "100%", padding: 8, marginBottom: 12 }} />
+            <input value={editing.name} onChange={(e) => setEditing({ ...editing, name: e.target.value })} readOnly={!!editing.is_builtin} style={{ width: "100%", padding: 8, marginBottom: 4, background: editing.is_builtin ? "#f8fafc" : undefined }} />
+            {editing.is_builtin ? (
+              <div style={{ fontSize: 11, color: "var(--muted)", marginBottom: 12 }}>Built-in name is fixed. Duplicate to rename.</div>
+            ) : <div style={{ marginBottom: 8 }} />}
 
             <label style={{ display: "block", fontWeight: 600, marginBottom: 4 }}>Kind</label>
-            <select value={editing.kind} onChange={(e) => setEditing({ ...editing, kind: e.target.value })} disabled={!!editing.is_builtin} style={{ marginBottom: 12 }}>
+            <select value={editing.kind} onChange={(e) => setEditing({ ...editing, kind: e.target.value })} style={{ marginBottom: 12 }}>
               {KINDS.map((k) => <option key={k} value={k}>{k}</option>)}
             </select>
 
             <label style={{ display: "block", fontWeight: 600, marginBottom: 4 }}>Subject</label>
-            <input value={editing.subject} onChange={(e) => setEditing({ ...editing, subject: e.target.value })} readOnly={!!editing.is_builtin} style={{ width: "100%", padding: 8, marginBottom: 12 }} />
+            <input value={editing.subject} onChange={(e) => setEditing({ ...editing, subject: e.target.value })} style={{ width: "100%", padding: 8, marginBottom: 12 }} />
 
             <label style={{ display: "block", fontWeight: 600, marginBottom: 4 }}>Body</label>
-            <textarea value={editing.body} onChange={(e) => setEditing({ ...editing, body: e.target.value })} readOnly={!!editing.is_builtin} rows={14} style={{ width: "100%", padding: 8, fontFamily: "inherit" }} />
+            <textarea value={editing.body} onChange={(e) => setEditing({ ...editing, body: e.target.value })} rows={14} style={{ width: "100%", padding: 8, fontFamily: "inherit" }} />
 
             <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 12 }}>
               <button className="btn secondary" onClick={() => setEditing(null)}>Cancel</button>
-              {!editing.is_builtin && <button className="btn" onClick={() => onSave(editing)}>Save</button>}
+              <button className="btn" onClick={() => onSave({ ...editing, name: editing.is_builtin ? (templates.find(x => x.id === editing.id)?.name ?? editing.name) : editing.name })}>Save</button>
             </div>
           </div>
         </div>
