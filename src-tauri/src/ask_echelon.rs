@@ -92,11 +92,30 @@ pub async fn ask_echelon(
     // Build schema context via the app's live DB connection (SQLCipher-
     // encrypted after v2.0.0). Opening our own rusqlite handle to the file
     // would fail with "file is not a database" for encrypted DBs.
-    let schema_ctx = build_schema_context(&gate, args.redact, args.allowed_tables.as_ref()).await?;
+    let (schema_ctx, user_tables) = build_schema_context(&gate, args.redact, args.allowed_tables.as_ref()).await?;
 
     // ── Step 1: Ask the model for SQL ───────────────────────────────────
     let sql_raw = generate_sql(&azure_ai_key, &args.question, &schema_ctx).await?;
     let sql = validate_and_normalize_sql(&sql_raw)?;
+
+    // ── Step 1b: Scope check.
+    // Ask Echelon is intentionally scoped to (a) the app's data and (b) the
+    // app's features (via howto_answer, earlier). A question like "when did
+    // WWII happen?" can still coax the model into writing valid SQL like
+    // `SELECT '1939' AS answer` — syntactically fine, semantically nonsense.
+    // We refuse any SQL that doesn't touch at least one real user table.
+    if !sql_references_a_user_table(&sql, &user_tables) {
+        let summary = "I can only answer questions about your daycare data (receipts, attendance, staff hours, expenses, credentials, etc.) or how to use this app (\"how do I add a student?\"). Try one of those.".to_string();
+        return Ok(AskEchelonResult {
+            sql: String::new(),
+            columns: Vec::new(),
+            rows: Vec::new(),
+            summary,
+            chart_hint: "none".to_string(),
+            elapsed_ms: started.elapsed().as_millis() as u64,
+            truncated: false,
+        });
+    }
 
     // ── Step 2: Execute against the same live connection.
     // SQL AST validation above guarantees this is a single SELECT (or
@@ -126,7 +145,7 @@ pub async fn ask_echelon(
 
 async fn build_schema_context(
     gate: &DbGate, redact: bool, allowed: Option<&Vec<String>>,
-) -> Result<String, String> {
+) -> Result<(String, Vec<String>), String> {
     // Enumerate user tables (skip internal + tauri-plugin-sql housekeeping).
     let master = gate
         .select(
@@ -178,7 +197,8 @@ async fn build_schema_context(
         }
     }
 
-    Ok(out)
+    let table_names: Vec<String> = tables.into_iter().map(|(n, _)| n).collect();
+    Ok((out, table_names))
 }
 
 // C-2: this used to be a PII *blocklist* — redact only columns whose name
@@ -374,6 +394,7 @@ async fn howto_answer(api_key: &str, question: &str) -> Result<(String, String),
          - Use the arrow notation for menus, e.g. 'Students → Roster → + Add Student'.\n\
          - Reference real button labels in quotes when they help ('Save', 'Upload sheet', '✨ Amend with AI').\n\
          - If the requested feature is NOT in the app map, say so plainly and suggest the closest existing feature — do not guess.\n\
+         - If the question has NOTHING to do with this daycare app (general knowledge, world facts, unrelated software, jokes, personal questions), reply with EXACTLY this sentence and nothing else: \"I can only help with features of this Echelon Receipts app. Try 'how do I add a student?' or 'how do I email a receipt?'.\"\n\
          - Do NOT mention SQL, tables, columns, JSON, or code. This is an end-user answer.\n\
          - No preamble. Start directly with step 1.\n\
          \n\
@@ -407,7 +428,8 @@ async fn generate_sql(
         • If aggregating over time, GROUP BY strftime('%Y-%m', <date>) etc.\n\
         • Add LIMIT 500 unless the question is a single-row aggregate (COUNT/SUM/AVG).\n\
         • The 'voided' flag on receipts means the receipt is cancelled — exclude WHERE voided=0 for revenue.\n\
-        • Refunds are receipts with is_refund=1; their amount is stored positive but nets negative in revenue.\n";
+        • Refunds are receipts with is_refund=1; their amount is stored positive but nets negative in revenue.\n\
+        • SCOPE: only answer questions about the schema below. If the question is unrelated (general knowledge, world facts, jokes, unrelated apps), return the literal SQL `SELECT 1 WHERE 0` — the caller will detect it and refuse politely. NEVER invent tables or hardcode literal answers to non-data questions.\n";
     let user = format!(
         "SCHEMA:\n{}\n\nQUESTION:\n{}\n\nReturn one SQLite SELECT statement:",
         schema_ctx, question
@@ -609,6 +631,36 @@ fn ensure_limit(sql: &str) -> Result<String, String> {
     Ok(format!("SELECT * FROM ({}) LIMIT {}", sql, HARD_ROW_CAP))
 }
 
+// Scope guard — returns true iff the (already validated) SQL text mentions
+// at least one real user table from `tables`. Prevents the model from
+// answering off-topic questions with hardcoded literals like
+// `SELECT 'World War 2 started in 1939' AS answer`, which is syntactically
+// a valid SELECT but has nothing to do with the daycare's data.
+//
+// Match is a case-insensitive whole-word check against the SQL text. False
+// positives here (a table name buried in a string literal) are harmless —
+// the query would then also reference that table via FROM.
+fn sql_references_a_user_table(sql: &str, tables: &[String]) -> bool {
+    if tables.is_empty() { return false; }
+    let lower = sql.to_lowercase();
+    for t in tables {
+        let t_lower = t.to_lowercase();
+        // Bracket the table name with non-identifier characters so `students`
+        // doesn't spuriously match inside `students_archive` on either side.
+        for (idx, _) in lower.match_indices(&t_lower) {
+            let before_ok = idx == 0 || !is_ident_char(lower.as_bytes()[idx - 1] as char);
+            let end = idx + t_lower.len();
+            let after_ok = end == lower.len() || !is_ident_char(lower.as_bytes()[end] as char);
+            if before_ok && after_ok { return true; }
+        }
+    }
+    false
+}
+
+fn is_ident_char(c: char) -> bool {
+    c.is_ascii_alphanumeric() || c == '_'
+}
+
 // ─── Read-only execution ────────────────────────────────────────────────
 //
 // The SQL AST validator above guarantees this is a single SELECT (or WITH
@@ -643,6 +695,46 @@ async fn execute_readonly(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn scope_guard_rejects_literal_answer_sql() {
+        let tables = vec!["students".to_string(), "receipts".to_string(), "staff".to_string()];
+        // The exact off-topic SQL the model produced for "when did WWII happen?"
+        assert!(!sql_references_a_user_table(
+            "SELECT 'World War 2 started on September 1, 1939' AS answer",
+            &tables
+        ));
+        assert!(!sql_references_a_user_table(
+            "SELECT * FROM (SELECT 1 WHERE 0) LIMIT 500",
+            &tables
+        ));
+        assert!(!sql_references_a_user_table("SELECT 42", &tables));
+    }
+
+    #[test]
+    fn scope_guard_accepts_real_queries() {
+        let tables = vec!["students".to_string(), "receipts".to_string(), "staff".to_string()];
+        assert!(sql_references_a_user_table("SELECT COUNT(*) FROM students", &tables));
+        assert!(sql_references_a_user_table("SELECT * FROM (SELECT * FROM receipts WHERE voided=0) LIMIT 500", &tables));
+        assert!(sql_references_a_user_table("select s.name from Students s join staff st on 1=1", &tables));
+    }
+
+    #[test]
+    fn scope_guard_word_boundaries() {
+        // "students" must not spuriously match inside "students_archive_v2".
+        let tables = vec!["students".to_string()];
+        assert!(sql_references_a_user_table("SELECT * FROM students WHERE id=1", &tables));
+        // The bracketing check: an SQL that only references a different table
+        // with a similar prefix should NOT satisfy the guard.
+        assert!(!sql_references_a_user_table("SELECT 'students_archive_v2 is not on the schema' AS a", &tables));
+    }
+
+    #[test]
+    fn scope_guard_empty_tables_refuses_all() {
+        // Fail closed — a schema with zero user tables means every query is
+        // off-topic by construction.
+        assert!(!sql_references_a_user_table("SELECT * FROM anything", &[]));
+    }
 
     // ── select_with_columns: order preservation + empty-set headers ─────
     #[tokio::test]
