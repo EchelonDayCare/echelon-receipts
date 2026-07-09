@@ -390,6 +390,23 @@ export default function MonthlyAttendance() {
         <button className="btn secondary" onClick={() => { const t = todayYm(); setYear(t.year); setMonthState(t.month); }}>This month</button>
         <div className="grow" />
         <button className="btn secondary" onClick={() => setShowCalendar((v) => !v)}>{showCalendar ? "Hide" : "Show"} Centre Calendar</button>
+        <button
+          className="btn secondary"
+          onClick={async () => {
+            const ok = await showConfirm(
+              `Clear every attendance mark in ${MONTH_NAMES[month-1]} ${year}?\n\n` +
+              `Days with in/out evidence keep their times; only the P/A marks are removed. Cannot be undone.`,
+            );
+            if (!ok) return;
+            await clearMonthMarks(year, month);
+            await refresh();
+            show(`Cleared all marks for ${MONTH_NAMES[month-1]} ${year}`);
+          }}
+          disabled={cells.length === 0}
+          title="Wipe every P/A mark for this month"
+        >
+          Clear This Month
+        </button>
         <button className="btn secondary" onClick={printBlank} disabled={cells.length === 0}>Print Blank Template</button>
       </div>
 
