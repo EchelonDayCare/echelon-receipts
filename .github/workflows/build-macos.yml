@@ -96,7 +96,6 @@ jobs:
           APP_DIR="src-tauri/target/aarch64-apple-darwin/release/bundle/macos"
           APP_NAME="Echelon Daycare.app"
           APP="$APP_DIR/$APP_NAME"
-          BIN="$APP/Contents/MacOS/Echelon Daycare"
           FRAMEWORKS="$APP/Contents/Frameworks"
 
           if [ ! -d "$APP" ]; then
@@ -104,22 +103,27 @@ jobs:
             ls -la "$APP_DIR" || true
             exit 1
           fi
-          if [ ! -f "$BIN" ]; then
-            echo "::error::Main binary not found at $BIN"
-            ls -la "$APP/Contents/MacOS/" || true
-            exit 1
-          fi
           mkdir -p "$FRAMEWORKS"
 
           # Every Mach-O executable inside Contents/MacOS is a root
-          # for the dep walk. That includes any FFmpeg / helper
-          # sidecars Tauri copies in via `externalBin`.
+          # for the dep walk. That includes the main app binary
+          # (named after the Cargo crate, e.g. `echelon-receipts`,
+          # not `productName`) plus any FFmpeg / helper sidecars
+          # Tauri copies in via `externalBin`. Discover them all by
+          # inspection so we don't hardcode a name that Tauri may
+          # change (or that differs between crate name and product
+          # name).
           ROOTS=()
           while IFS= read -r -d '' f; do
             if file "$f" | grep -q 'Mach-O.*executable'; then
               ROOTS+=("$f")
             fi
           done < <(find "$APP/Contents/MacOS" -type f -print0)
+          if [ "${#ROOTS[@]}" -eq 0 ]; then
+            echo "::error::No Mach-O executables found under $APP/Contents/MacOS"
+            ls -la "$APP/Contents/MacOS/" || true
+            exit 1
+          fi
           echo "── Mach-O roots to process ──"
           printf '  %s\n' "${ROOTS[@]}"
 
