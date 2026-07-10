@@ -202,8 +202,17 @@ pub fn build_reel_cmd(spec: &ReelSpec) -> Vec<String> {
     args.push(spec.fps.to_string());
     match spec.encoder {
         HwEncoder::VideoToolbox => {
+            // h264_videotoolbox accepts profile as a STRING (baseline /
+            // main / high / extended), not the H.264-spec integer. An
+            // earlier version passed "1" thinking it meant Main; recent
+            // FFmpeg builds parse that as `-level 1.0` (176x144 max)
+            // and reject 1080p with "Invalid Profile/Level" at open.
+            // Also pin `-level 4.0` so VT can't auto-select a level
+            // too low for 1920x1080p30 on any future build.
             args.push("-profile:v".into());
-            args.push("1".into()); // Main (integer for VT)
+            args.push("main".into());
+            args.push("-level".into());
+            args.push("4.0".into());
             args.push("-bf".into());
             args.push("0".into());
             if spec.video_bitrate_kbps < 2000 {
@@ -384,12 +393,18 @@ mod tests {
     }
 
     #[test]
-    fn videotoolbox_uses_integer_profile() {
+    fn videotoolbox_uses_string_main_profile_and_pinned_level() {
+        // Regression: v2.3.1 shipped `-profile:v 1` which recent FFmpeg
+        // builds parse as `-level 1.0` and reject 1080p at encoder open
+        // ("Invalid Profile/Level"). h264_videotoolbox needs the string
+        // form; keep an explicit -level so VT never auto-picks too low.
         let mut spec = base_spec();
         spec.encoder = HwEncoder::VideoToolbox;
         let args = build_reel_cmd(&spec);
-        let idx = args.iter().position(|a| a == "-profile:v").unwrap();
-        assert_eq!(args[idx + 1], "1"); // Not "main"
+        let pidx = args.iter().position(|a| a == "-profile:v").unwrap();
+        assert_eq!(args[pidx + 1], "main"); // NOT "1"
+        let lidx = args.iter().position(|a| a == "-level").unwrap();
+        assert_eq!(args[lidx + 1], "4.0");
         assert!(args.windows(2).any(|w| w[0] == "-bf" && w[1] == "0"));
     }
 
