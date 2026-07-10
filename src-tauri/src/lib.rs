@@ -41,6 +41,7 @@ fn embedded_migrations() -> Vec<(i64, &'static str, &'static str)> {
         (9, "add_staff_credentials_drills", include_str!("../migrations/009_staff_credentials.sql")),
         (10, "add_child_attendance", include_str!("../migrations/010_child_attendance.sql")),
         (11, "add_no_lunch_flag", include_str!("../migrations/011_no_lunch.sql")),
+        (12, "add_graduation_renders", include_str!("../migrations/012_graduation_renders.sql")),
     ]
 }
 

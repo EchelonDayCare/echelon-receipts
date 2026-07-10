@@ -22,6 +22,41 @@ use tauri_plugin_shell::process::CommandChild;
 use tauri_plugin_shell::ShellExt;
 
 use crate::graduation::{concat, curate, engine, paths, pptx, preflight, progress};
+use crate::db_gate::DbGate;
+
+/// Best-effort audit write into `graduation_renders` so Ask Echelon can
+/// answer render-history questions. Failures are logged and swallowed —
+/// the render itself already succeeded and we don't want a DB hiccup
+/// to surface as a user-facing error.
+async fn record_render(
+    db_gate: &DbGate,
+    kind: &'static str,
+    year: i64,
+    student_id: Option<i64>,
+    output_path: &str,
+    duration_ms: Option<i64>,
+    frames_encoded: Option<i64>,
+    slides_written: Option<i64>,
+) {
+    let output_path = output_path.to_string();
+    let res = db_gate
+        .with_conn(move |conn| {
+            conn.execute(
+                "INSERT INTO graduation_renders \
+                 (kind, year, student_id, output_path, duration_ms, frames_encoded, slides_written) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                rusqlite::params![
+                    kind, year, student_id, output_path,
+                    duration_ms, frames_encoded, slides_written,
+                ],
+            )?;
+            Ok(())
+        })
+        .await;
+    if let Err(e) = res {
+        eprintln!("[graduation] failed to record render history: {e:?}");
+    }
+}
 
 /// Session-level state that tracks the currently-running FFmpeg render
 /// so the frontend can cancel it. Also tracks whether the current or
@@ -203,6 +238,7 @@ pub struct RenderReelResponse {
 pub async fn graduation_render_reel(
     app: AppHandle,
     state: State<'_, RenderState>,
+    db_gate: State<'_, DbGate>,
     req: RenderReelRequest,
 ) -> Result<RenderReelResponse, String> {
     // Clear any stale cancel flag from a previous batch.
@@ -332,8 +368,20 @@ pub async fn graduation_render_reel(
     let _ = std::fs::remove_file(&concat_list);
 
     let published = paths::atomic_publish(&tmp_path, &final_path)?;
+    let output_path = published.to_string_lossy().into_owned();
+    record_render(
+        &db_gate,
+        "reel",
+        req.year as i64,
+        None,
+        &output_path,
+        Some(outcome.duration_ms),
+        Some(outcome.frames as i64),
+        None,
+    )
+    .await;
     Ok(RenderReelResponse {
-        output_path: published.to_string_lossy().into_owned(),
+        output_path,
         frames_encoded: outcome.frames,
         duration_ms: outcome.duration_ms,
     })
@@ -347,6 +395,7 @@ pub struct RenderChildRequest {
     pub output_folder: String,
     pub student_id: i64,
     pub display_name: String,
+    pub year: u32,
     pub music_track: Option<String>,
     pub music_folder: Option<String>,
     pub duration_sec: f64,
@@ -358,6 +407,7 @@ pub struct RenderChildRequest {
 pub async fn graduation_render_child(
     app: AppHandle,
     state: State<'_, RenderState>,
+    db_gate: State<'_, DbGate>,
     req: RenderChildRequest,
 ) -> Result<RenderReelResponse, String> {
     // Honor an in-flight cancel from a batch loop before we even scan.
@@ -440,8 +490,20 @@ pub async fn graduation_render_child(
     };
     let _ = std::fs::remove_file(&concat_list);
     let published = paths::atomic_publish(&tmp_path, &final_path)?;
+    let output_path = published.to_string_lossy().into_owned();
+    record_render(
+        &db_gate,
+        "per_child",
+        req.year as i64,
+        Some(req.student_id),
+        &output_path,
+        Some(outcome.duration_ms),
+        Some(outcome.frames as i64),
+        None,
+    )
+    .await;
     Ok(RenderReelResponse {
-        output_path: published.to_string_lossy().into_owned(),
+        output_path,
         frames_encoded: outcome.frames,
         duration_ms: outcome.duration_ms,
     })
@@ -501,8 +563,9 @@ pub struct RenderSlidesResponse {
 }
 
 #[tauri::command]
-pub fn graduation_render_slides(
+pub async fn graduation_render_slides(
     app: AppHandle,
+    db_gate: State<'_, DbGate>,
     req: RenderSlidesRequest,
 ) -> Result<RenderSlidesResponse, String> {
     if req.students.is_empty() {
@@ -542,10 +605,23 @@ pub fn graduation_render_slides(
     };
     pptx::render_slides(&tpl, &tmp_path, &ctx)?;
     let published = paths::atomic_publish(&tmp_path, &final_path)?;
+    let output_path = published.to_string_lossy().into_owned();
+    let template_used = tpl.to_string_lossy().into_owned();
+    record_render(
+        &db_gate,
+        "slides",
+        req.year as i64,
+        None,
+        &output_path,
+        None,
+        None,
+        Some(req.students.len() as i64),
+    )
+    .await;
     Ok(RenderSlidesResponse {
-        output_path: published.to_string_lossy().into_owned(),
+        output_path,
         slides_written: req.students.len(),
-        template_used: tpl.to_string_lossy().into_owned(),
+        template_used,
     })
 }
 

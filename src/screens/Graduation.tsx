@@ -209,6 +209,7 @@ export default function Graduation() {
               output_folder: layout.output,
               student_id: c.student_id,
               display_name: c.display_name,
+              year: Number(year),
               music_track: null,
               music_folder: layout.music,
               duration_sec: KID_DURATION_SEC,
