@@ -405,6 +405,38 @@ pub fn gc_cache(dir: &Path, max_age_days: u64, max_bytes: u64) -> Vec<String> {
     warnings
 }
 
+/// Find a photo in `child_folder` whose filename stem matches `display_name`
+/// case-insensitively, with extension `.jpg`, `.jpeg`, `.png`, or `.heic`.
+/// Returns `None` if no matching photo is found or the folder doesn't exist.
+pub fn child_photo(child_folder: &Path, display_name: &str) -> Option<PathBuf> {
+    const PHOTO_EXTS: &[&str] = &["jpg", "jpeg", "png", "heic"];
+    let name_lower = display_name.to_lowercase();
+    let entries = std::fs::read_dir(child_folder).ok()?;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        let ext_ok = path
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(|e| PHOTO_EXTS.iter().any(|x| e.eq_ignore_ascii_case(x)))
+            .unwrap_or(false);
+        if !ext_ok {
+            continue;
+        }
+        let stem_matches = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .map(|s| s.to_lowercase() == name_lower)
+            .unwrap_or(false);
+        if stem_matches {
+            return Some(path);
+        }
+    }
+    None
+}
+
 /// Validate a user-supplied folder path used by graduation commands.
 /// This is a lighter check than [`crate::path_guard::validate_existing_file`]
 /// because the base folder is chosen by the user via a native picker and
@@ -517,5 +549,33 @@ mod tests {
     fn student_folder_is_zero_padded() {
         assert_eq!(student_folder_name(7, "Ann"), "0007-Ann");
         assert_eq!(student_folder_name(1234, "Ben"), "1234-Ben");
+    }
+
+    #[test]
+    fn child_photo_finds_exact_and_case_variants() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = dir.path();
+        std::fs::write(base.join("Aarav Kumar.jpg"), b"fake").unwrap();
+        assert!(child_photo(base, "Aarav Kumar").is_some());
+        assert!(child_photo(base, "aarav kumar").is_some());
+        assert!(child_photo(base, "AARAV KUMAR").is_some());
+        assert!(child_photo(base, "Other Child").is_none());
+    }
+
+    #[test]
+    fn child_photo_accepts_heic_and_png() {
+        let heic_dir = tempfile::tempdir().unwrap();
+        std::fs::write(heic_dir.path().join("Mia.heic"), b"x").unwrap();
+        assert!(child_photo(heic_dir.path(), "Mia").is_some());
+
+        let png_dir = tempfile::tempdir().unwrap();
+        std::fs::write(png_dir.path().join("Ben.PNG"), b"x").unwrap();
+        assert!(child_photo(png_dir.path(), "ben").is_some());
+    }
+
+    #[test]
+    fn child_photo_missing_folder_returns_none() {
+        let missing = Path::new("/hopefully/nonexistent/echelon-test-7f3a9b");
+        assert!(child_photo(missing, "Anyone").is_none());
     }
 }

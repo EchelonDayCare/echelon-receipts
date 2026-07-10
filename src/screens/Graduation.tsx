@@ -247,10 +247,14 @@ export default function Graduation() {
             template_folder: layout.template,
             output_folder: layout.output,
             year: Number(year),
-            students: graduating.map((s) => ({
-              name: s.name,
-              note: s.graduation_note || "",
-            })),
+            students: graduating.map((s) => {
+              const childFolder = layout.child_folders.find((c) => c.student_id === s.id);
+              return {
+                name: s.name,
+                note: s.graduation_note || "",
+                photo_folder: childFolder?.folder ?? null,
+              };
+            }),
           },
         },
       );
@@ -622,6 +626,9 @@ export default function Graduation() {
                     <li>… and {layout.child_folders.length - 6} more</li>
                   )}
                 </ul>
+                <div style={{ marginTop: 4, color: "#64748b", fontSize: 12 }}>
+                  Include one photo named after the child (e.g. <code>Aarav.jpg</code>) to show them on their graduation slide.
+                </div>
               </div>
               <div style={{ marginTop: 6 }}><strong>🎵 Custom music (optional) →</strong> <code>3-Music-Optional/</code> <span style={{ color: "#64748b", fontSize: 12 }}>(drop multiple tracks — one is picked at random per render)</span></div>
               <div style={{ marginTop: 4 }}><strong>🖼️ Custom template (optional) →</strong> <code>4-Slide-Template-Optional/</code></div>

@@ -15,13 +15,14 @@
 //!    of the delivered deck).
 //!
 //! The result is a valid pptx that PowerPoint / Keynote / LibreOffice
-//! open with no repair prompt. This is text-substitution only —
-//! per-child photo replacement is a future extension (requires
-//! rewriting `media/` entries and updating `_rels` maps per slide).
+//! open with no repair prompt. When a per-child photo is provided,
+//! the largest image in the marker slide is replaced with a JPEG
+//! re-encoding of that photo; students without a photo keep the
+//! template placeholder unchanged.
 
 use std::collections::HashMap;
 use std::io::{Cursor, Read, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use zip::{write::SimpleFileOptions, CompressionMethod, ZipArchive, ZipWriter};
 
@@ -40,6 +41,15 @@ const MAX_UNCOMPRESSED_BYTES: u64 = 200 * 1024 * 1024;
 pub struct SlideRow {
     pub name: String,
     pub note: String,
+    /// Optional per-child photo to embed in this student's slide.
+    pub photo: Option<PathBuf>,
+}
+
+/// Image relationship extracted from a slide's `_rels` file.
+struct ImageRel {
+    r_id: String,
+    target: String,
+    media_path: String,
 }
 
 /// Substitution context applied to every generated slide.
@@ -152,6 +162,36 @@ pub fn render_slides(
     // when the marker sits between other slides.
     let marker_sld_line_pos = find_marker_sld_id_pos(&rels_xml, &pres_xml, marker_slide_num);
 
+    // Parse the marker slide's image relationships once so we know which
+    // relationship to swap per student (the one backed by the largest media
+    // entry). If the marker has no image rels, swap_rid stays None and photo
+    // injection is silently skipped for all students.
+    let swap_rid: Option<String> = match &marker_rels_bytes {
+        None => None,
+        Some(rels_bytes) => {
+            let rels_str = String::from_utf8_lossy(rels_bytes);
+            let image_rels = parse_image_rels(&rels_str);
+            if image_rels.is_empty() {
+                eprintln!(
+                    "[graduation] marker slide has no image relationships; \
+                     per-child photo swap disabled"
+                );
+                None
+            } else {
+                image_rels
+                    .iter()
+                    .max_by_key(|r| {
+                        entries
+                            .iter()
+                            .find(|(n, _)| n == &r.media_path)
+                            .map(|(_, b)| b.len())
+                            .unwrap_or(0)
+                    })
+                    .map(|r| r.r_id.clone())
+            }
+        }
+    };
+
     for (i, student) in ctx.students.iter().enumerate() {
         // Correct slide numbering: one new pptx-slide per student,
         // regardless of whether we push 1 or 2 zip entries (some
@@ -168,7 +208,27 @@ pub fn render_slides(
         new_entries.push((new_slide_path, slide_xml.into_bytes()));
 
         if let Some(rels) = &marker_rels_bytes {
-            new_entries.push((new_rels_path, rels.clone()));
+            let rels_str = String::from_utf8_lossy(rels);
+            let rels_bytes = match (&swap_rid, &student.photo) {
+                (Some(rid), Some(photo)) => match encode_as_jpeg(photo) {
+                    Ok(jpeg_bytes) => {
+                        let slug = media_slug(&student.name);
+                        let media_entry = format!("ppt/media/child-{new_num}-{slug}.jpg");
+                        let new_target = format!("../media/child-{new_num}-{slug}.jpg");
+                        new_entries.push((media_entry, jpeg_bytes));
+                        rewrite_image_target(&rels_str, rid, &new_target).into_bytes()
+                    }
+                    Err(e) => {
+                        eprintln!(
+                            "[graduation] photo for '{}' encode error ({e}); using placeholder",
+                            student.name
+                        );
+                        rels.clone()
+                    }
+                },
+                _ => rels.clone(),
+            };
+            new_entries.push((new_rels_path, rels_bytes));
         }
 
         let r_id = next_r_id;
@@ -209,7 +269,7 @@ pub fn render_slides(
 
     entries[pres_idx].1 = pres_xml.into_bytes();
     entries[rels_idx].1 = rels_xml.into_bytes();
-    entries[ct_idx].1 = ct_xml.into_bytes();
+    entries[ct_idx].1 = ensure_jpg_content_type(&ct_xml).into_bytes();
 
     // Write output pptx.
     if let Some(parent) = output_pptx.parent() {
@@ -433,6 +493,157 @@ fn strip_sld_id_for_target(pres: &mut String, rels: &mut String, target_file: &s
     }
 }
 
+// ── Photo helpers ─────────────────────────────────────────────────────────────
+
+/// Extract the value of an XML attribute from a `<Relationship .../>` snippet.
+fn attr_value(snippet: &str, name: &str) -> Option<String> {
+    let key = format!("{name}=\"");
+    let start = snippet.find(&key)? + key.len();
+    let end = snippet[start..].find('"')?;
+    Some(snippet[start..start + end].to_string())
+}
+
+/// Resolve a slide `_rels` Target like `../media/foo.jpeg` to its zip-entry
+/// path `ppt/media/foo.jpeg`.
+fn resolve_media_from_rel_target(target: &str) -> String {
+    if let Some(rest) = target.strip_prefix("../media/") {
+        format!("ppt/media/{rest}")
+    } else {
+        target.to_string()
+    }
+}
+
+/// Parse all image `<Relationship>` entries from a slide `_rels` XML string.
+/// Non-image relationships (slideLayout, notesSlide, etc.) are skipped.
+fn parse_image_rels(rels_xml: &str) -> Vec<ImageRel> {
+    let mut result = Vec::new();
+    let mut pos = 0;
+    while let Some(rel_offset) = rels_xml[pos..].find("<Relationship") {
+        let start = pos + rel_offset;
+        let end = rels_xml[start..]
+            .find("/>")
+            .map(|e| start + e + 2)
+            .unwrap_or(rels_xml.len());
+        let snippet = &rels_xml[start..end];
+        let is_image = snippet
+            .find("Type=\"")
+            .and_then(|tp| {
+                let ts = tp + 6;
+                snippet[ts..].find('"').map(|te| &snippet[ts..ts + te])
+            })
+            .map(|t| t.ends_with("/relationships/image"))
+            .unwrap_or(false);
+        if is_image {
+            if let (Some(r_id), Some(target)) =
+                (attr_value(snippet, "Id"), attr_value(snippet, "Target"))
+            {
+                let media_path = resolve_media_from_rel_target(&target);
+                result.push(ImageRel { r_id, target, media_path });
+            }
+        }
+        pos = end;
+    }
+    result
+}
+
+/// Rewrite the `Target=` of the relationship identified by `r_id`. All other
+/// relationships are left exactly as-is.
+fn rewrite_image_target(rels_xml: &str, r_id: &str, new_target: &str) -> String {
+    let id_needle = format!("Id=\"{r_id}\"");
+    let Some(id_pos) = rels_xml.find(&id_needle) else {
+        return rels_xml.to_string();
+    };
+    let start = rels_xml[..id_pos].rfind("<Relationship").unwrap_or(id_pos);
+    let end = rels_xml[id_pos..]
+        .find("/>")
+        .map(|e| id_pos + e + 2)
+        .unwrap_or(rels_xml.len());
+    let snippet = &rels_xml[start..end];
+    let Some(tgt_key_pos) = snippet.find("Target=\"") else {
+        return rels_xml.to_string();
+    };
+    let val_start = tgt_key_pos + 8; // len("Target=\"") = 8
+    let Some(val_end) = snippet[val_start..].find('"') else {
+        return rels_xml.to_string();
+    };
+    let new_snippet = format!(
+        "{}Target=\"{new_target}\"{}",
+        &snippet[..tgt_key_pos],
+        &snippet[val_start + val_end + 1..] // skip the old value's closing "
+    );
+    format!("{}{}{}", &rels_xml[..start], new_snippet, &rels_xml[end..])
+}
+
+/// Ensure `[Content_Types].xml` contains a `<Default Extension="jpg" …/>`.
+/// Idempotent: if `jpg` or `jpeg` is already declared, the string is returned
+/// unchanged. If neither is present, the declaration is injected before
+/// `</Types>`.
+fn ensure_jpg_content_type(ct_xml: &str) -> String {
+    if ct_xml.contains("Extension=\"jpg\"") || ct_xml.contains("Extension=\"jpeg\"") {
+        return ct_xml.to_string();
+    }
+    insert_before(
+        ct_xml,
+        "</Types>",
+        r#"<Default Extension="jpg" ContentType="image/jpeg"/>"#,
+    )
+}
+
+/// Sanitize a student display name into a lowercase alphanumeric-and-hyphen
+/// slug suitable for use in a zip entry filename.
+fn media_slug(name: &str) -> String {
+    let mut slug = String::with_capacity(name.len());
+    let mut prev_was_sep = true; // suppress leading hyphen
+    for c in name.chars() {
+        if c.is_alphanumeric() {
+            slug.push(c.to_lowercase().next().unwrap_or(c));
+            prev_was_sep = false;
+        } else if !prev_was_sep {
+            slug.push('-');
+            prev_was_sep = true;
+        }
+    }
+    if slug.ends_with('-') {
+        slug.pop();
+    }
+    if slug.is_empty() { "student".to_string() } else { slug }
+}
+
+/// Re-encode a student photo as JPEG bytes ready to embed in the pptx zip.
+///
+/// - `.jpg` / `.jpeg`: read bytes directly (passthrough).
+/// - `.heic`: decode via libheif → write to a temp dir → read back as JPEG.
+/// - Everything else (`.png`, `.webp`, …): open via `image` crate,
+///   convert to RGB8, encode at quality 85.
+fn encode_as_jpeg(source: &Path) -> Result<Vec<u8>, String> {
+    let ext = source
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_lowercase();
+    match ext.as_str() {
+        "jpg" | "jpeg" => std::fs::read(source)
+            .map_err(|e| format!("read jpeg {}: {e}", source.display())),
+        "heic" => {
+            let dest = std::env::temp_dir().join("echelon-grad-slides-heic");
+            let jpeg = crate::graduation::heic::convert_heic_to_jpeg(source, &dest)?;
+            std::fs::read(&jpeg)
+                .map_err(|e| format!("read converted heic {}: {e}", jpeg.display()))
+        }
+        _ => {
+            let dyn_img = image::open(source)
+                .map_err(|e| format!("open {}: {e}", source.display()))?;
+            let rgb = dyn_img.into_rgb8();
+            let mut buf = Vec::<u8>::new();
+            let mut enc =
+                image::codecs::jpeg::JpegEncoder::new_with_quality(&mut buf, 85);
+            enc.encode_image(&rgb)
+                .map_err(|e| format!("JPEG encode: {e}"))?;
+            Ok(buf)
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -513,8 +724,8 @@ mod tests {
         let ctx = TemplateContext {
             year: 2027,
             students: vec![
-                SlideRow { name: "Emma".into(), note: "Kind & curious.".into() },
-                SlideRow { name: "Liam O'Neil".into(), note: "Loves trucks & <blocks>.".into() },
+                SlideRow { name: "Emma".into(), note: "Kind & curious.".into(), photo: None },
+                SlideRow { name: "Liam O'Neil".into(), note: "Loves trucks & <blocks>.".into(), photo: None },
             ],
         };
         render_slides(&tpl, &out, &ctx).expect("render should succeed");
@@ -541,5 +752,191 @@ mod tests {
         assert!(!all_slides.contains("{{Name}}"), "unsubstituted Name token");
         assert!(!all_slides.contains("{{Year}}"), "unsubstituted Year token");
         assert!(all_slides.contains("2027"), "Year token not substituted");
+    }
+
+    #[test]
+    fn parse_image_rels_extracts_image_relationships() {
+        let xml = concat!(
+            r#"<?xml version="1.0"?>"#,
+            r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">"#,
+            r#"<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideLayout" Target="../slideLayouts/slideLayout1.xml"/>"#,
+            r#"<Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="../media/image1.jpeg"/>"#,
+            r#"<Relationship Id="rId3" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="../media/image2.png"/>"#,
+            r#"<Relationship Id="rId4" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/notesSlide" Target="../notesSlides/notesSlide1.xml"/>"#,
+            r#"</Relationships>"#,
+        );
+        let rels = parse_image_rels(xml);
+        assert_eq!(rels.len(), 2, "expected 2 image rels, got {}", rels.len());
+        assert_eq!(rels[0].r_id, "rId2");
+        assert_eq!(rels[0].target, "../media/image1.jpeg");
+        assert_eq!(rels[0].media_path, "ppt/media/image1.jpeg");
+        assert_eq!(rels[1].r_id, "rId3");
+        assert_eq!(rels[1].media_path, "ppt/media/image2.png");
+    }
+
+    #[test]
+    fn rewrite_image_target_changes_only_targeted_rel() {
+        let xml = concat!(
+            r#"<Relationships>"#,
+            r#"<Relationship Id="rId2" Type="...image" Target="../media/image1.jpeg"/>"#,
+            r#"<Relationship Id="rId3" Type="...image" Target="../media/image2.png"/>"#,
+            r#"</Relationships>"#,
+        );
+        let result = rewrite_image_target(xml, "rId2", "../media/child-7-alice.jpg");
+        assert!(result.contains(r#"Target="../media/child-7-alice.jpg""#));
+        assert!(result.contains(r#"Target="../media/image2.png""#));
+        assert!(!result.contains("image1.jpeg"), "old rId2 target should be gone");
+        assert!(result.contains(r#"Id="rId3""#), "rId3 must be untouched");
+    }
+
+    #[test]
+    fn ensure_jpg_content_type_idempotent_and_injects() {
+        // Already has jpg → no change
+        let with_jpg =
+            r#"<Types><Default Extension="jpg" ContentType="image/jpeg"/></Types>"#;
+        assert_eq!(ensure_jpg_content_type(with_jpg), with_jpg);
+
+        // Already has jpeg → no change
+        let with_jpeg =
+            r#"<Types><Default Extension="jpeg" ContentType="image/jpeg"/></Types>"#;
+        assert_eq!(ensure_jpg_content_type(with_jpeg), with_jpeg);
+
+        // Missing → injects before </Types>
+        let without = r#"<Types><Default Extension="png" ContentType="image/png"/></Types>"#;
+        let result = ensure_jpg_content_type(without);
+        assert!(result.contains(r#"Extension="jpg""#));
+        assert!(result.contains("image/jpeg"));
+        assert!(result.ends_with("</Types>"));
+    }
+
+    #[test]
+    fn photo_swap_replaces_largest_image() {
+        use std::io::Write as _;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let tpl_path = tmp.path().join("template.pptx");
+        let out_path = tmp.path().join("output.pptx");
+
+        // Build a synthetic minimal PPTX with two image rels: 100 B and 5000 B.
+        {
+            let file = std::fs::File::create(&tpl_path).unwrap();
+            let mut zip = ZipWriter::new(file);
+            let opts =
+                SimpleFileOptions::default().compression_method(CompressionMethod::Stored);
+
+            let ct = concat!(
+                r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>"#,
+                r#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">"#,
+                r#"<Override PartName="/ppt/presentation.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.presentation.main+xml"/>"#,
+                r#"<Override PartName="/ppt/slides/slide1.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.slide+xml"/>"#,
+                r#"</Types>"#,
+            );
+            zip.start_file("[Content_Types].xml", opts).unwrap();
+            zip.write_all(ct.as_bytes()).unwrap();
+
+            let pres = concat!(
+                r#"<?xml version="1.0"?>"#,
+                r#"<p:presentation xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">"#,
+                r#"<p:sldIdLst><p:sldId id="256" r:id="rId2"/></p:sldIdLst>"#,
+                r#"</p:presentation>"#,
+            );
+            zip.start_file("ppt/presentation.xml", opts).unwrap();
+            zip.write_all(pres.as_bytes()).unwrap();
+
+            let pres_rels = concat!(
+                r#"<?xml version="1.0"?>"#,
+                r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">"#,
+                r#"<Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide" Target="slides/slide1.xml"/>"#,
+                r#"</Relationships>"#,
+            );
+            zip.start_file("ppt/_rels/presentation.xml.rels", opts).unwrap();
+            zip.write_all(pres_rels.as_bytes()).unwrap();
+
+            let slide = concat!(
+                r#"<?xml version="1.0"?>"#,
+                r#"<p:sld xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main">"#,
+                r#"<p:cSld><p:spTree><p:sp><p:txBody><a:t>{{Name}}</a:t></p:txBody></p:sp></p:spTree></p:cSld>"#,
+                r#"</p:sld>"#,
+            );
+            zip.start_file("ppt/slides/slide1.xml", opts).unwrap();
+            zip.write_all(slide.as_bytes()).unwrap();
+
+            let slide_rels = concat!(
+                r#"<?xml version="1.0"?>"#,
+                r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">"#,
+                r#"<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="../media/small.jpeg"/>"#,
+                r#"<Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="../media/large.jpeg"/>"#,
+                r#"</Relationships>"#,
+            );
+            zip.start_file("ppt/slides/_rels/slide1.xml.rels", opts).unwrap();
+            zip.write_all(slide_rels.as_bytes()).unwrap();
+
+            zip.start_file("ppt/media/small.jpeg", opts).unwrap();
+            zip.write_all(&vec![0xFFu8; 100]).unwrap();
+
+            zip.start_file("ppt/media/large.jpeg", opts).unwrap();
+            zip.write_all(&vec![0xAAu8; 5000]).unwrap();
+
+            zip.finish().unwrap();
+        }
+
+        // Create a minimal valid PNG as the student photo.
+        let photo_path = tmp.path().join("Alice.png");
+        {
+            use image::codecs::png::PngEncoder;
+            use image::ImageEncoder;
+            use image::{ImageBuffer, Rgb};
+            let img: ImageBuffer<Rgb<u8>, Vec<u8>> =
+                ImageBuffer::from_pixel(4, 4, Rgb([128u8, 64u8, 192u8]));
+            let mut png_bytes = Vec::<u8>::new();
+            PngEncoder::new(&mut png_bytes)
+                .write_image(
+                    img.as_raw(),
+                    img.width(),
+                    img.height(),
+                    image::ExtendedColorType::Rgb8,
+                )
+                .unwrap();
+            std::fs::write(&photo_path, &png_bytes).unwrap();
+        }
+
+        let ctx = TemplateContext {
+            year: 2025,
+            students: vec![SlideRow {
+                name: "Alice".into(),
+                note: "Great kid".into(),
+                photo: Some(photo_path),
+            }],
+        };
+
+        render_slides(&tpl_path, &out_path, &ctx).expect("render should succeed");
+        assert!(out_path.exists(), "output file not created");
+
+        let out_bytes = std::fs::read(&out_path).unwrap();
+        let mut zip = ZipArchive::new(Cursor::new(&out_bytes)).unwrap();
+
+        // Collect all entry names.
+        let mut names = Vec::new();
+        for i in 0..zip.len() {
+            names.push(zip.by_index(i).unwrap().name().to_string());
+        }
+
+        // A child-* media entry must exist.
+        let child_entries: Vec<_> = names.iter().filter(|n| n.contains("child-")).collect();
+        assert!(!child_entries.is_empty(), "expected child photo entry; got: {names:?}");
+
+        // The student's slide rels must reference the child photo and NOT large.jpeg.
+        let rels_name = names
+            .iter()
+            .find(|n| n.ends_with("slide2.xml.rels"))
+            .expect("slide2.xml.rels must exist")
+            .clone();
+        let mut rels_file = zip.by_name(&rels_name).unwrap();
+        let mut rels_content = String::new();
+        rels_file.read_to_string(&mut rels_content).unwrap();
+
+        assert!(rels_content.contains("child-"), "rels must reference child photo");
+        assert!(!rels_content.contains("large.jpeg"), "large.jpeg should be swapped out");
+        assert!(rels_content.contains("small.jpeg"), "small.jpeg must still be referenced");
     }
 }

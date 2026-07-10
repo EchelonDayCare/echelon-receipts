@@ -567,6 +567,7 @@ pub struct RenderSlidesRequest {
 pub struct SlideStudentIn {
     pub name: String,
     pub note: Option<String>,
+    pub photo_folder: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -611,9 +612,33 @@ pub async fn graduation_render_slides(
         students: req
             .students
             .iter()
-            .map(|s| pptx::SlideRow {
-                name: s.name.clone(),
-                note: s.note.clone().unwrap_or_default(),
+            .map(|s| {
+                let photo = s.photo_folder.as_deref().and_then(|folder_str| {
+                    match paths::validate_folder(folder_str) {
+                        Ok(folder) => {
+                            let p = paths::child_photo(&folder, &s.name);
+                            if p.is_none() {
+                                eprintln!(
+                                    "[graduation] no matching photo for '{}' in {folder_str}",
+                                    s.name
+                                );
+                            }
+                            p
+                        }
+                        Err(e) => {
+                            eprintln!(
+                                "[graduation] invalid photo folder for '{}': {e}",
+                                s.name
+                            );
+                            None
+                        }
+                    }
+                });
+                pptx::SlideRow {
+                    name: s.name.clone(),
+                    note: s.note.clone().unwrap_or_default(),
+                    photo,
+                }
             })
             .collect(),
     };
