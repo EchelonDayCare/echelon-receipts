@@ -21,8 +21,16 @@ use tauri::{AppHandle, Emitter, Manager, State};
 use tauri_plugin_shell::process::CommandChild;
 use tauri_plugin_shell::ShellExt;
 
-use crate::graduation::{concat, curate, engine, paths, pptx, preflight, progress};
+use crate::graduation::{curate, engine, paths, pptx, preflight, progress};
 use crate::db_gate::DbGate;
+
+/// Total reel duration accounting for xfade overlaps.
+/// N*D - (N-1)*X, floored at 4.0 so audio fade math (dur-3) stays positive.
+fn spec_total_duration(n: usize, photo_sec: f64, xfade_sec: f64) -> f64 {
+    let n = n as f64;
+    let raw = (n * photo_sec - (n - 1.0).max(0.0) * xfade_sec).max(0.0);
+    raw.max(4.0)
+}
 
 /// Best-effort audit write into `graduation_renders` so Ask Echelon can
 /// answer render-history questions. Failures are logged and swallowed —
@@ -324,15 +332,7 @@ pub async fn graduation_render_reel(
         .or(auto_music)
         .or_else(|| paths::default_music_track(&app));
 
-    let concat_list = cache_root.join(format!("reel-{}-concat.txt", req.job_id));
-    let entries: Vec<concat::ConcatEntry> = curated
-        .iter()
-        .map(|p| concat::ConcatEntry {
-            path: p.path.clone(),
-            duration_sec: req.avg_photo_sec,
-        })
-        .collect();
-    concat::write_list(&concat_list, &entries)?;
+    let filter_script = cache_root.join(format!("reel-{}-filter.script", req.job_id));
 
     // Render to .tmp first so the final output only appears when the
     // encode completes cleanly.
@@ -341,15 +341,20 @@ pub async fn graduation_render_reel(
     let final_path = out_dir.join(format!("Graduation-Year-Reel-{}.mp4", req.year));
     let tmp_path = out_dir.join(format!("Graduation-Year-Reel-{}.mp4.tmp", req.year));
 
-    // Actual video duration = number of photos × avg_photo_sec.
-    let actual_duration = curated.len() as f64 * req.avg_photo_sec;
+    // v2.4.0: per-photo inputs + xfade transitions. Duration accounts
+    // for transitions consuming overlap: N*D - (N-1)*X.
+    let photos: Vec<PathBuf> = curated.iter().map(|p| p.path.clone()).collect();
     let spec = engine::default_reel_spec(
-        concat_list.clone(),
+        photos,
         music_track,
         tmp_path.clone(),
+        filter_script.clone(),
         req.avg_photo_sec,
-        actual_duration.max(4.0), // Ensure fade_start=(dur-3) > 0.
+        spec_total_duration(curated.len(), req.avg_photo_sec, 0.6),
     );
+    let filter_text = engine::build_filter_script(&spec);
+    std::fs::write(&filter_script, &filter_text)
+        .map_err(|e| format!("write filter script: {e}"))?;
     let args = engine::build_reel_cmd(&spec);
 
     let outcome = match spawn_and_stream(&app, state, &req.job_id, "reel", args).await {
@@ -357,15 +362,15 @@ pub async fn graduation_render_reel(
         Err(e) => {
             // Failed / cancelled renders leave a partial `.mp4.tmp`
             // that can be several hundred MB. Sweep it before returning
-            // so the output folder stays clean; the concat list is also
-            // useless without the render, so remove it too.
+            // so the output folder stays clean; the filter script is
+            // also useless without the render, so remove it too.
             let _ = std::fs::remove_file(&tmp_path);
-            let _ = std::fs::remove_file(&concat_list);
+            let _ = std::fs::remove_file(&filter_script);
             return Err(e);
         }
     };
-    // Concat list is per-job — safe to remove on success.
-    let _ = std::fs::remove_file(&concat_list);
+    // Filter script is per-job — safe to remove on success.
+    let _ = std::fs::remove_file(&filter_script);
 
     let published = paths::atomic_publish(&tmp_path, &final_path)?;
     let output_path = published.to_string_lossy().into_owned();
@@ -456,15 +461,7 @@ pub async fn graduation_render_child(
         .or(auto_music)
         .or_else(|| paths::default_music_track(&app));
 
-    let concat_list = cache_root.join(format!("child-{}-concat.txt", req.job_id));
-    let entries: Vec<concat::ConcatEntry> = curated
-        .iter()
-        .map(|p| concat::ConcatEntry {
-            path: p.path.clone(),
-            duration_sec: req.avg_photo_sec,
-        })
-        .collect();
-    concat::write_list(&concat_list, &entries)?;
+    let filter_script = cache_root.join(format!("child-{}-filter.script", req.job_id));
 
     let out_dir = paths::validate_writable_dir(&req.output_folder)?;
     std::fs::create_dir_all(&out_dir).map_err(|e| format!("mkdir output: {e}"))?;
@@ -472,23 +469,38 @@ pub async fn graduation_render_child(
     let final_path = out_dir.join(format!("{folder_name}.mp4"));
     let tmp_path = out_dir.join(format!("{folder_name}.mp4.tmp"));
 
-    let actual_duration = curated.len() as f64 * req.avg_photo_sec;
-    let args = engine::build_per_child_cmd(
-        &concat_list,
-        music_track.as_deref(),
-        &tmp_path,
-        actual_duration.max(4.0),
-    );
+    let photos: Vec<PathBuf> = curated.iter().map(|p| p.path.clone()).collect();
+    // Build the same ReelSpec build_per_child_cmd would produce so we
+    // can render its filter script deterministically before spawning.
+    let per_child_spec = engine::ReelSpec {
+        photos: photos.clone(),
+        music_track: music_track.clone(),
+        output: tmp_path.clone(),
+        filter_script: filter_script.clone(),
+        width: 1280,
+        height: 720,
+        avg_photo_sec: req.avg_photo_sec,
+        transition_sec: 0.6,
+        total_duration_sec: spec_total_duration(curated.len(), req.avg_photo_sec, 0.6),
+        fps: 30,
+        video_bitrate_kbps: 2000,
+        encoder: engine::HwEncoder::for_current_os(),
+        emit_progress: true,
+    };
+    let filter_text = engine::build_filter_script(&per_child_spec);
+    std::fs::write(&filter_script, &filter_text)
+        .map_err(|e| format!("write filter script: {e}"))?;
+    let args = engine::build_reel_cmd(&per_child_spec);
 
     let outcome = match spawn_and_stream(&app, state, &req.job_id, "per-child", args).await {
         Ok(o) => o,
         Err(e) => {
             let _ = std::fs::remove_file(&tmp_path);
-            let _ = std::fs::remove_file(&concat_list);
+            let _ = std::fs::remove_file(&filter_script);
             return Err(e);
         }
     };
-    let _ = std::fs::remove_file(&concat_list);
+    let _ = std::fs::remove_file(&filter_script);
     let published = paths::atomic_publish(&tmp_path, &final_path)?;
     let output_path = published.to_string_lossy().into_owned();
     record_render(
