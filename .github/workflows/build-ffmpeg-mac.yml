@@ -183,9 +183,11 @@ jobs:
       - name: Create dated release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
         run: |
           TAG="ffmpeg-mac-$(date -u +%Y%m%d)-${{ github.event.inputs.ffmpeg_version }}"
           gh release create "$TAG" \
+            -R "$GH_REPO" \
             out/ffmpeg-aarch64-apple-darwin \
             out/BUILD-MANIFEST.txt \
             --title "FFmpeg LGPL macOS arm64 — ${{ github.event.inputs.ffmpeg_version }}" \
