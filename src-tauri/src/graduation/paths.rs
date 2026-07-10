@@ -323,12 +323,15 @@ pub fn list_audio_in(dir: &Path) -> Vec<PathBuf> {
     files_with_ext(dir, &["mp3", "m4a", "wav", "flac", "ogg", "aac"])
 }
 
-/// Return the first audio file inside `dir`, or `None` if none is
-/// present. Used to auto-detect user-supplied music dropped into the
-/// scaffolded `3-Music-Optional` folder. See [`list_audio_in`] when the
-/// caller needs to warn on multiples.
-pub fn first_audio_in(dir: &Path) -> Option<PathBuf> {
-    list_audio_in(dir).into_iter().next()
+/// Pick one audio file at random from `dir`, or `None` if the folder
+/// contains no audio. As of v2.4.1 the music folder is designed for
+/// *multiple* tracks — each render picks a fresh song so back-to-back
+/// reels don't feel identical. Uses `rand::thread_rng` so the choice
+/// is process-lifetime random, not deterministic.
+pub fn pick_random_audio_in(dir: &Path) -> Option<PathBuf> {
+    use rand::seq::SliceRandom;
+    let list = list_audio_in(dir);
+    list.choose(&mut rand::thread_rng()).cloned()
 }
 
 /// Return the first `.pptx` inside `dir`, or `None`. Used to

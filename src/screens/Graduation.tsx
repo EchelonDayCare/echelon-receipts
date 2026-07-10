@@ -623,7 +623,7 @@ export default function Graduation() {
                   )}
                 </ul>
               </div>
-              <div style={{ marginTop: 6 }}><strong>🎵 Custom music (optional) →</strong> <code>3-Music-Optional/</code></div>
+              <div style={{ marginTop: 6 }}><strong>🎵 Custom music (optional) →</strong> <code>3-Music-Optional/</code> <span style={{ color: "#64748b", fontSize: 12 }}>(drop multiple tracks — one is picked at random per render)</span></div>
               <div style={{ marginTop: 4 }}><strong>🖼️ Custom template (optional) →</strong> <code>4-Slide-Template-Optional/</code></div>
               <div style={{ marginTop: 4, color: "#64748b" }}>Rendered files land in <code>5-Output/</code>.</div>
             </div>

@@ -301,29 +301,31 @@ pub async fn graduation_render_reel(
         .filter(|s| !s.is_empty())
         .map(|s| paths::validate_file(s))
         .transpose()?;
-    // Precedence: explicit music_track → first audio in music_folder → bundled default.
+    // Precedence: explicit music_track → random pick from music_folder → bundled default.
     let auto_music: Option<PathBuf> = if explicit_music.is_none() {
         req.music_folder
             .as_ref()
             .filter(|s| !s.is_empty())
             .and_then(|f| paths::validate_folder(f).ok())
             .and_then(|f| {
-                let list = paths::list_audio_in(&f);
-                if list.len() > 1 {
+                let picked = paths::pick_random_audio_in(&f);
+                if let Some(ref p) = picked {
+                    let name = p.file_name().and_then(|s| s.to_str()).unwrap_or("?");
+                    let list_len = paths::list_audio_in(&f).len();
                     let _ = app.emit(
                         "graduation://log",
                         LogPayload {
                             job_id: req.job_id.clone(),
-                            level: "warn".into(),
-                            message: format!(
-                                "Multiple audio files in {}; using {}. Remove the others to avoid ambiguity.",
-                                f.display(),
-                                list[0].file_name().and_then(|s| s.to_str()).unwrap_or("?")
-                            ),
+                            level: "info".into(),
+                            message: if list_len > 1 {
+                                format!("Picked '{name}' at random from {list_len} tracks in music folder.")
+                            } else {
+                                format!("Using music track '{name}'.")
+                            },
                         },
                     );
                 }
-                list.into_iter().next()
+                picked
             })
     } else {
         None
@@ -453,7 +455,7 @@ pub async fn graduation_render_child(
             .as_ref()
             .filter(|s| !s.is_empty())
             .and_then(|f| paths::validate_folder(f).ok())
-            .and_then(|f| paths::first_audio_in(&f))
+            .and_then(|f| paths::pick_random_audio_in(&f))
     } else {
         None
     };
