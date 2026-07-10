@@ -63,6 +63,11 @@ jobs:
 
       - name: Configure FFmpeg (LGPL, arm64, videotoolbox)
         working-directory: ffmpeg-src
+        env:
+          # Homebrew on Apple Silicon lives under /opt/homebrew; some
+          # formulae (notably `lame`) ship no pkg-config file, so we also
+          # pass the include/lib paths directly via --extra-cflags/ldflags.
+          PKG_CONFIG_PATH: /opt/homebrew/lib/pkgconfig:/opt/homebrew/share/pkgconfig
         run: |
           # NOTE: no --enable-gpl. The absence of that flag is what keeps
           # the build LGPL. We ALSO --disable-libx264/265 for defense in
@@ -89,6 +94,8 @@ jobs:
             --enable-libwebp \
             --enable-libzimg \
             --enable-zlib \
+            --extra-cflags="-I/opt/homebrew/include" \
+            --extra-ldflags="-L/opt/homebrew/lib" \
             --disable-doc \
             --disable-ffplay \
             --disable-debug
