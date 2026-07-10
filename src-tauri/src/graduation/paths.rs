@@ -289,6 +289,16 @@ photos and per-child photos.
       One subfolder per graduating student. Drop 20-40 photos of that
       child into their folder. The app builds a 2-minute slideshow
       per child.
+
+      *** Slide-deck photo ***
+      To show a child's photo on their graduation slide, include one
+      photo named after them. Any of these will work (case doesn't
+      matter, extension can be .jpg / .jpeg / .png / .heic):
+          Beau.jpg              (first name — simplest)
+          Seymour.jpg           (last name)
+          Beau Seymour.jpg      (full name — wins if multiple present)
+      If no name-matched photo exists, the slide uses the template's
+      default silhouette placeholder.
 {names_block}
 
   3-Music-Optional/
@@ -405,12 +415,37 @@ pub fn gc_cache(dir: &Path, max_age_days: u64, max_bytes: u64) -> Vec<String> {
     warnings
 }
 
-/// Find a photo in `child_folder` whose filename stem matches `display_name`
-/// case-insensitively, with extension `.jpg`, `.jpeg`, `.png`, or `.heic`.
-/// Returns `None` if no matching photo is found or the folder doesn't exist.
+/// Find a photo in `child_folder` for the child named `display_name`.
+///
+/// Extension must be one of `.jpg`, `.jpeg`, `.png`, `.heic`
+/// (case-insensitive). Priority — higher tiers win over lower:
+///
+/// 1. **Full name** — `Beau Seymour.jpg` (most specific)
+/// 2. **First word** — `Beau.jpg` (most common parent behaviour)
+/// 3. **Last word** — `Seymour.jpg`
+///
+/// All matches are case-insensitive on the file stem. Returns `None`
+/// if nothing matches, or if the folder doesn't exist.
 pub fn child_photo(child_folder: &Path, display_name: &str) -> Option<PathBuf> {
     const PHOTO_EXTS: &[&str] = &["jpg", "jpeg", "png", "heic"];
-    let name_lower = display_name.to_lowercase();
+    let full_lower = display_name.trim().to_lowercase();
+    if full_lower.is_empty() {
+        return None;
+    }
+    let tokens: Vec<String> = full_lower
+        .split_whitespace()
+        .map(|s| s.to_string())
+        .collect();
+    let first_token = tokens.first().cloned();
+    let last_token = tokens.last().cloned().filter(|t| Some(t) != first_token.as_ref());
+
+    // Track best hit per tier; walk the whole folder once so we can
+    // pick full > first > last deterministically instead of relying on
+    // filesystem ordering.
+    let mut full_hit: Option<PathBuf> = None;
+    let mut first_hit: Option<PathBuf> = None;
+    let mut last_hit: Option<PathBuf> = None;
+
     let entries = std::fs::read_dir(child_folder).ok()?;
     for entry in entries.flatten() {
         let path = entry.path();
@@ -425,16 +460,28 @@ pub fn child_photo(child_folder: &Path, display_name: &str) -> Option<PathBuf> {
         if !ext_ok {
             continue;
         }
-        let stem_matches = path
+        let Some(stem_lower) = path
             .file_stem()
             .and_then(|s| s.to_str())
-            .map(|s| s.to_lowercase() == name_lower)
-            .unwrap_or(false);
-        if stem_matches {
-            return Some(path);
+            .map(|s| s.trim().to_lowercase())
+        else {
+            continue;
+        };
+        if stem_lower == full_lower && full_hit.is_none() {
+            full_hit = Some(path.clone());
+        }
+        if let Some(ft) = &first_token {
+            if stem_lower == *ft && first_hit.is_none() {
+                first_hit = Some(path.clone());
+            }
+        }
+        if let Some(lt) = &last_token {
+            if stem_lower == *lt && last_hit.is_none() {
+                last_hit = Some(path.clone());
+            }
         }
     }
-    None
+    full_hit.or(first_hit).or(last_hit)
 }
 
 /// Validate a user-supplied folder path used by graduation commands.
@@ -577,5 +624,60 @@ mod tests {
     fn child_photo_missing_folder_returns_none() {
         let missing = Path::new("/hopefully/nonexistent/echelon-test-7f3a9b");
         assert!(child_photo(missing, "Anyone").is_none());
+    }
+
+    #[test]
+    fn child_photo_matches_first_name() {
+        // Most common parent behaviour: photo named just with the
+        // child's first name.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("Beau.jpg"), b"x").unwrap();
+        let hit = child_photo(dir.path(), "Beau Seymour").unwrap();
+        assert_eq!(hit.file_name().unwrap(), "Beau.jpg");
+    }
+
+    #[test]
+    fn child_photo_matches_last_name() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("Seymour.jpg"), b"x").unwrap();
+        let hit = child_photo(dir.path(), "Beau Seymour").unwrap();
+        assert_eq!(hit.file_name().unwrap(), "Seymour.jpg");
+    }
+
+    #[test]
+    fn child_photo_prefers_full_name_over_first_name() {
+        // When both are present, full-name match wins (most specific).
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("Beau.jpg"), b"x").unwrap();
+        std::fs::write(dir.path().join("Beau Seymour.jpg"), b"x").unwrap();
+        let hit = child_photo(dir.path(), "Beau Seymour").unwrap();
+        assert_eq!(hit.file_name().unwrap(), "Beau Seymour.jpg");
+    }
+
+    #[test]
+    fn child_photo_prefers_first_over_last_name() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("Beau.jpg"), b"x").unwrap();
+        std::fs::write(dir.path().join("Seymour.jpg"), b"x").unwrap();
+        let hit = child_photo(dir.path(), "Beau Seymour").unwrap();
+        assert_eq!(hit.file_name().unwrap(), "Beau.jpg");
+    }
+
+    #[test]
+    fn child_photo_ignores_random_names_that_dont_match_any_token() {
+        // "20191021_082507.jpg" should NOT match "Beau Seymour".
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("20191021_082507.jpg"), b"x").unwrap();
+        std::fs::write(dir.path().join("random_photo.jpg"), b"x").unwrap();
+        assert!(child_photo(dir.path(), "Beau Seymour").is_none());
+    }
+
+    #[test]
+    fn child_photo_single_word_name_still_works() {
+        // "Beau" as display_name — first_token == last_token, only the
+        // full/first tier should fire (avoid duplicate work).
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("Beau.jpg"), b"x").unwrap();
+        assert!(child_photo(dir.path(), "Beau").is_some());
     }
 }

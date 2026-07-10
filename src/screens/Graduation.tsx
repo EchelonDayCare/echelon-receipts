@@ -627,7 +627,7 @@ export default function Graduation() {
                   )}
                 </ul>
                 <div style={{ marginTop: 4, color: "#64748b", fontSize: 12 }}>
-                  Include one photo named after the child (e.g. <code>Aarav.jpg</code>) to show them on their graduation slide.
+                  Include one photo named after the child (first name, last name, or full name — e.g. <code>Beau.jpg</code>, <code>Seymour.jpg</code>, or <code>Beau Seymour.jpg</code>) to show them on their graduation slide.
                 </div>
               </div>
               <div style={{ marginTop: 6 }}><strong>🎵 Custom music (optional) →</strong> <code>3-Music-Optional/</code> <span style={{ color: "#64748b", fontSize: 12 }}>(drop multiple tracks — one is picked at random per render)</span></div>
