@@ -393,10 +393,10 @@ export default function Home() {
           <p>Upcoming deadlines, meeting log, follow-ups — one calm dashboard</p>
         </button>
 
-        <button className="home-tile config" onClick={() => nav("/config/identity")}>
-          <div className="home-tile-icon">⚙️</div>
-          <h2>Configuration</h2>
-          <p>Daycare identity, email, backups, optional features</p>
+        <button className="home-tile graduation" onClick={() => nav("/graduation")}>
+          <div className="home-tile-icon">🎓</div>
+          <h2>Graduation Day</h2>
+          <p>Year-in-review reel, per-child videos, slideshow — from your photo library</p>
         </button>
       </div>
 

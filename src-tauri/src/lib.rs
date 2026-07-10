@@ -22,6 +22,7 @@ mod db_migration;
 mod db_gate;
 mod auth;
 mod printing;
+mod graduation;
 
 /// Every schema migration we ship, in version order. Version numbers
 /// are stable across v1.x → v2.0.0 so entries backfilled from the
@@ -52,6 +53,7 @@ pub fn run() {
         .plugin(tauri_plugin_shell::init())
         .manage(db_gate::DbGate::new())
         .manage(auth::AuthState::new())
+        .manage(graduation::commands::RenderState::default())
         .setup(|app| {
             // Install panic hook + error log file before anything else can crash.
             errlog::init(&app.handle());
@@ -167,6 +169,14 @@ pub fn run() {
             voice::parse_meeting_notes,
             voice::amend_meeting_notes,
             printing::print_current_window,
+            graduation::commands::graduation_preflight,
+            graduation::commands::graduation_scaffold,
+            graduation::commands::graduation_curate_photos,
+            graduation::commands::graduation_render_reel,
+            graduation::commands::graduation_render_child,
+            graduation::commands::graduation_cancel,
+            graduation::commands::graduation_reset_cancel,
+            graduation::commands::graduation_render_slides,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

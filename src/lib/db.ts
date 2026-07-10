@@ -1460,6 +1460,33 @@ Thanks,
      END`
   );
 
+  // ─── Migration 031 — Graduation Day (v2.3.0) ─────────────────────────
+  // Two additions on `students`:
+  //   graduation_year — INTEGER (year the student graduates, e.g. 2026)
+  //                     or NULL. Storing the year (not a boolean) keeps
+  //                     history intact across years; next year's cohort
+  //                     is picked by comparing to the `grad_year` setting
+  //                     rather than by mass-unchecking last year's flags.
+  //   graduation_note — TEXT teacher-authored note that lands on that
+  //                     child's slide in the generated PowerPoint. Free
+  //                     text; the operator writes it themselves. No AI
+  //                     autogen in v2.3.0.
+  //
+  // Four settings for the folder-based workflow (Reel, Kids, Slides
+  // folders + current graduation year). Empty defaults; user picks paths
+  // in Settings → Graduation Day.
+  await addCol("students", "graduation_year", "INTEGER");
+  await addCol("students", "graduation_note", "TEXT");
+  for (const [k, v] of [
+    ["grad_reel_folder",   ""],
+    ["grad_kids_folder",   ""],
+    ["grad_slides_folder", ""],
+    ["grad_year",          ""],
+    // Simplified single-folder flow (v2.3.0+): user picks ONE base
+    // folder and the app scaffolds Graduation-{year}/... beneath it.
+    ["grad_base_folder",   ""],
+  ] as const) await setting(k, v);
+
   await logIntegrityWarnings(d);
 }
 
@@ -1605,16 +1632,18 @@ export async function listYears(): Promise<number[]> {
 export async function upsertStudent(s: Partial<Student> & { name: string; year: number }): Promise<{ id: number }> {
   const pid = s.person_id || personIdFor(s.name, s.father_name, s.mother_name);
   const grossOv = s.gross_override === undefined ? null : (s.gross_override == null ? null : roundMoney(Number(s.gross_override)));
+  const gradYr = s.graduation_year === undefined ? null : (s.graduation_year == null ? null : Number(s.graduation_year));
+  const gradNote = s.graduation_note === undefined ? null : (s.graduation_note == null ? null : String(s.graduation_note));
   if (s.id) {
     await execRetry(
-      "UPDATE students SET name=?, father_name=?, mother_name=?, email=?, year=?, active=?, person_id=?, gross_override=? WHERE id=?",
-      [s.name, s.father_name ?? null, s.mother_name ?? null, s.email ?? null, s.year, s.active ?? 1, pid, grossOv, s.id]
+      "UPDATE students SET name=?, father_name=?, mother_name=?, email=?, year=?, active=?, person_id=?, gross_override=?, graduation_year=?, graduation_note=? WHERE id=?",
+      [s.name, s.father_name ?? null, s.mother_name ?? null, s.email ?? null, s.year, s.active ?? 1, pid, grossOv, gradYr, gradNote, s.id]
     );
     return { id: s.id };
   }
   const res = await execRetry(
-    "INSERT INTO students(name,father_name,mother_name,email,year,active,person_id,gross_override) VALUES(?,?,?,?,?,1,?,?)",
-    [s.name, s.father_name ?? null, s.mother_name ?? null, s.email ?? null, s.year, pid, grossOv]
+    "INSERT INTO students(name,father_name,mother_name,email,year,active,person_id,gross_override,graduation_year,graduation_note) VALUES(?,?,?,?,?,1,?,?,?,?)",
+    [s.name, s.father_name ?? null, s.mother_name ?? null, s.email ?? null, s.year, pid, grossOv, gradYr, gradNote]
   );
   // Tauri SQL plugin returns { lastInsertId, rowsAffected }. Fall back to
   // person_id lookup if the runtime doesn't expose lastInsertId for some reason.

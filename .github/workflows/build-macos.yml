@@ -32,8 +32,204 @@ jobs:
       - name: Install npm deps
         run: npm ci
 
+      - name: Install libheif (for HEIC decode in libheif-rs)
+        run: brew install libheif
+
+      - name: Download FFmpeg sidecar (aarch64-apple-darwin)
+        # Pinned to a specific ffmpeg-sidecar release tag with SHA-256
+        # verification. This prevents surprise breakage when the "latest"
+        # release is a WIP or when the asset URL changes shape. Bump
+        # FFMPEG_TAG + FFMPEG_SHA256 together when we cut a new sidecar.
+        # Falls back to Homebrew ffmpeg if the pinned asset can't be
+        # fetched, but that path skips SHA verification and should only
+        # unblock forks.
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          FFMPEG_TAG: ffmpeg-mac-2026.07.09
+          FFMPEG_SHA256: "REPLACE_WITH_ACTUAL_SHA256_ON_FIRST_PIN"
+        run: |
+          set -euo pipefail
+          mkdir -p src-tauri/binaries
+          DEST="src-tauri/binaries/ffmpeg-aarch64-apple-darwin"
+          if gh release download "$FFMPEG_TAG" \
+              --repo "${{ github.repository }}" \
+              --pattern "ffmpeg-aarch64-apple-darwin" \
+              --output "$DEST" 2>/dev/null; then
+            echo "Downloaded pinned sidecar from tag $FFMPEG_TAG"
+            if [ "$FFMPEG_SHA256" != "REPLACE_WITH_ACTUAL_SHA256_ON_FIRST_PIN" ]; then
+              ACTUAL=$(shasum -a 256 "$DEST" | awk '{print $1}')
+              if [ "$ACTUAL" != "$FFMPEG_SHA256" ]; then
+                echo "::error::SHA-256 mismatch. expected=$FFMPEG_SHA256 actual=$ACTUAL"
+                exit 1
+              fi
+              echo "SHA-256 verified: $ACTUAL"
+            else
+              echo "::warning::FFMPEG_SHA256 not yet pinned — recording $(shasum -a 256 "$DEST" | awk '{print $1}')"
+            fi
+          else
+            echo "::warning::Pinned sidecar $FFMPEG_TAG unavailable; falling back to Homebrew ffmpeg (unverified)"
+            brew install ffmpeg
+            cp "$(brew --prefix ffmpeg)/bin/ffmpeg" "$DEST"
+          fi
+          chmod +x "$DEST"
+          codesign --force --sign - "$DEST"
+          ls -lh "$DEST"
+
       - name: Build (Apple Silicon)
-        run: npm run tauri -- build --target aarch64-apple-darwin
+        # Only build the .app bundle here. We patch dylib load paths
+        # inside the .app and then assemble the DMG ourselves, so
+        # letting Tauri build the DMG at this stage would just make
+        # us throw its DMG away and rebuild anyway.
+        run: npm run tauri -- build --target aarch64-apple-darwin --bundles app
+
+      - name: Bundle libheif and dependent dylibs into .app
+        # End-user Macs won't have Homebrew's libheif at
+        # /opt/homebrew/lib. Walk every bundled Mach-O executable
+        # (main binary + all sidecars in Contents/MacOS), copy every
+        # /opt/homebrew or /usr/local dylib into Contents/Frameworks
+        # (recursively for transitive deps), rewrite each dylib's
+        # install-name and every consumer's LC_LOAD_DYLIB reference
+        # to @executable_path-relative paths, then re-sign every
+        # touched file (ad-hoc).
+        run: |
+          set -euo pipefail
+          APP_DIR="src-tauri/target/aarch64-apple-darwin/release/bundle/macos"
+          APP_NAME="Echelon Daycare.app"
+          APP="$APP_DIR/$APP_NAME"
+          BIN="$APP/Contents/MacOS/Echelon Daycare"
+          FRAMEWORKS="$APP/Contents/Frameworks"
+
+          if [ ! -d "$APP" ]; then
+            echo "::error::App bundle not found at $APP"
+            ls -la "$APP_DIR" || true
+            exit 1
+          fi
+          if [ ! -f "$BIN" ]; then
+            echo "::error::Main binary not found at $BIN"
+            ls -la "$APP/Contents/MacOS/" || true
+            exit 1
+          fi
+          mkdir -p "$FRAMEWORKS"
+
+          # Every Mach-O executable inside Contents/MacOS is a root
+          # for the dep walk. That includes any FFmpeg / helper
+          # sidecars Tauri copies in via `externalBin`.
+          ROOTS=()
+          while IFS= read -r -d '' f; do
+            if file "$f" | grep -q 'Mach-O.*executable'; then
+              ROOTS+=("$f")
+            fi
+          done < <(find "$APP/Contents/MacOS" -type f -print0)
+          echo "── Mach-O roots to process ──"
+          printf '  %s\n' "${ROOTS[@]}"
+
+          # Recursive dylib collector. Copies every non-system dep
+          # into Frameworks/ once (idempotent) and recurses into
+          # each copy so transitive deps (libde265, libx265, libaom,
+          # libjpeg, libpng, libavcodec, …) are also captured.
+          collect_deps() {
+            local target="$1"
+            otool -L "$target" | tail -n +2 | awk '{print $1}' | while read -r dep; do
+              case "$dep" in
+                /opt/homebrew/*|/usr/local/Cellar/*|/usr/local/opt/*)
+                  local base
+                  base=$(basename "$dep")
+                  if [ ! -f "$FRAMEWORKS/$base" ]; then
+                    cp -L "$dep" "$FRAMEWORKS/$base"
+                    chmod u+w "$FRAMEWORKS/$base"
+                    collect_deps "$FRAMEWORKS/$base"
+                  fi
+                  ;;
+              esac
+            done
+          }
+
+          for root in "${ROOTS[@]}"; do
+            echo "── Collecting dylibs from $root ──"
+            collect_deps "$root"
+          done
+          echo "── Bundled dylibs ──"
+          ls -lh "$FRAMEWORKS" || true
+
+          # Rewrite every consumer's LC_LOAD_DYLIB references so
+          # /opt/homebrew/... → @executable_path/../Frameworks/...
+          patch_paths() {
+            local target="$1"
+            otool -L "$target" | tail -n +2 | awk '{print $1}' | while read -r dep; do
+              case "$dep" in
+                /opt/homebrew/*|/usr/local/Cellar/*|/usr/local/opt/*)
+                  local base
+                  base=$(basename "$dep")
+                  install_name_tool -change "$dep" "@executable_path/../Frameworks/$base" "$target"
+                  ;;
+              esac
+            done
+          }
+
+          for root in "${ROOTS[@]}"; do
+            patch_paths "$root"
+          done
+          for lib in "$FRAMEWORKS"/*.dylib; do
+            [ -f "$lib" ] || continue
+            # Every dylib also carries its own LC_ID_DYLIB, which loaders
+            # use as the canonical path. If we leave it as /opt/homebrew/…
+            # dyld will look there first and fail on end-user Macs.
+            install_name_tool -id "@executable_path/../Frameworks/$(basename "$lib")" "$lib"
+            patch_paths "$lib"
+          done
+
+          # Ad-hoc re-sign every touched file, inside-out.
+          # install_name_tool invalidates existing signatures, so
+          # anything with a pre-existing signature has to be signed
+          # again. --deep on the outer app also re-signs nested
+          # binaries (harmlessly), but signing each root explicitly
+          # first ensures nothing is missed if --deep skips a class
+          # of item.
+          for lib in "$FRAMEWORKS"/*.dylib; do
+            [ -f "$lib" ] || continue
+            codesign --force --sign - --timestamp=none "$lib"
+          done
+          for root in "${ROOTS[@]}"; do
+            codesign --force --sign - --timestamp=none "$root"
+          done
+          codesign --force --deep --sign - --timestamp=none "$APP"
+
+          echo "── Verifying no Homebrew paths remain in any root ──"
+          for root in "${ROOTS[@]}"; do
+            if otool -L "$root" | tail -n +2 | grep -E '/opt/homebrew|/usr/local/(Cellar|opt)/' ; then
+              echo "::error::Homebrew dylib references remain in $root"
+              exit 1
+            fi
+          done
+          echo "── Verifying dylibs are self-contained ──"
+          for lib in "$FRAMEWORKS"/*.dylib; do
+            [ -f "$lib" ] || continue
+            if otool -L "$lib" | tail -n +2 | grep -E '/opt/homebrew|/usr/local/(Cellar|opt)/' ; then
+              echo "::error::Homebrew references remain in $lib"
+              exit 1
+            fi
+          done
+          echo "── Bundle audit OK ──"
+
+      - name: Assemble DMG (with /Applications drag target)
+        # Tauri didn't produce a DMG this run (we passed --bundles
+        # app). Build one from a staging folder that contains the
+        # patched .app plus an /Applications symlink, so the mounted
+        # DMG shows the familiar drag-to-install layout instead of
+        # a bare .app icon.
+        run: |
+          set -euo pipefail
+          APP="src-tauri/target/aarch64-apple-darwin/release/bundle/macos/Echelon Daycare.app"
+          DMG_DIR="src-tauri/target/aarch64-apple-darwin/release/bundle/dmg"
+          STAGE="$(mktemp -d)/dmg-stage"
+          mkdir -p "$STAGE" "$DMG_DIR"
+          cp -R "$APP" "$STAGE/"
+          ln -s /Applications "$STAGE/Applications"
+          rm -f "$DMG_DIR"/*.dmg
+          hdiutil create -volname "Echelon Daycare" \
+            -srcfolder "$STAGE" -ov -format UDZO \
+            "$DMG_DIR/Echelon-Daycare.dmg"
+          ls -lh "$DMG_DIR"
 
       - name: Stage DMG
         run: |

@@ -11,6 +11,7 @@ import {
   type Notification,
 } from "../repo/notificationsRepo";
 import { runScanSoon, subscribeUnread } from "../lib/notifications/scheduler";
+import { prettifyCategory } from "../lib/notifications/format";
 
 // ─── Bell (icon + badge) ──────────────────────────────────────────────
 export default function NotificationBell({ size = 20 }: { size?: number }) {
@@ -38,13 +39,25 @@ export default function NotificationBell({ size = 20 }: { size?: number }) {
         title="Notifications"
         style={{
           position: "relative",
-          background: "transparent",
+          background: "var(--panel, #fff)",
           border: "1px solid var(--border)",
           borderRadius: 12,
           padding: `${padding}px ${padding + 2}px`,
           cursor: "pointer",
           fontSize: size,
           lineHeight: 1,
+          boxShadow: "0 6px 20px -8px rgba(15, 23, 42, 0.35)",
+          transition: "transform 160ms ease-out, box-shadow 160ms ease-out",
+        }}
+        onMouseEnter={(e) => {
+          (e.currentTarget as HTMLButtonElement).style.transform = "translateY(-2px)";
+          (e.currentTarget as HTMLButtonElement).style.boxShadow =
+            "0 10px 24px -8px rgba(15, 23, 42, 0.45)";
+        }}
+        onMouseLeave={(e) => {
+          (e.currentTarget as HTMLButtonElement).style.transform = "translateY(0)";
+          (e.currentTarget as HTMLButtonElement).style.boxShadow =
+            "0 6px 20px -8px rgba(15, 23, 42, 0.35)";
         }}
       >
         <span aria-hidden>🔔</span>
@@ -281,9 +294,9 @@ function sevIcon(sev: string): string {
   if (sev === "warning") return "⚠️";
   return "ℹ️";
 }
-export function prettifyCategory(c: string): string {
-  return c.replace(/_/g, " ");
-}
+// prettifyCategory moved to ../lib/notifications/format.ts so React
+// Fast Refresh doesn't invalidate the bell component when the helper
+// changes.
 
 type ViewItem =
   | { kind: "single"; n: Notification }

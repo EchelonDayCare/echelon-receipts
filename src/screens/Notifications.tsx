@@ -9,7 +9,7 @@ import {
   type Severity,
 } from "../repo/notificationsRepo";
 import { runScanNow } from "../lib/notifications/scheduler";
-import { prettifyCategory } from "../components/NotificationBell";
+import { prettifyCategory } from "../lib/notifications/format";
 
 const ALL_CATEGORIES = [
   "staff_credential_expiring",

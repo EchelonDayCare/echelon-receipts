@@ -1,0 +1,99 @@
+Echelon Daycare — Third-Party Software Notices
+==============================================
+
+This application includes third-party open-source software. The notices
+below satisfy attribution requirements for the licences involved. The
+Echelon Daycare application itself is proprietary; the components listed
+here are used under the terms of their respective licences and are not
+part of Echelon Daycare's own source code.
+
+────────────────────────────────────────────────────────────────────────
+FFmpeg (v2.3.0 sidecar)
+────────────────────────────────────────────────────────────────────────
+
+  Component:       FFmpeg
+  Website:         https://ffmpeg.org
+  Licence:         GNU Lesser General Public License, version 2.1 or later
+                   (LGPL 2.1+)
+  Licence text:    https://www.gnu.org/licenses/lgpl-2.1.html
+  Source URL:      https://github.com/FFmpeg/FFmpeg
+
+  How it is used:
+    Echelon Daycare invokes FFmpeg as an external subprocess ("sidecar")
+    for the Graduation Day feature — generating year-in-review videos and
+    per-child slideshows. FFmpeg is not statically linked into Echelon
+    Daycare's own binary. No part of Echelon Daycare's application code is
+    derived from FFmpeg.
+
+  Build details:
+    - Windows x64:   BtbN LGPL win64 build
+                     https://github.com/BtbN/FFmpeg-Builds
+                     (see scripts/download-ffmpeg.ps1 for exact URL + SHA-256)
+    - macOS arm64:   Self-built via .github/workflows/build-ffmpeg-mac.yml
+                     Configure flags include --disable-gpl,
+                     --disable-libx264, --disable-libx265.
+
+  Replacing the bundled binary:
+    Users are entitled under LGPL to substitute a compatible FFmpeg build.
+    The sidecar binary lives at:
+      macOS:   Echelon Daycare.app/Contents/MacOS/ffmpeg-aarch64-apple-darwin
+      Windows: <install-dir>\ffmpeg-x86_64-pc-windows-msvc.exe
+    Replacing this file with another LGPL-compatible FFmpeg build of the
+    same architecture will work provided the replacement provides the
+    h264_videotoolbox (macOS) / h264_mf (Windows) encoders and the
+    zoompan, xfade, afade, loudnorm filters plus the concat demuxer.
+
+  Corresponding source:
+    Available on request for three years from the release date of this
+    version. Contact Echelon Daycare Society, or fetch the exact source
+    used from the URLs above. Our build script (which enumerates every
+    configure flag) is checked into this repository under
+    .github/workflows/build-ffmpeg-mac.yml.
+
+────────────────────────────────────────────────────────────────────────
+libheif (used by libheif-rs, planned in v2.3.0)
+────────────────────────────────────────────────────────────────────────
+
+  Component:       libheif
+  Website:         https://github.com/strukturag/libheif
+  Licence:         GNU Lesser General Public License, version 3
+                   (LGPL 3.0+)
+  Licence text:    https://www.gnu.org/licenses/lgpl-3.0.html
+
+  How it is used:
+    Decodes HEIC / HEIF photos (iPhone default format) into JPEG frames
+    before they are passed to FFmpeg. Invoked via the `libheif-rs` Rust
+    bindings.
+
+  Build discipline (NO GPL CONTAMINATION):
+    Echelon Daycare's shipped binary uses libheif built with ONLY the
+    core / decode path — the vcpkg feature set is `libheif[core]` and
+    the mac self-build uses `--disable-x265 --disable-x264 --disable-aom`.
+    This means:
+      - HEVC encoding is NOT bundled (that feature would pull in x265,
+        GPL-2.0-or-later)
+      - AVC encoding is NOT bundled (would pull in x264, GPL-2.0-or-later)
+    HEIC decoding requires only libde265 (LGPL-3.0), which IS bundled.
+    Because Echelon Daycare only decodes HEIC files (photos from user
+    devices) and never re-encodes them, the base library alone is
+    sufficient and the LGPL-only claim is preserved.
+
+────────────────────────────────────────────────────────────────────────
+Bundled royalty-free music (Graduation Day feature)
+────────────────────────────────────────────────────────────────────────
+
+  Tracks bundled in src-tauri/resources/music/ are Creative Commons or
+  royalty-free. Individual attributions live in
+  src-tauri/resources/music/CREDITS.txt and are also embedded into every
+  generated video's closing card and into a credits.txt written next to
+  the output MP4.
+
+────────────────────────────────────────────────────────────────────────
+Full third-party crate list (Rust)
+────────────────────────────────────────────────────────────────────────
+
+  See Cargo.lock for the transitive dependency graph. Individual licences
+  are catalogued by cargo-about in third-party-licenses.html at build
+  time.
+
+────────────────────────────────────────────────────────────────────────

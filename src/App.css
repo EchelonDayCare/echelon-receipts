@@ -326,6 +326,7 @@ table.data tr.voided td { color: #9ca3af; text-decoration: line-through; }
 .home-tile.reports   { color: #0369a1; background: linear-gradient(180deg, #f0f9ff 0%, #ffffff 45%); }
 .home-tile.vault     { color: #0d9488; background: linear-gradient(180deg, #f0fdfa 0%, #ffffff 45%); }
 .home-tile.organizer { color: #e11d48; background: linear-gradient(180deg, #fff1f2 0%, #ffffff 45%); }
+.home-tile.graduation { color: #b45309; background: linear-gradient(180deg, #fffbeb 0%, #ffffff 45%); }
 .home-tile.config    { color: #475569; background: linear-gradient(180deg, #f8fafc 0%, #ffffff 45%); }
 .home-tile.students:hover  { border-color: #2563eb; }
 .home-tile.staff:hover     { border-color: #9333ea; }
@@ -335,6 +336,7 @@ table.data tr.voided td { color: #9ca3af; text-decoration: line-through; }
 .home-tile.reports:hover   { border-color: #0369a1; }
 .home-tile.vault:hover     { border-color: #0d9488; }
 .home-tile.organizer:hover { border-color: #e11d48; }
+.home-tile.graduation:hover { border-color: #b45309; }
 .home-tile.config:hover    { border-color: #475569; }
 .home-tile-icon { font-size: 32px; line-height: 1; margin-bottom: 4px; }
 .home-tile h2 { margin: 0; font-size: 18px; color: #0f172a; }

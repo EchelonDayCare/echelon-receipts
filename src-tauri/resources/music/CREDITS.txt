@@ -1,0 +1,38 @@
+# Graduation Day — Bundled Music Tracks
+
+The app ships **one default track** so every reel has audio out of the
+box. Users can override it via the Graduation Day screen ("Pick track").
+If the user picks their own track, the default is ignored.
+
+## Default bundled track
+
+| File                              | Duration | Source                              | Rights holder | License |
+| --------------------------------- | -------- | ----------------------------------- | ------------- | ------- |
+| `default-graduation.m4a`          | 21:52    | Echelon Daycare — internally produced | Echelon Daycare | Owned — cleared for redistribution inside this app |
+
+Extracted from the daycare's own "Video Project 4" master with:
+
+    ffmpeg -i "Video Project 4.mp4" -vn -c:a copy default-graduation.m4a
+
+AAC LC, 48 kHz stereo, 192 kbps CBR. No re-encode — audio is a direct
+stream copy from the master. Loudness has NOT been re-normalised: the
+FFmpeg engine applies `loudnorm=I=-16:LRA=11:TP=-1.5` on the fly
+during render, so it always hits -16 LUFS regardless of the source
+level.
+
+## Legal
+
+- Owned by Echelon Daycare — no attribution string required in the reel.
+- If a third-party track ever replaces this default, restore the
+  attribution card in the reel engine (see git history for the CC-BY
+  attribution string).
+
+## Adding an additional track
+
+1. Verify the license permits redistribution under CC-BY or looser
+   (or that the daycare owns / has cleared the master).
+2. If the source loudness is far off broadcast level, pre-normalise:
+   `ffmpeg -i in.mp3 -af loudnorm=I=-16:LRA=11:TP=-1.5 -c:a aac -b:a 192k out.m4a`
+3. Trim to a length ≥ 15 min if intended for the reel (concat / loop
+   silently is handled by the FFmpeg engine via `-stream_loop -1`).
+4. Add a row to the table above with the source / rights details.

@@ -44,12 +44,14 @@ const OrganizerScreen = lazy(() => import("./screens/organizer/Organizer"));
 const OrganizerNotes = lazy(() => import("./screens/organizer/Notes"));
 const NotificationsHistory = lazy(() => import("./screens/Notifications"));
 const Deposits = lazy(() => import("./screens/Deposits"));
+const Graduation = lazy(() => import("./screens/Graduation"));
 import { runCloudBackupIfDue } from "./lib/cloudBackup";
 import { getSettings } from "./lib/db";
 import { getVersion } from "@tauri-apps/api/app";
 import { DEFAULT_LOGO_DATA_URL } from "./lib/defaults";
 import PromptHost from "./components/PromptHost";
 import NotificationBell from "./components/NotificationBell";
+import SettingsFab from "./components/SettingsFab";
 import { startScheduler, stopScheduler, runScanSoon } from "./lib/notifications/scheduler";
 import "./App.css";
 
@@ -159,6 +161,7 @@ function Shell({ logo, name, staffEnabled }: { logo: string; name: string; staff
         <div style={{ position: "fixed", top: 20, right: 28, zIndex: 900 }}>
           <NotificationBell size={40} />
         </div>
+        <SettingsFab />
         <main className="content content-home">
           <Home />
         </main>
@@ -304,6 +307,16 @@ function Shell({ logo, name, staffEnabled }: { logo: string; name: string; staff
         ]}
       />
     );
+  } else if (path.startsWith("/graduation")) {
+    sidebar = (
+      <ModuleSidebar
+        title="Graduation Day"
+        accent="#c2410c"
+        logo={logo}
+        name={name}
+        items={[{ to: "/graduation", label: "Render Year-End Content" }]}
+      />
+    );
   } else if (path.startsWith("/expenses")) {
     sidebar = (
       <ModuleSidebar
@@ -380,6 +393,7 @@ function Shell({ logo, name, staffEnabled }: { logo: string; name: string; staff
   return (
     <div className="app">
       {sidebar}
+      {!path.startsWith("/config") && <SettingsFab />}
       <main className="content">
         <Suspense fallback={<div style={{ padding: 24, color: "var(--muted)" }}>Loading…</div>}>
           <Routes>
@@ -461,6 +475,7 @@ function Shell({ logo, name, staffEnabled }: { logo: string; name: string; staff
 
           {/* Notifications history — accessible only via the bell footer */}
           <Route path="/notifications" element={<NotificationsHistory />} />
+          <Route path="/graduation" element={<Graduation />} />
 
           {/* Redirects for old Students routes now moved to Reports module */}
           <Route path="/students/reports" element={<Navigate to="/reports/monthly" replace />} />

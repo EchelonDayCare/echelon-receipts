@@ -301,6 +301,50 @@ export default function Students() {
                 placeholder="(use default)" />
             </div>
           )}
+          {(() => {
+            const gradYearNum = parseInt(settings.grad_year || "", 10);
+            const gradYearValid = Number.isFinite(gradYearNum) && gradYearNum > 0;
+            const isGraduating = gradYearValid && editing.graduation_year === gradYearNum;
+            return (
+              <>
+                <div className="field" style={{ marginTop: 6 }}>
+                  <label style={{ display: "flex", alignItems: "center", gap: 8, cursor: gradYearValid ? "pointer" : "not-allowed" }}>
+                    <input
+                      type="checkbox"
+                      disabled={!gradYearValid}
+                      checked={isGraduating}
+                      onChange={(e) => {
+                        if (!gradYearValid) return;
+                        setEditing({
+                          ...editing,
+                          graduation_year: e.target.checked ? gradYearNum : null,
+                          graduation_note: e.target.checked ? (editing.graduation_note ?? "") : null,
+                        });
+                      }}
+                    />
+                    <span>Graduating this year{gradYearValid ? ` (${gradYearNum})` : ""}</span>
+                    {!gradYearValid && (
+                      <small style={{ color: "var(--muted)" }}>
+                        — set the graduation year in Settings → Graduation Day
+                      </small>
+                    )}
+                  </label>
+                </div>
+                {isGraduating && (
+                  <div className="field">
+                    <label>Graduation note <small style={{ color: "var(--muted)" }}>— appears on this child&apos;s slide in the graduation deck</small></label>
+                    <textarea
+                      rows={3}
+                      value={editing.graduation_note ?? ""}
+                      placeholder="e.g. Aarav loved building block towers and taught everyone the names of every dinosaur. We&apos;ll miss his big questions."
+                      onChange={(e) => setEditing({ ...editing, graduation_note: e.target.value })}
+                      style={{ width: "100%", resize: "vertical", fontFamily: "inherit" }}
+                    />
+                  </div>
+                )}
+              </>
+            );
+          })()}
           <div style={{ display: "flex", gap: 10 }}>
             <button className="btn" onClick={async () => {
               if (!editing.name?.trim()) { void showAlert("Name required."); return; }
@@ -311,6 +355,8 @@ export default function Students() {
                 email: editing.email || null,
                 year: editing.year || year, active: editing.active ?? 1,
                 gross_override: editing.gross_override ?? null,
+                graduation_year: editing.graduation_year ?? null,
+                graduation_note: editing.graduation_note ?? null,
               });
               // If this save was launched from the Waitlist "Convert to Student"
               // flow, link the waitlist entry to the new student and jump back

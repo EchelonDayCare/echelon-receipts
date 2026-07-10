@@ -10,6 +10,8 @@ export interface Student {
   created_at: string;
   person_id: string | null;
   gross_override: number | null;
+  graduation_year: number | null;
+  graduation_note: string | null;
 }
 
 export interface Receipt {

@@ -26,3 +26,12 @@ dist-ssr
 m.txt
 msg.txt
 
+# FFmpeg sidecar binaries — fetched by scripts/download-ffmpeg.ps1 / .sh
+# See docs/graduation-day.md for build details.
+src-tauri/binaries/ffmpeg-x86_64-pc-windows-msvc.exe
+src-tauri/binaries/ffmpeg-aarch64-apple-darwin
+src-tauri/binaries/.ffmpeg-checksums.json
+
+# Dev-machine env files emitted by scripts/setup-libheif-*.{ps1,sh}
+scripts/.env.windows
+scripts/.env.mac
