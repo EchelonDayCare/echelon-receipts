@@ -1,0 +1,195 @@
+name: Build FFmpeg (macOS Apple Silicon, LGPL)
+
+# One-off workflow that self-builds an LGPL FFmpeg for aarch64-apple-darwin,
+# ad-hoc signs it (matches Echelon Daycare's current signing convention —
+# see tauri.conf.json `"signingIdentity": "-"`), and uploads it as a
+# workflow artifact. Also creates a lightweight release tagged
+# `ffmpeg-mac-<yyyymmdd>` so scripts/download-ffmpeg.sh has a stable URL to
+# pin.
+#
+# WHY: No trusted public source publishes an LGPL FFmpeg static build for
+# Apple Silicon. Every popular option (Martin Riedl, aagedal, Vargol) ships
+# --enable-gpl --enable-libx264 which would contaminate Echelon's licence.
+# Building it ourselves is the only clean path.
+#
+# WHAT'S IN THE BUILD:
+#   * h264_videotoolbox encoder (Apple hardware — LGPL-compatible)
+#   * hevc_videotoolbox encoder + hevc decoder
+#   * libopenh264 fallback encoder (Cisco BSD)
+#   * libmp3lame, libopus, libvorbis, libvpx, libwebp (all BSD/LGPL)
+#   * zoompan, xfade, afade, loudnorm, concat — core LGPL filters
+#   * NO libx264 / libx265 (GPL)
+#   * NO --enable-gpl configure flag
+#
+# TRIGGERING: manual dispatch only. Update FFMPEG_VERSION below to bump.
+
+on:
+  workflow_dispatch:
+    inputs:
+      ffmpeg_version:
+        description: 'FFmpeg version tag (e.g. n7.1)'
+        required: true
+        default: 'n7.1'
+
+permissions:
+  contents: write
+
+jobs:
+  build-ffmpeg-mac:
+    runs-on: macos-14  # Apple Silicon runner
+    steps:
+      - name: Install build dependencies (Homebrew)
+        run: |
+          brew update
+          brew install \
+            nasm yasm pkg-config \
+            libvorbis lame opus libvpx webp \
+            openh264 dav1d aom \
+            zimg
+          # zlib and bzip2 ship with macOS. FreeType is a system framework.
+
+      - name: Download FFmpeg source (${{ github.event.inputs.ffmpeg_version }})
+        run: |
+          curl -fL "https://github.com/FFmpeg/FFmpeg/archive/refs/tags/${{ github.event.inputs.ffmpeg_version }}.tar.gz" -o ffmpeg.tar.gz
+          tar xf ffmpeg.tar.gz
+          mv FFmpeg-${{ github.event.inputs.ffmpeg_version }} ffmpeg-src
+
+      - name: Record source commit + configure hash
+        id: prov
+        run: |
+          cd ffmpeg-src
+          echo "sha=$(git rev-parse HEAD 2>/dev/null || echo N/A)" >> "$GITHUB_OUTPUT"
+          echo "ver=${{ github.event.inputs.ffmpeg_version }}" >> "$GITHUB_OUTPUT"
+
+      - name: Configure FFmpeg (LGPL, arm64, videotoolbox)
+        working-directory: ffmpeg-src
+        run: |
+          # NOTE: no --enable-gpl. The absence of that flag is what keeps
+          # the build LGPL. We ALSO --disable-libx264/265 for defense in
+          # depth — if a maintainer ever added --enable-gpl by mistake,
+          # the disable flags would still block the GPL codecs.
+          ./configure \
+            --prefix="$PWD/out" \
+            --enable-static \
+            --disable-shared \
+            --arch=arm64 \
+            --enable-videotoolbox \
+            --enable-audiotoolbox \
+            --enable-neon \
+            --disable-gpl \
+            --disable-libx264 \
+            --disable-libx265 \
+            --enable-libopenh264 \
+            --enable-libdav1d \
+            --enable-libaom \
+            --enable-libmp3lame \
+            --enable-libopus \
+            --enable-libvorbis \
+            --enable-libvpx \
+            --enable-libwebp \
+            --enable-libzimg \
+            --enable-zlib \
+            --disable-doc \
+            --disable-ffplay \
+            --disable-debug
+
+      - name: Build FFmpeg
+        working-directory: ffmpeg-src
+        run: |
+          make -j"$(sysctl -n hw.ncpu)"
+          make install
+
+      - name: Verify LGPL claim (no GPL codecs)
+        working-directory: ffmpeg-src
+        run: |
+          set -e
+          BIN=out/bin/ffmpeg
+          "$BIN" -version | tee ffmpeg-version.txt
+          # Must NOT be a GPL build:
+          if "$BIN" -version | grep -q -- '--enable-gpl'; then
+            echo 'FAIL: ffmpeg -version reports --enable-gpl'; exit 1
+          fi
+          # Encoders present:
+          "$BIN" -hide_banner -encoders | tee encoders.txt
+          grep -q ' h264_videotoolbox ' encoders.txt   || { echo 'FAIL: h264_videotoolbox missing'; exit 1; }
+          grep -q ' hevc_videotoolbox ' encoders.txt   || { echo 'FAIL: hevc_videotoolbox missing'; exit 1; }
+          # Encoders absent:
+          if grep -q ' libx264 ' encoders.txt; then echo 'FAIL: libx264 present'; exit 1; fi
+          if grep -q ' libx265 ' encoders.txt; then echo 'FAIL: libx265 present'; exit 1; fi
+          # Filters:
+          "$BIN" -hide_banner -filters > filters.txt
+          for f in zoompan xfade afade loudnorm; do
+            grep -q " $f " filters.txt || { echo "FAIL: filter $f missing"; exit 1; }
+          done
+          # Demuxers:
+          "$BIN" -hide_banner -demuxers | grep -q ' concat ' || { echo 'FAIL: concat demuxer missing'; exit 1; }
+          echo 'All LGPL + capability checks passed.'
+
+      - name: Stage binary + ad-hoc sign
+        run: |
+          mkdir -p out
+          cp ffmpeg-src/out/bin/ffmpeg out/ffmpeg-aarch64-apple-darwin
+          # Ad-hoc sign to match Echelon Daycare's signing convention
+          # (tauri.conf.json sets signingIdentity = "-"). Users see the
+          # standard "unidentified developer" dialog once, same as the app.
+          codesign --force --sign - out/ffmpeg-aarch64-apple-darwin
+          codesign --verify --verbose out/ffmpeg-aarch64-apple-darwin
+
+      - name: Compute SHA-256
+        id: hash
+        run: |
+          SHA=$(shasum -a 256 out/ffmpeg-aarch64-apple-darwin | awk '{print $1}')
+          echo "sha256=$SHA" | tee -a "$GITHUB_OUTPUT"
+          SIZE=$(du -m out/ffmpeg-aarch64-apple-darwin | awk '{print $1}')
+          echo "size_mb=$SIZE" | tee -a "$GITHUB_OUTPUT"
+
+      - name: Write build manifest
+        run: |
+          cat > out/BUILD-MANIFEST.txt <<EOF
+          Echelon Daycare — FFmpeg LGPL macOS build
+
+          FFmpeg source:   ${{ steps.prov.outputs.ver }}
+          Source commit:   ${{ steps.prov.outputs.sha }}
+          Built on:        $(date -u +%Y-%m-%dT%H:%M:%SZ)
+          Configure flags: see build-ffmpeg-mac.yml
+          Target arch:     aarch64-apple-darwin
+          Size (uncompressed): ${{ steps.hash.outputs.size_mb }} MB
+          SHA-256:         ${{ steps.hash.outputs.sha256 }}
+
+          License:         LGPL 2.1+
+          Source URL:      https://github.com/FFmpeg/FFmpeg/archive/refs/tags/${{ steps.prov.outputs.ver }}.tar.gz
+          License text:    https://www.gnu.org/licenses/lgpl-2.1.html
+
+          NOT included (GPL): libx264, libx265, and every --enable-gpl feature.
+
+          To reproduce: run this workflow with the same ffmpeg_version input.
+          EOF
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ffmpeg-aarch64-apple-darwin
+          path: |
+            out/ffmpeg-aarch64-apple-darwin
+            out/BUILD-MANIFEST.txt
+
+      - name: Create dated release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="ffmpeg-mac-$(date -u +%Y%m%d)-${{ github.event.inputs.ffmpeg_version }}"
+          gh release create "$TAG" \
+            out/ffmpeg-aarch64-apple-darwin \
+            out/BUILD-MANIFEST.txt \
+            --title "FFmpeg LGPL macOS arm64 — ${{ github.event.inputs.ffmpeg_version }}" \
+            --notes "Self-built LGPL FFmpeg for the Echelon Daycare Graduation Day sidecar.
+
+          SHA-256: \`${{ steps.hash.outputs.sha256 }}\`
+          Size:    ${{ steps.hash.outputs.size_mb }} MB
+          FFmpeg:  ${{ steps.prov.outputs.ver }}
+
+          Update \`scripts/download-ffmpeg.ps1\` and \`scripts/download-ffmpeg.sh\`:
+          \`\`\`
+          MAC_URL='https://github.com/${{ github.repository }}/releases/download/'$TAG'/ffmpeg-aarch64-apple-darwin'
+          MAC_SHA256='${{ steps.hash.outputs.sha256 }}'
+          \`\`\`"
