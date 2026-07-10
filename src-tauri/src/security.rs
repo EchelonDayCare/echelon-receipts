@@ -20,7 +20,6 @@
 //     platform keychain.
 
 use argon2::{Algorithm, Argon2, Params, Version};
-use base64::Engine;
 use chacha20poly1305::aead::{Aead, Payload};
 use chacha20poly1305::{KeyInit, XChaCha20Poly1305, XNonce};
 use rand::{rngs::OsRng, RngCore};
@@ -44,6 +43,7 @@ const ARGON2_M_COST_KIB: u32 = 19_456;
 const ARGON2_T_COST: u32 = 2;
 const ARGON2_P_COST: u32 = 1;
 
+#[allow(dead_code)] // Reserved for the future PIN-only fast-path.
 fn argon2_pinned() -> Argon2<'static> {
     let params = Params::new(
         ARGON2_M_COST_KIB,
@@ -170,6 +170,7 @@ impl SecurityEnvelope {
         }
     }
 
+    #[allow(dead_code)] // Reserved for future PIN/passphrase revocation.
     pub fn remove_slot(&mut self, kind: SlotKind) {
         self.slots.retain(|s| s.kind != kind);
     }
@@ -285,6 +286,7 @@ impl Drop for Mdk {
 // ────────────────────────────────────────────────────────────────────────
 
 #[derive(Debug, thiserror::Error)]
+#[allow(dead_code)] // SlotNotFound reserved for future slot-lookup APIs.
 pub enum SecurityError {
     #[error("wrong secret or corrupted slot")]
     Authentication,
@@ -367,11 +369,12 @@ pub fn wrap_mdk(
     let kek = derive_kek(secret, device_bound_secret, &salt, &argon)?;
     let cipher = XChaCha20Poly1305::new_from_slice(kek.as_ref())
         .map_err(|e| SecurityError::Crypto(e.to_string()))?;
-    let nonce = XNonce::from_slice(&nonce_bytes);
+    let nonce = XNonce::try_from(&nonce_bytes[..])
+        .map_err(|_| SecurityError::Crypto("nonce length invariant broken".into()))?;
 
     let aad = build_aad(kind, &salt, &nonce_bytes, &argon);
     let ciphertext = cipher
-        .encrypt(nonce, Payload { msg: mdk.as_bytes(), aad: &aad })
+        .encrypt(&nonce, Payload { msg: mdk.as_bytes(), aad: &aad })
         .map_err(|_| SecurityError::Crypto("aead encrypt failed".into()))?;
 
     Ok(Slot {
@@ -400,11 +403,12 @@ pub fn unwrap_mdk(
     let kek = derive_kek(secret, device_bound_secret, &slot.salt, &slot.argon)?;
     let cipher = XChaCha20Poly1305::new_from_slice(kek.as_ref())
         .map_err(|e| SecurityError::Crypto(e.to_string()))?;
-    let nonce = XNonce::from_slice(&slot.nonce);
+    let nonce = XNonce::try_from(&slot.nonce[..])
+        .map_err(|_| SecurityError::Crypto("nonce length invariant broken".into()))?;
 
     let aad = build_aad(slot.kind, &slot.salt, &slot.nonce, &slot.argon);
     let plaintext = cipher
-        .decrypt(nonce, Payload { msg: &slot.wrapped_mdk, aad: &aad })
+        .decrypt(&nonce, Payload { msg: &slot.wrapped_mdk, aad: &aad })
         .map_err(|_| SecurityError::Authentication)?;
 
     if plaintext.len() != MDK_LEN {

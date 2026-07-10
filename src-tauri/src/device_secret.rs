@@ -113,6 +113,7 @@ pub fn get_or_create() -> Result<zeroize::Zeroizing<Vec<u8>>, DeviceSecretError>
 /// Best-effort peek: return the existing secret without creating one.
 /// Used by the migration state machine to detect whether the app has
 /// already been through first-run.
+#[allow(dead_code)] // Reserved for the dormant migration_heal path.
 pub fn peek() -> Result<Option<zeroize::Zeroizing<Vec<u8>>>, DeviceSecretError> {
     let entry = keyring::Entry::new(KEYRING_SERVICE, DEVICE_SECRET_KEY)
         .map_err(|e| DeviceSecretError::Keychain(e.to_string()))?;

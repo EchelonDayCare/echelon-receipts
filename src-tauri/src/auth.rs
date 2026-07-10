@@ -129,9 +129,8 @@ pub enum StepUpProof {
     Recovery { code: String },
 }
 
-// Rate-limit policy: after this many failures in ATTEMPT_WINDOW,
-// apply an increasing cool-off before the next attempt is honoured.
-const MAX_ATTEMPTS: usize = 5;
+// Rate-limit policy: attempts inside ATTEMPT_WINDOW feed cool_off_for(),
+// which grows the mandatory cool-off with each additional failure.
 const ATTEMPT_WINDOW: Duration = Duration::from_secs(5 * 60);
 
 /// Cool-off ladder — grows with successive lockouts within the window.
@@ -193,7 +192,8 @@ impl AuthState {
     }
 
     /// Record a failed unlock attempt. Prunes old attempts, then
-    /// sets a lockout if we're past MAX_ATTEMPTS in the window.
+    /// escalates the cool-off via `cool_off_for(n)` once the threshold
+    /// (currently 5) is crossed inside ATTEMPT_WINDOW.
     fn record_failure(&self) {
         let mut g = self.inner.lock().unwrap();
         let now = Instant::now();

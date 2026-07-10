@@ -17,6 +17,10 @@
 // Long-term hygiene: don't edit shipped migration files. Add a new migration
 // with the schema change instead. This heal exists so we can safely ship the
 // DMG without stranding existing installs.
+//
+// Currently DORMANT — not called from lib.rs. Kept in-tree so we can flip
+// the switch quickly if a future edit to a shipped migration slips through.
+#![allow(dead_code)]
 
 use std::fs;
 use std::path::PathBuf;
@@ -28,7 +32,7 @@ use tauri::Manager;
 /// Kept in lockstep with the Migration list in lib.rs — a mismatch here would
 /// mean we forgot to update the heal after adding a migration.
 fn expected_checksums() -> Vec<(i64, Vec<u8>)> {
-    let files: [(i64, &str); 11] = [
+    let files: [(i64, &str); 12] = [
         (1, include_str!("../migrations/001_initial.sql")),
         (2, include_str!("../migrations/002_pdf_folder.sql")),
         (3, include_str!("../migrations/003_email.sql")),
@@ -40,6 +44,7 @@ fn expected_checksums() -> Vec<(i64, Vec<u8>)> {
         (9, include_str!("../migrations/009_staff_credentials.sql")),
         (10, include_str!("../migrations/010_child_attendance.sql")),
         (11, include_str!("../migrations/011_no_lunch.sql")),
+        (12, include_str!("../migrations/012_graduation_renders.sql")),
     ];
     files
         .iter()

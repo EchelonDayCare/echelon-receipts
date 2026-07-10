@@ -144,6 +144,7 @@ fn free_space(dir: &Path) -> io::Result<u64> {
 /// NOTE: on SSDs with wear-leveling, file deletion doesn't guarantee
 /// physical erasure of the underlying blocks. This is documented in
 /// the setup wizard, which recommends enabling FileVault / BitLocker.
+#[allow(dead_code)] // Legacy plaintext-DB cleanup helper; retained for future migration edges.
 pub fn purge_sqlite_files(base: &Path) {
     for suffix in ["", "-wal", "-shm", "-journal"] {
         let mut p = base.as_os_str().to_owned();
