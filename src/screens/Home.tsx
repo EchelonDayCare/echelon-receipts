@@ -202,9 +202,9 @@ export default function Home() {
       </form>
 
       {alerts.partialLoad.length > 0 && (
-        <div
-          role="status"
-          aria-live="polite"
+        <button
+          type="button"
+          aria-label={`Some background checks didn't complete: ${alerts.partialLoad.join(", ")}. Click to retry.`}
           title={`Some background checks didn't complete:\n• ${alerts.partialLoad.join("\n• ")}\nDots on affected tiles may be incomplete.`}
           style={{
             margin: "8px 0 -4px",
@@ -218,12 +218,13 @@ export default function Home() {
             alignItems: "center",
             gap: 6,
             cursor: "pointer",
+            font: "inherit",
           }}
           onClick={() => refreshAlerts()}
         >
           <span aria-hidden>⚠︎</span>
           <span>Some checks didn't finish — click to retry</span>
-        </div>
+        </button>
       )}
 
       <div className="home-tiles">
