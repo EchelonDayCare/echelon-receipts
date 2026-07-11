@@ -52,6 +52,8 @@ import { DEFAULT_LOGO_DATA_URL } from "./lib/defaults";
 import PromptHost from "./components/PromptHost";
 import NotificationBell from "./components/NotificationBell";
 import SettingsFab from "./components/SettingsFab";
+import AlertDot from "./components/AlertDot";
+import { HomeAlertsProvider, useHomeAlerts } from "./hooks/useHomeAlerts";
 import { startScheduler, stopScheduler, runScanSoon } from "./lib/notifications/scheduler";
 import "./App.css";
 
@@ -71,6 +73,7 @@ function ModuleSidebar({
   const nav = useNavigate();
   const [ver, setVer] = useState("");
   const loc = useLocation();
+  const { snapshot: alertSnap } = useHomeAlerts();
   useEffect(() => { getVersion().then(setVer).catch(() => setVer("")); }, []);
   return (
     <aside className="sidebar">
@@ -130,6 +133,7 @@ function ModuleSidebar({
           const isActive = it.match
             ? it.match(loc.pathname, loc.search)
             : loc.pathname === it.to.split("?")[0] && loc.search === (it.to.includes("?") ? "?" + it.to.split("?")[1] : "");
+          const badge = alertSnap.bySidebar[it.to];
           return (
             <NavLink
               key={it.to}
@@ -139,8 +143,17 @@ function ModuleSidebar({
               // which would otherwise also mark siblings with the same pathname
               // active (e.g. /vault and /vault?expiring=60).
               className={() => "nav-item" + (isActive ? " active" : "")}
+              style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8 }}
             >
-              {it.label}
+              <span>{it.label}</span>
+              {badge && (
+                <AlertDot
+                  tone={badge.tone}
+                  size="sm"
+                  count={badge.count}
+                  title={badge.items.map((i) => `• ${i.text}`).join("\n")}
+                />
+              )}
             </NavLink>
           );
         })}
@@ -564,10 +577,12 @@ export default function App() {
   return (
     <AppGate>
       <HashRouter>
-        <PromptHost />
-        <Routes>
-          <Route path="/*" element={<Shell logo={logo} name={name} staffEnabled={staffEnabled} />} />
-        </Routes>
+        <HomeAlertsProvider>
+          <PromptHost />
+          <Routes>
+            <Route path="/*" element={<Shell logo={logo} name={name} staffEnabled={staffEnabled} />} />
+          </Routes>
+        </HomeAlertsProvider>
       </HashRouter>
     </AppGate>
   );

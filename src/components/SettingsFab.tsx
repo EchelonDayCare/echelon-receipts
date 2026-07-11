@@ -1,20 +1,34 @@
 import { useNavigate } from "react-router-dom";
+import { useHomeAlerts } from "../hooks/useHomeAlerts";
+import AlertDot from "./AlertDot";
 
 /**
- * Floating settings gear pinned to the bottom-right of every screen
- * (except the Configuration section itself). Mirrors the NotificationBell
- * aesthetic — same border, radius, and hover feel — so the two "utility
- * corner buttons" feel like siblings.
+ * Floating settings gear pinned to the bottom-right of the Home screen
+ * only. Mirrors the NotificationBell aesthetic — same border, radius,
+ * and hover feel — so the two "utility corner buttons" feel like siblings.
+ *
+ * Renders a small badge dot when a setup gap exists (SMTP not configured,
+ * cloud backup unconfigured or overdue). See lib/homeAlerts.ts.
  */
 export default function SettingsFab({ size = 40 }: { size?: number }) {
   const nav = useNavigate();
+  const { snapshot } = useHomeAlerts();
   const padding = Math.max(8, Math.round(size * 0.55));
+  const needsSetup = snapshot.setup.needsSetup;
+  const setupTone = snapshot.setup.items.some((i) => i.tone === "danger")
+    ? "danger"
+    : snapshot.setup.items.some((i) => i.tone === "warn")
+      ? "warn"
+      : "info";
+  const setupTitle = needsSetup
+    ? snapshot.setup.items.map((i) => `• ${i.text}`).join("\n")
+    : undefined;
 
   return (
     <button
       onClick={() => nav("/config/identity")}
-      aria-label="Open configuration"
-      title="Configuration"
+      aria-label={needsSetup ? "Open configuration (setup needed)" : "Open configuration"}
+      title={setupTitle ?? "Configuration"}
       style={{
         position: "fixed",
         bottom: 24,
@@ -41,7 +55,16 @@ export default function SettingsFab({ size = 40 }: { size?: number }) {
           "0 6px 20px -8px rgba(15, 23, 42, 0.35)";
       }}
     >
-      <span aria-hidden>⚙️</span>
+      <span aria-hidden style={{ position: "relative", display: "inline-block" }}>
+        ⚙️
+        {needsSetup && (
+          <AlertDot
+            tone={setupTone}
+            size="sm"
+            style={{ position: "absolute", top: -2, right: -4 }}
+          />
+        )}
+      </span>
     </button>
   );
 }
