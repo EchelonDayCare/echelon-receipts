@@ -93,7 +93,9 @@ export default function WaitlistList() {
     const dirMul = sortDir === "asc" ? 1 : -1;
     const cmp = (a: WaitlistEntry, b: WaitlistEntry): number => {
       if (sortKey === "priority") {
-        return (priorityScore(b, weights, ctx) - priorityScore(a, weights, ctx)) * dirMul;
+        const as = priorityScore(a, weights, ctx);
+        const bs = priorityScore(b, weights, ctx);
+        return as < bs ? -1 * dirMul : as > bs ? 1 * dirMul : 0;
       }
       if (sortKey === "dob") {
         // Nulls always last regardless of direction
