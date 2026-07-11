@@ -237,8 +237,16 @@ table.data tr.voided td { color: #9ca3af; text-decoration: line-through; }
 .wizard-foot { display: flex; justify-content: space-between; margin-top: 18px; gap: 10px; }
 
 /* --- Home landing page --- */
-.content-home-shell { padding: 0; }
-.home { padding: 56px 0 32px; }
+/* Home is designed as a single-viewport, no-scroll surface. Lock overflow
+   so trackpad two-finger gestures and inertial scroll can't slide content
+   around, and compact vertical rhythm so the composition fits inside a
+   typical desktop viewport (>=800 CSS-px tall) without needing a scrollbar. */
+.content-home-shell {
+  padding: 0;
+  overflow: hidden;
+  overscroll-behavior: none;
+}
+.home { padding: 28px 0 20px; }
 .home-main {
   max-width: 1180px;
   margin: 0 auto;
@@ -249,17 +257,17 @@ table.data tr.voided td { color: #9ca3af; text-decoration: line-through; }
      Move left by up to 96px, but never closer than 32px to viewport edge. */
   padding-left: max(32px, calc((100% - 1180px) / 2 - 64px));
   padding-right: 32px;
-  margin-bottom: 32px;
+  margin-bottom: 20px;
 }
 .home-head {
   display: flex; align-items: center; gap: 22px; margin: 0;
 }
 .home-head-copy {
   display: flex; flex-direction: column; justify-content: center;
-  min-height: 144px; /* match logo height so text block is optically centered */
+  min-height: 125px; /* match logo height so text block is optically centered */
 }
 .home-logo {
-  width: 144px; height: 144px; border-radius: 50%; object-fit: cover;
+  width: 125px; height: 125px; border-radius: 50%; object-fit: cover;
   border: 1px solid var(--border); background: #fff;
   box-shadow: 0 4px 14px -6px rgba(15, 23, 42, 0.18);
   flex-shrink: 0;
