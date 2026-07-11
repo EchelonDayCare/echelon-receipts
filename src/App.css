@@ -306,13 +306,15 @@ table.data tr.voided td { color: #9ca3af; text-decoration: line-through; }
   font: inherit;
   color: inherit;
   position: relative;
-  overflow: hidden;
 }
-/* Left accent bar — colored per module, subtle. */
+/* Left accent bar — colored per module, subtle. Rounded on the left so it
+   matches the tile's own corner radius even though the tile no longer clips
+   overflow (needed so the alert popover can escape the tile). */
 .home-tile::before {
   content: "";
   position: absolute; left: 0; top: 0; bottom: 0;
   width: 4px; background: currentColor; opacity: .55;
+  border-radius: 14px 0 0 14px;
 }
 .home-tile:hover {
   transform: translateY(-2px);
@@ -341,6 +343,85 @@ table.data tr.voided td { color: #9ca3af; text-decoration: line-through; }
 .home-tile-icon { font-size: 32px; line-height: 1; margin-bottom: 4px; }
 .home-tile h2 { margin: 0; font-size: 18px; color: #0f172a; }
 .home-tile p { margin: 0; color: var(--muted); font-size: 13px; line-height: 1.45; }
+
+/* Alert popover: appears on tile hover/focus, lives inside the tile as an
+   absolutely-positioned overlay so it doesn't affect grid layout or bring
+   back a page scrollbar. Bottom-row tiles set data-above="1" to flip anchor
+   upward and avoid clipping at the viewport edge. */
+.home-tile-popover {
+  position: absolute;
+  left: 8px; right: 8px;
+  top: calc(100% + 8px);
+  z-index: 30;
+  background: #fff;
+  border: 1px solid var(--border);
+  border-top: 3px solid #dc2626;
+  border-radius: 10px;
+  padding: 10px 12px 12px;
+  box-shadow: 0 12px 32px -8px rgba(15, 23, 42, 0.25);
+  opacity: 0;
+  visibility: hidden;
+  transform: translateY(-4px);
+  transition: opacity .14s ease-out, transform .14s ease-out, visibility 0s linear .14s;
+  pointer-events: none;
+  cursor: default;
+  text-align: left;
+}
+.home-tile-popover[data-above="1"] {
+  top: auto;
+  bottom: calc(100% + 8px);
+  transform: translateY(4px);
+}
+.home-tile:hover .home-tile-popover,
+.home-tile:focus-visible .home-tile-popover,
+.home-tile:focus-within .home-tile-popover {
+  opacity: 1;
+  visibility: visible;
+  transform: translateY(0);
+  transition: opacity .14s ease-out, transform .14s ease-out, visibility 0s;
+}
+.home-tile-popover-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: #0f172a;
+  margin-bottom: 6px;
+  letter-spacing: 0.01em;
+}
+.home-tile-popover-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.home-tile-popover-list li {
+  font-size: 12.5px;
+  color: #334155;
+  line-height: 1.4;
+  padding-left: 12px;
+  position: relative;
+}
+.home-tile-popover-list li::before {
+  content: "•";
+  position: absolute;
+  left: 2px;
+  color: #94a3b8;
+}
+.home-tile-popover-hint {
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px dashed #e2e8f0;
+  font-size: 11px;
+  color: #64748b;
+}
+@media (prefers-reduced-motion: reduce) {
+  .home-tile-popover { transition: opacity 0s, visibility 0s; transform: none; }
+  .home-tile-popover[data-above="1"] { transform: none; }
+  .home-tile:hover .home-tile-popover,
+  .home-tile:focus-visible .home-tile-popover,
+  .home-tile:focus-within .home-tile-popover { transform: none; }
+}
 
 .home-alerts {
   background: #fff;
