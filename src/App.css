@@ -243,12 +243,15 @@ table.data tr.voided td { color: #9ca3af; text-decoration: line-through; }
   padding: 56px 32px 32px;
 }
 .home-head {
-  display: flex; align-items: center; gap: 22px;
-  /* Pull the header ~1 inch left, but keep at least 16px clearance from
-     the viewport edge so the logo can never clip. On windows wide enough
-     to allow the full 96px shift, take it; on narrower windows, take
-     whatever is available. */
-  margin: 0 0 32px max(-96px, calc(-16px - (100vw - 1180px) / 2));
+  display: flex; align-items: center; gap: 22px; margin: 0 0 32px 0;
+}
+/* Wide-enough windows: pull the header ~1 inch (up to 96px) further left
+   than the .content-home padding, keeping a 40px minimum viewport gutter
+   so the logo can never clip. Narrower windows get no shift. */
+@media (min-width: 1180px) {
+  .home-head {
+    margin-left: max(-96px, calc(8px - (100vw - 1180px) / 2));
+  }
 }
 .home-head-copy {
   display: flex; flex-direction: column; justify-content: center;
