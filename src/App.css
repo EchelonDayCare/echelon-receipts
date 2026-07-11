@@ -243,11 +243,24 @@ table.data tr.voided td { color: #9ca3af; text-decoration: line-through; }
   padding: 56px 32px 32px;
 }
 .home-head {
-  display: flex; align-items: center; gap: 18px; margin-bottom: 28px;
+  display: flex; align-items: center; gap: 22px; margin: 0 0 32px -6px;
 }
 .home-logo {
-  width: 72px; height: 72px; border-radius: 50%; object-fit: cover;
+  width: 96px; height: 96px; border-radius: 50%; object-fit: cover;
   border: 1px solid var(--border); background: #fff;
+  box-shadow: 0 4px 14px -6px rgba(15, 23, 42, 0.18);
+}
+.home-head h1 {
+  font-size: 32px;
+  line-height: 1.15;
+  letter-spacing: -0.01em;
+  font-weight: 700;
+  color: #0f172a;
+}
+.home-head .subtitle {
+  font-size: 15px;
+  margin-top: 4px !important;
+  color: var(--muted);
 }
 
 /* Ask Echelon hero — full-width, gradient, prominent CTA. */
