@@ -59,11 +59,16 @@ export default function SettingsFab({ size = 40 }: { size?: number }) {
       {needsSetup && (
         <AlertDot
           tone={setupTone}
-          size="sm"
-          // Anchored to the button, not the emoji glyph — emoji bounding
-          // boxes vary across Windows/macOS/Linux, so pegging the badge
-          // to button geometry keeps it stable everywhere.
-          style={{ position: "absolute", top: 6, right: 6 }}
+          size="md"
+          count={snapshot.setup.items.length}
+          title={setupTitle}
+          // Anchored to the button (position:fixed establishes the
+          // containing block), not the emoji glyph — emoji bounding boxes
+          // vary across Windows/macOS/Linux, so pegging the badge to
+          // button geometry keeps it stable everywhere. Offset outside
+          // the top-right corner so the pill reads as a notification
+          // badge, matching the tile-dot placement on Home.
+          style={{ position: "absolute", top: -6, right: -6 }}
         />
       )}
     </button>
