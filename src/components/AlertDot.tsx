@@ -28,7 +28,7 @@ export function AlertDot({
   style?: CSSProperties;
 }) {
   const color = TONE_COLOR[tone];
-  const showCount = typeof count === "number" && count > 1;
+  const showCount = typeof count === "number" && count >= 1;
   const isMd = size === "md";
 
   if (showCount) {
