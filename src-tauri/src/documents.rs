@@ -52,38 +52,47 @@ pub async fn documents_export_zip(
         .await
         .map_err(|e| format!("read blobs: {e:?}"))?;
 
-    let out_file = File::create(&dest_path).map_err(|e| format!("create zip: {e}"))?;
-    let mut zip = zip::ZipWriter::new(out_file);
-    let opts = SimpleFileOptions::default()
-        .compression_method(zip::CompressionMethod::Deflated)
-        .unix_permissions(0o644);
+    // Zip creation is CPU + disk bound; wrap in spawn_blocking so we
+    // don't stall the tokio runtime while a large export (100+ blobs)
+    // is being deflated and written.
+    let dest_path_clone = dest_path.clone();
+    let total = tokio::task::spawn_blocking(move || -> Result<u64, String> {
+        let out_file = File::create(&dest_path_clone).map_err(|e| format!("create zip: {e}"))?;
+        let mut zip = zip::ZipWriter::new(out_file);
+        let opts = SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Deflated)
+            .unix_permissions(0o644);
 
-    let mut total: u64 = 0;
-    let mut used_names: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut total: u64 = 0;
+        let mut used_names: std::collections::HashSet<String> = std::collections::HashSet::new();
 
-    for (path_in_zip, content) in fetched {
-        let mut name = sanitize(&path_in_zip);
-        if used_names.contains(&name) {
-            let (stem, ext) = split_ext(&name);
-            let mut i = 2u32;
-            loop {
-                let candidate = if ext.is_empty() {
-                    format!("{stem} ({i})")
-                } else {
-                    format!("{stem} ({i}).{ext}")
-                };
-                if !used_names.contains(&candidate) { name = candidate; break; }
-                i += 1;
+        for (path_in_zip, content) in fetched {
+            let mut name = sanitize(&path_in_zip);
+            if used_names.contains(&name) {
+                let (stem, ext) = split_ext(&name);
+                let mut i = 2u32;
+                loop {
+                    let candidate = if ext.is_empty() {
+                        format!("{stem} ({i})")
+                    } else {
+                        format!("{stem} ({i}).{ext}")
+                    };
+                    if !used_names.contains(&candidate) { name = candidate; break; }
+                    i += 1;
+                }
             }
+            used_names.insert(name.clone());
+
+            zip.start_file(&name, opts).map_err(|e| format!("zip start: {e}"))?;
+            zip.write_all(&content).map_err(|e| format!("zip write: {e}"))?;
+            total += content.len() as u64;
         }
-        used_names.insert(name.clone());
 
-        zip.start_file(&name, opts).map_err(|e| format!("zip start: {e}"))?;
-        zip.write_all(&content).map_err(|e| format!("zip write: {e}"))?;
-        total += content.len() as u64;
-    }
-
-    zip.finish().map_err(|e| format!("zip finish: {e}"))?;
+        zip.finish().map_err(|e| format!("zip finish: {e}"))?;
+        Ok(total)
+    })
+    .await
+    .map_err(|e| format!("join: {e}"))??;
     Ok(total)
 }
 

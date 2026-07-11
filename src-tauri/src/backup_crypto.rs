@@ -297,19 +297,30 @@ pub async fn export_plaintext_backup(
     args: ExportBackupArgs,
 ) -> Result<(), String> {
     let dst = std::path::PathBuf::from(&args.dst_path);
-    if let Some(parent) = dst.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| format!("create backup dir: {e}"))?;
+    // Create parent dir off the tokio runtime — sync fs on hot path stalls IPC.
+    let parent = dst.parent().map(|p| p.to_path_buf());
+    if let Some(parent) = parent {
+        tokio::task::spawn_blocking(move || std::fs::create_dir_all(&parent))
+            .await
+            .map_err(|e| format!("join: {e}"))?
+            .map_err(|e| format!("create backup dir: {e}"))?;
     }
     gate.export_plaintext_to(&dst)
         .await
         .map_err(|e| format!("sqlcipher_export failed: {e}"))?;
-    // Sanity: the first 16 bytes should read "SQLite format 3\0" so the
-    // restore path can accept the file without an envelope round-trip.
-    let mut head = [0u8; 16];
-    use std::io::Read;
-    let mut f = std::fs::File::open(&dst).map_err(|e| format!("verify open: {e}"))?;
-    let n = f.read(&mut head).map_err(|e| format!("verify read: {e}"))?;
-    if n < 16 || &head[..16] != b"SQLite format 3\0" {
+    // Sanity: first 16 bytes should read "SQLite format 3\0". Do this off-runtime too.
+    let dst_verify = dst.clone();
+    let head_ok = tokio::task::spawn_blocking(move || -> std::io::Result<bool> {
+        use std::io::Read;
+        let mut head = [0u8; 16];
+        let mut f = std::fs::File::open(&dst_verify)?;
+        let n = f.read(&mut head)?;
+        Ok(n >= 16 && &head[..16] == b"SQLite format 3\0")
+    })
+    .await
+    .map_err(|e| format!("join: {e}"))?
+    .map_err(|e| format!("verify read: {e}"))?;
+    if !head_ok {
         let _ = std::fs::remove_file(&dst);
         return Err("Exported file is not a valid plain SQLite database — aborting backup.".into());
     }
@@ -325,8 +336,12 @@ pub async fn export_encrypted_backup(
     // we can encrypt in one shot without keeping arbitrary-sized bytes
     // pinned in memory longer than needed.
     let dst = std::path::PathBuf::from(&args.dst_path);
-    if let Some(parent) = dst.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| format!("create backup dir: {e}"))?;
+    let parent = dst.parent().map(|p| p.to_path_buf());
+    if let Some(parent) = parent {
+        tokio::task::spawn_blocking(move || std::fs::create_dir_all(&parent))
+            .await
+            .map_err(|e| format!("join: {e}"))?
+            .map_err(|e| format!("create backup dir: {e}"))?;
     }
     let tmp = dst.with_extension("edcbk1.tmp");
     // Clean any stragglers from a previous crashed run.
@@ -336,18 +351,24 @@ pub async fn export_encrypted_backup(
     gate.export_plaintext_to(&tmp)
         .await
         .map_err(|e| format!("sqlcipher_export failed: {e}"))?;
-    // Step 2: read + encrypt + write. Best-effort remove of the temp
-    // file happens after each exit path.
-    let plaintext = std::fs::read(&tmp).map_err(|e| format!("read tmp: {e}"))?;
-    // Zero the file before removing so plaintext bytes don't linger on
-    // disk between GC and the next allocation of those blocks.
-    let _ = std::fs::write(&tmp, vec![0u8; plaintext.len().min(64 * 1024)]);
-    let _ = std::fs::remove_file(&tmp);
+    // Step 2: read + encrypt + write on a blocking thread. Encryption
+    // can be tens-of-MB → hundreds-of-ms; running it on the tokio
+    // runtime stalls every other IPC call.
     let passphrase = crate::secrets::get_secret("backup_passphrase")?;
-    let enc = encrypt(&passphrase, &plaintext)?;
-    // Best-effort scrub of plaintext buffer before it drops.
-    drop(plaintext);
-    std::fs::write(&dst, enc).map_err(|e| format!("write dst: {e}"))?;
+    let tmp_for_task = tmp.clone();
+    let dst_for_task = dst.clone();
+    tokio::task::spawn_blocking(move || -> Result<(), String> {
+        let plaintext = std::fs::read(&tmp_for_task).map_err(|e| format!("read tmp: {e}"))?;
+        // Zero the file before removing so plaintext bytes don't linger.
+        let _ = std::fs::write(&tmp_for_task, vec![0u8; plaintext.len().min(64 * 1024)]);
+        let _ = std::fs::remove_file(&tmp_for_task);
+        let enc = encrypt(&passphrase, &plaintext)?;
+        drop(plaintext);
+        std::fs::write(&dst_for_task, enc).map_err(|e| format!("write dst: {e}"))?;
+        Ok(())
+    })
+    .await
+    .map_err(|e| format!("join: {e}"))??;
     Ok(())
 }
 

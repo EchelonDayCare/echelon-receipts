@@ -57,12 +57,30 @@ pub struct RankedPhoto {
 /// fails to decode is silently skipped; the caller gets a stats struct
 /// so it can surface a warning like "3 of 47 photos couldn't be read".
 pub fn scan_and_rank(source_folder: &Path, heic_cache_dir: &Path) -> ScanResult {
+    scan_and_rank_cancellable(source_folder, heic_cache_dir, &|| false)
+}
+
+/// Cancellable variant of [`scan_and_rank`]. Checks `is_cancelled`
+/// between each file *and* threads the same predicate into HEIC
+/// decode so a cancel during a 100-photo HEIC batch takes effect
+/// within one photo instead of running the whole scan to completion
+/// (F14). On cancel, returns whatever was scanned so far — the
+/// caller sees a partial `ScanResult` but is expected to bail out
+/// immediately when it sees the render-state cancel flag set.
+pub fn scan_and_rank_cancellable(
+    source_folder: &Path,
+    heic_cache_dir: &Path,
+    is_cancelled: &dyn Fn() -> bool,
+) -> ScanResult {
     let mut kept: Vec<RankedPhoto> = Vec::new();
     let mut errors: Vec<String> = Vec::new();
     let mut heic_count = 0usize;
 
     let walker = walk(source_folder);
     for path in walker {
+        if is_cancelled() {
+            break;
+        }
         let ext = path
             .extension()
             .and_then(|e| e.to_str())
@@ -71,7 +89,7 @@ pub fn scan_and_rank(source_folder: &Path, heic_cache_dir: &Path) -> ScanResult 
 
         let (usable_path, is_heic) = if HEIC_EXTS.contains(&ext.as_str()) {
             heic_count += 1;
-            match heic::convert_heic_to_jpeg(&path, heic_cache_dir) {
+            match heic::convert_heic_to_jpeg_cancellable(&path, heic_cache_dir, is_cancelled) {
                 Ok(p) => (p, true),
                 Err(e) => {
                     errors.push(format!("HEIC decode {}: {e}", path.display()));
@@ -79,9 +97,6 @@ pub fn scan_and_rank(source_folder: &Path, heic_cache_dir: &Path) -> ScanResult 
                 }
             }
         } else if IMAGE_EXTS.contains(&ext.as_str()) {
-            // JPEG-family only carries EXIF orientation — PNG/WebP/BMP
-            // don't need this pass. Still call the helper for all;
-            // it's a no-op fast path when no EXIF is present.
             match ensure_upright(&path, heic_cache_dir) {
                 Ok(p) => (p, false),
                 Err(e) => {
@@ -106,7 +121,6 @@ pub fn scan_and_rank(source_folder: &Path, heic_cache_dir: &Path) -> ScanResult 
         }
     }
 
-    // Descending sort — highest sharpness first.
     kept.sort_by(|a, b| b.sharpness.partial_cmp(&a.sharpness).unwrap_or(std::cmp::Ordering::Equal));
 
     ScanResult {
@@ -217,14 +231,30 @@ fn ensure_upright(source: &Path, cache_dir: &Path) -> Result<PathBuf, String> {
     std::fs::create_dir_all(cache_dir).map_err(|e| format!("mkdir: {e}"))?;
     let key = orient_cache_key(source, mtime_ns, meta.len(), orient);
     let out = cache_dir.join(format!("orient-{key}.jpg"));
+    // Fast path: already produced on disk.
     if out.exists() {
         return Ok(out);
     }
     let img = image::open(source).map_err(|e| format!("decode: {e}"))?;
     let rotated = apply_exif_orientation(img, orient);
+    // Same race-safe atomic-rename pattern as heic.rs — two threads
+    // could otherwise both `save_with_format` to `out` and interleave
+    // JPEG bytes, corrupting the cache.
+    let tmp = cache_dir.join(format!(
+        "orient-{key}.jpg.tmp-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0)
+    ));
     rotated
-        .save_with_format(&out, image::ImageFormat::Jpeg)
+        .save_with_format(&tmp, image::ImageFormat::Jpeg)
         .map_err(|e| format!("write upright jpeg: {e}"))?;
+    if let Err(e) = std::fs::rename(&tmp, &out) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(format!("rename {} -> {}: {e}", tmp.display(), out.display()));
+    }
     Ok(out)
 }
 
@@ -429,6 +459,27 @@ mod tests {
         }];
         let out = curate(&photos, 10);
         assert_eq!(out.len(), 1);
+    }
+
+    #[test]
+    fn scan_and_rank_cancellable_bails_out_early_when_flag_set() {
+        // F14: with a pre-tripped cancel flag, scan_and_rank_cancellable
+        // must return an empty ScanResult immediately instead of walking
+        // every file. Simulates a user pressing Cancel between the
+        // command entry and the spawn_blocking task starting.
+        use std::fs;
+        let src = tempfile::tempdir().unwrap();
+        let cache = tempfile::tempdir().unwrap();
+        // Drop 5 tiny JPEGs into the source folder.
+        for i in 0..5 {
+            let path = src.path().join(format!("photo-{i}.jpg"));
+            let img = image::RgbImage::from_pixel(4, 4, image::Rgb([128, 128, 128]));
+            image::DynamicImage::ImageRgb8(img).save(&path).unwrap();
+            let _ = fs::metadata(&path).unwrap();
+        }
+        let result = scan_and_rank_cancellable(src.path(), cache.path(), &|| true);
+        assert!(result.photos.is_empty(), "cancelled scan should return no photos");
+        assert_eq!(result.heic_count, 0);
     }
 
     #[test]

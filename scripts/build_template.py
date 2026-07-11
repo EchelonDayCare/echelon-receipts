@@ -80,8 +80,17 @@ def main() -> None:
         width=PHOTO_CX,
         height=PHOTO_CY,
     )
+    # Tag the shape with alt-text `{{Photo}}` so the Rust renderer's
+    # find_tagged_photo_embed_rid() picks THIS picture unambiguously,
+    # even on custom templates that later add larger images (F2).
+    # python-pptx exposes the alt-text description as `.name`/`.descr`
+    # via the underlying cNvPr element. Set both name (visible in the
+    # PowerPoint selection pane) and descr (the actual alt text).
+    pic.name = "PhotoPlaceholder"
+    cNvPr = pic._element.nvPicPr.cNvPr
+    cNvPr.set("descr", "{{Photo}}")
     print(f"Added placeholder image: {pic.name} at "
-          f"({PHOTO_X}, {PHOTO_Y}) {PHOTO_CX}x{PHOTO_CY} EMU")
+          f"({PHOTO_X}, {PHOTO_Y}) {PHOTO_CX}x{PHOTO_CY} EMU  descr={{Photo}}")
 
     pres.save(str(TPL))
     size = TPL.stat().st_size

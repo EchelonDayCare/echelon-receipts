@@ -393,7 +393,6 @@ function Shell({ logo, name, staffEnabled }: { logo: string; name: string; staff
   return (
     <div className="app">
       {sidebar}
-      {!path.startsWith("/config") && <SettingsFab />}
       <main className="content">
         <Suspense fallback={<div style={{ padding: 24, color: "var(--muted)" }}>Loading…</div>}>
           <Routes>

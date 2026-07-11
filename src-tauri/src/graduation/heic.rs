@@ -25,6 +25,17 @@ use crate::graduation::StepReport;
 /// so a second invocation with the same source is a no-op if the JPEG
 /// already exists on disk.
 pub fn convert_heic_to_jpeg(source: &Path, dest_dir: &Path) -> Result<PathBuf, String> {
+    convert_heic_to_jpeg_cancellable(source, dest_dir, &|| false)
+}
+
+/// Cancellable variant of [`convert_heic_to_jpeg`]. `is_cancelled`
+/// is polled before the (expensive) libheif decode; if it returns
+/// true we bail with `Err("cancelled")` instead of continuing.
+pub fn convert_heic_to_jpeg_cancellable(
+    source: &Path,
+    dest_dir: &Path,
+    is_cancelled: &dyn Fn() -> bool,
+) -> Result<PathBuf, String> {
     let meta = std::fs::metadata(source)
         .map_err(|e| format!("stat({}): {e}", source.display()))?;
     let mtime_ns = meta
@@ -37,8 +48,14 @@ pub fn convert_heic_to_jpeg(source: &Path, dest_dir: &Path) -> Result<PathBuf, S
     std::fs::create_dir_all(dest_dir)
         .map_err(|e| format!("mkdir({}): {e}", dest_dir.display()))?;
     let out = dest_dir.join(format!("{key}.jpg"));
+    // Fast path: someone (this process or a previous run) already
+    // produced this JPEG. Bytes on disk are the source of truth.
     if out.exists() {
         return Ok(out);
+    }
+
+    if is_cancelled() {
+        return Err("cancelled".to_string());
     }
 
     let lib = LibHeif::new();
@@ -52,6 +69,10 @@ pub fn convert_heic_to_jpeg(source: &Path, dest_dir: &Path) -> Result<PathBuf, S
         .primary_image_handle()
         .map_err(|e| format!("libheif primary handle: {e}"))?;
 
+    if is_cancelled() {
+        return Err("cancelled".to_string());
+    }
+
     let img = lib
         .decode(&handle, ColorSpace::Rgb(RgbChroma::Rgb), None)
         .map_err(|e| format!("libheif decode: {e}"))?;
@@ -63,8 +84,6 @@ pub fn convert_heic_to_jpeg(source: &Path, dest_dir: &Path) -> Result<PathBuf, S
 
     let width = plane.width as u32;
     let height = plane.height as u32;
-    // libheif hands us row-padded data (stride ≥ width * 3). Copy each
-    // row into a tight buffer that image::RgbImage understands.
     let stride = plane.stride;
     let src = plane.data;
     let row_bytes = (width as usize) * 3;
@@ -77,14 +96,39 @@ pub fn convert_heic_to_jpeg(source: &Path, dest_dir: &Path) -> Result<PathBuf, S
     let rgb = image::RgbImage::from_raw(width, height, tight)
         .ok_or_else(|| "image::RgbImage::from_raw: dimensions mismatch".to_string())?;
 
-    // Quality 88: sweet spot for photo slideshows; visually
-    // indistinguishable from source at 1080p output but ~35% smaller
-    // than 95.
-    let mut file = std::fs::File::create(&out)
-        .map_err(|e| format!("create({}): {e}", out.display()))?;
-    let mut enc = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut file, 88);
-    enc.encode_image(&rgb)
-        .map_err(|e| format!("jpeg encode: {e}"))?;
+    // Atomically publish the JPEG: write to a per-process temp file
+    // then rename over the target. On a race, whichever thread renames
+    // last wins with byte-identical content (same source + same key),
+    // and any leftover temp files from earlier processes are cleaned
+    // up by the graduation cache GC. Without this fix, two threads
+    // racing to convert the same HEIC could both open `out.jpg` for
+    // write, interleave, and produce a truncated JPEG that PowerPoint
+    // then refuses to render.
+    let tmp = dest_dir.join(format!(
+        "{key}.jpg.tmp-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0)
+    ));
+    {
+        let mut file = std::fs::File::create(&tmp)
+            .map_err(|e| format!("create({}): {e}", tmp.display()))?;
+        let mut enc = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut file, 88);
+        enc.encode_image(&rgb)
+            .map_err(|e| format!("jpeg encode: {e}"))?;
+    }
+    // rename is atomic on POSIX and Windows (modern std uses
+    // MoveFileExW with MOVEFILE_REPLACE_EXISTING). If the target now
+    // exists because a racer beat us, this replaces it with our
+    // byte-equivalent output — the caller sees consistent bytes.
+    if let Err(e) = std::fs::rename(&tmp, &out) {
+        // Best-effort cleanup so a failed rename doesn't leave junk
+        // for the cache GC to find.
+        let _ = std::fs::remove_file(&tmp);
+        return Err(format!("rename {} -> {}: {e}", tmp.display(), out.display()));
+    }
     Ok(out)
 }
 

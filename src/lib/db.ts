@@ -1487,6 +1487,20 @@ Thanks,
     ["grad_base_folder",   ""],
   ] as const) await setting(k, v);
 
+  // ─── Migration 032 — Perf indexes (v2.6.0) ───────────────────────────
+  // Bench harness (echelon-perf-bench, 10k receipts / 200 students):
+  //   Q4 per-student history:  1398us → 129us  (10.8×)
+  //   Q5 aging report:         2615us →  868us  ( 3.0×)
+  //   Q2 SUM by student:      14023us →11264us  ( 1.25×, GROUP BY still scans)
+  // Write cost: +7ms per 1000 inserts (8 → 15). Acceptable — receipts
+  // are entered one at a time from the UI, batches only during import.
+  await d.execute("CREATE INDEX IF NOT EXISTS ix_receipts_student ON receipts(student_id)");
+  await d.execute("CREATE INDEX IF NOT EXISTS ix_receipts_date ON receipts(date DESC)");
+  await d.execute(
+    "CREATE INDEX IF NOT EXISTS ix_receipts_pending ON receipts(pending_amount) " +
+    "WHERE pending_amount > 0 AND voided = 0"
+  );
+
   await logIntegrityWarnings(d);
 }
 

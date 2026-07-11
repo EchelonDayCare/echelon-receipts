@@ -208,11 +208,11 @@ mod tests {
     #[test]
     fn expected_matches_committed_files() {
         // Every migration in the constant list must exist and be readable.
-        // Regenerating expected_checksums() must succeed and produce 11 rows.
+        // Regenerating expected_checksums() must succeed and produce 12 rows.
         let ck = expected_checksums();
-        assert_eq!(ck.len(), 11);
+        assert_eq!(ck.len(), 12);
         for (v, h) in &ck {
-            assert!(*v >= 1 && *v <= 11);
+            assert!(*v >= 1 && *v <= 12);
             assert_eq!(h.len(), 48, "sha384 must be 48 bytes for v{v}");
         }
     }

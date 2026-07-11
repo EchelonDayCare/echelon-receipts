@@ -94,9 +94,12 @@ pub fn atomic_publish(tmp: &Path, final_dest: &Path) -> Result<PathBuf, String> 
             ));
             let _ = std::fs::remove_file(&backup);
             if let Err(e) = std::fs::rename(final_dest, &backup) {
-                // Existing file is locked — publish tmp under a
-                // timestamped sibling so the render isn't lost.
-                return timestamped_fallback(tmp, final_dest, &format!("existing file locked: {e}"));
+                let hint = classify_publish_error(&e);
+                return timestamped_fallback(
+                    tmp,
+                    final_dest,
+                    &format!("existing file locked ({e}){hint}"),
+                );
             }
             match std::fs::rename(tmp, final_dest) {
                 Ok(()) => {
@@ -104,16 +107,22 @@ pub fn atomic_publish(tmp: &Path, final_dest: &Path) -> Result<PathBuf, String> 
                     return Ok(final_dest.to_path_buf());
                 }
                 Err(e) => {
-                    // Restore previous final so we don't lose it, then
-                    // publish tmp under a timestamped sibling.
+                    let hint = classify_publish_error(&e);
                     let _ = std::fs::rename(&backup, final_dest);
-                    return timestamped_fallback(tmp, final_dest, &format!("promote tmp failed: {e}"));
+                    return timestamped_fallback(
+                        tmp,
+                        final_dest,
+                        &format!("promote tmp failed ({e}){hint}"),
+                    );
                 }
             }
         }
         std::fs::rename(tmp, final_dest)
             .map(|_| final_dest.to_path_buf())
-            .or_else(|e| timestamped_fallback(tmp, final_dest, &format!("rename failed: {e}")))
+            .or_else(|e| {
+                let hint = classify_publish_error(&e);
+                timestamped_fallback(tmp, final_dest, &format!("rename failed ({e}){hint}"))
+            })
     }
     #[cfg(not(windows))]
     {
@@ -133,12 +142,31 @@ fn timestamped_fallback(tmp: &Path, final_dest: &Path, reason: &str) -> Result<P
         final_dest.extension().and_then(|s| s.to_str()).unwrap_or("mp4"),
     ));
     std::fs::rename(tmp, &fallback).map_err(|e2| {
+        let hint = classify_publish_error(&e2);
         format!(
-            "{reason}; fallback rename to {} also failed ({e2})",
+            "{reason}; fallback rename to {} also failed ({e2}){hint}",
             fallback.display()
         )
     })?;
     Ok(fallback)
+}
+
+/// Turn `std::io::Error` kinds we've seen on real Windows machines
+/// into user-actionable hints appended to the error message. AV
+/// scanners hold new-file handles for a few seconds after write, so
+/// AccessDenied on rename is far more common than the base rate.
+#[cfg(windows)]
+fn classify_publish_error(e: &std::io::Error) -> &'static str {
+    use std::io::ErrorKind;
+    match e.kind() {
+        ErrorKind::PermissionDenied => {
+            " — likely locked by antivirus or another program; retry in a few seconds or add the output folder to AV exclusions"
+        }
+        ErrorKind::AlreadyExists => {
+            " — target file exists and appears locked (e.g. open in PowerPoint / Preview); close it and retry"
+        }
+        _ => "",
+    }
 }
 
 /// The graduation cache directory: `{app_data}/graduation-cache/`.
@@ -260,9 +288,11 @@ pub fn scaffold_year(base: &Path, year: u32, students: &[(i64, String)]) -> Resu
         std::fs::create_dir_all(&c.folder)
             .map_err(|e| format!("mkdir {}: {e}", c.folder.display()))?;
     }
-    // Only write README the first time so we don't clobber notes the
-    // user might have added.
-    if !layout.readme.exists() {
+    // README is auto-generated; overwrite on every scaffold so users
+    // upgrading between app versions see current matcher rules and
+    // format lists. Warn users in the file itself to keep personal
+    // notes in NOTES.txt (which we never touch).
+    {
         let names: Vec<String> = layout
             .child_folders
             .iter()
@@ -274,8 +304,11 @@ pub fn scaffold_year(base: &Path, year: u32, students: &[(i64, String)]) -> Resu
             names.join("\n")
         };
         let content = format!(
-r#"Graduation {year} — Folder Guide
-=================================
+r#"Graduation {year} — Folder Guide  (auto-generated; safe to overwrite)
+=====================================================================
+NOTE: this file is rewritten every time you re-scaffold. If you want
+      to keep personal notes about this year's rendering, drop them
+      into `NOTES.txt` in this folder — the app never touches that file.
 
 Drop your files into the folders below, then come back to the app and
 click "Render everything". Everything is optional except the reel
@@ -290,33 +323,49 @@ photos and per-child photos.
       child into their folder. The app builds a 2-minute slideshow
       per child.
 
-      *** Slide-deck photo ***
-      To show a child's photo on their graduation slide, include one
-      photo named after them. Any of these will work (case doesn't
-      matter, extension can be .jpg / .jpeg / .png / .heic):
-          Beau.jpg              (first name — simplest)
-          Seymour.jpg           (last name)
-          Beau Seymour.jpg      (full name — wins if multiple present)
-      If no name-matched photo exists, the slide uses the template's
+      *** Slide-deck photo(s) ***
+      To show a child on their graduation slide, name their photo(s)
+      to match one of these patterns (case-insensitive, spaces
+      optional, extension .jpg / .jpeg / .png / .heic — or none if
+      the extension was stripped by AirDrop / Finder):
+
+          Beau.jpg                        (first name)
+          Beau Seymour.jpg                (first + last)
+          BeauSeymour.jpg                 (first + last, no space)
+          Beau Andrew Seymour.jpg         (first + middle + last)
+          BeauAndrewSeymour.jpg           (first + middle + last, no space)
+
+      If MULTIPLE photos match, the app will place up to 4 of them
+      on the slide (composited into a single image). Priority order
+      when there are more than 4 matches: full-name > first+last >
+      first-only, alphabetical within each tier.
+
+      If NO name-matched photo exists, the slide uses the template's
       default silhouette placeholder.
 {names_block}
 
   3-Music-Optional/
-      Drop ONE audio file (mp3 / m4a / wav / flac) here to use as the
-      soundtrack. Leave empty to use the app's bundled default music.
+      Drop one or more audio files (mp3 / m4a / wav / flac) here.
+      One track is picked at random per render — the app logs which
+      one it used, so you can reproduce a specific render.
 
   4-Slide-Template-Optional/
       Drop ONE PowerPoint template (.pptx) here with a slide
       containing the tokens {{{{Name}}}}, {{{{Note}}}}, {{{{Year}}}}.
-      Leave empty to use the app's bundled default template.
+      Tag the picture placeholder shape with alt-text `{{{{Photo}}}}`
+      so the app knows which image to swap out (otherwise it falls
+      back to swapping whichever image is largest, which can pick
+      the wrong shape on decks with big backgrounds).
+      Leave the folder empty to use the app's bundled default template.
 
   5-Output/
       Rendered videos and the final .pptx deck are saved here.
 
 Tips:
-  • Photo formats supported: JPG, PNG, WebP, HEIC (iPhone).
-  • You can re-scaffold at any time; existing folders and files are
-    kept. Only new subfolders are added.
+  • Photo formats supported: JPG, PNG, WebP, HEIC (iPhone). Extensionless
+    files are recognised by their magic bytes.
+  • You can re-scaffold at any time; existing folders and files are kept.
+    Only new subfolders are added and this README is refreshed.
 "#
         );
         std::fs::write(&layout.readme, content)
@@ -415,73 +464,176 @@ pub fn gc_cache(dir: &Path, max_age_days: u64, max_bytes: u64) -> Vec<String> {
     warnings
 }
 
-/// Find a photo in `child_folder` for the child named `display_name`.
+/// Maximum number of photos we'll composite onto a single graduation slide.
+/// Past 4 the tiles get too small to make out faces (see 2x2 grid in
+/// `pptx::composite_photos_as_jpeg`).
+pub const MAX_PHOTOS_PER_SLIDE: usize = 4;
+
+/// Find every photo in `child_folder` that matches the child named
+/// `display_name`. Returns up to [`MAX_PHOTOS_PER_SLIDE`] matches
+/// ordered by specificity (full-name > first+last > first-only) and
+/// then alphabetically within each tier.
 ///
-/// Extension must be one of `.jpg`, `.jpeg`, `.png`, `.heic`
-/// (case-insensitive). Priority — higher tiers win over lower:
+/// Match rules (case-insensitive, spaces optional):
+/// - First name only — `Beau.jpg`
+/// - First + last — `Beau Seymour.jpg`, `BeauSeymour.jpg`
+/// - First + middle + last — `Beau Andrew Seymour.jpg`, `BeauAndrewSeymour.jpg`
 ///
-/// 1. **Full name** — `Beau Seymour.jpg` (most specific)
-/// 2. **First word** — `Beau.jpg` (most common parent behaviour)
-/// 3. **Last word** — `Seymour.jpg`
+/// The file must have a recognized photo extension (`jpg`, `jpeg`,
+/// `png`, `heic`) OR — when the extension is missing or unrecognised —
+/// its magic bytes must identify it as one of those formats. This
+/// catches cases where AirDrop / Finder-hide-extension / a bad export
+/// stripped the `.jpg` (real-world example: a file literally named
+/// `Beau Seymour` with no visible extension).
 ///
-/// All matches are case-insensitive on the file stem. Returns `None`
-/// if nothing matches, or if the folder doesn't exist.
-pub fn child_photo(child_folder: &Path, display_name: &str) -> Option<PathBuf> {
-    const PHOTO_EXTS: &[&str] = &["jpg", "jpeg", "png", "heic"];
-    let full_lower = display_name.trim().to_lowercase();
-    if full_lower.is_empty() {
-        return None;
+/// Returns an empty `Vec` if the folder is missing, unreadable, or has
+/// no matches.
+pub fn child_photos(child_folder: &Path, display_name: &str) -> Vec<PathBuf> {
+    let variants = name_variants(display_name);
+    if variants.is_empty() {
+        return Vec::new();
     }
-    let tokens: Vec<String> = full_lower
-        .split_whitespace()
-        .map(|s| s.to_string())
-        .collect();
-    let first_token = tokens.first().cloned();
-    let last_token = tokens.last().cloned().filter(|t| Some(t) != first_token.as_ref());
 
-    // Track best hit per tier; walk the whole folder once so we can
-    // pick full > first > last deterministically instead of relying on
-    // filesystem ordering.
-    let mut full_hit: Option<PathBuf> = None;
-    let mut first_hit: Option<PathBuf> = None;
-    let mut last_hit: Option<PathBuf> = None;
+    let Ok(entries) = std::fs::read_dir(child_folder) else {
+        return Vec::new();
+    };
 
-    let entries = std::fs::read_dir(child_folder).ok()?;
+    // Collect (tier, filename_lower, path). Lower tier = higher priority.
+    let mut hits: Vec<(u8, String, PathBuf)> = Vec::new();
     for entry in entries.flatten() {
         let path = entry.path();
         if !path.is_file() {
             continue;
         }
-        let ext_ok = path
-            .extension()
-            .and_then(|e| e.to_str())
-            .map(|e| PHOTO_EXTS.iter().any(|x| e.eq_ignore_ascii_case(x)))
-            .unwrap_or(false);
-        if !ext_ok {
+        if !is_photo_file(&path) {
             continue;
         }
-        let Some(stem_lower) = path
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .map(|s| s.trim().to_lowercase())
+        let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
+            continue;
+        };
+        let norm = normalize(stem);
+        if norm.is_empty() {
+            continue;
+        }
+        let Some(tier) = variants
+            .iter()
+            .find(|(_, v)| v == &norm)
+            .map(|(t, _)| *t)
         else {
             continue;
         };
-        if stem_lower == full_lower && full_hit.is_none() {
-            full_hit = Some(path.clone());
-        }
-        if let Some(ft) = &first_token {
-            if stem_lower == *ft && first_hit.is_none() {
-                first_hit = Some(path.clone());
-            }
-        }
-        if let Some(lt) = &last_token {
-            if stem_lower == *lt && last_hit.is_none() {
-                last_hit = Some(path.clone());
-            }
+        let fname_lower = path
+            .file_name()
+            .and_then(|s| s.to_str())
+            .map(|s| s.to_lowercase())
+            .unwrap_or_default();
+        hits.push((tier, fname_lower, path));
+    }
+
+    hits.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
+    hits.into_iter()
+        .map(|(_, _, p)| p)
+        .take(MAX_PHOTOS_PER_SLIDE)
+        .collect()
+}
+
+/// Legacy single-match helper. Returns the highest-priority match,
+/// preserved so callers that only want one photo don't have to
+/// destructure a `Vec`.
+pub fn child_photo(child_folder: &Path, display_name: &str) -> Option<PathBuf> {
+    child_photos(child_folder, display_name).into_iter().next()
+}
+
+/// Normalise a name-like string for comparison: NFC-normalize, lowercase,
+/// strip all whitespace. `"Beau Seymour"`, `"BeauSeymour"`, and
+/// `"BEAU  SEYMOUR"` all collapse to `"beauseymour"`.
+///
+/// F7: NFC normalization is essential on macOS. HFS+/APFS store filenames
+/// in NFD (decomposed), so `René.jpg` on disk is `R e ́ n e ́` (5 code points
+/// with combining acute accents), while the display name coming from the
+/// CSV / UI is typically NFC (`R é n é`, 4 precomposed code points). Byte
+/// comparison of these fails silently. Normalizing BOTH sides to NFC
+/// before comparison unifies the representation.
+fn normalize(s: &str) -> String {
+    use unicode_normalization::UnicodeNormalization;
+    s.nfc()
+        .filter(|c| !c.is_whitespace())
+        .flat_map(|c| c.to_lowercase())
+        .collect()
+}
+
+/// Generate accepted (tier, normalized_variant) pairs for a display
+/// name. Tier 0 wins over tier 1 wins over tier 2.
+///
+/// - Tier 0: full name (all tokens)
+/// - Tier 1: first + last (only when 3+ tokens, else it collapses into tier 0)
+/// - Tier 2: first-only
+fn name_variants(display_name: &str) -> Vec<(u8, String)> {
+    let tokens: Vec<String> = display_name
+        .split_whitespace()
+        .map(|s| normalize(s))
+        .filter(|s| !s.is_empty())
+        .collect();
+    if tokens.is_empty() {
+        return Vec::new();
+    }
+    let mut out: Vec<(u8, String)> = Vec::new();
+    // Tier 0: full name (all tokens concatenated).
+    out.push((0, tokens.join("")));
+    // Tier 1: first + last, only meaningful when there's a middle name.
+    if tokens.len() >= 3 {
+        out.push((1, format!("{}{}", tokens[0], tokens[tokens.len() - 1])));
+    }
+    // Tier 2: first name only. Suppress when it duplicates tier 0 (single-token names).
+    if tokens.len() >= 2 {
+        out.push((2, tokens[0].clone()));
+    }
+    // Deduplicate keeping the lowest tier (highest priority) per variant.
+    out.sort_by(|a, b| a.1.cmp(&b.1).then_with(|| a.0.cmp(&b.0)));
+    out.dedup_by(|a, b| a.1 == b.1);
+    out
+}
+
+/// Does this file look like a photo we can embed? Accepts:
+/// - Any file with extension jpg/jpeg/png/heic (case-insensitive, fast path).
+/// - Files with missing or unknown extensions whose first bytes match
+///   a known image magic (JPEG, PNG, HEIC).
+fn is_photo_file(path: &Path) -> bool {
+    const KNOWN_EXTS: &[&str] = &["jpg", "jpeg", "png", "heic"];
+    if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
+        if KNOWN_EXTS.iter().any(|x| ext.eq_ignore_ascii_case(x)) {
+            return true;
         }
     }
-    full_hit.or(first_hit).or(last_hit)
+    // Fallback: sniff magic bytes. Only reads 12 bytes so it's cheap
+    // even when a folder has hundreds of non-photo entries.
+    let Ok(mut f) = std::fs::File::open(path) else { return false };
+    let mut buf = [0u8; 12];
+    use std::io::Read;
+    let n = f.read(&mut buf).unwrap_or(0);
+    if n < 4 {
+        return false;
+    }
+    // JPEG: FF D8 FF
+    if buf[0] == 0xFF && buf[1] == 0xD8 && buf[2] == 0xFF {
+        return true;
+    }
+    // PNG: 89 50 4E 47 0D 0A 1A 0A
+    if n >= 8 && &buf[0..8] == b"\x89PNG\r\n\x1a\n" {
+        return true;
+    }
+    // HEIC/HEIF: ISO-BMFF `ftyp` box at offset 4. Brands we accept:
+    // heic, heix, hevc, hevx, mif1, msf1, heim, heis.
+    if n >= 12 && &buf[4..8] == b"ftyp" {
+        let brand = &buf[8..12];
+        const HEIF_BRANDS: &[&[u8; 4]] = &[
+            b"heic", b"heix", b"hevc", b"hevx", b"mif1", b"msf1", b"heim", b"heis",
+        ];
+        if HEIF_BRANDS.iter().any(|b| brand == *b) {
+            return true;
+        }
+    }
+    false
 }
 
 /// Validate a user-supplied folder path used by graduation commands.
@@ -501,6 +653,15 @@ pub fn validate_folder(raw: &str) -> Result<PathBuf, String> {
         return Err("empty folder path".to_string());
     }
     let p = Path::new(raw);
+    // F16: reject any `..` traversal component and the leaf-being-a-symlink
+    // case. Full-chain symlink rejection is unsafe on macOS where system
+    // paths like `/tmp` and `/var` are themselves symlinks — walking every
+    // ancestor with symlink_metadata would refuse to accept a user's own
+    // /tmp/mypics pick. The residual attack surface (attacker-controlled
+    // symlink INSIDE the user-picked folder) is defended at the scan-walker
+    // layer: curate::scan_and_rank already skips symlinked entries during
+    // directory traversal.
+    reject_traversal_components(p)?;
     if std::fs::symlink_metadata(p)
         .map(|m| m.file_type().is_symlink())
         .unwrap_or(false)
@@ -516,6 +677,23 @@ pub fn validate_folder(raw: &str) -> Result<PathBuf, String> {
     Ok(canon)
 }
 
+/// Reject `..` and `.` components anywhere in a user-supplied path.
+/// `canonicalize()` resolves these silently, so an input like
+/// `~/Documents/../../../etc/passwd` would slip past a leaf-only symlink
+/// check. Empty and absolute-prefix components are fine.
+fn reject_traversal_components(p: &Path) -> Result<(), String> {
+    use std::path::Component;
+    for c in p.components() {
+        if matches!(c, Component::ParentDir) {
+            return Err(format!(
+                "refusing path containing '..' component: {}",
+                p.display()
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// Validate a folder used for output (writes). Canonicalizes the
 /// parent chain if the folder itself doesn't yet exist — we allow
 /// creating scaffolded subfolders under an existing user-picked base.
@@ -524,6 +702,7 @@ pub fn validate_writable_dir(raw: &str) -> Result<PathBuf, String> {
         return Err("empty folder path".to_string());
     }
     let p = Path::new(raw);
+    reject_traversal_components(p)?;
     // If it exists, run the standard validation. Otherwise walk up to
     // the first existing ancestor and require that to be a real dir
     // (not a symlink) — the missing tail will be created by the caller.
@@ -558,6 +737,7 @@ pub fn validate_file(raw: &str) -> Result<PathBuf, String> {
         return Err("empty file path".to_string());
     }
     let p = Path::new(raw);
+    reject_traversal_components(p)?;
     if std::fs::symlink_metadata(p)
         .map(|m| m.file_type().is_symlink())
         .unwrap_or(false)
@@ -637,14 +817,6 @@ mod tests {
     }
 
     #[test]
-    fn child_photo_matches_last_name() {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("Seymour.jpg"), b"x").unwrap();
-        let hit = child_photo(dir.path(), "Beau Seymour").unwrap();
-        assert_eq!(hit.file_name().unwrap(), "Seymour.jpg");
-    }
-
-    #[test]
     fn child_photo_prefers_full_name_over_first_name() {
         // When both are present, full-name match wins (most specific).
         let dir = tempfile::tempdir().unwrap();
@@ -655,29 +827,128 @@ mod tests {
     }
 
     #[test]
-    fn child_photo_prefers_first_over_last_name() {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("Beau.jpg"), b"x").unwrap();
-        std::fs::write(dir.path().join("Seymour.jpg"), b"x").unwrap();
-        let hit = child_photo(dir.path(), "Beau Seymour").unwrap();
-        assert_eq!(hit.file_name().unwrap(), "Beau.jpg");
-    }
-
-    #[test]
     fn child_photo_ignores_random_names_that_dont_match_any_token() {
-        // "20191021_082507.jpg" should NOT match "Beau Seymour".
+        // "20191021_082507.jpg" should NOT match "Beau Seymour", and neither
+        // should a bare last name — the new spec dropped last-only matches.
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("20191021_082507.jpg"), b"x").unwrap();
         std::fs::write(dir.path().join("random_photo.jpg"), b"x").unwrap();
+        std::fs::write(dir.path().join("Seymour.jpg"), b"x").unwrap();
         assert!(child_photo(dir.path(), "Beau Seymour").is_none());
     }
 
     #[test]
     fn child_photo_single_word_name_still_works() {
-        // "Beau" as display_name — first_token == last_token, only the
-        // full/first tier should fire (avoid duplicate work).
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("Beau.jpg"), b"x").unwrap();
         assert!(child_photo(dir.path(), "Beau").is_some());
+    }
+
+    #[test]
+    fn child_photos_matches_first_last_when_display_name_has_middle() {
+        // The bug that motivated v2.5.3: display name "Beau Andrew Seymour"
+        // with a file named "Beau Seymour.jpg" MUST match.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("Beau Seymour.jpg"), b"x").unwrap();
+        let hits = child_photos(dir.path(), "Beau Andrew Seymour");
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].file_name().unwrap(), "Beau Seymour.jpg");
+    }
+
+    #[test]
+    fn child_photos_matches_concatenated_no_space_variants() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("BeauSeymour.jpg"), b"x").unwrap();
+        std::fs::write(dir.path().join("BeauAndrewSeymour.png"), b"x").unwrap();
+        let hits = child_photos(dir.path(), "Beau Andrew Seymour");
+        assert_eq!(hits.len(), 2);
+        // Full-name (tier 0) beats first+last (tier 1).
+        assert_eq!(hits[0].file_name().unwrap(), "BeauAndrewSeymour.png");
+        assert_eq!(hits[1].file_name().unwrap(), "BeauSeymour.jpg");
+    }
+
+    #[test]
+    fn child_photos_returns_all_matches_up_to_cap() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("Beau.jpg"), b"x").unwrap();
+        std::fs::write(dir.path().join("BeauSeymour.jpg"), b"x").unwrap();
+        std::fs::write(dir.path().join("Beau Andrew Seymour.jpg"), b"x").unwrap();
+        std::fs::write(dir.path().join("BeauAndrewSeymour.jpg"), b"x").unwrap();
+        let hits = child_photos(dir.path(), "Beau Andrew Seymour");
+        // 4 matches, all under the cap.
+        assert_eq!(hits.len(), 4);
+        // Full-name (tier 0) files first, alpha within tier.
+        let names: Vec<_> = hits
+            .iter()
+            .map(|p| p.file_name().unwrap().to_str().unwrap().to_string())
+            .collect();
+        assert_eq!(names[0], "Beau Andrew Seymour.jpg");
+        assert_eq!(names[1], "BeauAndrewSeymour.jpg");
+        assert_eq!(names[2], "BeauSeymour.jpg"); // tier 1: first+last
+        assert_eq!(names[3], "Beau.jpg");        // tier 2: first only
+    }
+
+    #[test]
+    fn child_photos_caps_at_max_per_slide() {
+        let dir = tempfile::tempdir().unwrap();
+        for n in 0..7 {
+            // 7 files that all normalize to "beau".
+            std::fs::write(dir.path().join(format!("Beau ({n}).jpg")), b"x").unwrap();
+        }
+        // Also add an unambiguous first-name-only match.
+        std::fs::write(dir.path().join("Beau.jpg"), b"x").unwrap();
+        let hits = child_photos(dir.path(), "Beau");
+        assert!(hits.len() <= MAX_PHOTOS_PER_SLIDE);
+    }
+
+    #[test]
+    fn child_photos_accepts_extensionless_jpeg_via_magic_bytes() {
+        // Real-world case: AirDrop / macOS "hide extension" strips the
+        // suffix, leaving a file literally named "Beau Seymour" with
+        // JPEG magic bytes.
+        let dir = tempfile::tempdir().unwrap();
+        // Minimal JPEG magic: FF D8 FF E0 ... (JFIF header stub is enough).
+        let jpeg_bytes: &[u8] = &[
+            0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10, b'J', b'F', b'I', b'F', 0x00, 0x01,
+        ];
+        std::fs::write(dir.path().join("Beau Seymour"), jpeg_bytes).unwrap();
+        let hits = child_photos(dir.path(), "Beau Andrew Seymour");
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].file_name().unwrap(), "Beau Seymour");
+    }
+
+    #[test]
+    fn child_photos_ignores_extensionless_non_image_files() {
+        let dir = tempfile::tempdir().unwrap();
+        // Text file with no extension whose name would otherwise match.
+        std::fs::write(dir.path().join("Beau"), b"just some notes about beau").unwrap();
+        let hits = child_photos(dir.path(), "Beau");
+        assert!(hits.is_empty());
+    }
+
+    #[test]
+    fn child_photos_matches_nfc_and_nfd_variants() {
+        // F7: filename on disk may be NFD (macOS APFS) while display
+        // name from the CSV is NFC. Both should match.
+        let dir = tempfile::tempdir().unwrap();
+        // NFD: 'e' + combining acute (U+0301).
+        let nfd_name = "Ren\u{0065}\u{0301}.jpg";
+        std::fs::write(dir.path().join(nfd_name), b"x").unwrap();
+        // Display name in NFC: precomposed 'é' (U+00E9).
+        let nfc_display = "Ren\u{00E9}";
+        let hits = child_photos(dir.path(), nfc_display);
+        assert_eq!(hits.len(), 1, "NFC display should match NFD filename");
+    }
+
+    #[test]
+    fn validate_folder_rejects_parent_dir_traversal() {
+        // F16: `..` must be rejected before canonicalize resolves it.
+        let dir = tempfile::tempdir().unwrap();
+        let sneaky = dir.path().join("child").join("..").join("..");
+        // Create the child so the leaf exists — traversal check must
+        // fire before existence resolves it away.
+        std::fs::create_dir_all(dir.path().join("child")).unwrap();
+        let err = validate_folder(sneaky.to_str().unwrap()).unwrap_err();
+        assert!(err.contains(".."), "expected .. rejection, got {err}");
     }
 }

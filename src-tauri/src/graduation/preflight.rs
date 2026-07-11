@@ -128,22 +128,78 @@ pub fn check_capabilities(ffmpeg_path: &Path) -> StepReport {
 }
 
 /// Confirms `dir` exists and is writable by performing a create+delete
-/// probe. Empty file so we don't leave a stray temp on failure.
+/// probe. Uses `OpenOptions::create_new(true)` with a random suffix so
+/// the probe cannot truncate or replace an existing file — a symlinked
+/// output dir pointing this at `~/.ssh/id_rsa` would otherwise let us
+/// wipe user data during a "harmless" preflight check.
+///
+/// F13: If the folder doesn't exist yet but its nearest existing
+/// ancestor is a writable directory, that's fine — the render code
+/// calls `create_dir_all` before writing. Rejecting a
+/// freshly-typed-in output path forced users to precreate every
+/// folder in Finder / Explorer just to satisfy preflight.
 pub fn check_writable_folder(dir: &Path) -> StepReport {
     if !dir.exists() {
+        // Walk up to the first existing ancestor and probe *that*.
+        let mut cur = dir.parent();
+        while let Some(anc) = cur {
+            if anc.as_os_str().is_empty() {
+                break;
+            }
+            if anc.exists() {
+                if !anc.is_dir() {
+                    return StepReport::fail(format!(
+                        "Ancestor of {} is not a directory: {}",
+                        dir.display(),
+                        anc.display()
+                    ));
+                }
+                return match probe_writable(anc) {
+                    Ok(()) => StepReport::ok(format!(
+                        "Will create {} — writable ancestor: {}",
+                        dir.display(),
+                        anc.display()
+                    )),
+                    Err(e) => StepReport::fail(format!(
+                        "Ancestor not writable: {} ({e})",
+                        anc.display()
+                    )),
+                };
+            }
+            cur = anc.parent();
+        }
         return StepReport::fail(format!("Folder not found: {}", dir.display()));
     }
     if !dir.is_dir() {
         return StepReport::fail(format!("Not a directory: {}", dir.display()));
     }
-    let probe = dir.join(".echelon-write-probe");
-    match std::fs::write(&probe, b"") {
-        Ok(()) => {
-            let _ = std::fs::remove_file(&probe);
-            StepReport::ok(format!("Writable: {}", dir.display()))
-        }
+    match probe_writable(dir) {
+        Ok(()) => StepReport::ok(format!("Writable: {}", dir.display())),
         Err(e) => StepReport::fail(format!("Not writable: {} ({e})", dir.display())),
     }
+}
+
+/// Create a random-name probe file with O_CREAT|O_EXCL semantics so we
+/// don't clobber anything through a symlink or a hostile pre-existing
+/// file. Deletes on success; returns Err on any I/O failure.
+fn probe_writable(dir: &Path) -> std::io::Result<()> {
+    use std::fs::OpenOptions;
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let pid = std::process::id();
+    let probe = dir.join(format!(".echelon-write-probe-{pid}-{nanos:x}"));
+    // create_new(true) → O_CREAT|O_EXCL → fails if the target already
+    // exists as a file OR a symlink to a file. Prevents both TOCTOU
+    // truncation and symlink-target overwrite.
+    let mut opts = OpenOptions::new();
+    opts.write(true).create_new(true);
+    let f = opts.open(&probe)?;
+    drop(f);
+    let _ = std::fs::remove_file(&probe);
+    Ok(())
 }
 
 /// Free-space check. Platform-specific; falls back to a soft-ok on
@@ -279,4 +335,32 @@ pub fn check_readable_folder(dir: &Path) -> StepReport {
         return StepReport::fail(format!("Not a directory: {}", dir.display()));
     }
     StepReport::ok(format!("Found: {}", dir.display()))
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn check_writable_folder_accepts_missing_leaf_with_writable_parent() {
+        // F13: preflight must OK a non-existent output folder as long as
+        // its nearest existing ancestor is writable — the render's own
+        // create_dir_all will materialise the leaf. Previously flagged
+        // any missing dir as "Folder not found", forcing the user to
+        // manually create the folder before Render.
+        let parent = tempfile::tempdir().unwrap();
+        let leaf = parent.path().join("does-not-exist-yet").join("nested");
+        let report = check_writable_folder(&leaf);
+        assert!(report.ok, "report was: {:?}", report.message);
+        assert!(report.message.contains("Will create"),
+            "expected message to note deferred create, got: {}", report.message);
+    }
+
+    #[test]
+    fn check_writable_folder_ok_on_existing_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let report = check_writable_folder(dir.path());
+        assert!(report.ok, "expected writable, got: {}", report.message);
+    }
 }

@@ -45,6 +45,56 @@ impl ProgressTick {
     }
 }
 
+/// Stateful, incremental parser for FFmpeg's `-progress pipe:1` output.
+///
+/// tauri-plugin-shell delivers stdout in chunks that rarely align with
+/// FFmpeg's per-block key=value emission (single lines arrive in
+/// separate events). This parser accumulates key/value fields into a
+/// pending `ProgressTick` across `feed_line` calls and emits it only
+/// when it sees `progress=continue` / `progress=end` — the block
+/// terminators. That way `frame`, `fps`, `out_time_us`, and friends
+/// stay bundled in the same event.
+#[derive(Default)]
+pub struct ProgressParser {
+    current: ProgressTick,
+}
+
+impl ProgressParser {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Feed a single terminated line (no trailing newline required).
+    /// Returns `Some(tick)` when a block completes, `None` otherwise.
+    pub fn feed_line(&mut self, line: &str) -> Option<ProgressTick> {
+        let l = line.trim_end();
+        let (k, v) = l.split_once('=')?;
+        match k {
+            "frame" => self.current.frame = v.parse().ok(),
+            "fps" => self.current.fps = v.parse().ok(),
+            "total_size" => self.current.total_size = v.parse().ok(),
+            "out_time_us" => self.current.out_time_us = v.parse().ok(),
+            "out_time_ms" => self.current.out_time_ms = v.parse().ok(),
+            "progress" => {
+                self.current.done = v == "end";
+                return Some(std::mem::take(&mut self.current));
+            }
+            _ => {}
+        }
+        None
+    }
+
+    /// Drain any partial block that hadn't seen a `progress=` terminator
+    /// yet (called on EOF).
+    pub fn drain(&mut self) -> Option<ProgressTick> {
+        if has_data(&self.current) {
+            Some(std::mem::take(&mut self.current))
+        } else {
+            None
+        }
+    }
+}
+
 /// Read every line from `reader`, invoking `on_tick` once per completed
 /// progress block. Returns Ok when EOF is hit.
 ///
@@ -52,36 +102,23 @@ impl ProgressTick {
 /// intended use is to emit a Tauri event and return.
 pub fn parse_stream<R: Read>(reader: R, mut on_tick: impl FnMut(ProgressTick)) -> std::io::Result<()> {
     let mut buf = BufReader::new(reader);
-    let mut current = ProgressTick::default();
+    let mut parser = ProgressParser::new();
     let mut line = String::new();
     loop {
         line.clear();
         let n = buf.read_line(&mut line)?;
         if n == 0 {
-            // EOF: emit any partial tick that had data.
-            if has_data(&current) {
-                on_tick(std::mem::take(&mut current));
+            if let Some(t) = parser.drain() {
+                on_tick(t);
             }
             return Ok(());
         }
-        let l = line.trim_end();
-        let Some((k, v)) = l.split_once('=') else { continue };
-        match k {
-            "frame" => current.frame = v.parse().ok(),
-            "fps" => current.fps = v.parse().ok(),
-            "total_size" => current.total_size = v.parse().ok(),
-            "out_time_us" => current.out_time_us = v.parse().ok(),
-            "out_time_ms" => current.out_time_ms = v.parse().ok(),
-            "progress" => {
-                current.done = v == "end";
-                let tick = std::mem::take(&mut current);
-                let is_end = tick.done;
-                on_tick(tick);
-                if is_end {
-                    return Ok(());
-                }
+        if let Some(t) = parser.feed_line(&line) {
+            let is_end = t.done;
+            on_tick(t);
+            if is_end {
+                return Ok(());
             }
-            _ => {}
         }
     }
 }

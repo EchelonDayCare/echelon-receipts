@@ -293,7 +293,7 @@ impl DbGate {
     ) -> Result<(Vec<String>, Vec<Map<String, Value>>), DbError> {
         let guard = self.inner.lock().await;
         let conn = guard.as_ref().ok_or(DbError::Locked)?;
-        let mut stmt = conn.prepare(sql)?;
+        let mut stmt = conn.prepare_cached(sql)?;
         let col_names: Vec<String> =
             stmt.column_names().iter().map(|s| s.to_string()).collect();
         let rusqlite_args = json_args_to_sql(args)?;
@@ -330,7 +330,8 @@ impl DbGate {
             });
         }
         let rusqlite_args = json_args_to_sql(args)?;
-        let rows_affected = conn.execute(sql, params_from_iter(rusqlite_args.iter()))?;
+        let mut stmt = conn.prepare_cached(sql)?;
+        let rows_affected = stmt.execute(params_from_iter(rusqlite_args.iter()))?;
         Ok(ExecuteResult {
             last_insert_id: conn.last_insert_rowid().max(0) as u64,
             rows_affected: rows_affected as u64,
@@ -377,6 +378,8 @@ fn apply_startup_pragmas(
          PRAGMA foreign_keys = ON;\
          PRAGMA busy_timeout = 5000;\
          PRAGMA temp_store = MEMORY;\
+         PRAGMA cache_size = -65536;\
+         PRAGMA mmap_size = 268435456;\
          ",
     )?;
     Ok(())

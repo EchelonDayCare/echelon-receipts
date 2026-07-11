@@ -13,8 +13,9 @@
 //!   the state slot before the frontend batch loop advances so the
 //!   next iteration's spawn doesn't race.
 
-use std::path::PathBuf;
-use std::sync::Mutex;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager, State};
@@ -30,6 +31,76 @@ fn spec_total_duration(n: usize, photo_sec: f64, xfade_sec: f64) -> f64 {
     let n = n as f64;
     let raw = (n * photo_sec - (n - 1.0).max(0.0) * xfade_sec).max(0.0);
     raw.max(4.0)
+}
+
+/// Reject any `job_id` that isn't `[A-Za-z0-9_-]{1,64}`. F6: the raw
+/// job_id is spliced into cache paths (`reel-{job_id}-filter.script`,
+/// `child-{job_id}-aliases`), so a hostile frontend value like
+/// `../../../etc` would let a render write outside the cache dir. This
+/// pins it to the character class the frontend uses (`crypto.randomUUID()`
+/// stripped of dashes, timestamps) and length-caps to prevent DoS via
+/// pathological filenames.
+fn sanitize_job_id(raw: &str) -> Result<String, String> {
+    if raw.is_empty() {
+        return Err("job_id must not be empty".to_string());
+    }
+    if raw.len() > 64 {
+        return Err("job_id too long (max 64 chars)".to_string());
+    }
+    if !raw
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+    {
+        return Err(
+            "job_id must contain only ASCII letters, digits, '_' or '-'".to_string(),
+        );
+    }
+    Ok(raw.to_string())
+}
+
+/// Hard-link (or copy on cross-volume failure) each source photo to
+/// a short deterministic alias `p0001.jpg` … `pNNNN.jpg` in a scratch
+/// dir. Returns just the alias **filenames** (no path prefix) in the
+/// same order as `sources`.
+///
+/// Rationale (F4 + review-agent #2): Windows `CreateProcess` caps the
+/// command line at 32 767 chars. With 150+ photos and typical
+/// OneDrive/Documents paths (~130 chars each), the raw `-i <abs-path>`
+/// arg list can blow past that limit and FFmpeg fails to launch with a
+/// cryptic error. Even shortening filenames alone isn't enough — the
+/// scratch dir sits under the user's cache root, so full alias paths
+/// still run ~150 chars. Returning bare filenames and setting the
+/// spawned FFmpeg command's `current_dir` to the scratch dir keeps
+/// each `-i` arg at ~12 bytes.
+///
+/// The `@filelist` approach was investigated first and abandoned —
+/// bundled FFmpeg parses `@arg` as an *output format specifier*, not
+/// a filelist reference, so `-i @list.txt` yields
+/// "Unable to choose an output format for '@…'".
+fn alias_photos(sources: &[PathBuf], scratch_dir: &Path) -> Result<Vec<PathBuf>, String> {
+    std::fs::create_dir_all(scratch_dir)
+        .map_err(|e| format!("mkdir alias scratch: {e}"))?;
+    let mut aliases: Vec<PathBuf> = Vec::with_capacity(sources.len());
+    for (i, src) in sources.iter().enumerate() {
+        let ext = src
+            .extension()
+            .and_then(|s| s.to_str())
+            .unwrap_or("jpg")
+            .to_ascii_lowercase();
+        let name = format!("p{:04}.{ext}", i + 1);
+        let alias_full = scratch_dir.join(&name);
+        let _ = std::fs::remove_file(&alias_full);
+        match std::fs::hard_link(src, &alias_full) {
+            Ok(()) => {}
+            Err(_) => {
+                std::fs::copy(src, &alias_full).map_err(|e| {
+                    format!("alias copy {} → {}: {e}", src.display(), alias_full.display())
+                })?;
+            }
+        }
+        aliases.push(PathBuf::from(name));
+    }
+    Ok(aliases)
 }
 
 /// Best-effort audit write into `graduation_renders` so Ask Echelon can
@@ -67,13 +138,33 @@ async fn record_render(
 }
 
 /// Session-level state that tracks the currently-running FFmpeg render
-/// so the frontend can cancel it. Also tracks whether the current or
-/// upcoming render has been cancelled, so a frontend batch loop can
-/// check and short-circuit between per-child iterations.
+/// so the frontend can cancel it. `current_child` and `cancelled` live
+/// under a single mutex so callers can never acquire them in
+/// inconsistent order (F5). Every read/write of either field goes
+/// through `state.inner.lock()`.
 #[derive(Default)]
 pub struct RenderState {
-    pub current_child: Mutex<Option<CommandChild>>,
-    pub cancelled: Mutex<bool>,
+    pub inner: Mutex<RenderInner>,
+    /// Lock-free cancel signal readable from worker threads (curate
+    /// scan_and_rank, HEIC decode) without going through the mutex.
+    /// F14: threads a cancel checkpoint into HEIC decode so cancelling
+    /// during a 100+ HEIC batch takes effect within one photo instead
+    /// of running to completion. Kept in sync with `RenderInner.cancelled`
+    /// — every write to one must write the other under the mutex.
+    pub cancel_flag: Arc<AtomicBool>,
+}
+
+#[derive(Default)]
+pub struct RenderInner {
+    /// (invocation-id, child). Only the owning spawn_and_stream may
+    /// clear this slot on Terminate/Error — matching by id prevents an
+    /// earlier render's cleanup from wiping a newer render's handle
+    /// after the older process was killed and replaced.
+    pub current_child: Option<(u64, CommandChild)>,
+    pub cancelled: bool,
+    /// Monotonic invocation counter. Each spawn_and_stream call
+    /// grabs the next id under the mutex.
+    pub next_child_id: u64,
 }
 
 /// Payload emitted on the `graduation://progress` channel.
@@ -240,6 +331,10 @@ pub struct RenderReelResponse {
     pub output_path: String,
     pub frames_encoded: u64,
     pub duration_ms: i64,
+    /// Absolute path (or filename) of the music track actually used
+    /// in the reel — surfaces the auto-picked random track so the
+    /// user can see which one FFmpeg mixed (F11).
+    pub music_used: Option<String>,
 }
 
 #[tauri::command]
@@ -249,6 +344,8 @@ pub async fn graduation_render_reel(
     db_gate: State<'_, DbGate>,
     req: RenderReelRequest,
 ) -> Result<RenderReelResponse, String> {
+    // F6: reject a hostile job_id before it lands in cache paths.
+    let job_id = sanitize_job_id(&req.job_id)?;
     // Clear any stale cancel flag from a previous batch.
     reset_cancelled(&state);
     let cache_root = paths::cache_dir(&app)?;
@@ -259,10 +356,16 @@ pub async fn graduation_render_reel(
     let scan = {
         let src = source.clone();
         let cache = heic_cache.clone();
-        tokio::task::spawn_blocking(move || curate::scan_and_rank(&src, &cache))
+        let flag = Arc::clone(&state.cancel_flag);
+        tokio::task::spawn_blocking(move || {
+            curate::scan_and_rank_cancellable(&src, &cache, &|| flag.load(Ordering::Relaxed))
+        })
             .await
             .map_err(|e| format!("curate join: {e}"))?
     };
+    if is_cancelled(&state) {
+        return Err("cancelled".into());
+    }
     if scan.photos.is_empty() {
         return Err(format!(
             "No usable photos in {}. {} errors encountered.",
@@ -279,7 +382,7 @@ pub async fn graduation_render_reel(
         let _ = app.emit(
             "graduation://log",
             LogPayload {
-                job_id: req.job_id.clone(),
+                job_id: job_id.clone(),
                 level: "warn".into(),
                 message: format!(
                     "Only {} photos available; reel will be ~{actual_sec:.0}s not {}s. \
@@ -315,7 +418,7 @@ pub async fn graduation_render_reel(
                     let _ = app.emit(
                         "graduation://log",
                         LogPayload {
-                            job_id: req.job_id.clone(),
+                            job_id: job_id.clone(),
                             level: "info".into(),
                             message: if list_len > 1 {
                                 format!("Picked '{name}' at random from {list_len} tracks in music folder.")
@@ -334,7 +437,7 @@ pub async fn graduation_render_reel(
         .or(auto_music)
         .or_else(|| paths::default_music_track(&app));
 
-    let filter_script = cache_root.join(format!("reel-{}-filter.script", req.job_id));
+    let filter_script = cache_root.join(format!("reel-{}-filter.script", job_id));
 
     // Render to .tmp first so the final output only appears when the
     // encode completes cleanly.
@@ -345,7 +448,12 @@ pub async fn graduation_render_reel(
 
     // v2.4.0: per-photo inputs + xfade transitions. Duration accounts
     // for transitions consuming overlap: N*D - (N-1)*X.
-    let photos: Vec<PathBuf> = curated.iter().map(|p| p.path.clone()).collect();
+    let source_photos: Vec<PathBuf> = curated.iter().map(|p| p.path.clone()).collect();
+    // F4: hard-link photos to short aliases before handing to FFmpeg
+    // so `CreateProcess` argv stays under the Windows 32 KB cap even
+    // for large batches (150+ photos with deep OneDrive paths).
+    let alias_dir = cache_root.join(format!("reel-{}-aliases", job_id));
+    let photos = alias_photos(&source_photos, &alias_dir)?;
     let spec = engine::default_reel_spec(
         photos,
         music_track,
@@ -359,7 +467,7 @@ pub async fn graduation_render_reel(
         .map_err(|e| format!("write filter script: {e}"))?;
     let args = engine::build_reel_cmd(&spec);
 
-    let outcome = match spawn_and_stream(&app, state, &req.job_id, "reel", args).await {
+    let outcome = match spawn_and_stream(&app, state, &job_id, "reel", args, Some(alias_dir.clone())).await {
         Ok(o) => o,
         Err(e) => {
             // Failed / cancelled renders leave a partial `.mp4.tmp`
@@ -368,11 +476,13 @@ pub async fn graduation_render_reel(
             // also useless without the render, so remove it too.
             let _ = std::fs::remove_file(&tmp_path);
             let _ = std::fs::remove_file(&filter_script);
+            let _ = std::fs::remove_dir_all(&alias_dir);
             return Err(e);
         }
     };
-    // Filter script is per-job — safe to remove on success.
+    // Filter script + alias dir are per-job — safe to remove on success.
     let _ = std::fs::remove_file(&filter_script);
+    let _ = std::fs::remove_dir_all(&alias_dir);
 
     let published = paths::atomic_publish(&tmp_path, &final_path)?;
     let output_path = published.to_string_lossy().into_owned();
@@ -391,6 +501,10 @@ pub async fn graduation_render_reel(
         output_path,
         frames_encoded: outcome.frames,
         duration_ms: outcome.duration_ms,
+        music_used: spec
+            .music_track
+            .as_ref()
+            .map(|p| p.to_string_lossy().into_owned()),
     })
 }
 
@@ -417,17 +531,24 @@ pub async fn graduation_render_child(
     db_gate: State<'_, DbGate>,
     req: RenderChildRequest,
 ) -> Result<RenderReelResponse, String> {
-    // Honor an in-flight cancel from a batch loop before we even scan.
-    if is_cancelled(&state) {
-        return Err("cancelled".to_string());
-    }
+    // F6: reject a hostile job_id before it lands in cache paths.
+    let job_id = sanitize_job_id(&req.job_id)?;
+    // F9: reset the backend cancel flag on every render entrypoint. The
+    // frontend batch loop's own `cancelledRef` decides whether to
+    // iterate; the backend flag is only meaningful for "kill the
+    // currently-running child". Leaving it sticky between calls made
+    // standalone per-child runs abort instantly after any prior cancel.
+    reset_cancelled(&state);
     let cache_root = paths::cache_dir(&app)?;
     let heic_cache = cache_root.join("heic");
     let source = paths::validate_folder(&req.source_folder)?;
     let scan = {
         let src = source.clone();
         let cache = heic_cache.clone();
-        tokio::task::spawn_blocking(move || curate::scan_and_rank(&src, &cache))
+        let flag = Arc::clone(&state.cancel_flag);
+        tokio::task::spawn_blocking(move || {
+            curate::scan_and_rank_cancellable(&src, &cache, &|| flag.load(Ordering::Relaxed))
+        })
             .await
             .map_err(|e| format!("curate join: {e}"))?
     };
@@ -463,7 +584,7 @@ pub async fn graduation_render_child(
         .or(auto_music)
         .or_else(|| paths::default_music_track(&app));
 
-    let filter_script = cache_root.join(format!("child-{}-filter.script", req.job_id));
+    let filter_script = cache_root.join(format!("child-{}-filter.script", job_id));
 
     let out_dir = paths::validate_writable_dir(&req.output_folder)?;
     std::fs::create_dir_all(&out_dir).map_err(|e| format!("mkdir output: {e}"))?;
@@ -471,7 +592,10 @@ pub async fn graduation_render_child(
     let final_path = out_dir.join(format!("{folder_name}.mp4"));
     let tmp_path = out_dir.join(format!("{folder_name}.mp4.tmp"));
 
-    let photos: Vec<PathBuf> = curated.iter().map(|p| p.path.clone()).collect();
+    let source_photos: Vec<PathBuf> = curated.iter().map(|p| p.path.clone()).collect();
+    // F4: hard-link → short alias to keep Windows argv under 32 KB.
+    let alias_dir = cache_root.join(format!("child-{}-aliases", job_id));
+    let photos = alias_photos(&source_photos, &alias_dir)?;
     // Build the same ReelSpec build_per_child_cmd would produce so we
     // can render its filter script deterministically before spawning.
     let per_child_spec = engine::ReelSpec {
@@ -494,15 +618,17 @@ pub async fn graduation_render_child(
         .map_err(|e| format!("write filter script: {e}"))?;
     let args = engine::build_reel_cmd(&per_child_spec);
 
-    let outcome = match spawn_and_stream(&app, state, &req.job_id, "per-child", args).await {
+    let outcome = match spawn_and_stream(&app, state, &job_id, "per-child", args, Some(alias_dir.clone())).await {
         Ok(o) => o,
         Err(e) => {
             let _ = std::fs::remove_file(&tmp_path);
             let _ = std::fs::remove_file(&filter_script);
+            let _ = std::fs::remove_dir_all(&alias_dir);
             return Err(e);
         }
     };
     let _ = std::fs::remove_file(&filter_script);
+    let _ = std::fs::remove_dir_all(&alias_dir);
     let published = paths::atomic_publish(&tmp_path, &final_path)?;
     let output_path = published.to_string_lossy().into_owned();
     record_render(
@@ -520,6 +646,10 @@ pub async fn graduation_render_child(
         output_path,
         frames_encoded: outcome.frames,
         duration_ms: outcome.duration_ms,
+        music_used: per_child_spec
+            .music_track
+            .as_ref()
+            .map(|p| p.to_string_lossy().into_owned()),
     })
 }
 
@@ -527,14 +657,21 @@ pub async fn graduation_render_child(
 
 #[tauri::command]
 pub fn graduation_cancel(state: State<'_, RenderState>) -> Result<(), String> {
-    // Flip the cancel flag so any batch loop between renders bails
-    // instead of kicking off the next child.
-    {
-        let mut cancelled = state.cancelled.lock().map_err(|e| format!("lock cancel: {e}"))?;
-        *cancelled = true;
-    }
-    let mut guard = state.current_child.lock().map_err(|e| format!("lock: {e}"))?;
-    if let Some(child) = guard.take() {
+    // Atomically set the cancel flag AND take the current child under a
+    // single lock — this used to be two separate mutexes acquired in
+    // opposite order from the spawn path, which was a lock-inversion
+    // hazard (see F5). Fixing by merging into one struct.
+    let mut inner = state.inner.lock().map_err(|e| format!("lock: {e}"))?;
+    inner.cancelled = true;
+    // F14: signal worker threads (curate scan, HEIC decode) via the
+    // atomic mirror so they can bail out mid-work without touching the
+    // mutex. Set AFTER the bool so any observer that sees the atomic
+    // set will also see the bool set on next lock acquisition.
+    state.cancel_flag.store(true, Ordering::SeqCst);
+    if let Some((_id, child)) = inner.current_child.take() {
+        // Release the lock before kill() so we don't hold it across a
+        // potentially-blocking OS call.
+        drop(inner);
         child.kill().map_err(|e| format!("kill: {e}"))?;
     }
     Ok(())
@@ -544,8 +681,9 @@ pub fn graduation_cancel(state: State<'_, RenderState>) -> Result<(), String> {
 /// so a prior cancel doesn't leak into the next `Render everything`.
 #[tauri::command]
 pub fn graduation_reset_cancel(state: State<'_, RenderState>) -> Result<(), String> {
-    let mut cancelled = state.cancelled.lock().map_err(|e| format!("lock cancel: {e}"))?;
-    *cancelled = false;
+    let mut inner = state.inner.lock().map_err(|e| format!("lock: {e}"))?;
+    inner.cancelled = false;
+    state.cancel_flag.store(false, Ordering::SeqCst);
     Ok(())
 }
 
@@ -575,17 +713,33 @@ pub struct RenderSlidesResponse {
     pub output_path: String,
     pub slides_written: usize,
     pub template_used: String,
+    /// Non-fatal render warnings — surface these in the UI so users
+    /// understand why a slide fell back to the placeholder (F15).
+    pub warnings: Vec<String>,
+    /// Per-child status (name + matched photo count + human-readable
+    /// status message). Frontend can render this as a table so the
+    /// user sees which kids matched, which fell back, and why (F16).
+    pub child_results: Vec<ChildResult>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ChildResult {
+    pub name: String,
+    pub photo_count: usize,
+    pub status: String,
 }
 
 #[tauri::command]
 pub async fn graduation_render_slides(
     app: AppHandle,
     db_gate: State<'_, DbGate>,
+    state: State<'_, RenderState>,
     req: RenderSlidesRequest,
 ) -> Result<RenderSlidesResponse, String> {
     if req.students.is_empty() {
         return Err("No graduating students provided".to_string());
     }
+    reset_cancelled(&state);
     // Resolve template: explicit path → template_folder → bundled default.
     // Every user-supplied path passes through path_guard first.
     let tpl: PathBuf = if let Some(p) = req.template_path.as_ref().filter(|s| !s.is_empty()) {
@@ -613,37 +767,57 @@ pub async fn graduation_render_slides(
             .students
             .iter()
             .map(|s| {
-                let photo = s.photo_folder.as_deref().and_then(|folder_str| {
-                    match paths::validate_folder(folder_str) {
+                let photos: Vec<PathBuf> = s
+                    .photo_folder
+                    .as_deref()
+                    .map(|folder_str| match paths::validate_folder(folder_str) {
                         Ok(folder) => {
-                            let p = paths::child_photo(&folder, &s.name);
-                            if p.is_none() {
+                            let hits = paths::child_photos(&folder, &s.name);
+                            if hits.is_empty() {
                                 eprintln!(
                                     "[graduation] no matching photo for '{}' in {folder_str}",
                                     s.name
                                 );
                             }
-                            p
+                            hits
                         }
                         Err(e) => {
                             eprintln!(
                                 "[graduation] invalid photo folder for '{}': {e}",
                                 s.name
                             );
-                            None
+                            Vec::new()
                         }
-                    }
-                });
+                    })
+                    .unwrap_or_default();
                 pptx::SlideRow {
                     name: s.name.clone(),
                     note: s.note.clone().unwrap_or_default(),
-                    photo,
+                    photos,
                 }
             })
             .collect(),
     };
-    pptx::render_slides(&tpl, &tmp_path, &ctx)?;
-    let published = paths::atomic_publish(&tmp_path, &final_path)?;
+    let flag = Arc::clone(&state.cancel_flag);
+    let is_cancelled_cb: Box<dyn Fn() -> bool + Send + Sync> =
+        Box::new(move || flag.load(Ordering::Relaxed));
+    let report = match pptx::render_slides_cancellable(&tpl, &tmp_path, &ctx, &*is_cancelled_cb) {
+        Ok(r) => r,
+        Err(e) => {
+            // F15: sweep any partial .pptx.tmp on failure so stale
+            // half-written decks don't accumulate in the output folder.
+            let _ = std::fs::remove_file(&tmp_path);
+            return Err(e);
+        }
+    };
+    let published = match paths::atomic_publish(&tmp_path, &final_path) {
+        Ok(p) => p,
+        Err(e) => {
+            // Publish failed → tmp is still there. Sweep it.
+            let _ = std::fs::remove_file(&tmp_path);
+            return Err(e);
+        }
+    };
     let output_path = published.to_string_lossy().into_owned();
     let template_used = tpl.to_string_lossy().into_owned();
     record_render(
@@ -661,6 +835,16 @@ pub async fn graduation_render_slides(
         output_path,
         slides_written: req.students.len(),
         template_used,
+        warnings: report.warnings,
+        child_results: report
+            .children
+            .into_iter()
+            .map(|c| ChildResult {
+                name: c.name,
+                photo_count: c.photo_count,
+                status: c.status,
+            })
+            .collect(),
     })
 }
 
@@ -677,63 +861,75 @@ async fn spawn_and_stream(
     job_id: &str,
     stage: &'static str,
     args: Vec<String>,
+    cwd: Option<PathBuf>,
 ) -> Result<RenderOutcome, String> {
     use tauri_plugin_shell::process::CommandEvent;
 
     let shell = app.shell();
-    let cmd = shell
+    let mut cmd = shell
         .sidecar("ffmpeg")
         .map_err(|e| format!("sidecar resolve: {e}"))?
         .args(args);
+    // Setting current_dir lets callers pass relative `-i p0001.jpg`
+    // args instead of full alias paths, keeping argv well under
+    // Windows' 32 KB CreateProcess cap even for 300+ photos.
+    if let Some(dir) = cwd {
+        cmd = cmd.current_dir(dir);
+    }
 
     let (mut rx, child) = cmd.spawn().map_err(|e| format!("spawn ffmpeg: {e}"))?;
 
-    {
-        let mut guard = state.current_child.lock().map_err(|e| format!("lock: {e}"))?;
+    let my_id = {
+        let mut inner = state.inner.lock().map_err(|e| format!("lock: {e}"))?;
         // Kill any previous child before overwriting. `CommandChild`'s
         // Drop does NOT kill the process — dropping just closes our
         // side of the pipes, leaving a zombie FFmpeg that fills its
         // stderr buffer, blocks, and idles until app exit.
-        if let Some(prev) = guard.take() {
+        if let Some((_prev_id, prev)) = inner.current_child.take() {
             let _ = prev.kill();
         }
         // Cancel race guard: if the user pressed Cancel between the
-        // photo scan finishing and this point, the cancel signal would
-        // have arrived while `current_child` was None, so it was lost.
-        // Re-check the flag now that we're about to register the new
-        // child; if cancelled, kill the freshly-spawned FFmpeg
-        // immediately instead of letting it run to completion.
-        if state.cancelled.lock().map(|g| *g).unwrap_or(false) {
+        // photo scan finishing and this point, the cancel signal
+        // arrived while current_child was None. Check the flag now
+        // that we hold the same lock cancel uses.
+        if inner.cancelled {
             let _ = child.kill();
             return Err("cancelled".into());
         }
-        *guard = Some(child);
-    }
+        inner.next_child_id = inner.next_child_id.wrapping_add(1);
+        let id = inner.next_child_id;
+        inner.current_child = Some((id, child));
+        id
+    };
 
     let start = std::time::Instant::now();
     let mut latest = progress::ProgressTick::default();
     let mut carry = String::new();
+    // Stateful progress parser: keep field state across stdout events so
+    // fields from the same block (frame/fps/out_time_us) stay bundled
+    // even when they arrive in separate CommandEvent::Stdout chunks.
+    let mut parser = progress::ProgressParser::new();
     while let Some(ev) = rx.recv().await {
         match ev {
             CommandEvent::Stdout(bytes) => {
                 let text = String::from_utf8_lossy(&bytes).into_owned();
                 carry.push_str(&text);
-                // Attempt to parse whatever complete blocks are in the
-                // carry buffer; retain any trailing partial line.
                 if let Some(last_newline) = carry.rfind('\n') {
                     let ready = carry[..=last_newline].to_string();
                     carry = carry[last_newline + 1..].to_string();
-                    let _ = progress::parse_stream(std::io::Cursor::new(ready), |tick| {
-                        latest = tick.clone();
-                        let _ = app.emit(
-                            "graduation://progress",
-                            ProgressPayload {
-                                job_id: job_id.to_string(),
-                                stage: stage.to_string(),
-                                tick,
-                            },
-                        );
-                    });
+                    for line in ready.split_inclusive('\n') {
+                        if let Some(tick) = parser.feed_line(line) {
+                            latest = tick.clone();
+                            let _ = app.emit(
+                                "graduation://progress",
+                                ProgressPayload {
+                                    job_id: job_id.to_string(),
+                                    stage: stage.to_string(),
+                                    tick,
+                                },
+                            );
+                        }
+                    }
                 }
             }
             CommandEvent::Stderr(bytes) => {
@@ -750,11 +946,11 @@ async fn spawn_and_stream(
                 }
             }
             CommandEvent::Error(e) => {
-                let _ = clear_child(&state);
+                let _ = clear_child(&state, my_id);
                 return Err(format!("ffmpeg command error: {e}"));
             }
             CommandEvent::Terminated(status) => {
-                let _ = clear_child(&state);
+                let _ = clear_child(&state, my_id);
                 if status.code.unwrap_or(1) != 0 {
                     return Err(format!(
                         "ffmpeg exited with code {:?} signal {:?}",
@@ -773,24 +969,32 @@ async fn spawn_and_stream(
     })
 }
 
-fn clear_child(state: &State<'_, RenderState>) -> Result<(), String> {
-    let mut guard = state.current_child.lock().map_err(|e| format!("lock: {e}"))?;
-    *guard = None;
+fn clear_child(state: &State<'_, RenderState>, my_id: u64) -> Result<(), String> {
+    let mut inner = state.inner.lock().map_err(|e| format!("lock: {e}"))?;
+    // Only clear if we still own the slot. If a newer render replaced
+    // us (and killed our process to do so), leave the newer child in
+    // place — otherwise its cancel handle would be lost.
+    if let Some((cur_id, _)) = &inner.current_child {
+        if *cur_id == my_id {
+            inner.current_child = None;
+        }
+    }
     Ok(())
 }
 
 fn is_cancelled(state: &State<'_, RenderState>) -> bool {
     state
-        .cancelled
+        .inner
         .lock()
-        .map(|g| *g)
+        .map(|g| g.cancelled)
         .unwrap_or(false)
 }
 
 fn reset_cancelled(state: &State<'_, RenderState>) {
-    if let Ok(mut g) = state.cancelled.lock() {
-        *g = false;
+    if let Ok(mut g) = state.inner.lock() {
+        g.cancelled = false;
     }
+    state.cancel_flag.store(false, Ordering::SeqCst);
 }
 
 /// Resolve the FFmpeg sidecar path relative to the app bundle. Used by
@@ -849,4 +1053,60 @@ fn sidecar_binary_path(app: &AppHandle) -> Result<PathBuf, String> {
         candidates.join(", "),
         search_roots.iter().map(|p| p.display().to_string()).collect::<Vec<_>>().join("; ")
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sanitize_job_id_accepts_typical_uuid_like_strings() {
+        // Frontend passes `crypto.randomUUID()` without dashes, or a
+        // timestamp+random suffix. Both must pass.
+        assert!(sanitize_job_id("abc123DEF").is_ok());
+        assert!(sanitize_job_id("1699999999-abcd_efgh").is_ok());
+        assert!(sanitize_job_id("a").is_ok());
+    }
+
+    #[test]
+    fn sanitize_job_id_rejects_traversal_and_special_chars() {
+        // F6: raw job_id lands in cache paths; escape hatches must fail.
+        assert!(sanitize_job_id("../etc/passwd").is_err());
+        assert!(sanitize_job_id("job/id").is_err());
+        assert!(sanitize_job_id("job.id").is_err());
+        assert!(sanitize_job_id("job id").is_err());
+        assert!(sanitize_job_id("").is_err());
+        // Length cap.
+        assert!(sanitize_job_id(&"a".repeat(65)).is_err());
+        assert!(sanitize_job_id(&"a".repeat(64)).is_ok());
+    }
+
+    #[test]
+    fn alias_photos_creates_short_paths_in_order() {
+        // F4 + review-agent #2: aliases must be relative filenames
+        // (no path prefix) so the argv stays under Windows' 32 KB cap
+        // when the caller sets ffmpeg's current_dir to scratch.
+        let src_dir = tempfile::tempdir().unwrap();
+        let scratch = tempfile::tempdir().unwrap();
+        let mut sources: Vec<PathBuf> = Vec::new();
+        for i in 0..3 {
+            let p = src_dir.path().join(format!("very-long-source-name-{i}.jpg"));
+            std::fs::write(&p, format!("photo-{i}").as_bytes()).unwrap();
+            sources.push(p);
+        }
+        let aliases = alias_photos(&sources, scratch.path()).expect("alias should succeed");
+        assert_eq!(aliases.len(), 3);
+        // Each alias is a bare filename — no parent components.
+        for a in &aliases {
+            assert!(a.parent().map(|p| p.as_os_str().is_empty()).unwrap_or(true),
+                "alias {:?} should be a bare filename, no path prefix", a);
+        }
+        assert_eq!(aliases[0].to_str().unwrap(), "p0001.jpg");
+        assert_eq!(aliases[2].to_str().unwrap(), "p0003.jpg");
+        // Content preserved (hard link or copy) on disk under scratch.
+        for (i, a) in aliases.iter().enumerate() {
+            let bytes = std::fs::read(scratch.path().join(a)).unwrap();
+            assert_eq!(bytes, format!("photo-{i}").as_bytes());
+        }
+    }
 }

@@ -45,8 +45,16 @@ pub async fn normalize_sheet(args: NormalizeArgs) -> Result<NormalizeResult, Str
             note: format!("QR decode skipped for .{ext} (unsupported here)"),
         });
     }
+    // Whole rest of the pipeline (open image, luma8 conversions, rotations,
+    // QR scan) is CPU-bound and takes tens-to-hundreds of ms per photo.
+    // Push to blocking pool so other IPC calls keep flowing.
+    tokio::task::spawn_blocking(move || normalize_sheet_blocking(&path))
+        .await
+        .map_err(|e| format!("join: {e}"))?
+}
 
-    let img = image::open(&path).map_err(|e| format!("open image: {e}"))?;
+fn normalize_sheet_blocking(path: &std::path::Path) -> Result<NormalizeResult, String> {
+    let img = image::open(path).map_err(|e| format!("open image: {e}"))?;
     let (w, h) = img.dimensions();
 
     // Try full image first (fast for well-aligned photos).
