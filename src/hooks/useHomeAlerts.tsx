@@ -13,6 +13,7 @@ const EMPTY: HomeAlertsSnapshot = {
   byTile: {},
   bySidebar: {},
   setup: { smtp: false, backup: false, needsSetup: false, items: [] },
+  partialLoad: [],
   computedAt: "",
 };
 

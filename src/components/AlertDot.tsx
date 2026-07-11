@@ -9,7 +9,7 @@ import type { Tone } from "../lib/homeAlerts";
 
 const TONE_COLOR: Record<Tone, string> = {
   danger: "#dc2626",
-  warn:   "#d97706",
+  warn:   "#b45309",
   info:   "#2563eb",
 };
 

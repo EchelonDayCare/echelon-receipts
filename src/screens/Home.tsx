@@ -19,8 +19,10 @@ export default function Home() {
   const [appVersion, setAppVersion] = useState<string>("");
 
   // Home-wide alert badges (tiles + Settings cog). Computed once at App
-  // level in HomeAlertsProvider; we just read.
-  const { snapshot: alerts } = useHomeAlerts();
+  // level in HomeAlertsProvider; we call refresh() on mount so alerts
+  // reflect resolutions made in-tile (issuing a receipt, publishing the
+  // schedule) even if the app never lost focus in between.
+  const { snapshot: alerts, refresh: refreshAlerts } = useHomeAlerts();
 
   // Inline Ask Echelon state — v2.2.4 lets users query straight from Home.
   const [homeAskQ, setHomeAskQ] = useState("");
@@ -44,6 +46,11 @@ export default function Home() {
   }
 
   useEffect(() => {
+    // P0: refresh alerts every time Home mounts so resolutions made
+    // in-tile (issued receipts, published schedules) don't leave a stale
+    // dot on Home. Cheap: the provider dedupes overlapping refreshes.
+    refreshAlerts();
+
     (async () => {
       const settings = await getSettings();
       setS(settings);
@@ -63,10 +70,19 @@ export default function Home() {
         // On non-tauri builds (never in production) fall back silently.
       }
     })();
-  }, []);
+  }, [refreshAlerts]);
 
   const daycareName = s.daycare_name || "Echelon Daycare";
   const logo = s.logo_data_url || DEFAULT_LOGO_DATA_URL;
+
+  // Route a tile click. If the tile carries alerts, prefer the sub-route
+  // that owns the first alert (info scent — user lands on the exact page
+  // that resolves the highest-severity concern instead of the tile default).
+  const tileRoute = (key: TileKey, fallback: string): string => {
+    const t = alerts.byTile[key];
+    const sub = t?.items.find((i) => i.sub)?.sub;
+    return sub ?? fallback;
+  };
 
   const tileDot = (key: TileKey) => {
     const t = alerts.byTile[key];
@@ -185,64 +201,89 @@ export default function Home() {
         )}
       </form>
 
+      {alerts.partialLoad.length > 0 && (
+        <div
+          role="status"
+          aria-live="polite"
+          title={`Some background checks didn't complete:\n• ${alerts.partialLoad.join("\n• ")}\nDots on affected tiles may be incomplete.`}
+          style={{
+            margin: "8px 0 -4px",
+            padding: "6px 10px",
+            fontSize: 12,
+            color: "#78350f",
+            background: "#fef3c7",
+            border: "1px solid #fcd34d",
+            borderRadius: 6,
+            display: "inline-flex",
+            alignItems: "center",
+            gap: 6,
+            cursor: "pointer",
+          }}
+          onClick={() => refreshAlerts()}
+        >
+          <span aria-hidden>⚠︎</span>
+          <span>Some checks didn't finish — click to retry</span>
+        </div>
+      )}
+
       <div className="home-tiles">
-        <button className="home-tile students" style={{ position: "relative" }} onClick={() => nav("/students/today")}>
+        <button className="home-tile students" style={{ position: "relative" }} onClick={() => nav(tileRoute("students", "/students/today"))}>
           {tileDot("students")}
           <div className="home-tile-icon">👶</div>
           <h2>Students</h2>
           <p>Receipts, subsidies, annual tax receipts, roster</p>
         </button>
 
-        <button className="home-tile staff" style={{ position: "relative" }} onClick={() => nav(staffEnabled ? "/staff/hours" : "/config/staff")}>
+        <button className="home-tile staff" style={{ position: "relative" }} onClick={() => nav(staffEnabled ? tileRoute("staff", "/staff/hours") : "/config/staff")}>
           {tileDot("staff")}
           <div className="home-tile-icon">👩‍🏫</div>
           <h2>Staff{staffEnabled ? "" : " (disabled)"}</h2>
           <p>{staffEnabled ? "Hours, credentials, drill log, payroll prep" : "Turn on in Configuration → Staff to enable."}</p>
         </button>
 
-        <button className="home-tile comms" style={{ position: "relative" }} onClick={() => nav("/communications/compose")}>
+        <button className="home-tile comms" style={{ position: "relative" }} onClick={() => nav(tileRoute("comms", "/communications/compose"))}>
           {tileDot("comms")}
           <div className="home-tile-icon">✉️</div>
           <h2>Communications</h2>
           <p>Group email, templates, message history, contact directory</p>
         </button>
 
-        <button className="home-tile waitlist" style={{ position: "relative" }} onClick={() => nav("/waitlist")}>
+        <button className="home-tile waitlist" style={{ position: "relative" }} onClick={() => nav(tileRoute("waitlist", "/waitlist"))}>
           {tileDot("waitlist")}
           <div className="home-tile-icon">📝</div>
           <h2>Waitlist</h2>
           <p>Google Form applications, follow-ups, conversions to enrolled students</p>
         </button>
 
-        <button className="home-tile expenses" style={{ position: "relative" }} onClick={() => nav("/expenses/dashboard")}>
+        <button className="home-tile expenses" style={{ position: "relative" }} onClick={() => nav(tileRoute("expenses", "/expenses/dashboard"))}>
           {tileDot("expenses")}
           <div className="home-tile-icon">💵</div>
           <h2>Expenses</h2>
           <p>Track spending, recurring bills, WCB/CRA remittance, P&L reports</p>
         </button>
 
-        <button className="home-tile reports" style={{ position: "relative" }} onClick={() => nav("/reports/overview")}>
+        <button className="home-tile reports" style={{ position: "relative" }} onClick={() => nav(tileRoute("reports", "/reports/overview"))}>
           {tileDot("reports")}
           <div className="home-tile-icon">📊</div>
           <h2>Reports & Compliance</h2>
           <p>Revenue, aging, subsidies, licensing rosters, credentials, drills, AGM</p>
         </button>
 
-        <button className="home-tile vault" style={{ position: "relative" }} onClick={() => nav("/vault")}>
+        <button className="home-tile vault" style={{ position: "relative" }} onClick={() => nav(tileRoute("vault", "/vault"))}>
           {tileDot("vault")}
           <div className="home-tile-icon">🗂️</div>
           <h2>Document Vault</h2>
           <p>Licences, insurance, policies, staff & child records — with expiry alerts</p>
         </button>
 
-        <button className="home-tile organizer" style={{ position: "relative" }} onClick={() => nav("/organizer")}>
+        <button className="home-tile organizer" style={{ position: "relative" }} onClick={() => nav(tileRoute("organizer", "/organizer"))}>
           {tileDot("organizer")}
           <div className="home-tile-icon">🗓️</div>
           <h2>Organizer</h2>
           <p>Upcoming deadlines, meeting log, follow-ups — one calm dashboard</p>
         </button>
 
-        <button className="home-tile graduation" style={{ position: "relative" }} onClick={() => nav("/graduation")}>
+        <button className="home-tile graduation" style={{ position: "relative" }} onClick={() => nav(tileRoute("graduation", "/graduation"))}>
           {tileDot("graduation")}
           <div className="home-tile-icon">🎓</div>
           <h2>Graduation Day</h2>

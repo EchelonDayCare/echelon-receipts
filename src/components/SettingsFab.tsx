@@ -55,16 +55,17 @@ export default function SettingsFab({ size = 40 }: { size?: number }) {
           "0 6px 20px -8px rgba(15, 23, 42, 0.35)";
       }}
     >
-      <span aria-hidden style={{ position: "relative", display: "inline-block" }}>
-        ⚙️
-        {needsSetup && (
-          <AlertDot
-            tone={setupTone}
-            size="sm"
-            style={{ position: "absolute", top: -2, right: -4 }}
-          />
-        )}
-      </span>
+      <span aria-hidden style={{ display: "inline-block" }}>⚙️</span>
+      {needsSetup && (
+        <AlertDot
+          tone={setupTone}
+          size="sm"
+          // Anchored to the button, not the emoji glyph — emoji bounding
+          // boxes vary across Windows/macOS/Linux, so pegging the badge
+          // to button geometry keeps it stable everywhere.
+          style={{ position: "absolute", top: 6, right: 6 }}
+        />
+      )}
     </button>
   );
 }

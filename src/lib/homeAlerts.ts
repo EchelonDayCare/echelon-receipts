@@ -55,6 +55,10 @@ export interface HomeAlertsSnapshot {
     needsSetup: boolean;
     items: AlertItem[];
   };
+  /** Labels of scanners that timed out or errored. If non-empty, the UI
+   *  should surface a subtle "some checks failed" indicator so users don't
+   *  falsely assume "no alerts = nothing to do". P1 from review. */
+  partialLoad: string[];
   /** ISO timestamp of when this snapshot was produced. */
   computedAt: string;
 }
@@ -65,39 +69,61 @@ function bumpTone(current: Tone | undefined, next: Tone): Tone {
   return TONE_RANK[next] > TONE_RANK[current] ? next : current;
 }
 
-function pushTile(
+/** Emitted by a scanner. Merged into the outer maps ONLY if the scanner
+ *  finished before its timeout — this prevents late-completing scans from
+ *  mutating an already-published snapshot (P1 from Codex review). */
+interface ScanResult {
+  tile: TileKey;
+  sub?: string;
+  tone: Tone;
+  text: string;
+}
+
+function mergeResults(
   byTile: Partial<Record<TileKey, TileAlerts>>,
   bySidebar: Record<string, TileAlerts>,
-  tile: TileKey,
-  sub: string | undefined,
-  tone: Tone,
-  text: string,
+  results: ScanResult[],
 ) {
-  const item: AlertItem = { tone, text, sub };
-  const t = byTile[tile] ?? { tone, count: 0, items: [] };
-  t.tone = bumpTone(t.tone, tone);
-  t.count += 1;
-  t.items.push(item);
-  byTile[tile] = t;
+  for (const r of results) {
+    const item: AlertItem = { tone: r.tone, text: r.text, sub: r.sub };
+    const t = byTile[r.tile] ?? { tone: r.tone, count: 0, items: [] };
+    t.tone = bumpTone(t.tone, r.tone);
+    t.count += 1;
+    t.items.push(item);
+    byTile[r.tile] = t;
 
-  if (sub) {
-    const s = bySidebar[sub] ?? { tone, count: 0, items: [] };
-    s.tone = bumpTone(s.tone, tone);
-    s.count += 1;
-    s.items.push(item);
-    bySidebar[sub] = s;
+    if (r.sub) {
+      const s = bySidebar[r.sub] ?? { tone: r.tone, count: 0, items: [] };
+      s.tone = bumpTone(s.tone, r.tone);
+      s.count += 1;
+      s.items.push(item);
+      bySidebar[r.sub] = s;
+    }
   }
 }
 
-/** Best-effort wrapper: swallows errors + times out at 2.5s so one slow
- *  query never blocks the whole snapshot. */
-async function safeRun<T>(label: string, p: Promise<T>): Promise<T | null> {
+/** Runs a scanner with a timeout and error swallow. Returns the scanner's
+ *  own local result list on success, or null on timeout/error. Late
+ *  completions after timeout do NOT mutate outer state — the scanner
+ *  writes only to its own local accumulator, which the caller merges
+ *  only if the race resolved with the value (not the timeout). */
+async function safeRun(
+  label: string,
+  scan: () => Promise<ScanResult[]>,
+  timeoutMs = 2500,
+): Promise<{ ok: true; results: ScanResult[] } | { ok: false; reason: "timeout" | "error" }> {
+  let timedOut = false;
+  const timeout = new Promise<null>((resolve) => setTimeout(() => { timedOut = true; resolve(null); }, timeoutMs));
   try {
-    const timeout = new Promise<T | null>((resolve) => setTimeout(() => resolve(null), 2500));
-    return await Promise.race([p, timeout]);
+    const winner = await Promise.race([scan(), timeout]);
+    if (timedOut || winner === null) {
+      console.warn(`[homeAlerts:${label}] timed out after ${timeoutMs}ms`);
+      return { ok: false, reason: "timeout" };
+    }
+    return { ok: true, results: winner };
   } catch (e) {
     console.warn(`[homeAlerts:${label}] failed:`, e);
-    return null;
+    return { ok: false, reason: "error" };
   }
 }
 
@@ -146,7 +172,14 @@ export async function computeHomeAlerts(): Promise<HomeAlertsSnapshot> {
   const y = now.getFullYear();
   const m = now.getMonth() + 1;
   const ym = `${y}-${String(m).padStart(2, "0")}`;
-  await safeRun("issued", (async () => {
+  const partialLoad: string[] = [];
+  const runAndMerge = async (label: string, scan: () => Promise<ScanResult[]>) => {
+    const outcome = await safeRun(label, scan);
+    if (outcome.ok) mergeResults(byTile, bySidebar, outcome.results);
+    else partialLoad.push(label);
+  };
+
+  await runAndMerge("issued", async () => {
     const d = await db();
     const [total, issued] = await Promise.all([
       listStudents(y, true),
@@ -161,17 +194,19 @@ export async function computeHomeAlerts(): Promise<HomeAlertsSnapshot> {
     ]);
     const issuedCount = issued[0]?.n ?? 0;
     const missing = total.length - issuedCount;
+    const out: ScanResult[] = [];
     if (missing > 0) {
-      pushTile(
-        byTile, bySidebar, "students", "/students/month", "warn",
-        `${missing} of ${total.length} students don't have a receipt for ${now.toLocaleString(undefined, { month: "long", year: "numeric" })} yet.`,
-      );
+      out.push({
+        tile: "students", sub: "/students/month", tone: "warn",
+        text: `${missing} of ${total.length} students don't have a receipt for ${now.toLocaleString(undefined, { month: "long", year: "numeric" })} yet.`,
+      });
     }
-  })());
+    return out;
+  });
 
   // ── Staff: credentials expired / expiring, unpublished shifts ────────
   if (settings.feature_staff_hours_enabled === "1") {
-    await safeRun("credentials", (async () => {
+    await runAndMerge("credentials", async () => {
       const alertDays = Number(settings.staff_cred_alert_days || "60");
       const creds = await listAllCredentialsWithStaff();
       let expired = 0, expiring = 0;
@@ -180,21 +215,23 @@ export async function computeHomeAlerts(): Promise<HomeAlertsSnapshot> {
         if (st === "expired") expired++;
         else if (st === "expiring") expiring++;
       }
+      const out: ScanResult[] = [];
       if (expired > 0) {
-        pushTile(
-          byTile, bySidebar, "staff", "/staff/credentials", "danger",
-          `${expired} staff credential${expired === 1 ? " has" : "s have"} expired.`,
-        );
+        out.push({
+          tile: "staff", sub: "/staff/credentials", tone: "danger",
+          text: `${expired} staff credential${expired === 1 ? " has" : "s have"} expired.`,
+        });
       }
       if (expiring > 0) {
-        pushTile(
-          byTile, bySidebar, "staff", "/staff/credentials", "warn",
-          `${expiring} staff credential${expiring === 1 ? "" : "s"} expir${expiring === 1 ? "es" : "e"} in the next ${alertDays} days.`,
-        );
+        out.push({
+          tile: "staff", sub: "/staff/credentials", tone: "warn",
+          text: `${expiring} staff credential${expiring === 1 ? "" : "s"} expir${expiring === 1 ? "es" : "e"} in the next ${alertDays} days.`,
+        });
       }
-    })());
+      return out;
+    });
 
-    await safeRun("schedule", (async () => {
+    await runAndMerge("schedule", async () => {
       const { mondayOf, listShiftsForWeek, listWeeklyPublishes } = await import("../repo/scheduleRepo");
       const weekStart = mondayOf(new Date());
       const [shifts, publishes] = await Promise.all([
@@ -204,66 +241,74 @@ export async function computeHomeAlerts(): Promise<HomeAlertsSnapshot> {
       const publishedStaff = new Set(publishes.map((p) => p.staffId));
       const unpubStaff = new Set<string>();
       for (const s of shifts) if (!publishedStaff.has(s.staffId)) unpubStaff.add(s.staffId);
+      const out: ScanResult[] = [];
       if (unpubStaff.size > 0) {
-        pushTile(
-          byTile, bySidebar, "staff", "/staff/schedule", "warn",
-          `${unpubStaff.size} staff have unpublished shifts this week.`,
-        );
+        out.push({
+          tile: "staff", sub: "/staff/schedule", tone: "warn",
+          text: `${unpubStaff.size} staff have unpublished shifts this week.`,
+        });
       }
-    })());
+      return out;
+    });
   }
 
   // ── Communications: scheduled messages due ───────────────────────────
-  await safeRun("scheduled", (async () => {
+  await runAndMerge("scheduled", async () => {
     const { dueScheduled } = await import("./comms");
     const due = await dueScheduled();
+    const out: ScanResult[] = [];
     if (due.length > 0) {
-      pushTile(
-        byTile, bySidebar, "comms", "/communications/scheduled", "info",
-        `${due.length} scheduled message${due.length === 1 ? " is" : "s are"} ready to send.`,
-      );
+      out.push({
+        tile: "comms", sub: "/communications/scheduled", tone: "info",
+        text: `${due.length} scheduled message${due.length === 1 ? " is" : "s are"} ready to send.`,
+      });
     }
-  })());
+    return out;
+  });
 
   // ── Vault: docs expired / expiring ───────────────────────────────────
-  await safeRun("vault", (async () => {
+  await runAndMerge("vault", async () => {
     const { expiringSoon } = await import("../repo/documentsRepo");
     const soon = await expiringSoon(60);
+    const out: ScanResult[] = [];
     if (soon.length > 0) {
       const today = new Date().toISOString().slice(0, 10);
       const overdue = soon.filter((doc) => doc.expiryDate && doc.expiryDate < today).length;
       const upcoming = soon.length - overdue;
       if (overdue > 0) {
-        pushTile(
-          byTile, bySidebar, "vault", "/vault?expiring=60", "danger",
-          `${overdue} vault document${overdue === 1 ? " has" : "s have"} expired.`,
-        );
+        out.push({
+          tile: "vault", sub: "/vault?expiring=60", tone: "danger",
+          text: `${overdue} vault document${overdue === 1 ? " has" : "s have"} expired.`,
+        });
       }
       if (upcoming > 0) {
-        pushTile(
-          byTile, bySidebar, "vault", "/vault?expiring=60", "warn",
-          `${upcoming} vault document${upcoming === 1 ? "" : "s"} expir${upcoming === 1 ? "es" : "e"} within 60 days.`,
-        );
+        out.push({
+          tile: "vault", sub: "/vault?expiring=60", tone: "warn",
+          text: `${upcoming} vault document${upcoming === 1 ? "" : "s"} expir${upcoming === 1 ? "es" : "e"} within 60 days.`,
+        });
       }
     }
-  })());
+    return out;
+  });
 
   // ── Organizer: items due today / this week ───────────────────────────
-  await safeRun("organizer", (async () => {
+  await runAndMerge("organizer", async () => {
     const { countDueToday, countDueThisWeek } = await import("../repo/organizerRepo");
     const [today, week] = await Promise.all([countDueToday(), countDueThisWeek()]);
+    const out: ScanResult[] = [];
     if (today > 0) {
-      pushTile(
-        byTile, bySidebar, "organizer", "/organizer", "danger",
-        `${today} item${today === 1 ? " is" : "s are"} due today.`,
-      );
+      out.push({
+        tile: "organizer", sub: "/organizer", tone: "danger",
+        text: `${today} item${today === 1 ? " is" : "s are"} due today.`,
+      });
     } else if (week > 0) {
-      pushTile(
-        byTile, bySidebar, "organizer", "/organizer", "info",
-        `${week} item${week === 1 ? "" : "s"} due within 7 days.`,
-      );
+      out.push({
+        tile: "organizer", sub: "/organizer", tone: "info",
+        text: `${week} item${week === 1 ? "" : "s"} due within 7 days.`,
+      });
     }
-  })());
+    return out;
+  });
 
   return {
     byTile,
@@ -274,6 +319,7 @@ export async function computeHomeAlerts(): Promise<HomeAlertsSnapshot> {
       needsSetup: setupItems.length > 0,
       items: setupItems,
     },
+    partialLoad,
     computedAt: new Date().toISOString(),
   };
 }
