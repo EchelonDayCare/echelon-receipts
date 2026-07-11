@@ -244,11 +244,11 @@ table.data tr.voided td { color: #9ca3af; text-decoration: line-through; }
 }
 .home-head {
   display: flex; align-items: center; gap: 22px;
-  /* Escape the content-home 32px left padding and pull the whole header
-     ~1 inch (96px) further left so the composition feels anchored to the
-     left edge instead of floating in the middle. The negative margin is
-     clamped so a narrow window can't punch it off-screen. */
-  margin: 0 0 32px max(-96px, calc(-1 * (100vw - 1180px) / 2 - 32px));
+  /* Pull the header ~1 inch left, but keep at least 16px clearance from
+     the viewport edge so the logo can never clip. On windows wide enough
+     to allow the full 96px shift, take it; on narrower windows, take
+     whatever is available. */
+  margin: 0 0 32px max(-96px, calc(-16px - (100vw - 1180px) / 2));
 }
 .home-head-copy {
   display: flex; flex-direction: column; justify-content: center;
