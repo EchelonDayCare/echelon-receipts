@@ -635,6 +635,8 @@ export async function syncOnScreenOpen(): Promise<void> {
 export async function listWaitlist(opts: {
   statuses?: WaitlistStatus[];
   search?: string;
+  /** ISO date (YYYY-MM-DD) — return only entries with birthday on or after this date. */
+  birthFrom?: string;
 } = {}): Promise<WaitlistEntry[]> {
   const d = await db();
   const clauses: string[] = [];
@@ -647,6 +649,12 @@ export async function listWaitlist(opts: {
     const q = `%${opts.search.trim().toLowerCase()}%`;
     clauses.push("(LOWER(child_name) LIKE ? OR LOWER(COALESCE(parent_email,'')) LIKE ? OR LOWER(COALESCE(parent_name,'')) LIKE ? OR COALESCE(phone,'') LIKE ?)");
     args.push(q, q, q, q);
+  }
+  if (opts.birthFrom) {
+    // Kids with no recorded birthday are excluded from date-range filtering
+    // (we can't compare them). Sorting later still surfaces them separately.
+    clauses.push("(birthday IS NOT NULL AND birthday >= ?)");
+    args.push(opts.birthFrom);
   }
   const where = clauses.length ? `WHERE ${clauses.join(" AND ")}` : "";
   return d.select<WaitlistEntry[]>(

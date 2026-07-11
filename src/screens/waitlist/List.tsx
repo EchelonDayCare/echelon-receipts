@@ -5,6 +5,7 @@ import { useEffect, useMemo, useState } from "react";
 import {
   listWaitlist, syncOnScreenOpen, ageBand, waitDays, priorityScore, scoreBreakdown,
   loadPriorityWeights, loadActiveStudentMap,
+  updateWaitlistStatus,
   DEFAULT_PRIORITY_WEIGHTS,
   WAITLIST_STATUSES,
   type WaitlistEntry, type WaitlistStatus, type AgeBand,
@@ -25,6 +26,17 @@ const BAND_INFO: Record<AgeBand, { range: string; note: string }> = {
 
 const DEFAULT_STATUSES: WaitlistStatus[] = ["new", "contacted", "offered"];
 
+type SortKey = "priority" | "dob" | "submitted";
+type SortDir = "asc" | "desc";
+
+/** Format ISO YYYY-MM-DD as "12 Aug 2024". Returns "—" for null/invalid. */
+function formatDob(iso: string | null | undefined): string {
+  if (!iso) return "—";
+  const d = new Date(`${iso}T00:00:00`);
+  if (Number.isNaN(d.getTime())) return "—";
+  return d.toLocaleDateString("en-CA", { day: "2-digit", month: "short", year: "numeric" });
+}
+
 export default function WaitlistList() {
   const [rows, setRows] = useState<WaitlistEntry[]>([]);
   const [statuses, setStatuses] = useState<Set<WaitlistStatus>>(
@@ -33,13 +45,18 @@ export default function WaitlistList() {
   const [bands, setBands] = useState<Set<AgeBand>>(new Set());
   const [inBuildingOnly, setInBuildingOnly] = useState(false);
   const [search, setSearch] = useState("");
+  // YYYY-MM string from <input type="month">, e.g. "2024-08". Empty = no filter.
+  const [birthMonthFrom, setBirthMonthFrom] = useState("");
   const [openId, setOpenId] = useState<number | null>(null);
   const [weights, setWeights] = useState<PriorityWeights>(DEFAULT_PRIORITY_WEIGHTS);
   const [siblingActive, setSiblingActive] = useState<Map<number, number>>(new Map());
+  const [sortKey, setSortKey] = useState<SortKey>("priority");
+  const [sortDir, setSortDir] = useState<SortDir>("desc");
 
   const refresh = async () => {
+    const birthFrom = birthMonthFrom ? `${birthMonthFrom}-01` : undefined;
     const [r, w, sm] = await Promise.all([
-      listWaitlist({ statuses: [...statuses], search }),
+      listWaitlist({ statuses: [...statuses], search, birthFrom }),
       loadPriorityWeights(),
       loadActiveStudentMap(),
     ]);
@@ -55,27 +72,73 @@ export default function WaitlistList() {
     })();
   }, []);
 
-  useEffect(() => { void refresh();   }, [statuses, search]);
+  useEffect(() => { void refresh();   }, [statuses, search, birthMonthFrom]);
+
+  const toggleSort = (key: SortKey) => {
+    if (sortKey === key) {
+      setSortDir((d) => (d === "asc" ? "desc" : "asc"));
+    } else {
+      setSortKey(key);
+      // Sensible defaults: priority high→low, dob newest→oldest, submitted newest→oldest
+      setSortDir("desc");
+    }
+  };
 
   const filtered = useMemo(() => {
     const ctx = { siblingStudentActive: siblingActive };
     let r = rows;
     if (bands.size > 0) r = r.filter((e) => bands.has(ageBand(e.birthday)));
     if (inBuildingOnly) r = r.filter((e) => e.in_building === 1);
-    return [...r].sort((a, b) => priorityScore(b, weights, ctx) - priorityScore(a, weights, ctx));
-  }, [rows, bands, inBuildingOnly, weights, siblingActive]);
+
+    const dirMul = sortDir === "asc" ? 1 : -1;
+    const cmp = (a: WaitlistEntry, b: WaitlistEntry): number => {
+      if (sortKey === "priority") {
+        return (priorityScore(b, weights, ctx) - priorityScore(a, weights, ctx)) * dirMul;
+      }
+      if (sortKey === "dob") {
+        // Nulls always last regardless of direction
+        const av = a.birthday, bv = b.birthday;
+        if (!av && !bv) return 0;
+        if (!av) return 1;
+        if (!bv) return -1;
+        return av < bv ? -1 * dirMul : av > bv ? 1 * dirMul : 0;
+      }
+      // submitted
+      const av = a.submitted_at, bv = b.submitted_at;
+      if (!av && !bv) return 0;
+      if (!av) return 1;
+      if (!bv) return -1;
+      return av < bv ? -1 * dirMul : av > bv ? 1 * dirMul : 0;
+    };
+    return [...r].sort(cmp);
+  }, [rows, bands, inBuildingOnly, weights, siblingActive, sortKey, sortDir]);
 
   const defaultStatusSet =
     statuses.size === DEFAULT_STATUSES.length &&
     DEFAULT_STATUSES.every((s) => statuses.has(s));
   const filtersActive =
-    !defaultStatusSet || bands.size > 0 || inBuildingOnly || search.trim().length > 0;
+    !defaultStatusSet || bands.size > 0 || inBuildingOnly || search.trim().length > 0 || birthMonthFrom !== "";
 
   const clearFilters = () => {
     setStatuses(new Set(DEFAULT_STATUSES));
     setBands(new Set());
     setInBuildingOnly(false);
     setSearch("");
+    setBirthMonthFrom("");
+  };
+
+  const handleDelete = async (entry: WaitlistEntry, e: React.MouseEvent) => {
+    e.stopPropagation();
+    const ok = window.confirm(
+      `Move ${entry.child_name} to the archive?\n\nThey'll disappear from the active waitlist but remain in Waitlist → Archived.`,
+    );
+    if (!ok) return;
+    try {
+      await updateWaitlistStatus(entry.id, "archived", "Manually archived from waitlist");
+      await refresh();
+    } catch (err: any) {
+      window.alert(`Couldn't archive: ${err?.message ?? err}`);
+    }
   };
 
   return (
@@ -138,6 +201,17 @@ export default function WaitlistList() {
               In-building only
             </label>
           </div>
+          <div>
+            <label style={labelSmall} title="Show only kids born in or after this month.">
+              Born on/after
+            </label>
+            <input
+              type="month"
+              value={birthMonthFrom}
+              onChange={(e) => setBirthMonthFrom(e.target.value)}
+              style={{ fontSize: 13, padding: "3px 6px" }}
+            />
+          </div>
           <div style={{ flex: 1, minWidth: 220 }}>
             <label style={labelSmall}>Search</label>
             <input
@@ -179,15 +253,17 @@ export default function WaitlistList() {
         <table style={{ width: "100%", borderCollapse: "collapse" }}>
           <thead>
             <tr style={{ background: "#f8fafc" }}>
-              <Th>Score</Th>
+              <SortableTh label="Score" active={sortKey === "priority"} dir={sortDir} onClick={() => toggleSort("priority")} />
               <Th>Child</Th>
               <Th>Age band</Th>
+              <SortableTh label="DoB" active={sortKey === "dob"} dir={sortDir} onClick={() => toggleSort("dob")} />
               <Th>Parent / Email</Th>
               <Th>Phone</Th>
-              <Th>Submitted</Th>
+              <SortableTh label="Submitted" active={sortKey === "submitted"} dir={sortDir} onClick={() => toggleSort("submitted")} />
               <Th>Target start</Th>
               <Th>In bldg</Th>
               <Th>Status</Th>
+              <Th>{""}</Th>
             </tr>
           </thead>
           <tbody>
@@ -212,6 +288,7 @@ export default function WaitlistList() {
                   </Td>
                   <Td><strong>{e.child_name}</strong></Td>
                   <Td><span style={bandChipStyle(ageBand(e.birthday))}>{ageBand(e.birthday)}</span></Td>
+                  <Td style={{ whiteSpace: "nowrap", fontVariantNumeric: "tabular-nums" }}>{formatDob(e.birthday)}</Td>
                   <Td>
                     <div>{e.parent_name || "—"}</div>
                     <div style={{ fontSize: 12, color: "var(--muted)" }}>{e.parent_email || ""}</div>
@@ -221,11 +298,43 @@ export default function WaitlistList() {
                   <Td>{e.target_start || "—"}</Td>
                   <Td>{e.in_building === 1 ? "✓" : e.in_building === 0 ? "—" : "?"}</Td>
                   <Td><span style={statusChipStyle(e.status)}>{e.status}</span></Td>
+                  <Td>
+                    {e.status !== "archived" && (
+                      <button
+                        type="button"
+                        onClick={(ev) => handleDelete(e, ev)}
+                        title={`Move ${e.child_name} to the archive`}
+                        aria-label={`Move ${e.child_name} to the archive`}
+                        style={{
+                          border: "1px solid var(--border)",
+                          background: "transparent",
+                          color: "var(--muted)",
+                          borderRadius: 6,
+                          padding: "2px 8px",
+                          cursor: "pointer",
+                          fontSize: 14,
+                          lineHeight: 1,
+                        }}
+                        onMouseEnter={(ev) => {
+                          (ev.currentTarget as HTMLButtonElement).style.color = "#b91c1c";
+                          (ev.currentTarget as HTMLButtonElement).style.borderColor = "#fecaca";
+                          (ev.currentTarget as HTMLButtonElement).style.background = "#fef2f2";
+                        }}
+                        onMouseLeave={(ev) => {
+                          (ev.currentTarget as HTMLButtonElement).style.color = "var(--muted)";
+                          (ev.currentTarget as HTMLButtonElement).style.borderColor = "var(--border)";
+                          (ev.currentTarget as HTMLButtonElement).style.background = "transparent";
+                        }}
+                      >
+                        🗑
+                      </button>
+                    )}
+                  </Td>
                 </tr>
               );
             })}
             {filtered.length === 0 && (
-              <tr><td colSpan={9} style={{ padding: 24, textAlign: "center", color: "var(--muted)" }}>No entries match these filters.</td></tr>
+              <tr><td colSpan={11} style={{ padding: 24, textAlign: "center", color: "var(--muted)" }}>No entries match these filters.</td></tr>
             )}
           </tbody>
         </table>
@@ -243,8 +352,28 @@ const labelSmall: React.CSSProperties = {
 function Th({ children }: { children: React.ReactNode }) {
   return <th style={{ padding: "10px 12px", textAlign: "left", fontSize: 12, color: "var(--muted)", textTransform: "uppercase", letterSpacing: ".05em" }}>{children}</th>;
 }
-function Td({ children }: { children: React.ReactNode }) {
-  return <td style={{ padding: "10px 12px", fontSize: 14, verticalAlign: "top" }}>{children}</td>;
+function SortableTh({ label, active, dir, onClick }: { label: string; active: boolean; dir: SortDir; onClick: () => void }) {
+  const arrow = active ? (dir === "asc" ? "▲" : "▼") : "";
+  return (
+    <th style={{ padding: "10px 12px", textAlign: "left", fontSize: 12, color: "var(--muted)", textTransform: "uppercase", letterSpacing: ".05em" }}>
+      <button
+        type="button"
+        onClick={onClick}
+        aria-sort={active ? (dir === "asc" ? "ascending" : "descending") : "none"}
+        style={{
+          background: "none", border: "none", padding: 0, cursor: "pointer",
+          font: "inherit", color: "inherit", textTransform: "inherit", letterSpacing: "inherit",
+          display: "inline-flex", alignItems: "center", gap: 4,
+        }}
+      >
+        {label}
+        <span aria-hidden style={{ fontSize: 9, opacity: active ? 1 : 0.3, minWidth: 8 }}>{arrow || "↕"}</span>
+      </button>
+    </th>
+  );
+}
+function Td({ children, style }: { children: React.ReactNode; style?: React.CSSProperties }) {
+  return <td style={{ padding: "10px 12px", fontSize: 14, verticalAlign: "top", ...style }}>{children}</td>;
 }
 
 function Chip({ label, active, onClick, title }: { label: string; active: boolean; onClick: () => void; title?: string }) {
