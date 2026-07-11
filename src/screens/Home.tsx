@@ -99,35 +99,6 @@ export default function Home() {
     );
   };
 
-  // Alert popover that appears on tile hover or keyboard focus. Lives inside
-  // the tile via position:absolute so the layout never reflows and no
-  // scrollbar returns. `above` flips the anchor for bottom-row tiles so the
-  // popover opens upward and can't get clipped by the viewport edge.
-  const tilePopover = (key: TileKey, above = false) => {
-    const t = alerts.byTile[key];
-    if (!t) return null;
-    const tone =
-      t.tone === "danger" ? "#dc2626" : t.tone === "warn" ? "#b45309" : "#2563eb";
-    return (
-      <div
-        className="home-tile-popover"
-        role="tooltip"
-        data-above={above ? "1" : "0"}
-        style={{ borderTopColor: tone }}
-      >
-        <div className="home-tile-popover-title">
-          {t.count} {t.count === 1 ? "item" : "items"} need attention
-        </div>
-        <ul className="home-tile-popover-list">
-          {t.items.map((it, i) => (
-            <li key={i}>{it.text}</li>
-          ))}
-        </ul>
-        <div className="home-tile-popover-hint">Click tile to open →</div>
-      </div>
-    );
-  };
-
   return (
     <div className="home">
       <header className="home-head">
@@ -258,7 +229,6 @@ export default function Home() {
       <div className="home-tiles">
         <button className="home-tile students" style={{ position: "relative" }} onClick={() => nav(tileRoute("students", "/students/today"))}>
           {tileDot("students")}
-          {tilePopover("students")}
           <div className="home-tile-icon">👶</div>
           <h2>Students</h2>
           <p>Receipts, subsidies, annual tax receipts, roster</p>
@@ -266,7 +236,6 @@ export default function Home() {
 
         <button className="home-tile staff" style={{ position: "relative" }} onClick={() => nav(staffEnabled ? tileRoute("staff", "/staff/hours") : "/config/staff")}>
           {tileDot("staff")}
-          {tilePopover("staff")}
           <div className="home-tile-icon">👩‍🏫</div>
           <h2>Staff{staffEnabled ? "" : " (disabled)"}</h2>
           <p>{staffEnabled ? "Hours, credentials, drill log, payroll prep" : "Turn on in Configuration → Staff to enable."}</p>
@@ -274,7 +243,6 @@ export default function Home() {
 
         <button className="home-tile comms" style={{ position: "relative" }} onClick={() => nav(tileRoute("comms", "/communications/compose"))}>
           {tileDot("comms")}
-          {tilePopover("comms")}
           <div className="home-tile-icon">✉️</div>
           <h2>Communications</h2>
           <p>Group email, templates, message history, contact directory</p>
@@ -282,7 +250,6 @@ export default function Home() {
 
         <button className="home-tile waitlist" style={{ position: "relative" }} onClick={() => nav(tileRoute("waitlist", "/waitlist"))}>
           {tileDot("waitlist")}
-          {tilePopover("waitlist")}
           <div className="home-tile-icon">📝</div>
           <h2>Waitlist</h2>
           <p>Google Form applications, follow-ups, conversions to enrolled students</p>
@@ -290,7 +257,6 @@ export default function Home() {
 
         <button className="home-tile expenses" style={{ position: "relative" }} onClick={() => nav(tileRoute("expenses", "/expenses/dashboard"))}>
           {tileDot("expenses")}
-          {tilePopover("expenses")}
           <div className="home-tile-icon">💵</div>
           <h2>Expenses</h2>
           <p>Track spending, recurring bills, WCB/CRA remittance, P&L reports</p>
@@ -298,7 +264,6 @@ export default function Home() {
 
         <button className="home-tile reports" style={{ position: "relative" }} onClick={() => nav(tileRoute("reports", "/reports/overview"))}>
           {tileDot("reports")}
-          {tilePopover("reports")}
           <div className="home-tile-icon">📊</div>
           <h2>Reports & Compliance</h2>
           <p>Revenue, aging, subsidies, licensing rosters, credentials, drills, AGM</p>
@@ -306,7 +271,6 @@ export default function Home() {
 
         <button className="home-tile vault" style={{ position: "relative" }} onClick={() => nav(tileRoute("vault", "/vault"))}>
           {tileDot("vault")}
-          {tilePopover("vault", true)}
           <div className="home-tile-icon">🗂️</div>
           <h2>Document Vault</h2>
           <p>Licences, insurance, policies, staff & child records — with expiry alerts</p>
@@ -314,7 +278,6 @@ export default function Home() {
 
         <button className="home-tile organizer" style={{ position: "relative" }} onClick={() => nav(tileRoute("organizer", "/organizer"))}>
           {tileDot("organizer")}
-          {tilePopover("organizer", true)}
           <div className="home-tile-icon">🗓️</div>
           <h2>Organizer</h2>
           <p>Upcoming deadlines, meeting log, follow-ups — one calm dashboard</p>
@@ -322,7 +285,6 @@ export default function Home() {
 
         <button className="home-tile graduation" style={{ position: "relative" }} onClick={() => nav(tileRoute("graduation", "/graduation"))}>
           {tileDot("graduation")}
-          {tilePopover("graduation", true)}
           <div className="home-tile-icon">🎓</div>
           <h2>Graduation Day</h2>
           <p>Year-in-review reel, per-child videos, slideshow — from your photo library</p>
