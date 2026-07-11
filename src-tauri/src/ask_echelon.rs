@@ -354,6 +354,7 @@ Top-level nav (left sidebar):\n\
   Communications → Compose / Templates / History / Directory / Scheduled\n\
   Waitlist → Overview / List / Enrolled / Archived\n\
   Vault (document library), Organizer → Dashboard / Notes, Ask Echelon\n\
+  Graduation → 4-step wizard: pick folder / mark grads / set up folders / render\n\
   Config (Settings) → Identity / Receipts & Email / Folders / Staff / Backups / Security / Stat Holidays / Notifications / Waitlist / About\n\
 \n\
 Common tasks and where to do them:\n\
@@ -383,6 +384,16 @@ Common tasks and where to do them:\n\
   Set up email (SMTP): Config → Receipts & Email → enter host / port / from address / password. Use \"Send test email\".\n\
   Set up Azure AI (needed for OCR + statement import): Config → Staff → \"Azure AI Foundry key\".\n\
   Jot a quick note (no reminder needed): Organizer → Notes → type in the textarea → \"+ Add note\". Search using the search box top-right. Click a note to edit inline, or use ✎/✕.\n\
+\n\
+Graduation Day (year-end reel + per-child videos + PowerPoint deck):\n\
+  Overview: Graduation → 4 numbered steps on one page. Renders a ~15-minute year reel, a 2-minute video per graduating child, and a slide deck with each child's teacher note.\n\
+  Step 1 — Pick folder: Graduation → \"Choose folder\". The app creates a Graduation-YEAR subfolder inside it with everything it needs. Set the \"Graduation year\" (defaults to the current year).\n\
+  Step 2 — Mark graduating students: Graduation → check every graduating child from the roster; type each child's teacher note in the textarea (the note appears on the child's slide and credits card).\n\
+  Step 3 — Set up folders: Graduation → \"Set up folders\". Safe to re-run — existing folders/photos are preserved. Creates: 1-Year-Reel-Photos (drop group photos here), one folder per graduating child, Music, Template, Output.\n\
+  Step 4 — Drop photos + render: put group photos into 1-Year-Reel-Photos, and each child's photos into their own folder. Supports JPG/PNG/HEIC. Filenames like \"First Last.jpg\", \"First+Middle+Last.jpg\" or extensionless are auto-matched to the right child. Optional: drop an .mp3 into Music, or a .pptx template into Template. Then Graduation → \"Render everything\" (or \"Reel only\" / \"Per-child only\" / \"Slides only\"). Click \"Run preflight\" first if you want a dry-run warning list. Click \"Cancel\" during rendering to stop safely.\n\
+  Where outputs go: inside Graduation-YEAR → Output. Files are published atomically — the old version is never left half-overwritten.\n\
+  If the reel is silent: no .mp3 in Music, or the file is corrupt. Drop a valid .mp3 in Music and re-render.\n\
+  If a child's video is missing: their per-child folder is empty. Add at least one photo and re-render \"Per-child only\".\n\
 ";
 
 async fn howto_answer(api_key: &str, question: &str) -> Result<(String, String), String> {
