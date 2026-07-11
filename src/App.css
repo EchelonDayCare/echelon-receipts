@@ -243,12 +243,22 @@ table.data tr.voided td { color: #9ca3af; text-decoration: line-through; }
   padding: 56px 32px 32px;
 }
 .home-head {
-  display: flex; align-items: center; gap: 22px; margin: 0 0 32px -6px;
+  display: flex; align-items: center; gap: 22px;
+  /* Escape the content-home 32px left padding and pull the whole header
+     ~1 inch (96px) further left so the composition feels anchored to the
+     left edge instead of floating in the middle. The negative margin is
+     clamped so a narrow window can't punch it off-screen. */
+  margin: 0 0 32px max(-96px, calc(-1 * (100vw - 1180px) / 2 - 32px));
+}
+.home-head-copy {
+  display: flex; flex-direction: column; justify-content: center;
+  min-height: 96px; /* match logo height so text block is optically centered */
 }
 .home-logo {
   width: 96px; height: 96px; border-radius: 50%; object-fit: cover;
   border: 1px solid var(--border); background: #fff;
   box-shadow: 0 4px 14px -6px rgba(15, 23, 42, 0.18);
+  flex-shrink: 0;
 }
 .home-head h1 {
   font-size: 32px;

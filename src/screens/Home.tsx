@@ -103,7 +103,7 @@ export default function Home() {
     <div className="home">
       <header className="home-head">
         <img src={logo} alt="Logo" className="home-logo" />
-        <div>
+        <div className="home-head-copy">
           <h1 style={{ margin: 0 }}>{daycareName}</h1>
           <p className="subtitle" style={{ margin: 0 }}>
             {new Date().toLocaleDateString(undefined, { weekday: "long", day: "numeric", month: "long", year: "numeric" })}
