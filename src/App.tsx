@@ -175,7 +175,7 @@ function Shell({ logo, name, staffEnabled }: { logo: string; name: string; staff
           <NotificationBell size={40} />
         </div>
         <SettingsFab />
-        <main className="content content-home">
+        <main className="content content-home-shell">
           <Home />
         </main>
       </>

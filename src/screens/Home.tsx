@@ -101,15 +101,18 @@ export default function Home() {
 
   return (
     <div className="home">
-      <header className="home-head">
-        <img src={logo} alt="Logo" className="home-logo" />
-        <div className="home-head-copy">
-          <h1 style={{ margin: 0 }}>{daycareName}</h1>
-          <p className="subtitle" style={{ margin: 0 }}>
-            {new Date().toLocaleDateString(undefined, { weekday: "long", day: "numeric", month: "long", year: "numeric" })}
-          </p>
-        </div>
-      </header>
+      <div className="home-head-row">
+        <header className="home-head">
+          <img src={logo} alt="Logo" className="home-logo" />
+          <div className="home-head-copy">
+            <h1 style={{ margin: 0 }}>{daycareName}</h1>
+            <p className="subtitle" style={{ margin: 0 }}>
+              {new Date().toLocaleDateString(undefined, { weekday: "long", day: "numeric", month: "long", year: "numeric" })}
+            </p>
+          </div>
+        </header>
+      </div>
+      <div className="home-main">
 
       {/* Ask Echelon — hero banner with inline query box + inline answer.
           v2.2.4: users can ask "how do I scan a credit-card statement?" from
@@ -303,9 +306,10 @@ export default function Home() {
         </div>
       )}
 
-      <footer className="home-foot">
-        <span>{appVersion ? `v${appVersion} · ` : ""}Echelon Daycare</span>
-      </footer>
+        <footer className="home-foot">
+          <span>{appVersion ? `v${appVersion} · ` : ""}Echelon Daycare</span>
+        </footer>
+      </div>
     </div>
   );
 }
