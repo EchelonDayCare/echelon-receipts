@@ -4,7 +4,33 @@
 import { db, execRetry, serializeWrite } from "../lib/db";
 import { uuidv4, nowIso, StaleWriteError } from "./ids";
 
-export type ShiftStatus = "planned" | "confirmed" | "cancelled" | "swapped";
+export type ShiftStatus =
+  | "planned"
+  | "confirmed"
+  | "cancelled"
+  | "swapped"
+  // v2.6.3 absence statuses. Times default to 09:00–17:00 as placeholders
+  // but `shiftHours` returns 0 for these so they never inflate weekly /
+  // monthly totals. Rendered in the grid as a coloured "Vacation" /
+  // "Sick" / "Day off" chip instead of start–end times.
+  | "vacation"
+  | "sick"
+  | "day_off";
+
+/** True iff this status contributes worked hours to totals. */
+export function isWorkedStatus(status: ShiftStatus): boolean {
+  return status === "planned" || status === "confirmed" || status === "swapped";
+}
+
+/** Short human label for absence statuses; null for worked statuses. */
+export function absenceLabel(status: ShiftStatus): string | null {
+  switch (status) {
+    case "vacation": return "Vacation";
+    case "sick": return "Sick";
+    case "day_off": return "Day off";
+    default: return null;
+  }
+}
 
 export type StaffShift = {
   id: string;
@@ -78,12 +104,34 @@ export function addDays(iso: string, n: number): string {
   return `${dt.getFullYear()}-${String(dt.getMonth() + 1).padStart(2, "0")}-${String(dt.getDate()).padStart(2, "0")}`;
 }
 
-// Decimal hours between HH:MM strings minus break minutes.
-export function shiftHours(s: Pick<StaffShift, "startTime" | "endTime" | "breakMinutes">): number {
+/**
+ * Paid hours for a scheduled shift, mirroring the Hours-tab `paidHours`
+ * rule (`src/lib/staff.ts`): raw duration minus the shift's explicit
+ * `breakMinutes` when non-zero; otherwise minus a 30-minute unpaid
+ * lunch when the raw shift is 5 hours or more. Under 5 hours: no
+ * deduction. Never negative.
+ *
+ * The auto-30-min-if-≥5h path was added in v2.6.3 so the Schedule
+ * tab's Total column reads the same numbers payroll sees on the
+ * Hours tab. Explicit `breakMinutes` in the shift drawer still wins,
+ * so managers can override the auto rule per shift (e.g. a 6-hour
+ * shift the worker will take at their desk).
+ */
+export function shiftHours(s: Pick<StaffShift, "startTime" | "endTime" | "breakMinutes"> & { status?: ShiftStatus }): number {
+  // v2.6.3: absence rows are placeholders with no paid hours. They may
+  // carry non-zero start/end times (drawer defaults to 09:00–17:00) so
+  // the row renders sensibly, but we never let those minutes contribute
+  // to weekly/monthly totals.
+  if (s.status && !isWorkedStatus(s.status)) return 0;
   const [sh, sm] = s.startTime.split(":").map(Number);
   const [eh, em] = s.endTime.split(":").map(Number);
-  const worked = (eh * 60 + em) - (sh * 60 + sm) - (s.breakMinutes || 0);
-  return Math.max(0, worked / 60);
+  const rawMinutes = (eh * 60 + em) - (sh * 60 + sm);
+  if (rawMinutes <= 0) return 0;
+  const explicit = s.breakMinutes || 0;
+  const deduct = explicit > 0
+    ? explicit
+    : (rawMinutes >= 5 * 60 ? 30 : 0);
+  return Math.max(0, (rawMinutes - deduct) / 60);
 }
 
 export async function listShiftsForWeek(mondayISO: string): Promise<StaffShift[]> {
@@ -103,6 +151,74 @@ export async function listShiftsForStaffWeek(staffId: string, mondayISO: string)
     "SELECT * FROM staff_shifts WHERE deleted_at IS NULL AND staff_id = ? AND shift_date >= ? AND shift_date <= ? ORDER BY shift_date, start_time",
     [staffId, mondayISO, sunday],
   );
+  return rows.map(rowToShift);
+}
+
+/**
+ * v2.6.3: list every non-deleted shift in the given calendar month
+ * (year is 4-digit, month is 1-12). Used by the Schedule tab's
+ * "Month total" column so the owner can see accumulated hours across
+ * the whole month while still working week-by-week.
+ */
+export async function listShiftsForMonth(year: number, month: number): Promise<StaffShift[]> {
+  const start = `${year}-${String(month).padStart(2, "0")}-01`;
+  // Last-of-month via day-0-of-next-month trick.
+  const lastDay = new Date(year, month, 0).getDate();
+  const end = `${year}-${String(month).padStart(2, "0")}-${String(lastDay).padStart(2, "0")}`;
+  const d = await db();
+  const rows = await d.select<ShiftRow[]>(
+    "SELECT * FROM staff_shifts WHERE deleted_at IS NULL AND shift_date >= ? AND shift_date <= ? ORDER BY shift_date, start_time",
+    [start, end],
+  );
+  return rows.map(rowToShift);
+}
+
+/**
+ * v2.6.3: live (not soft-deleted, not cancelled) shifts scheduled on any
+ * of the given ISO dates. Used by the closure-impact modal to warn (and
+ * offer to cancel) when the owner marks a previously-open day closed —
+ * either from Centre Calendar or by toggling a stat holiday in Settings.
+ *
+ * By default only shifts on or after today are returned — historical
+ * shifts on the affected days are payroll history and shouldn't be
+ * touched by a calendar edit. Pass `{ includePast: true }` to override
+ * (unused today; kept for future audit tooling).
+ */
+export async function listLiveShiftsOnDates(
+  isoDates: string[],
+  opts: { includePast?: boolean } = {},
+): Promise<StaffShift[]> {
+  if (isoDates.length === 0) return [];
+  const d = await db();
+  // De-dupe + build the parameter list. SQLite has a 999-parameter
+  // ceiling by default; a stat-holiday sweep across ~12 months of the
+  // year hits ~12 dates so we're nowhere near it, but chunk defensively.
+  const uniq = Array.from(new Set(isoDates));
+  const today = new Date();
+  const todayIso =
+    `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, "0")}-` +
+    `${String(today.getDate()).padStart(2, "0")}`;
+  const chunkSize = 500;
+  const rows: ShiftRow[] = [];
+  for (let i = 0; i < uniq.length; i += chunkSize) {
+    const chunk = uniq.slice(i, i + chunkSize);
+    const placeholders = chunk.map(() => "?").join(",");
+    const sql = opts.includePast
+      ? `SELECT * FROM staff_shifts
+          WHERE deleted_at IS NULL
+            AND status != 'cancelled'
+            AND shift_date IN (${placeholders})
+          ORDER BY shift_date, start_time`
+      : `SELECT * FROM staff_shifts
+          WHERE deleted_at IS NULL
+            AND status != 'cancelled'
+            AND shift_date >= ?
+            AND shift_date IN (${placeholders})
+          ORDER BY shift_date, start_time`;
+    const params = opts.includePast ? chunk : [todayIso, ...chunk];
+    const part = await d.select<ShiftRow[]>(sql, params);
+    rows.push(...part);
+  }
   return rows.map(rowToShift);
 }
 
@@ -200,7 +316,75 @@ export async function cancelShift(id: string, expectedVersion: number, reason?: 
     [now, id, expectedVersion],
   );
   if (res.rowsAffected === 0) throw new StaleWriteError("Shift");
-  await writeEvent(id, "cancelled", { reason: reason ?? null, was: { start: cur.startTime, end: cur.endTime, room: cur.room } });
+  // v2.6.3: record the previous status so a later `restoreShift` can put
+  // the shift back exactly where it was (planned / confirmed / swapped /
+  // absence) rather than blindly downgrading to planned.
+  await writeEvent(id, "cancelled", {
+    reason: reason ?? null,
+    prev_status: cur.status,
+    was: { start: cur.startTime, end: cur.endTime, room: cur.room },
+  });
+}
+
+/** v2.6.3: undo a cancel. Restores the shift to its previous status (as
+ *  recorded in the `cancelled` audit event) or "planned" as a safe fallback.
+ *
+ *  Guards against the one-shift-per-day partial unique index by checking
+ *  `hasExistingShift` first — surfaces a friendly domain error instead of
+ *  a raw SQLite constraint exception if the owner already re-scheduled
+ *  the same (staff, date) after the cancel. */
+export async function restoreShift(id: string, expectedVersion: number): Promise<StaffShift> {
+  const cur = await getShift(id);
+  if (!cur) throw new Error("Shift not found");
+  if (cur.status !== "cancelled") throw new Error("Only cancelled shifts can be restored");
+  // Fast check for the one-shift-per-day rule so we return a clean error
+  // instead of a raw SQLite constraint from the partial unique index.
+  const conflict = await hasExistingShift(cur.staffId, cur.shiftDate, id);
+  if (conflict) {
+    throw new Error("Cannot restore — this staff member already has another shift on this day.");
+  }
+  // Recover the prior status from the most recent `cancelled` event.
+  // Falls back to "planned" for legacy rows that predate the prev_status
+  // audit-payload change (v2.6.3 and earlier).
+  const events = await listEventsForShift(id);
+  let prevStatus: ShiftStatus = "planned";
+  for (let i = events.length - 1; i >= 0; i--) {
+    const ev = events[i];
+    if (ev.eventType === "cancelled") {
+      const raw = (ev.payload as { prev_status?: unknown } | null)?.prev_status;
+      if (raw === "planned" || raw === "confirmed" || raw === "swapped" || raw === "vacation" || raw === "sick" || raw === "day_off") {
+        prevStatus = raw;
+      }
+      break;
+    }
+  }
+  const now = nowIso();
+  const res = await execRetry(
+    "UPDATE staff_shifts SET status = ?, updated_at = ?, version = version + 1 WHERE id = ? AND version = ?",
+    [prevStatus, now, id, expectedVersion],
+  );
+  if (res.rowsAffected === 0) throw new StaleWriteError("Shift");
+  await writeEvent(id, "restored", { restored_to: prevStatus });
+  const restored = await getShift(id);
+  if (!restored) throw new Error("Shift disappeared after restore");
+  return restored;
+}
+
+/** v2.6.3: list shifts cancelled within the past `days` days (default 7),
+ *  most-recent first. Powers the "Recently cancelled" panel on Schedule. */
+export async function listRecentlyCancelled(days = 7): Promise<StaffShift[]> {
+  const d = await db();
+  const cutoff = new Date();
+  cutoff.setDate(cutoff.getDate() - days);
+  const cutoffIso = cutoff.toISOString();
+  const rows = await d.select<ShiftRow[]>(
+    `SELECT * FROM staff_shifts
+     WHERE status = 'cancelled' AND deleted_at IS NULL AND updated_at >= ?
+     ORDER BY updated_at DESC
+     LIMIT 200`,
+    [cutoffIso],
+  );
+  return rows.map(rowToShift);
 }
 
 export async function softDeleteShift(id: string, expectedVersion: number): Promise<void> {
@@ -458,3 +642,21 @@ export async function listAuditForWeek(mondayISO: string): Promise<ShiftEvent[]>
   }));
 }
 function safeJson(s: string) { try { return JSON.parse(s); } catch { return s; } }
+
+/** v2.6.3: list all audit events for a single shift, oldest first.
+ *  Used by `restoreShift` to recover the pre-cancel status. */
+export async function listEventsForShift(shiftId: string): Promise<ShiftEvent[]> {
+  const d = await db();
+  const rows = await d.select<{
+    id: string; entity_id: string; event_type: string; payload_json: string | null;
+    actor: string; channel: string | null; message_ref: string | null; created_at: string;
+  }[]>(
+    `SELECT * FROM staff_shift_events WHERE entity_id = ? ORDER BY created_at ASC LIMIT 200`,
+    [shiftId],
+  );
+  return rows.map((r) => ({
+    id: r.id, entityId: r.entity_id, eventType: r.event_type,
+    payload: r.payload_json ? safeJson(r.payload_json) : null,
+    actor: r.actor, channel: r.channel, messageRef: r.message_ref, createdAt: r.created_at,
+  }));
+}

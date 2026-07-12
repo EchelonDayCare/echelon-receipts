@@ -182,6 +182,8 @@ export function toLocalIso(d: Date): string {
 // page. Text in, array of shifts out, constrained to the passed-in week
 // and the passed-in active-staff roster.
 
+export type ParsedShiftKind = "shift" | "vacation" | "sick" | "day_off";
+
 export interface ParsedShift {
   staffId: string | null;
   staffName: string;
@@ -192,6 +194,9 @@ export interface ParsedShift {
   room: string | null;
   notes: string | null;
   confidence: number | null;
+  /** v2.6.3. "shift" = normal worked shift (default). Others are absence
+   *  markers — see Rust ParsedShift docs for details. */
+  kind: ParsedShiftKind;
 }
 
 interface RustParsedShift {
@@ -204,15 +209,22 @@ interface RustParsedShift {
   room: string | null;
   notes: string | null;
   confidence: number | null;
+  kind?: ParsedShiftKind;
 }
 
 export async function parseStaffShifts(opts: {
   text: string;
   weekStartIso: string;
   roster: Array<{ id: string; name: string }>;
+  /** ISO → reason map for centre-closed days. Sent to the LLM as
+   *  a "do not schedule on these dates" list. v2.6.3. */
+  closedDays?: Map<string, string>;
 }): Promise<{ shifts: ParsedShift[]; latencyMs: number; rawJson: string }> {
   const now = new Date();
   const tz = Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
+  const closedDaysList = opts.closedDays
+    ? Array.from(opts.closedDays.entries()).map(([iso, reason]) => ({ iso, reason }))
+    : [];
   const res = await invoke<{ shifts: RustParsedShift[]; latency_ms: number; raw_json: string }>(
     "parse_staff_shifts",
     {
@@ -222,6 +234,7 @@ export async function parseStaffShifts(opts: {
         tz,
         week_start_iso: opts.weekStartIso,
         roster: opts.roster,
+        closed_days: closedDaysList,
       },
     },
   );
@@ -236,6 +249,7 @@ export async function parseStaffShifts(opts: {
       room: s.room,
       notes: s.notes,
       confidence: s.confidence,
+      kind: s.kind ?? "shift",
     })),
     latencyMs: res.latency_ms,
     rawJson: res.raw_json,

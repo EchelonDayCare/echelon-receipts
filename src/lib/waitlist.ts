@@ -637,6 +637,8 @@ export async function listWaitlist(opts: {
   search?: string;
   /** ISO date (YYYY-MM-DD) — return only entries with birthday on or after this date. */
   birthFrom?: string;
+  /** ISO date (YYYY-MM-DD) — return only entries with birthday on or before this date (inclusive). */
+  birthTo?: string;
 } = {}): Promise<WaitlistEntry[]> {
   const d = await db();
   const clauses: string[] = [];
@@ -655,6 +657,12 @@ export async function listWaitlist(opts: {
     // (we can't compare them). Sorting later still surfaces them separately.
     clauses.push("(birthday IS NOT NULL AND birthday >= ?)");
     args.push(opts.birthFrom);
+  }
+  if (opts.birthTo) {
+    // Same NULL semantics as birthFrom — unknown-birthday entries are excluded
+    // from the range. Caller passes an inclusive upper bound (end-of-month).
+    clauses.push("(birthday IS NOT NULL AND birthday <= ?)");
+    args.push(opts.birthTo);
   }
   const where = clauses.length ? `WHERE ${clauses.join(" AND ")}` : "";
   return d.select<WaitlistEntry[]>(

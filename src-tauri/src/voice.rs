@@ -294,6 +294,12 @@ pub struct RosterMember {
 }
 
 #[derive(Deserialize)]
+pub struct ClosedDay {
+    pub iso: String,
+    pub reason: String,
+}
+
+#[derive(Deserialize)]
 pub struct ParseShiftsArgs {
     pub text: String,
     pub now_iso: String,
@@ -302,6 +308,12 @@ pub struct ParseShiftsArgs {
     /// emit dates outside [week_start_iso .. week_start_iso + 6d].
     pub week_start_iso: String,
     pub roster: Vec<RosterMember>,
+    /// v2.6.3. Days the centre is closed (weekend / stat holiday /
+    /// manual override) within the parser's likely date window. The
+    /// LLM is told never to schedule on these dates. Frontend also
+    /// re-checks post-parse and pre-save as a backstop.
+    #[serde(default)]
+    pub closed_days: Vec<ClosedDay>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -322,7 +334,18 @@ pub struct ParsedShift {
     pub room: Option<String>,
     pub notes: Option<String>,
     pub confidence: Option<f32>,
+    /// v2.6.3. What kind of row this is:
+    ///   "shift"    → normal worked shift (default; matches legacy behaviour)
+    ///   "vacation" → paid vacation marker; times default 09:00-17:00
+    ///   "sick"     → sick-leave marker; times default 09:00-17:00
+    ///   "day_off"  → unpaid personal day; times default 09:00-17:00
+    /// Absence rows soft-cancel any planned shift for the same
+    /// (staff, date) on save.
+    #[serde(default = "default_shift_kind")]
+    pub kind: String,
 }
+
+fn default_shift_kind() -> String { "shift".to_string() }
 
 #[derive(Serialize)]
 pub struct ParseShiftsResult {
@@ -354,6 +377,19 @@ pub async fn parse_staff_shifts(args: ParseShiftsArgs) -> Result<ParseShiftsResu
         .collect();
     let roster_block = roster_lines.join("\n");
 
+    // v2.6.3 closed-day block. When present the LLM is instructed to
+    // never emit shifts on those dates. Kept short so it doesn't blow
+    // token budget on year-long spans — callers should trim to a
+    // reasonable window (typically 3-6 months around the visible week).
+    let closed_block = if args.closed_days.is_empty() {
+        "(none supplied — assume centre is open every day the user names)".to_string()
+    } else {
+        args.closed_days.iter()
+            .map(|d| format!("- {} ({})", d.iso, d.reason))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+
     let system_prompt = format!(
         "You convert free-text scheduling notes into a strict JSON array of staff shifts.\n\
          \n\
@@ -370,9 +406,14 @@ pub async fn parse_staff_shifts(args: ParseShiftsArgs) -> Result<ParseShiftsResu
          and put the raw name in staff_name — never invent an id.\n\
          {roster}\n\
          \n\
+         Centre-closed days — NEVER emit a shift on any of these dates. If the user says\n\
+         \"Priya Mon-Sun\" and Sat/Sun are listed as closed, only emit Mon-Fri. If every date\n\
+         the user names is closed, emit an empty shifts array.\n\
+         {closed}\n\
+         \n\
          Rules:\n\
          - Expand multi-day phrases like \"Mon-Fri\" into one shift per day.\n\
-         - Expand \"weekdays\" to Mon..Fri. \"weekend\" to Sat..Sun.\n\
+         - Expand \"weekdays\" to Mon..Fri. \"weekend\" to Sat..Sun (but skip closed dates).\n\
          - Expand \"every Monday for next 4 weeks\", \"daily until end of month\", etc.\n\
          - Times: accept \"7-2\", \"7am to 2pm\", \"morning\", \"closing\", \"full day\".\n\
            Default anchors when only a shift word is given:\n\
@@ -380,14 +421,41 @@ pub async fn parse_staff_shifts(args: ParseShiftsArgs) -> Result<ParseShiftsResu
          - break_minutes: 0 unless the user says \"with lunch\", \"1h break\", \"no lunch\" (0), etc.\n\
          - room, notes: only fill if explicitly said. Otherwise null.\n\
          - Never emit end_time <= start_time.\n\
-         - Never emit a date in the past (before today's local date).\n\
+         - PAST DATES: if the user names a date that's already in the past (e.g. \"June 17\"\n\
+           when today is July 13), still emit the shift with the past date. The frontend\n\
+           will drop it and tell the user, which is more helpful than silently emitting\n\
+           nothing (they usually meant a typo like \"July 17\" or next year's date).\n\
          - confidence: 0.0-1.0 self-report per shift.\n\
+         \n\
+         ABSENCES (kind field) — you MUST classify every row:\n\
+         - kind=\"shift\"    : the default. A normal worked shift with real start/end times.\n\
+         - kind=\"vacation\" : phrases like \"Judy on vacation this week\", \"Alex vacation Aug 1-5\",\n\
+                              \"Priya off next Mon-Wed for vacation\", \"Sam PTO Tuesday\".\n\
+         - kind=\"sick\"     : phrases like \"Judy sick today\", \"Priya was sick yesterday\",\n\
+                              \"Alex out sick tomorrow\", \"Sam called in sick\".\n\
+         - kind=\"day_off\"  : phrases like \"Judy day off Friday\", \"Alex has Wed off\",\n\
+                              \"Priya dayoff tomorrow\", \"Sam is off Monday\" (with no reason given).\n\
+         \n\
+         For absence rows (kind != \"shift\"):\n\
+         - Use 09:00 as start_time and 17:00 as end_time (placeholder — frontend zeroes hours).\n\
+         - break_minutes = 0, room = null, notes = null.\n\
+         - Expand week/range phrases the same way: \"Judy on vacation Mon-Fri next week\" → 5 rows.\n\
+         - Do NOT emit an absence row on a centre-closed date (closed_days above).\n\
+         \n\
+         REPLACEMENTS — phrases like \"Judy was sick yesterday, Aldex covered\" or\n\
+         \"Priya sick Monday, replaced by Sam\" or \"Alex off Tuesday, Judy takes it\" mean\n\
+         EMIT TWO ROWS in this exact order:\n\
+           1. The absence row for the original person (kind=sick/vacation/day_off, 09:00-17:00).\n\
+           2. A normal kind=\"shift\" row for the covering person on the same date. If the user\n\
+              didn't name times, use 09:00-17:00 as a best-guess placeholder — the user will\n\
+              adjust in the review UI before saving.\n\
          \n\
          Return {{ \"shifts\": [...] }} — always wrap in an object, never a bare array.",
         now_iso = args.now_iso,
         tz = args.tz,
         week_start = args.week_start_iso,
         roster = roster_block,
+        closed = closed_block,
     );
 
     let schema = json!({
@@ -406,9 +474,10 @@ pub async fn parse_staff_shifts(args: ParseShiftsArgs) -> Result<ParseShiftsResu
                         "break_minutes": { "type": "integer" },
                         "room":          { "type": ["string", "null"] },
                         "notes":         { "type": ["string", "null"] },
-                        "confidence":    { "type": ["number", "null"] }
+                        "confidence":    { "type": ["number", "null"] },
+                        "kind":          { "type": "string", "enum": ["shift", "vacation", "sick", "day_off"] }
                     },
-                    "required": ["staff_id", "staff_name", "shift_date", "start_time", "end_time", "break_minutes", "room", "notes", "confidence"],
+                    "required": ["staff_id", "staff_name", "shift_date", "start_time", "end_time", "break_minutes", "room", "notes", "confidence", "kind"],
                     "additionalProperties": false
                 }
             }
@@ -475,7 +544,11 @@ pub async fn parse_staff_shifts(args: ParseShiftsArgs) -> Result<ParseShiftsResu
         args.roster.iter().map(|m| m.id.as_str()).collect();
     let mut cleaned: Vec<ParsedShift> = Vec::with_capacity(parsed.shifts.len());
     for mut s in parsed.shifts {
-        if !today.is_empty() && s.shift_date.as_str() < today.as_str() {
+        // v2.6.3: only reject past dates for worked shifts. Absence rows
+        // ("Judy was sick yesterday", "Priya on vacation last Mon-Fri")
+        // legitimately reference past dates and must flow through to the
+        // frontend so the user can persist them as historical markers.
+        if s.kind == "shift" && !today.is_empty() && s.shift_date.as_str() < today.as_str() {
             continue;
         }
         if s.end_time.as_str() <= s.start_time.as_str() {

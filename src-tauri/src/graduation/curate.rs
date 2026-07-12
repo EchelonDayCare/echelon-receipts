@@ -282,7 +282,7 @@ fn orient_cache_key(source: &Path, mtime_ns: u128, size: u64, orient: u16) -> St
 /// 1: Normal • 2: Flip-H • 3: Rotate 180 • 4: Flip-V
 /// 5: Transpose (rotate 90 CW then flip-H) • 6: Rotate 90 CW
 /// 7: Transverse (rotate 90 CCW then flip-H) • 8: Rotate 90 CCW
-fn apply_exif_orientation(img: image::DynamicImage, orient: u16) -> image::DynamicImage {
+pub(crate) fn apply_exif_orientation(img: image::DynamicImage, orient: u16) -> image::DynamicImage {
     use image::imageops::{flip_horizontal, flip_vertical, rotate180, rotate270, rotate90};
     match orient {
         1 => img,
@@ -313,7 +313,7 @@ fn apply_exif_orientation(img: image::DynamicImage, orient: u16) -> image::Dynam
 /// EXIF. After the header is a TIFF header (`II*\0` little-endian or
 /// `MM\0*` big-endian), the IFD0 offset, then IFD0 which is a count
 /// followed by 12-byte entries. Orientation is tag 0x0112, type SHORT.
-fn read_jpeg_orientation(path: &Path) -> Option<u16> {
+pub(crate) fn read_jpeg_orientation(path: &Path) -> Option<u16> {
     let mut f = std::fs::File::open(path).ok()?;
     // 128 KB is plenty — APP1/EXIF lives at the very start of the file
     // and typical JPEGs put it in the first ~64 KB.

@@ -9,7 +9,7 @@
 
 import { useEffect, useState } from "react";
 import {
-  BC_HOLIDAY_CATALOG,
+  BC_HOLIDAY_CATALOG, bcStatHolidays,
 } from "../lib/bcHolidays";
 import {
   getDisabledBcHolidayIds,
@@ -17,11 +17,17 @@ import {
   isBcHolidaysEnabled,
   setBcHolidaysEnabled,
 } from "../lib/centreCalendar";
+import { runClosureImpact, type ClosureImpactDate } from "./ClosureImpactDialog";
 
 export default function HolidaysSettingsSection() {
   const [loaded, setLoaded] = useState(false);
   const [masterOn, setMasterOn] = useState(true);
   const [disabled, setDisabled] = useState<Set<string>>(new Set());
+  // Snapshot of the disabled set at load / last successful save. Used
+  // by `save()` to figure out which holidays are being *newly enabled*
+  // (i.e. moved out of the disabled set) so we can warn about affected
+  // shifts before writing the change.
+  const [savedDisabled, setSavedDisabled] = useState<Set<string>>(new Set());
   const [saving, setSaving] = useState(false);
   const [toast, setToast] = useState<string | null>(null);
 
@@ -33,11 +39,64 @@ export default function HolidaysSettingsSection() {
       ]);
       setMasterOn(on);
       setDisabled(off);
+      setSavedDisabled(new Set(off));
       setLoaded(true);
     })();
   }, []);
 
+  // Lookahead window for closure-impact checks. Deliberately capped at
+  // 26 weeks (~6 months) — staff scheduling is generally 4-8 weeks out,
+  // so this covers the practical horizon without pulling a year+ of
+  // holidays into the modal. Any live shift on an affected date past
+  // this window will still be surfaced in the Schedule grid via the
+  // warning-tint on the shift row when the owner navigates there.
+  const IMPACT_LOOKAHEAD_DAYS = 26 * 7;
+
+  // Build the set of ISO dates that would flip open → closed when the
+  // supplied holiday ids become "enabled" (i.e. removed from the
+  // disabled set), across the next IMPACT_LOOKAHEAD_DAYS.
+  function futureHolidayDates(enabledIds: Set<string>): ClosureImpactDate[] {
+    if (enabledIds.size === 0) return [];
+    const today = new Date();
+    const todayIso =
+      `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, "0")}-` +
+      `${String(today.getDate()).padStart(2, "0")}`;
+    const endDate = new Date(today);
+    endDate.setDate(endDate.getDate() + IMPACT_LOOKAHEAD_DAYS);
+    const endIso =
+      `${endDate.getFullYear()}-${String(endDate.getMonth() + 1).padStart(2, "0")}-` +
+      `${String(endDate.getDate()).padStart(2, "0")}`;
+    const fromYear = today.getFullYear();
+    const toYear = endDate.getFullYear();
+    const out: ClosureImpactDate[] = [];
+    for (let y = fromYear; y <= toYear; y++) {
+      for (const h of bcStatHolidays(y)) {
+        if (!enabledIds.has(h.id)) continue;
+        if (h.iso >= todayIso && h.iso <= endIso) out.push({ iso: h.iso, reason: h.name });
+      }
+    }
+    return out;
+  }
+
   async function toggleMaster(next: boolean) {
+    // Only guard the OFF → ON direction (turning holidays on makes days
+    // closed). ON → OFF opens more days and can't orphan anything.
+    if (next && !masterOn) {
+      const enabled = new Set(
+        BC_HOLIDAY_CATALOG.map((h) => h.id).filter((id) => !disabled.has(id)),
+      );
+      const dates = futureHolidayDates(enabled);
+      if (dates.length > 0) {
+        const choice = await runClosureImpact({
+          title: "Turning on stat holidays would close scheduled days",
+          intro:
+            `Some scheduled staff shifts fall on upcoming BC statutory holidays. ` +
+            `Choose what to do with those shifts before turning the setting on.`,
+          dates,
+        });
+        if (choice === "cancel") return;
+      }
+    }
     setMasterOn(next);
     await setBcHolidaysEnabled(next);
     showToast(next ? "Stat holidays turned ON" : "Stat holidays turned OFF");
@@ -54,7 +113,30 @@ export default function HolidaysSettingsSection() {
   async function save() {
     setSaving(true);
     try {
+      // Newly-enabled = present in savedDisabled but no longer in
+      // current `disabled`. Only these matter for the closure-impact
+      // warning — items being newly disabled make more days open, which
+      // can never orphan a shift.
+      const newlyEnabled = new Set<string>();
+      for (const id of savedDisabled) {
+        if (!disabled.has(id)) newlyEnabled.add(id);
+      }
+      if (masterOn && newlyEnabled.size > 0) {
+        const dates = futureHolidayDates(newlyEnabled);
+        if (dates.length > 0) {
+          const choice = await runClosureImpact({
+            title: "Enabling these holidays would close scheduled days",
+            intro:
+              `Some scheduled staff shifts fall on upcoming BC statutory ` +
+              `holidays you're about to enable. Choose what to do with those ` +
+              `shifts before saving.`,
+            dates,
+          });
+          if (choice === "cancel") { setSaving(false); return; }
+        }
+      }
       await setDisabledBcHolidayIds([...disabled]);
+      setSavedDisabled(new Set(disabled));
       showToast("Saved. Applies to every year going forward.");
     } catch (e: any) {
       showToast("Save failed: " + String(e?.message ?? e));

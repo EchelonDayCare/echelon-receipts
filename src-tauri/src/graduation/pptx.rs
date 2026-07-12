@@ -284,6 +284,81 @@ pub fn render_slides_cancellable(
         }
     };
 
+    // Auto-generate a cover slide when the template contains ONLY the
+    // marker (i.e. the author didn't include a separate title slide).
+    // Without this the deck opens directly on the first child, which
+    // reads more like a report page than a graduation deck. When the
+    // author has already provided one or more non-marker slides they
+    // remain untouched — we only fill the gap; we never override.
+    //
+    // The cover is built by cloning the marker slide's XML + rels, then
+    // substituting `{{Name}}` → "Class of {year}" and `{{Note}}` → a
+    // short subtitle. Trailing possessive text ("{{Name}}'s ...") in
+    // the template — a common pattern that reads badly on a cover — is
+    // scrubbed after substitution.
+    let template_slide_count = entries.iter().filter(|(n, _)| is_slide_path(n)).count();
+    if template_slide_count == 1 {
+        let cover_num = max_slide_num + 1;
+        max_slide_num = cover_num;
+
+        let cover_title = format!("Class of {}", ctx.year);
+        let cover_subtitle = "Graduation Ceremony";
+        let mut cover_xml = String::from_utf8_lossy(&marker_slide_bytes).into_owned();
+        cover_xml = coalesce_split_runs(&cover_xml);
+        cover_xml = cover_xml
+            .replace("{{Name}}", &escape_xml(&cover_title))
+            .replace("{{Note}}", &escape_xml(cover_subtitle))
+            .replace("{{Year}}", &ctx.year.to_string());
+        // Scrub possessive suffixes glued to the substituted title
+        // (`Class of 2026's ...` reads awkwardly on a cover slide).
+        // Both straight and curly apostrophes.
+        let title_esc = escape_xml(&cover_title);
+        for suffix in [
+            format!("{title_esc}'s "),
+            format!("{title_esc}\u{2019}s "),
+            format!("{title_esc}'s<"),
+            format!("{title_esc}\u{2019}s<"),
+        ] {
+            let replacement = if suffix.ends_with('<') {
+                format!("{title_esc}<")
+            } else {
+                format!("{title_esc} ")
+            };
+            cover_xml = cover_xml.replace(&suffix, &replacement);
+        }
+
+        let cover_slide_path = format!("ppt/slides/slide{cover_num}.xml");
+        new_entries.push((cover_slide_path, cover_xml.into_bytes()));
+        if let Some(rels) = &marker_rels_bytes {
+            let cover_rels_path = format!("ppt/slides/_rels/slide{cover_num}.xml.rels");
+            new_entries.push((cover_rels_path, rels.clone()));
+        }
+
+        let cover_r_id = next_r_id;
+        next_r_id += 1;
+        let cover_sld_id = sld_id_next;
+        sld_id_next += 1;
+        inserted_r_ids.push((cover_r_id, cover_num));
+
+        let rel_line = format!(
+            r#"<Relationship Id="rId{cover_r_id}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide" Target="slides/slide{cover_num}.xml"/>"#
+        );
+        rels_xml = insert_before_strict(&rels_xml, "</Relationships>", &rel_line)?;
+
+        let sld_line = format!(r#"<p:sldId id="{cover_sld_id}" r:id="rId{cover_r_id}"/>"#);
+        pres_xml = insert_sld_line(&pres_xml, marker_sld_line_pos.as_deref(), &sld_line)?;
+
+        let override_line = format!(
+            r#"<Override PartName="/ppt/slides/slide{cover_num}.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.slide+xml"/>"#
+        );
+        ct_xml = insert_before_strict(&ct_xml, "</Types>", &override_line)?;
+
+        report.warnings.push(
+            "Template had no cover slide — auto-inserted \"Class of \
+             {year}\" title before the student slides.".replace("{year}", &ctx.year.to_string())
+        );
+    }
+
     for (i, student) in ctx.students.iter().enumerate() {
         if is_cancelled() {
             return Err("cancelled".into());
@@ -310,10 +385,11 @@ pub fn render_slides_cancellable(
                     "No matching photo found — using placeholder.".to_string(),
                 ),
                 (Some(rid), photos) => {
+                    let target_aspect = compute_target_aspect(&String::from_utf8_lossy(&marker_slide_bytes), rid);
                     let encoded = if photos.len() == 1 {
-                        encode_as_jpeg_cancellable(&photos[0], is_cancelled)
+                        encode_as_jpeg_cancellable(&photos[0], target_aspect, is_cancelled)
                     } else {
-                        composite_photos_as_jpeg_cancellable(photos, is_cancelled)
+                        composite_photos_as_jpeg_cancellable(photos, target_aspect, is_cancelled)
                     };
                     match encoded {
                         Ok(jpeg_bytes) => {
@@ -990,30 +1066,94 @@ fn media_slug(name: &str) -> String {
 /// - JPEG magic → passthrough (fastest, no re-encode).
 /// - HEIC/HEIF magic → libheif → JPEG.
 /// - Anything else the `image` crate recognises → decode → JPEG quality 85.
-fn encode_as_jpeg(source: &Path) -> Result<Vec<u8>, String> {
-    encode_as_jpeg_cancellable(source, &|| false)
+fn encode_as_jpeg(source: &Path, target_aspect: f32) -> Result<Vec<u8>, String> {
+    encode_as_jpeg_cancellable(source, target_aspect, &|| false)
 }
 
+/// Encode a per-child photo for embedding in the PPTX.
+///
+/// Pipeline (v2.6.3):
+/// 1. Decode via `load_photo_cancellable` — HEIC, JPEG, PNG, WebP.
+///    JPEG path applies EXIF Orientation so sideways iPhone photos
+///    render upright (the marker slide `<p:pic>` has no `rot="…"`).
+/// 2. Alpha-flatten over white.
+/// 3. Center-crop to `target_aspect` (the marker slide picture-frame's
+///    width/height ratio). Without this, the `<a:stretch>` fill mode
+///    in `<p:blipFill>` distorts photos whose aspect doesn't match the
+///    frame — e.g. a 2.14:1 panorama forced into a 0.93:1 near-square
+///    frame is squished vertically.
+/// 4. Downscale so the longest edge is ≤ `MAX_EDGE` (keeps deck size
+///    reasonable — a 7 MB iPhone JPEG becomes ~300–600 KB with no
+///    visible loss at slide size).
+/// 5. Re-encode JPEG at quality 85.
 fn encode_as_jpeg_cancellable(
     source: &Path,
+    target_aspect: f32,
     is_cancelled: &dyn Fn() -> bool,
 ) -> Result<Vec<u8>, String> {
-    let sig = sniff_format(source);
-    match sig {
-        PhotoFmt::Jpeg => std::fs::read(source)
-            .map_err(|e| format!("read jpeg {}: {e}", source.display())),
-        PhotoFmt::Heic => encode_heic_as_jpeg(source, is_cancelled),
-        PhotoFmt::Other => {
-            let dyn_img = decode_via_image(source)?;
-            let rgb = flatten_over_white(&dyn_img);
-            let mut buf = Vec::<u8>::new();
-            let mut enc =
-                image::codecs::jpeg::JpegEncoder::new_with_quality(&mut buf, 85);
-            enc.encode_image(&rgb)
-                .map_err(|e| format!("JPEG encode: {e}"))?;
-            Ok(buf)
-        }
+    const MAX_EDGE: u32 = 1920;
+
+    let dyn_img = load_photo_cancellable(source, is_cancelled)?;
+    if is_cancelled() {
+        return Err("cancelled".into());
     }
+    let rgb = flatten_over_white(&dyn_img);
+    let cropped = center_crop_to_aspect(rgb, target_aspect);
+    if is_cancelled() {
+        return Err("cancelled".into());
+    }
+    let resized = downscale_to_max_edge(cropped, MAX_EDGE);
+    let mut buf = Vec::<u8>::new();
+    let mut enc =
+        image::codecs::jpeg::JpegEncoder::new_with_quality(&mut buf, 85);
+    enc.encode_image(&resized)
+        .map_err(|e| format!("JPEG encode: {e}"))?;
+    Ok(buf)
+}
+
+/// Center-crop an RGB image so its aspect ratio matches `target` (w/h).
+/// `target <= 0` or non-finite is treated as "no crop".
+fn center_crop_to_aspect(img: image::RgbImage, target: f32) -> image::RgbImage {
+    if !target.is_finite() || target <= 0.0 {
+        return img;
+    }
+    let (w, h) = (img.width(), img.height());
+    if w == 0 || h == 0 {
+        return img;
+    }
+    let cur = w as f32 / h as f32;
+    // Within 0.5% of the target — no crop needed.
+    if (cur - target).abs() / target < 0.005 {
+        return img;
+    }
+    let (new_w, new_h) = if cur > target {
+        // Too wide → shrink width, keep height.
+        let nw = ((h as f32) * target).round().max(1.0) as u32;
+        (nw.min(w), h)
+    } else {
+        // Too tall → shrink height, keep width.
+        let nh = ((w as f32) / target).round().max(1.0) as u32;
+        (w, nh.min(h))
+    };
+    let x = (w - new_w) / 2;
+    let y = (h - new_h) / 2;
+    image::DynamicImage::ImageRgb8(img)
+        .crop_imm(x, y, new_w, new_h)
+        .to_rgb8()
+}
+
+/// Downscale an RGB image so its longest edge is at most `max_edge`.
+/// Uses Lanczos3 for photographic quality. No-op when already smaller.
+fn downscale_to_max_edge(img: image::RgbImage, max_edge: u32) -> image::RgbImage {
+    let (w, h) = (img.width(), img.height());
+    let longest = w.max(h);
+    if longest <= max_edge {
+        return img;
+    }
+    let scale = max_edge as f32 / longest as f32;
+    let new_w = ((w as f32) * scale).round().max(1.0) as u32;
+    let new_h = ((h as f32) * scale).round().max(1.0) as u32;
+    image::imageops::resize(&img, new_w, new_h, image::imageops::FilterType::Lanczos3)
 }
 
 /// Alpha-composite a `DynamicImage` onto a white background and return
@@ -1072,13 +1212,6 @@ fn sniff_format(source: &Path) -> PhotoFmt {
     PhotoFmt::Other
 }
 
-fn encode_heic_as_jpeg(source: &Path, is_cancelled: &dyn Fn() -> bool) -> Result<Vec<u8>, String> {
-    let dest = std::env::temp_dir().join("echelon-grad-slides-heic");
-    let jpeg = crate::graduation::heic::convert_heic_to_jpeg_cancellable(source, &dest, is_cancelled)?;
-    std::fs::read(&jpeg)
-        .map_err(|e| format!("read converted heic {}: {e}", jpeg.display()))
-}
-
 /// Decode an image using the `image` crate with format sniffed from
 /// magic bytes rather than from the file extension. Works for files
 /// whose extension is missing or wrong.
@@ -1102,14 +1235,29 @@ fn load_photo_cancellable(
     source: &Path,
     is_cancelled: &dyn Fn() -> bool,
 ) -> Result<image::DynamicImage, String> {
-    // Magic-byte sniff parity with encode_as_jpeg — extension can't be
-    // trusted for HEIC vs JPEG here either.
-    if sniff_format(source) == PhotoFmt::Heic {
+    // Magic-byte sniff parity with encode_as_jpeg_cancellable — extension
+    // can't be trusted for HEIC vs JPEG here either.
+    let fmt = sniff_format(source);
+    if fmt == PhotoFmt::Heic {
+        // libheif already returns pixels in display orientation, so no
+        // EXIF pass needed here.
         let dest = std::env::temp_dir().join("echelon-grad-slides-heic");
         let jpeg = crate::graduation::heic::convert_heic_to_jpeg_cancellable(source, &dest, is_cancelled)?;
         return decode_via_image(&jpeg);
     }
-    decode_via_image(source)
+    let img = decode_via_image(source)?;
+    // The `image` crate does not apply EXIF Orientation on decode. Do it
+    // here so iPhone photos taken portrait-with-EXIF-6 (a very common
+    // real-world case) land upright in the pptx — the marker slide's
+    // `<p:pic>` has no `rot="…"` compensation.
+    if fmt == PhotoFmt::Jpeg {
+        if let Some(orient) = crate::graduation::curate::read_jpeg_orientation(source) {
+            if orient != 1 {
+                return Ok(crate::graduation::curate::apply_exif_orientation(img, orient));
+            }
+        }
+    }
+    Ok(img)
 }
 
 /// Composite 2–4 photos onto a single cream-background canvas sized to
@@ -1123,12 +1271,13 @@ fn load_photo_cancellable(
 ///
 /// Each cell uses a "contain" fit (letterbox with cream fill) so faces
 /// don't get chopped by an aspect-forcing crop.
-fn composite_photos_as_jpeg(paths: &[PathBuf]) -> Result<Vec<u8>, String> {
-    composite_photos_as_jpeg_cancellable(paths, &|| false)
+fn composite_photos_as_jpeg(paths: &[PathBuf], target_aspect: f32) -> Result<Vec<u8>, String> {
+    composite_photos_as_jpeg_cancellable(paths, target_aspect, &|| false)
 }
 
 fn composite_photos_as_jpeg_cancellable(
     paths: &[PathBuf],
+    target_aspect: f32,
     is_cancelled: &dyn Fn() -> bool,
 ) -> Result<Vec<u8>, String> {
     use image::{imageops::FilterType, GenericImage, Rgb, RgbImage};
@@ -1214,11 +1363,70 @@ fn composite_photos_as_jpeg_cancellable(
         }
     }
 
+    // Center-crop the finished canvas so it matches the marker slide's
+    // picture-frame aspect. Without this, a composite built for the
+    // bundled 0.93 template would still get stretched inside a custom
+    // template whose photo frame is a different shape.
+    let canvas = center_crop_to_aspect(canvas, target_aspect);
+
     let mut buf = Vec::<u8>::new();
     let mut enc = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut buf, 88);
     enc.encode_image(&canvas)
         .map_err(|e| format!("JPEG encode composite: {e}"))?;
     Ok(buf)
+}
+
+/// Compute the target aspect ratio (width/height) of the `<p:pic>`
+/// picture-frame in the marker slide that references `target_rid`.
+///
+/// The marker template may have several `<p:pic>` blocks; if the same
+/// `r:embed` appears in more than one (e.g. a background echo of the
+/// hero photo), we pick the one with the largest area — that's the
+/// visible portrait frame the student photo actually fills.
+///
+/// Falls back to 0.93 (the bundled Echelon template's ratio) if the
+/// marker XML is unparseable or the rId isn't found; that keeps the
+/// pre-v2.6.3 behaviour on unusual templates.
+fn compute_target_aspect(marker_xml: &str, target_rid: &str) -> f32 {
+    const DEFAULT: f32 = 0.93;
+    let embed_needle = format!(r#"r:embed="{target_rid}""#);
+    let mut best_area: u64 = 0;
+    let mut best_aspect: Option<f32> = None;
+    let mut pos = 0;
+    while let Some(rel) = marker_xml[pos..].find("<p:pic") {
+        let start = pos + rel;
+        let Some(end_rel) = marker_xml[start..].find("</p:pic>") else { break };
+        let end = start + end_rel;
+        let block = &marker_xml[start..end];
+        if block.contains(&embed_needle) {
+            // Find <a:ext cx=".." cy=".."/> — first one inside <p:spPr>.
+            if let Some(ext_pos) = block.find("<a:ext ") {
+                let after = &block[ext_pos..];
+                let cx = attr_u64(after, "cx");
+                let cy = attr_u64(after, "cy");
+                if let (Some(cx), Some(cy)) = (cx, cy) {
+                    if cy > 0 {
+                        let area = cx.saturating_mul(cy);
+                        if area > best_area {
+                            best_area = area;
+                            best_aspect = Some(cx as f32 / cy as f32);
+                        }
+                    }
+                }
+            }
+        }
+        pos = end + 8;
+    }
+    best_aspect.filter(|a| a.is_finite() && *a > 0.0).unwrap_or(DEFAULT)
+}
+
+/// Pull a numeric attribute value from an XML fragment. Handles
+/// `name="123"` with double quotes only (sufficient for OOXML picks).
+fn attr_u64(hay: &str, name: &str) -> Option<u64> {
+    let key = format!(r#"{name}=""#);
+    let start = hay.find(&key)? + key.len();
+    let end_rel = hay[start..].find('"')?;
+    hay[start..start + end_rel].parse::<u64>().ok()
 }
 
 #[cfg(test)]
@@ -1230,6 +1438,73 @@ mod tests {
         assert_eq!(slide_number("ppt/slides/slide7.xml"), Some(7));
         assert_eq!(slide_number("ppt/slides/_rels/slide12.xml.rels"), Some(12));
         assert_eq!(slide_number("ppt/theme/theme1.xml"), None);
+    }
+
+    #[test]
+    fn compute_target_aspect_extracts_frame_ratio_from_matching_pic() {
+        let marker = r#"<p:pic><p:nvPicPr/><p:blipFill><a:blip r:embed="rId5"/></p:blipFill><p:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="4846320" cy="5212080"/></a:xfrm></p:spPr></p:pic>"#;
+        let aspect = compute_target_aspect(marker, "rId5");
+        // 4846320 / 5212080 = 0.9298...
+        assert!((aspect - 0.93).abs() < 0.005, "aspect={aspect}");
+    }
+
+    #[test]
+    fn compute_target_aspect_picks_largest_when_rid_appears_twice() {
+        let marker = r#"
+            <p:pic><p:blipFill><a:blip r:embed="rId7"/></p:blipFill><p:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="100" cy="100"/></a:xfrm></p:spPr></p:pic>
+            <p:pic><p:blipFill><a:blip r:embed="rId7"/></p:blipFill><p:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="3000" cy="1000"/></a:xfrm></p:spPr></p:pic>
+        "#;
+        let aspect = compute_target_aspect(marker, "rId7");
+        assert!((aspect - 3.0).abs() < 0.01, "aspect={aspect}");
+    }
+
+    #[test]
+    fn compute_target_aspect_falls_back_when_rid_missing() {
+        let marker = r#"<p:pic><p:blipFill><a:blip r:embed="rId2"/></p:blipFill></p:pic>"#;
+        let aspect = compute_target_aspect(marker, "rIdMissing");
+        assert!((aspect - 0.93).abs() < 0.001);
+    }
+
+    #[test]
+    fn center_crop_to_aspect_squeezes_wide_panorama_into_portrait_frame() {
+        // 200x100 landscape → cropped to 0.5 aspect (portrait) → 50x100.
+        let img = image::RgbImage::from_pixel(200, 100, image::Rgb([128, 128, 128]));
+        let out = center_crop_to_aspect(img, 0.5);
+        assert_eq!(out.width(), 50);
+        assert_eq!(out.height(), 100);
+    }
+
+    #[test]
+    fn center_crop_to_aspect_stretches_tall_portrait_into_landscape_frame() {
+        // 100x300 tall → cropped to 2.0 aspect (landscape) → 100x50.
+        let img = image::RgbImage::from_pixel(100, 300, image::Rgb([128, 128, 128]));
+        let out = center_crop_to_aspect(img, 2.0);
+        assert_eq!(out.width(), 100);
+        assert_eq!(out.height(), 50);
+    }
+
+    #[test]
+    fn center_crop_to_aspect_noop_when_already_matches() {
+        let img = image::RgbImage::from_pixel(93, 100, image::Rgb([128, 128, 128]));
+        let out = center_crop_to_aspect(img, 0.93);
+        assert_eq!(out.width(), 93);
+        assert_eq!(out.height(), 100);
+    }
+
+    #[test]
+    fn downscale_to_max_edge_shrinks_and_preserves_aspect() {
+        let img = image::RgbImage::from_pixel(4000, 3000, image::Rgb([128, 128, 128]));
+        let out = downscale_to_max_edge(img, 1920);
+        assert_eq!(out.width(), 1920);
+        assert_eq!(out.height(), 1440);
+    }
+
+    #[test]
+    fn downscale_to_max_edge_noop_when_smaller() {
+        let img = image::RgbImage::from_pixel(800, 600, image::Rgb([128, 128, 128]));
+        let out = downscale_to_max_edge(img, 1920);
+        assert_eq!(out.width(), 800);
+        assert_eq!(out.height(), 600);
     }
 
     #[test]
@@ -1434,7 +1709,7 @@ mod tests {
             slide_count += 1;
             f.read_to_string(&mut all_slides).unwrap();
         }
-        assert_eq!(slide_count, 2, "expected 2 output slides, got {slide_count}");
+        assert_eq!(slide_count, 3, "expected 3 output slides (cover + 2 students), got {slide_count}");
         assert!(all_slides.contains("Emma"), "output missing Emma");
         assert!(
             all_slides.contains("Liam O&apos;Neil"),
@@ -1443,6 +1718,7 @@ mod tests {
         assert!(!all_slides.contains("{{Name}}"), "unsubstituted Name token");
         assert!(!all_slides.contains("{{Year}}"), "unsubstituted Year token");
         assert!(all_slides.contains("2027"), "Year token not substituted");
+        assert!(all_slides.contains("Class of 2027"), "output missing auto-generated cover title");
     }
 
     #[test]
@@ -1619,11 +1895,12 @@ mod tests {
         let child_entries: Vec<_> = names.iter().filter(|n| n.contains("child-")).collect();
         assert!(!child_entries.is_empty(), "expected child photo entry; got: {names:?}");
 
-        // The student's slide rels must reference the child photo and NOT large.jpeg.
+        // Cover slide is now auto-inserted first (slide2), so the student
+        // rels live at slide3.xml.rels.
         let rels_name = names
             .iter()
-            .find(|n| n.ends_with("slide2.xml.rels"))
-            .expect("slide2.xml.rels must exist")
+            .find(|n| n.ends_with("slide3.xml.rels"))
+            .expect("slide3.xml.rels (student rels) must exist")
             .clone();
         let mut rels_file = zip.by_name(&rels_name).unwrap();
         let mut rels_content = String::new();

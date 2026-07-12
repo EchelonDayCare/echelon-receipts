@@ -9,8 +9,9 @@
 // who doesn't exist on the roster.
 
 import { useMemo, useState } from "react";
-import { parseStaffShifts, type ParsedShift } from "../../lib/voice";
-import { createShift } from "../../repo/scheduleRepo";
+import { parseStaffShifts, type ParsedShift, type ParsedShiftKind } from "../../lib/voice";
+import { createShift, cancelShift, restoreShift, getShift, listLiveShiftsOnDates, type ShiftStatus, absenceLabel } from "../../repo/scheduleRepo";
+import { closedDayReasonsForRange } from "../../lib/centreCalendar";
 import { showAlert } from "../../lib/dialogs";
 
 type Row = ParsedShift & { include: boolean; err?: string };
@@ -18,16 +19,48 @@ type Row = ParsedShift & { include: boolean; err?: string };
 const EXAMPLES = [
   "Priya morning 7-2 Mon-Fri, no lunch",
   "Sarah closing 2-6 Wed and Thu",
-  "Anita full day Saturday, Ravi covers Sunday morning",
+  "Judy on vacation this week",
+  "Alex was sick yesterday, Priya covered",
 ];
+
+// Map a ParsedShift.kind to the ShiftStatus we persist. "shift" → planned;
+// absence kinds map straight through.
+function kindToStatus(kind: ParsedShiftKind): ShiftStatus {
+  return kind === "shift" ? "planned" : kind;
+}
+
+// Short human label for the review row chip. Matches the grid's badge
+// wording so the user sees the same phrasing here as in the schedule.
+function kindChipLabel(kind: ParsedShiftKind): string {
+  if (kind === "shift") return "Shift";
+  return absenceLabel(kindToStatus(kind)) ?? kind;
+}
+
+function kindChipStyle(kind: ParsedShiftKind): React.CSSProperties {
+  const base: React.CSSProperties = {
+    fontSize: 11, padding: "2px 8px", borderRadius: 999, fontWeight: 600,
+    border: "1px solid transparent", whiteSpace: "nowrap",
+  };
+  switch (kind) {
+    case "vacation": return { ...base, background: "#dcfce7", color: "#166534", borderColor: "#86efac" };
+    case "sick":     return { ...base, background: "#fee2e2", color: "#991b1b", borderColor: "#fca5a5" };
+    case "day_off":  return { ...base, background: "#e5e7eb", color: "#374151", borderColor: "#d1d5db" };
+    default:         return { ...base, background: "#ede9fe", color: "#5b21b6", borderColor: "#c4b5fd" };
+  }
+}
 
 export default function ScheduleAiTextPanel({
   weekStartIso,
   roster,
+  closedDays,
   onSaved,
 }: {
   weekStartIso: string;
   roster: Array<{ id: string; name: string }>;
+  /** ISO → reason map for centre-closed days near the visible week.
+   *  Passed to the LLM so it avoids proposing closed days up front.
+   *  Frontend also re-checks post-parse and pre-save. v2.6.3. */
+  closedDays?: Map<string, string>;
   onSaved: () => void;
 }) {
   const [text, setText] = useState("");
@@ -47,9 +80,85 @@ export default function ScheduleAiTextPanel({
     if (roster.length === 0) { setErr("No active staff yet — add staff on the Staff page first."); return; }
     setErr(null); setBusy("parsing"); setRows(null);
     try {
-      const res = await parseStaffShifts({ text: t, weekStartIso, roster });
+      const res = await parseStaffShifts({ text: t, weekStartIso, roster, closedDays });
       if (res.shifts.length === 0) {
-        setErr("AI couldn't find any shifts in that text. Try being more explicit — include a name, day, and time.");
+        setErr(
+          "AI couldn't find any shifts in that text. Try being more explicit — " +
+          "include a name, day, and time (e.g. \"Judy 9am to 11am on Friday\").",
+        );
+        setBusy("idle");
+        return;
+      }
+      // Compute today's local ISO for the past-date filter below.
+      const today = new Date();
+      const todayIso =
+        `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, "0")}-` +
+        `${String(today.getDate()).padStart(2, "0")}`;
+
+      // Past-date filter (v2.6.3): the LLM is now told to *emit* past
+      // dates rather than swallow them silently, because users typically
+      // typo'd the month ("June 17" vs "July 17") or meant next year.
+      // We drop them here with a specific message so the user can retry
+      // with the fix, rather than seeing "AI couldn't find any shifts".
+      //
+      // EXCEPTION: absence rows (sick / vacation / day_off) are allowed
+      // in the past — "Judy was sick yesterday" is the whole point of
+      // the flow, and dropping it would be user-hostile.
+      const droppedForPast: string[] = [];
+      const afterPast: ParsedShift[] = [];
+      for (const s of res.shifts) {
+        if (s.shiftDate < todayIso && s.kind === "shift") {
+          droppedForPast.push(`${s.staffName} on ${s.shiftDate}`);
+          continue;
+        }
+        afterPast.push(s);
+      }
+
+      // Closed-day gate (v2.6.3): fetch the reason map covering every
+      // date the AI produced (may span past the currently-viewed week
+      // for "every Monday for 4 weeks"-style prompts) and drop rows
+      // that land on a closed day. The staff scheduler is the choke
+      // point that the AI can bypass otherwise — the "+ Add" button
+      // and drawer are already guarded.
+      const droppedForClosure: string[] = [];
+      const kept: ParsedShift[] = [];
+      if (afterPast.length > 0) {
+        const parsedDates = afterPast.map((s) => s.shiftDate).sort();
+        const minDate = parsedDates[0];
+        const maxDate = parsedDates[parsedDates.length - 1];
+        const closedMap = await closedDayReasonsForRange(minDate, maxDate);
+        for (const s of afterPast) {
+          const reason = closedMap.get(s.shiftDate);
+          if (reason) {
+            droppedForClosure.push(`${s.staffName} on ${s.shiftDate} (${reason})`);
+            continue;
+          }
+          kept.push(s);
+        }
+      }
+
+      if (kept.length === 0) {
+        // Nothing survived — build a single clear explanation covering
+        // whichever filter(s) rejected the AI's rows. This is what the
+        // user sees instead of the generic "couldn't find any shifts".
+        const reasons: string[] = [];
+        if (droppedForPast.length > 0) {
+          reasons.push(
+            `${droppedForPast.length} shift${droppedForPast.length === 1 ? " was" : "s were"} on past ` +
+            `date${droppedForPast.length === 1 ? "" : "s"} — did you mean a different month or next year?\n` +
+            `  • ${droppedForPast.join("\n  • ")}`,
+          );
+        }
+        if (droppedForClosure.length > 0) {
+          reasons.push(
+            `${droppedForClosure.length} shift${droppedForClosure.length === 1 ? " landed" : "s landed"} on a closed day:\n` +
+            `  • ${droppedForClosure.join("\n  • ")}`,
+          );
+        }
+        setErr(
+          `AI parsed ${res.shifts.length} shift${res.shifts.length === 1 ? "" : "s"} ` +
+          `but nothing could be scheduled:\n\n${reasons.join("\n\n")}`,
+        );
         setBusy("idle");
         return;
       }
@@ -59,7 +168,7 @@ export default function ScheduleAiTextPanel({
       // save would fail anyway — telling the user up front is friendlier.
       const seen = new Set<string>();
       const dupeNames: string[] = [];
-      const marked: Row[] = res.shifts.map((s) => {
+      const marked: Row[] = kept.map((s) => {
         const key = `${s.staffId ?? "?"}|${s.shiftDate}`;
         const isDup = !!s.staffId && seen.has(key);
         if (s.staffId) seen.add(key);
@@ -68,14 +177,32 @@ export default function ScheduleAiTextPanel({
       });
       setRows(marked);
       setBusy("idle");
+      // Compose one alert covering past-dates, duplicates, and dropped
+      // closed-day rows so we don't stack multiple dialogs.
+      const notes: string[] = [];
+      if (droppedForPast.length > 0) {
+        const uniq = Array.from(new Set(droppedForPast));
+        notes.push(
+          `Dropped ${uniq.length} shift${uniq.length === 1 ? "" : "s"} on past dates ` +
+          `— check the month or year:\n• ${uniq.join("\n• ")}`,
+        );
+      }
+      if (droppedForClosure.length > 0) {
+        const uniq = Array.from(new Set(droppedForClosure));
+        notes.push(
+          `Dropped ${uniq.length} shift${uniq.length === 1 ? "" : "s"} on closed days:\n• ${uniq.join("\n• ")}`,
+        );
+      }
       if (dupeNames.length > 0) {
         const uniq = Array.from(new Set(dupeNames));
-        window.setTimeout(() => void showAlert(
-          `Heads up — one staff member can only have one shift per day.\n\n` +
-          `AI produced duplicate shifts for:\n• ${uniq.join("\n• ")}\n\n` +
-          `Only the first shift for each person+day is checked. Edit or uncheck as needed before saving.`,
-          { kind: "warning" },
-        ), 50);
+        notes.push(
+          `One staff member can only have one shift per day.\n` +
+          `Auto-unchecked duplicate rows for:\n• ${uniq.join("\n• ")}\n` +
+          `Edit or uncheck as needed before saving.`,
+        );
+      }
+      if (notes.length > 0) {
+        window.setTimeout(() => void showAlert(notes.join("\n\n"), { kind: "warning" }), 50);
       }
     } catch (e: any) {
       setErr(String(e?.message ?? e)); setBusy("idle");
@@ -88,10 +215,56 @@ export default function ScheduleAiTextPanel({
     const skipped = rows.length - toSave.length;
     if (toSave.length === 0) { setErr("Nothing to save — every row is either excluded or missing a staff match."); return; }
     setBusy("saving"); setErr(null);
+    // Save-time backstop: user can manually change dates in the review
+    // grid, so re-check every kept row against the closed-day set right
+    // before we hit the DB.
+    const dates = toSave.map((r) => r.shiftDate).sort();
+    const closedMap = await closedDayReasonsForRange(dates[0], dates[dates.length - 1]);
+
+    // v2.6.3: for absence rows (vacation/sick/day_off) we may need to
+    // soft-cancel a planned shift the same person already has on that
+    // date, so the new marker doesn't collide with the one-per-day rule.
+    // Batch that lookup up front (single SQL) and index by (staffId|date).
+    // Include past dates too — sick-yesterday flows are the common case.
+    // We also capture the ORIGINAL STATUS so that if createShift fails
+    // after cancelShift succeeded we can restore the shift to exactly
+    // where it was (planned / confirmed / swapped), not blindly downgrade.
+    const absenceRows = toSave.filter((r) => r.kind !== "shift");
+    const existingByKey = new Map<string, { id: string; version: number; status: ShiftStatus }>();
+    if (absenceRows.length > 0) {
+      const absenceDates = Array.from(new Set(absenceRows.map((r) => r.shiftDate)));
+      const existing = await listLiveShiftsOnDates(absenceDates, { includePast: true });
+      for (const s of existing) {
+        existingByKey.set(`${s.staffId}|${s.shiftDate}`, { id: s.id, version: s.version, status: s.status });
+      }
+    }
+
     let ok = 0;
     const failed: string[] = [];
+    const replacedNotes: Array<{ label: string; prevStatus: ShiftStatus }> = [];
     for (const r of toSave) {
+      const reason = closedMap.get(r.shiftDate);
+      if (reason) {
+        failed.push(`${r.staffName} ${r.shiftDate}: centre closed (${reason})`);
+        continue;
+      }
+      let cancelledForRollback: { id: string; prevStatus: ShiftStatus } | null = null;
       try {
+        // Absence rows first cancel any conflicting live shift for the
+        // same (staff, date). If createShift fails afterwards we roll
+        // back via restoreShift so we never leave the schedule with a
+        // silent gap (Codex M3).
+        if (r.kind !== "shift") {
+          const existing = existingByKey.get(`${r.staffId!}|${r.shiftDate}`);
+          if (existing) {
+            await cancelShift(existing.id, existing.version, `Replaced by ${kindChipLabel(r.kind)} marker (AI)`);
+            cancelledForRollback = { id: existing.id, prevStatus: existing.status };
+            replacedNotes.push({
+              label: `${r.staffName} ${r.shiftDate}`,
+              prevStatus: existing.status,
+            });
+          }
+        }
         await createShift({
           staffId: r.staffId!,
           shiftDate: r.shiftDate,
@@ -100,22 +273,50 @@ export default function ScheduleAiTextPanel({
           room: r.room,
           breakMinutes: r.breakMinutes,
           notes: r.notes,
-          status: "planned",
+          status: kindToStatus(r.kind),
         });
         ok++;
       } catch (e: any) {
-        failed.push(`${r.staffName} ${r.shiftDate}: ${String(e?.message ?? e)}`);
+        // Best-effort rollback so we never orphan the pre-existing shift.
+        // restoreShift internally recovers the exact previous status
+        // from the audit trail — no hard-coded "planned" downgrade.
+        let rollbackNote = "";
+        if (cancelledForRollback) {
+          try {
+            // Need fresh version — cancelShift bumped it. Look it up.
+            const rolledBack = await getShift(cancelledForRollback.id);
+            if (rolledBack) {
+              await restoreShift(rolledBack.id, rolledBack.version);
+              rollbackNote = " (previous shift restored)";
+              // Drop the "replaced" note since we un-replaced it.
+              const idx = replacedNotes.findIndex((n) => n.label === `${r.staffName} ${r.shiftDate}`);
+              if (idx >= 0) replacedNotes.splice(idx, 1);
+            }
+          } catch (rollbackErr) {
+            rollbackNote = ` (⚠ ROLLBACK FAILED: ${String((rollbackErr as any)?.message ?? rollbackErr)} — original shift is still cancelled; recover it from the "Recently cancelled" panel)`;
+          }
+        }
+        failed.push(`${r.staffName} ${r.shiftDate}: ${String(e?.message ?? e)}${rollbackNote}`);
       }
     }
     setBusy("idle");
     if (failed.length > 0) {
-      setErr(`Saved ${ok}. Failed ${failed.length}: ${failed.slice(0, 3).join(" · ")}`);
+      setErr(`Saved ${ok}. Failed ${failed.length}:\n• ${failed.slice(0, 5).join("\n• ")}${failed.length > 5 ? `\n…and ${failed.length - 5} more.` : ""}`);
     } else {
-      const msg = skipped > 0 ? `Saved ${ok}. Skipped ${skipped}.` : `Saved ${ok}.`;
+      const parts: string[] = [skipped > 0 ? `Saved ${ok}. Skipped ${skipped}.` : `Saved ${ok}.`];
+      if (replacedNotes.length > 0) {
+        // v2.6.3 (Sonnet B4): echo the original status so the owner knows
+        // whether we pulled a planned shift (safe) or a confirmed one
+        // (may have already been WhatsApp'd to the employee).
+        const bullets = replacedNotes.map((n) => `${n.label} (was ${n.prevStatus})`);
+        parts.push(
+          `Replaced existing shift${replacedNotes.length === 1 ? "" : "s"}:\n• ${bullets.join("\n• ")}`,
+        );
+      }
       setErr(null);
       onSaved();
       setText(""); setRows(null);
-      window.setTimeout(() => void showAlert(msg), 50);
+      window.setTimeout(() => void showAlert(parts.join("\n\n")), 50);
     }
   }
 
@@ -173,6 +374,18 @@ export default function ScheduleAiTextPanel({
                     onChange={(e) => updateRow(i, { include: e.target.checked })}
                     style={{ marginRight: 8 }}
                   />
+                  <select
+                    style={{ ...styles.input, width: 100 }}
+                    value={r.kind}
+                    onChange={(e) => updateRow(i, { kind: e.target.value as ParsedShiftKind })}
+                    title="Row type"
+                  >
+                    <option value="shift">Shift</option>
+                    <option value="vacation">Vacation</option>
+                    <option value="sick">Sick</option>
+                    <option value="day_off">Day off</option>
+                  </select>
+                  <span style={{ ...kindChipStyle(r.kind), visibility: r.kind === "shift" ? "hidden" : "visible" }}>{kindChipLabel(r.kind)}</span>
                   <select
                     style={{ ...styles.input, minWidth: 120 }}
                     value={r.staffId ?? ""}

@@ -3,12 +3,13 @@
 import { useEffect, useMemo, useState } from "react";
 import {
   createShift, updateShift, cancelShift, reassignShift,
-  shiftHours, type StaffShift,
+  shiftHours, absenceLabel, isWorkedStatus, type StaffShift, type ShiftStatus,
 } from "../../repo/scheduleRepo";
 import { buildWhatsappDeepLink, renderTemplate } from "../../lib/whatsapp";
 import { db, getSettings } from "../../lib/db";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { showAlert, showConfirm, showPrompt } from "../../lib/dialogs";
+import { closedDayReason } from "../../lib/centreCalendar";
 
 type StaffLite = { id: number; name: string; whatsapp_phone_e164: string | null; active: boolean; terminated_at: string | null };
 
@@ -93,6 +94,18 @@ export default function ShiftDrawer({
     if (state.mode === "closed") return;
     setBusy(true); setErr(null);
     try {
+      // v2.6.3 belt-and-suspenders: even though the grid hides "+ Add"
+      // for closed days, the drawer exposes an editable date input so
+      // the user could still steer a shift onto a weekend / holiday /
+      // manually-closed day. Re-check right before write.
+      const reason = await closedDayReason(shiftDate);
+      if (reason) {
+        setErr(
+          `Cannot save shift on ${prettyDate(shiftDate)} — the centre is closed (${reason}). ` +
+          `To schedule this day, mark it open in Centre Calendar or disable the holiday in Settings.`
+        );
+        return;
+      }
       if (state.mode === "new") {
         await createShift({
           staffId, shiftDate, startTime, endTime,
@@ -173,6 +186,31 @@ export default function ShiftDrawer({
         {err && <div style={errBox}>{err}</div>}
 
         <div style={{ display: "grid", gap: 10 }}>
+          {/* v2.6.3: Kind selector as first field. Switching TO an absence
+              auto-fills placeholder 09:00-17:00 + break=0 so the drawer
+              matches how the AI panel creates the same rows. Switching
+              back to Shift keeps the times but resets to planned so
+              hours are counted again. Prevents the drawer from silently
+              corrupting an AI-created absence into a worked shift (Sonnet D3). */}
+          <label style={label}>Kind
+            <select
+              value={isWorkedStatus(status) ? "shift" : status}
+              onChange={(e) => {
+                const v = e.target.value as "shift" | "vacation" | "sick" | "day_off";
+                if (v === "shift") {
+                  setStatus("planned");
+                } else {
+                  setStatus(v);
+                  setStartTime("09:00"); setEndTime("17:00"); setBreakMinutes(0);
+                }
+              }}
+            >
+              <option value="shift">Shift (worked)</option>
+              <option value="vacation">Vacation</option>
+              <option value="sick">Sick</option>
+              <option value="day_off">Day off</option>
+            </select>
+          </label>
           <label style={label}>Staff
             <select value={staffId} onChange={(e) => setStaffId(e.target.value)}>
               {staffList.map((s) => (
@@ -187,28 +225,36 @@ export default function ShiftDrawer({
           </label>
           <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
             <label style={label}>Start
-              <input type="time" value={startTime} onChange={(e) => setStartTime(e.target.value)} />
+              <input type="time" value={startTime} onChange={(e) => setStartTime(e.target.value)} disabled={!isWorkedStatus(status)} />
             </label>
             <label style={label}>End
-              <input type="time" value={endTime} onChange={(e) => setEndTime(e.target.value)} />
+              <input type="time" value={endTime} onChange={(e) => setEndTime(e.target.value)} disabled={!isWorkedStatus(status)} />
             </label>
           </div>
           <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
             <label style={label}>Room
-              <input list="room-presets" value={room} onChange={(e) => setRoom(e.target.value)} />
+              <input list="room-presets" value={room} onChange={(e) => setRoom(e.target.value)} disabled={!isWorkedStatus(status)} />
               <datalist id="room-presets">{ROOM_PRESETS.map((r) => <option key={r} value={r} />)}</datalist>
             </label>
             <label style={label}>Break (min)
-              <input type="number" min={0} value={breakMinutes} onChange={(e) => setBreakMinutes(Number(e.target.value))} />
+              <input type="number" min={0} value={breakMinutes} onChange={(e) => setBreakMinutes(Number(e.target.value))} disabled={!isWorkedStatus(status)} />
             </label>
           </div>
+          {!isWorkedStatus(status) && (
+            <div style={{ fontSize: 12, color: "var(--muted)", marginTop: -4 }}>
+              {absenceLabel(status)} rows use placeholder times and count as 0 hours in totals.
+            </div>
+          )}
           {state.mode === "edit" && (
             <label style={label}>Status
-              <select value={status} onChange={(e) => setStatus(e.target.value as StaffShift["status"])}>
+              <select value={status} onChange={(e) => setStatus(e.target.value as ShiftStatus)}>
                 <option value="planned">Planned</option>
                 <option value="confirmed">Confirmed</option>
                 <option value="cancelled">Cancelled</option>
                 <option value="swapped">Swapped</option>
+                <option value="vacation">Vacation</option>
+                <option value="sick">Sick</option>
+                <option value="day_off">Day off</option>
               </select>
             </label>
           )}

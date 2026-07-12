@@ -142,3 +142,76 @@ export function daysOpenInRange(
   }
   return n;
 }
+
+/**
+ * Load explicit centre_calendar override rows for a date range. Returns
+ * a Map of ISO date → is_open. Empty map = no explicit rows in the
+ * range (all dates fall back to the default-open-days bitmap).
+ *
+ * Introduced in v2.6.3 so the Staff Schedule tab can gate the "+ Add"
+ * button on weekends / stat holidays / manually-closed days without
+ * seeding the whole month upfront the way MonthlyAttendance does.
+ */
+export async function overridesForRange(
+  fromIso: string,
+  toIso: string,
+): Promise<Map<string, boolean>> {
+  const { db } = await import("./db");
+  const d = await db();
+  const rows = await d.select<{ day: string; is_open: number }[]>(
+    "SELECT day, is_open FROM centre_calendar WHERE day >= ? AND day <= ?",
+    [fromIso, toIso],
+  );
+  const map = new Map<string, boolean>();
+  for (const r of rows) map.set(r.day, !!r.is_open);
+  return map;
+}
+
+/**
+ * Human-readable "why is the centre closed on this day" string, or null
+ * if the centre is open. Combines the three inputs (explicit override,
+ * BC stat holiday, default-open-days bitmap) into one answer so callers
+ * can guard save flows with one call.
+ *
+ * v2.6.3. Single-date version — for hot paths that need many days at
+ * once, prefer `closedDayReasonsForRange` below which makes one round
+ * trip to settings + centre_calendar instead of N.
+ */
+export async function closedDayReason(iso: string): Promise<string | null> {
+  const map = await closedDayReasonsForRange(iso, iso);
+  return map.get(iso) ?? null;
+}
+
+/**
+ * Batched variant of `closedDayReason` — returns a Map of ISO → reason
+ * for every closed day in [fromIso .. toIso] inclusive. Days that are
+ * open are absent from the map (so `map.has(iso)` is the closed test).
+ *
+ * v2.6.3. Used by the AI Schedule Builder to reject parsed shifts that
+ * land on a closed day in one shot, and by the Schedule grid to render
+ * an existing-shift-on-closed-day warning tint.
+ */
+export async function closedDayReasonsForRange(
+  fromIso: string,
+  toIso: string,
+): Promise<Map<string, string>> {
+  const [defaultOpenDays, rawOverrides, on] = await Promise.all([
+    getDefaultOpenDays(),
+    overridesForRange(fromIso, toIso),
+    isBcHolidaysEnabled(),
+  ]);
+  const excluded = on ? await getDisabledBcHolidayIds() : new Set<string>();
+  const merged = on
+    ? mergeBcHolidayOverrides(rawOverrides, fromIso, toIso, excluded)
+    : rawOverrides;
+  const holidays = on ? bcHolidayLookup(fromIso, toIso, excluded) : new Map<string, string>();
+  const out = new Map<string, string>();
+  for (const iso of eachDay(fromIso, toIso)) {
+    if (isOpenDay(iso, merged, defaultOpenDays)) continue;
+    const name = holidays.get(iso);
+    if (name) { out.set(iso, name); continue; }
+    const d = new Date(`${iso}T12:00:00Z`).getUTCDay();
+    out.set(iso, (d === 0 || d === 6) ? "Weekend" : "Closed");
+  }
+  return out;
+}

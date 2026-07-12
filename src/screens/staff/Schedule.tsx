@@ -5,8 +5,9 @@ import { useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import {
-  addDays, copyWeek, listShiftsForWeek, mondayOf, recordWeeklyPublish,
-  shiftHours, softDeleteShift, type StaffShift,
+  addDays, copyWeek, listShiftsForWeek, listShiftsForMonth, mondayOf, recordWeeklyPublish,
+  shiftHours, softDeleteShift, absenceLabel, restoreShift, listRecentlyCancelled,
+  type StaffShift,
 } from "../../repo/scheduleRepo";
 import { buildWaMeUrl, buildWhatsappDeepLink, renderTemplate } from "../../lib/whatsapp";
 import { getSettings } from "../../lib/db";
@@ -16,38 +17,118 @@ import { inactiveLabel } from "../../lib/inactiveLabel";
 import ShiftDrawer, { loadStaffWithShiftsInWeek, notifyShiftCancel, type DrawerState } from "./ShiftDrawer";
 import ScheduleAiTextPanel from "./ScheduleAiTextPanel";
 import { bcHolidayLookup } from "../../lib/bcHolidays";
-import { isBcHolidaysEnabled, getDisabledBcHolidayIds } from "../../lib/centreCalendar";
+import {
+  isBcHolidaysEnabled,
+  getDisabledBcHolidayIds,
+  getDefaultOpenDays,
+  overridesForRange,
+  isOpenDay,
+  mergeBcHolidayOverrides,
+  closedDayReasonsForRange,
+} from "../../lib/centreCalendar";
 
 type StaffLite = { id: number; name: string; whatsapp_phone_e164: string | null; active: boolean; terminated_at: string | null };
 
 const DAY_LABELS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
 
+/** Extract the calendar month (year, month 1-12) that contains a given ISO date. */
+function monthOf(iso: string): { year: number; month: number } {
+  const [y, m] = iso.split("-").map(Number);
+  return { year: y, month: m };
+}
+
+function monthLabel(year: number, month: number): string {
+  const dt = new Date(year, month - 1, 1);
+  return dt.toLocaleDateString(undefined, { month: "long", year: "numeric" });
+}
+
 export default function StaffSchedule() {
+  // v2.6.3: view mode. "week" = existing Mon-Sun grid; "month" = day-of-month
+  // grid rendered by <MonthGrid/>. Toggle lives in the toolbar. Both modes
+  // share the closed-days map so gating rules are identical.
+  const [viewMode, setViewMode] = useState<"week" | "month">("week");
   const [weekStart, setWeekStart] = useState<string>(() => mondayOf(new Date()));
   const [staff, setStaff] = useState<StaffLite[]>([]);
   const [shifts, setShifts] = useState<StaffShift[]>([]);
+  // Every shift in the calendar month containing `weekStart`. Powers the
+  // "Month total" column in week view AND the whole grid in month view.
+  const [monthShifts, setMonthShifts] = useState<StaffShift[]>([]);
   const [drawer, setDrawer] = useState<DrawerState>({ mode: "closed" });
   const [publishOpen, setPublishOpen] = useState(false);
   const [aiTextEnabled, setAiTextEnabled] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [holidayMap, setHolidayMap] = useState<Map<string, string>>(new Map());
+  // Set of ISO dates in the current week when the centre is closed —
+  // any combination of weekend (per `centre_default_open_days` bitmap),
+  // stat holiday (per Settings), or explicit `centre_calendar` closure.
+  // Populated in the same effect that loads holiday names so we only
+  // hit the DB once per week change. v2.6.3.
+  const [closedDays, setClosedDays] = useState<Map<string, string>>(new Map());
+  // Same as closedDays but covers the whole visible calendar month.
+  // Populated alongside the week-scoped map so month view has the
+  // reason strings without a second round-trip. v2.6.3.
+  const [closedDaysMonth, setClosedDaysMonth] = useState<Map<string, string>>(new Map());
+  // v2.6.3: rolling window of cancelled shifts so an accidental
+  // "Close and cancel N shifts" can be undone one row at a time.
+  // Populated after refresh(); shown collapsed by default.
+  const [recentlyCancelled, setRecentlyCancelled] = useState<StaffShift[]>([]);
+  const [rcOpen, setRcOpen] = useState(false);
+  const [rcBusy, setRcBusy] = useState<string | null>(null);
   useEffect(() => {
     (async () => {
-      const on = await isBcHolidaysEnabled();
       const end = addDays(weekStart, 6);
+      const on = await isBcHolidaysEnabled();
       const excluded = on ? await getDisabledBcHolidayIds() : new Set<string>();
-      setHolidayMap(on ? bcHolidayLookup(weekStart, end, excluded) : new Map());
+      const holidays = on ? bcHolidayLookup(weekStart, end, excluded) : new Map<string, string>();
+      setHolidayMap(holidays);
+
+      const [defaultOpenDays, rawOverrides] = await Promise.all([
+        getDefaultOpenDays(),
+        overridesForRange(weekStart, end),
+      ]);
+      const merged = on
+        ? mergeBcHolidayOverrides(rawOverrides, weekStart, end, excluded)
+        : rawOverrides;
+      const closed = new Map<string, string>();
+      for (let i = 0; i < 7; i++) {
+        const iso = addDays(weekStart, i);
+        if (!isOpenDay(iso, merged, defaultOpenDays)) {
+          // Prefer specific reason: explicit override reason > holiday
+          // name > weekend/default-closed. We don't have the override
+          // reason string here (overridesForRange returns is_open only),
+          // so fall back to holiday name or "Closed".
+          closed.set(iso, holidays.get(iso) ?? "Closed");
+        }
+      }
+      setClosedDays(closed);
+
+      // Extend the reason lookup to the full calendar month containing
+      // weekStart so month view can render closed days consistently.
+      // Uses the batched `closedDayReasonsForRange` helper (single trip
+      // to settings + centre_calendar).
+      const { year, month } = monthOf(weekStart);
+      const monthFrom = `${year}-${String(month).padStart(2, "0")}-01`;
+      const lastDay = new Date(year, month, 0).getDate();
+      const monthTo = `${year}-${String(month).padStart(2, "0")}-${String(lastDay).padStart(2, "0")}`;
+      const monthClosed = await closedDayReasonsForRange(monthFrom, monthTo);
+      setClosedDaysMonth(monthClosed);
     })();
   }, [weekStart]);
 
   const refresh = async () => {
     try {
-      const [staffRows, shiftRows] = await Promise.all([
-        loadStaffWithShiftsInWeek(weekStart), listShiftsForWeek(weekStart),
+      const { year, month } = monthOf(weekStart);
+      const [staffRows, shiftRows, monthRows, rcRows] = await Promise.all([
+        loadStaffWithShiftsInWeek(weekStart),
+        listShiftsForWeek(weekStart),
+        listShiftsForMonth(year, month),
+        listRecentlyCancelled(7),
       ]);
       setStaff(staffRows);
       setShifts(shiftRows);
+      setMonthShifts(monthRows);
+      setRecentlyCancelled(rcRows);
     } catch (e: any) { setErr(String(e?.message ?? e)); }
   };
 
@@ -79,6 +160,22 @@ export default function StaffSchedule() {
     }
     return map;
   }, [shifts]);
+
+  // Hours for the calendar month containing weekStart, keyed by staffId.
+  // Rendered in the "Month total" column alongside "Weekly total". Uses
+  // the same shiftHours rule (auto-30-min-if-≥5h) so the two totals are
+  // directly comparable. v2.6.3.
+  const monthHoursByStaff = useMemo(() => {
+    const map = new Map<string, number>();
+    for (const s of monthShifts) {
+      if (s.status === "cancelled") continue;
+      map.set(s.staffId, (map.get(s.staffId) ?? 0) + shiftHours(s));
+    }
+    return map;
+  }, [monthShifts]);
+
+  const monthCtx = useMemo(() => monthOf(weekStart), [weekStart]);
+  const monthTitle = useMemo(() => monthLabel(monthCtx.year, monthCtx.month), [monthCtx]);
 
   const weekLabel = useMemo(() => {
     const end = addDays(weekStart, 6);
@@ -146,16 +243,54 @@ export default function StaffSchedule() {
       <style>{PRINT_CSS}</style>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16, gap: 12, flexWrap: "wrap" }}>
         <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-          <button className="btn" onClick={() => setWeekStart(addDays(weekStart, -7))}>‹</button>
-          <h1 style={{ margin: 0, minWidth: 260 }}>{weekLabel}</h1>
-          <button className="btn" onClick={() => setWeekStart(addDays(weekStart, 7))}>›</button>
-          <button className="btn" onClick={() => setWeekStart(mondayOf(new Date()))}>This week</button>
+          {viewMode === "week" ? (
+            <>
+              <button className="btn" onClick={() => setWeekStart(addDays(weekStart, -7))} title="Previous week">‹</button>
+              <h1 style={{ margin: 0, minWidth: 260 }}>{weekLabel}</h1>
+              <button className="btn" onClick={() => setWeekStart(addDays(weekStart, 7))} title="Next week">›</button>
+              <button className="btn" onClick={() => setWeekStart(mondayOf(new Date()))}>This week</button>
+            </>
+          ) : (
+            <>
+              <button className="btn" onClick={() => {
+                // Jump to the Monday inside the previous month.
+                const first = new Date(monthCtx.year, monthCtx.month - 1, 1);
+                first.setMonth(first.getMonth() - 1);
+                setWeekStart(mondayOf(first));
+              }} title="Previous month">‹</button>
+              <h1 style={{ margin: 0, minWidth: 260 }}>{monthTitle}</h1>
+              <button className="btn" onClick={() => {
+                const first = new Date(monthCtx.year, monthCtx.month - 1, 1);
+                first.setMonth(first.getMonth() + 1);
+                setWeekStart(mondayOf(first));
+              }} title="Next month">›</button>
+              <button className="btn" onClick={() => setWeekStart(mondayOf(new Date()))}>This month</button>
+            </>
+          )}
+          <div role="group" aria-label="View mode" style={{ display: "inline-flex", marginLeft: 8, border: "1px solid var(--border, #e5e7eb)", borderRadius: 6, overflow: "hidden" }}>
+            <button
+              className="btn"
+              style={viewMode === "week" ? toggleActiveStyle : toggleInactiveStyle}
+              onClick={() => setViewMode("week")}
+              aria-pressed={viewMode === "week"}
+            >Week</button>
+            <button
+              className="btn"
+              style={viewMode === "month" ? toggleActiveStyle : toggleInactiveStyle}
+              onClick={() => setViewMode("month")}
+              aria-pressed={viewMode === "month"}
+            >Month</button>
+          </div>
         </div>
         <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
-          <button className="btn" onClick={() => window.print()} title="Print weekly schedule (1 page)">🖨 Print</button>
-          <button className="btn" onClick={() => doCopy(1)} disabled={busy}>Copy → next week</button>
-          <button className="btn" onClick={() => doCopy(4)} disabled={busy}>Copy → next 4 weeks</button>
-          <button className="btn primary" onClick={() => setPublishOpen(true)}>Publish week</button>
+          <button className="btn" onClick={() => window.print()} title="Print schedule">🖨 Print</button>
+          {viewMode === "week" && (
+            <>
+              <button className="btn" onClick={() => doCopy(1)} disabled={busy}>Copy → next week</button>
+              <button className="btn" onClick={() => doCopy(4)} disabled={busy}>Copy → next 4 weeks</button>
+              <button className="btn primary" onClick={() => setPublishOpen(true)}>Publish week</button>
+            </>
+          )}
         </div>
       </div>
 
@@ -165,6 +300,28 @@ export default function StaffSchedule() {
         <div style={{ padding: 40, border: "1px dashed var(--border, #334155)", borderRadius: 8, textAlign: "center", color: "var(--muted)" }}>
           No active staff. Add staff first in <Link to="/staff/hours">Staff → Hours</Link>.
         </div>
+      ) : viewMode === "month" ? (
+        <MonthView
+          year={monthCtx.year}
+          month={monthCtx.month}
+          staff={staff}
+          shifts={monthShifts}
+          monthHoursByStaff={monthHoursByStaff}
+          onCellClick={(staffId, iso) => {
+            const s = staff.find((x) => String(x.id) === staffId);
+            if (!s) return;
+            if (!s.active) { void showAlert(`${s.name} is inactive.`); return; }
+            const closedReason = closedDaysMonth.get(iso);
+            if (closedReason) {
+              void showAlert(`Cannot add a shift on ${iso} — the centre is closed (${closedReason}).`);
+              return;
+            }
+            const own = monthShifts.filter((sh) => sh.staffId === staffId && sh.shiftDate === iso);
+            if (own.length === 1) setDrawer({ mode: "edit", shift: own[0] });
+            else setDrawer({ mode: "new", staffId, shiftDate: iso });
+          }}
+          closedDays={closedDaysMonth}
+        />
       ) : (
         <div style={{ overflowX: "auto" }}>
           <table style={{ width: "100%", borderCollapse: "separate", borderSpacing: 6, fontSize: 12 }}>
@@ -176,14 +333,29 @@ export default function StaffSchedule() {
                   const [y, m, dd] = iso.split("-").map(Number);
                   const dt = new Date(y, m - 1, dd);
                   const holidayName = holidayMap.get(iso);
+                  const closedReason = closedDays.get(iso);
+                  const bg = closedReason
+                    ? "#f1f5f9"
+                    : holidayName
+                    ? "#fff7ed"
+                    : undefined;
+                  const tip = closedReason
+                    ? `Centre closed — ${closedReason}`
+                    : (holidayName ?? undefined);
                   return (
-                    <th key={d} style={{ textAlign: "left", padding: 8, color: "var(--muted)", background: holidayName ? "#fff7ed" : undefined }} title={holidayName ?? undefined}>
+                    <th key={d} style={{ textAlign: "left", padding: 8, color: "var(--muted)", background: bg }} title={tip}>
                       {d} <span style={{ fontWeight: 400 }}>{dt.getMonth() + 1}/{dt.getDate()}</span>
                       {holidayName && <div style={{ fontSize: 10, color: "#ea580c", fontWeight: 500 }}>🎉 {holidayName}</div>}
+                      {closedReason && !holidayName && <div style={{ fontSize: 10, color: "#64748b", fontStyle: "italic" }}>Closed</div>}
                     </th>
                   );
                 })}
-                <th style={{ textAlign: "right", padding: 8, color: "var(--muted)", width: 80 }}>Total</th>
+                <th style={{ textAlign: "right", padding: 8, color: "var(--muted)", width: 80 }}>
+                  Week total
+                </th>
+                <th style={{ textAlign: "right", padding: 8, color: "var(--muted)", width: 90 }} title={`Total scheduled hours in ${monthTitle}`}>
+                  {monthTitle.split(" ")[0]} total
+                </th>
               </tr>
             </thead>
             <tbody>
@@ -204,31 +376,53 @@ export default function StaffSchedule() {
                     {DAY_LABELS.map((_, i) => {
                       const iso = addDays(weekStart, i);
                       const cellShifts = shiftsByCell.get(`${s.id}|${iso}`) ?? [];
+                      const closedReason = closedDays.get(iso);
+                      const closedMsg = `Cannot add a shift on ${iso} — the centre is closed (${closedReason ?? "Closed"}). To schedule this day, mark it open in Centre Calendar or disable the holiday in Settings.`;
                       return (
-                        <td key={i} style={{ padding: 0, verticalAlign: "top", minWidth: 110 }}>
+                        <td key={i} style={{ padding: 0, verticalAlign: "top", minWidth: 110, background: closedReason ? "#f8fafc" : undefined }}>
                           {cellShifts.length === 0 ? (
-                            <button
-                              onClick={() => {
-                                if (inactive) { void showAlert(inactiveMsg); return; }
-                                setDrawer({ mode: "new", staffId: String(s.id), shiftDate: iso });
-                              }}
-                              style={emptyCellStyle}
-                              title={inactive ? "Inactive staff" : "Add shift"}
-                              disabled={inactive}
-                            >+ Add</button>
+                            closedReason ? (
+                              <div
+                                style={closedCellStyle}
+                                title={`Centre closed — ${closedReason}`}
+                              >
+                                Closed
+                              </div>
+                            ) : (
+                              <button
+                                onClick={() => {
+                                  if (inactive) { void showAlert(inactiveMsg); return; }
+                                  setDrawer({ mode: "new", staffId: String(s.id), shiftDate: iso });
+                                }}
+                                style={emptyCellStyle}
+                                title={inactive ? "Inactive staff" : "Add shift"}
+                                disabled={inactive}
+                              >+ Add</button>
+                            )
                           ) : (
                             cellShifts.map((sh) => (
                               <div key={sh.id} className="shift-cell" style={{ position: "relative" }}>
                                 <button
                                   onClick={() => {
                                     if (inactive) { void showAlert(inactiveMsg); return; }
+                                    if (closedReason) { void showAlert(closedMsg); return; }
                                     setDrawer({ mode: "edit", shift: sh });
                                   }}
-                                  style={cellStyle(sh.status)}
-                                  title={inactive ? "Inactive staff — read only" : `${sh.startTime}–${sh.endTime}${sh.room ? ` · ${sh.room}` : ""}`}
+                                  style={closedReason ? closedShiftWarningStyle(sh.status) : cellStyle(sh.status)}
+                                  title={
+                                    inactive
+                                      ? "Inactive staff — read only"
+                                      : closedReason
+                                      ? `⚠ Shift on closed day (${closedReason}) — click ✕ to remove`
+                                      : (absenceLabel(sh.status) ?? `${sh.startTime}–${sh.endTime}${sh.room ? ` · ${sh.room}` : ""}`)
+                                  }
                                 >
-                                  <div>{sh.startTime}–{sh.endTime}</div>
-                                  {sh.room && <div style={{ fontSize: 10, opacity: 0.85 }}>{sh.room}</div>}
+                                  {absenceLabel(sh.status)
+                                    ? <div style={{ fontWeight: 700 }}>{absenceLabel(sh.status)}</div>
+                                    : <>
+                                        <div>{sh.startTime}–{sh.endTime}</div>
+                                        {sh.room && <div style={{ fontSize: 10, opacity: 0.85 }}>{sh.room}</div>}
+                                      </>}
                                 </button>
                                 <button
                                   className="shift-delete"
@@ -249,6 +443,9 @@ export default function StaffSchedule() {
                     <td style={{ padding: 8, textAlign: "right", color: overtime ? "#d97706" : undefined }}>
                       {total.toFixed(1)}h {overtime && "⚠"}
                     </td>
+                    <td style={{ padding: 8, textAlign: "right", color: "var(--muted)" }} title={`${monthTitle} total`}>
+                      {(monthHoursByStaff.get(String(s.id)) ?? 0).toFixed(1)}h
+                    </td>
                   </tr>
                 );
               })}
@@ -261,8 +458,103 @@ export default function StaffSchedule() {
         <ScheduleAiTextPanel
           weekStartIso={weekStart}
           roster={staff.map((s) => ({ id: String(s.id), name: s.name }))}
+          closedDays={closedDays}
           onSaved={() => { void refresh(); }}
         />
+      )}
+
+      {recentlyCancelled.length > 0 && (
+        <section
+          aria-label="Recently cancelled shifts"
+          style={{
+            marginTop: 16,
+            border: "1px solid var(--border)",
+            borderRadius: 10,
+            background: "var(--surface, #fff)",
+          }}
+        >
+          <button
+            type="button"
+            onClick={() => setRcOpen((v) => !v)}
+            aria-expanded={rcOpen}
+            style={{
+              width: "100%",
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "space-between",
+              padding: "10px 14px",
+              background: "transparent",
+              border: 0,
+              cursor: "pointer",
+              fontWeight: 600,
+              color: "var(--ink, #111)",
+            }}
+          >
+            <span>Recently cancelled ({recentlyCancelled.length}) — last 7 days</span>
+            <span aria-hidden="true" style={{ opacity: 0.6 }}>{rcOpen ? "▾" : "▸"}</span>
+          </button>
+          {rcOpen && (
+            <div style={{ borderTop: "1px solid var(--border)", padding: "8px 14px 12px" }}>
+              <div style={{ fontSize: 12, color: "var(--muted, #666)", marginBottom: 8 }}>
+                Restore puts the shift back on the schedule with the status it had before it was cancelled.
+              </div>
+              <ul style={{ listStyle: "none", padding: 0, margin: 0, display: "flex", flexDirection: "column", gap: 6 }}>
+                {recentlyCancelled.slice(0, 50).map((sh) => {
+                  const person = staff.find((s) => String(s.id) === String(sh.staffId));
+                  const name = person?.name ?? `Staff #${sh.staffId}`;
+                  const abs = absenceLabel(sh.status);
+                  const when = `${prettyDate(sh.shiftDate)}`;
+                  const detail = abs ? abs : `${sh.startTime}–${sh.endTime}${sh.room ? ` · ${sh.room}` : ""}`;
+                  const key = String(sh.id);
+                  return (
+                    <li
+                      key={key}
+                      style={{
+                        display: "flex",
+                        alignItems: "center",
+                        justifyContent: "space-between",
+                        gap: 12,
+                        padding: "6px 8px",
+                        borderRadius: 6,
+                        background: "rgba(0,0,0,0.02)",
+                      }}
+                    >
+                      <span style={{ flex: 1, minWidth: 0 }}>
+                        <strong style={{ marginRight: 8 }}>{name}</strong>
+                        <span style={{ color: "var(--muted, #666)" }}>{when} · {detail}</span>
+                      </span>
+                      <button
+                        type="button"
+                        disabled={rcBusy === key}
+                        onClick={async () => {
+                          setRcBusy(key);
+                          try {
+                            await restoreShift(sh.id, sh.version);
+                            await refresh();
+                          } catch (e: any) {
+                            await showAlert(`Could not restore shift: ${String(e?.message ?? e)}`);
+                          } finally {
+                            setRcBusy(null);
+                          }
+                        }}
+                        style={{
+                          padding: "4px 10px",
+                          borderRadius: 6,
+                          border: "1px solid var(--border)",
+                          background: "var(--surface, #fff)",
+                          cursor: rcBusy === key ? "wait" : "pointer",
+                          fontWeight: 600,
+                        }}
+                      >
+                        {rcBusy === key ? "Restoring…" : "Restore"}
+                      </button>
+                    </li>
+                  );
+                })}
+              </ul>
+            </div>
+          )}
+        </section>
       )}
 
       {/* Print-only view — hidden on screen, shown on print, fits 1 landscape page. */}
@@ -295,12 +587,15 @@ export default function StaffSchedule() {
                     const cellShifts = (shiftsByCell.get(`${s.id}|${iso}`) ?? []).filter((sh) => sh.status !== "cancelled");
                     return (
                       <td key={i}>
-                        {cellShifts.map((sh, ix) => (
-                          <div key={sh.id} style={{ marginTop: ix ? 2 : 0 }}>
-                            {sh.startTime}–{sh.endTime}
-                            {sh.room && <span className="print-room"> · {sh.room}</span>}
-                          </div>
-                        ))}
+                        {cellShifts.map((sh, ix) => {
+                          const abs = absenceLabel(sh.status);
+                          return (
+                            <div key={sh.id} style={{ marginTop: ix ? 2 : 0 }}>
+                              {abs ? abs : `${sh.startTime}–${sh.endTime}`}
+                              {sh.room && <span className="print-room"> · {sh.room}</span>}
+                            </div>
+                          );
+                        })}
                       </td>
                     );
                   })}
@@ -368,7 +663,19 @@ function PublishModal({ weekStart, staff, shifts, onClose }: {
           continue;
         }
         const firstName = row.staff.name.split(/\s+/)[0];
-        const lines = row.shifts.map((sh) => `${prettyDate(sh.shiftDate)}: ${sh.startTime}–${sh.endTime}${sh.room ? ` · ${sh.room}` : ""}`).join("\n");
+        // v2.6.3 CRITICAL: absence rows (vacation/sick/day_off) carry
+        // placeholder 09:00-17:00 times but count as 0 hours. Publishing
+        // them as literal times would send the employee a WhatsApp
+        // saying "Fri Jul 18: 09:00-17:00" for a day they're on vacation
+        // — self-contradictory with `total_hours` and dangerous (staff
+        // might actually show up). Format absences as their label.
+        const lines = row.shifts.map((sh) => {
+          const abs = absenceLabel(sh.status);
+          if (abs) {
+            return `${prettyDate(sh.shiftDate)}: ${abs}${sh.room ? ` · ${sh.room}` : ""}`;
+          }
+          return `${prettyDate(sh.shiftDate)}: ${sh.startTime}–${sh.endTime}${sh.room ? ` · ${sh.room}` : ""}`;
+        }).join("\n");
         const body = renderTemplate(template, {
           staff_first_name: firstName,
           owner_first_name: ownerFirst,
@@ -489,25 +796,236 @@ function prettyDate(iso: string): string {
   return dt.toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric" });
 }
 
+// v2.6.3: month view — staff × day-of-month grid. Each cell shows the
+// summary of that day's shifts for that staff (hours, or "—", or the
+// centre-closed hatch). Click a cell to add/edit — routing back to the
+// same ShiftDrawer as week view. Kept simple on purpose: no chip-per-
+// shift like week view because 31 columns × 5-15 staff rows can't fit
+// full chips at reasonable font size.
+function MonthView({
+  year, month, staff, shifts, monthHoursByStaff, closedDays, onCellClick,
+}: {
+  year: number;
+  month: number;
+  staff: StaffLite[];
+  shifts: StaffShift[];
+  monthHoursByStaff: Map<string, number>;
+  closedDays: Map<string, string>;
+  onCellClick: (staffId: string, iso: string) => void;
+}) {
+  const daysInMonth = new Date(year, month, 0).getDate();
+  const days = Array.from({ length: daysInMonth }, (_, i) => i + 1);
+  const shiftsByCell = useMemo(() => {
+    const map = new Map<string, StaffShift[]>();
+    for (const s of shifts) {
+      const key = `${s.staffId}|${s.shiftDate}`;
+      const arr = map.get(key) ?? [];
+      arr.push(s);
+      map.set(key, arr);
+    }
+    return map;
+  }, [shifts]);
+
+  const dayLabel = (d: number) => {
+    const dt = new Date(year, month - 1, d);
+    return ["Su", "Mo", "Tu", "We", "Th", "Fr", "Sa"][dt.getDay()];
+  };
+  const isoFor = (d: number) =>
+    `${year}-${String(month).padStart(2, "0")}-${String(d).padStart(2, "0")}`;
+
+  return (
+    <div style={{ overflowX: "auto" }}>
+      <table style={{ borderCollapse: "separate", borderSpacing: 3, fontSize: 11 }}>
+        <thead>
+          <tr>
+            <th style={{ position: "sticky", left: 0, background: "var(--bg, #fff)", zIndex: 1, textAlign: "left", padding: "6px 8px", minWidth: 140 }}>Staff</th>
+            {days.map((d) => {
+              const iso = isoFor(d);
+              const closed = closedDays.get(iso);
+              return (
+                <th key={d} style={{
+                  padding: "4px 2px", textAlign: "center", minWidth: 34,
+                  color: closed ? "#7c2d12" : "var(--muted)",
+                  background: closed ? "#f1f5f9" : undefined,
+                  fontWeight: 400,
+                }} title={closed ? `Closed — ${closed}` : undefined}>
+                  <div style={{ fontSize: 10 }}>{dayLabel(d)}</div>
+                  <div style={{ fontWeight: 600, color: closed ? "#7c2d12" : "inherit" }}>{d}</div>
+                </th>
+              );
+            })}
+            <th style={{ padding: "4px 8px", textAlign: "right", color: "var(--muted)", minWidth: 60 }}>Total</th>
+          </tr>
+        </thead>
+        <tbody>
+          {staff.map((s) => (
+            <tr key={s.id} style={!s.active ? { opacity: 0.55 } : undefined}>
+              <td style={{ position: "sticky", left: 0, background: "var(--bg, #fff)", padding: "6px 8px", fontWeight: 600, whiteSpace: "nowrap" }}>{s.name}</td>
+              {days.map((d) => {
+                const iso = isoFor(d);
+                const closed = closedDays.get(iso);
+                const cellShifts = shiftsByCell.get(`${s.id}|${iso}`) ?? [];
+                const live = cellShifts.filter((sh) => sh.status !== "cancelled");
+                const hours = live.reduce((sum, sh) => sum + shiftHours(sh), 0);
+                if (closed) {
+                  // v2.6.3: closed day with live shift(s) — must be
+                  // clickable so the owner can open the drawer and
+                  // decide (cancel/keep) without switching to Week view.
+                  if (live.length > 0) {
+                    return (
+                      <td key={d}>
+                        <button
+                          onClick={() => onCellClick(String(s.id), iso)}
+                          style={{
+                            width: "100%", minWidth: 30, padding: "4px 0",
+                            background: "rgba(254,215,170,.5)",
+                            border: "1px dashed #d97706",
+                            borderRadius: 4, cursor: "pointer",
+                            color: "#7c2d12", fontSize: 12, fontWeight: 700,
+                          }}
+                          title={`⚠ ${live.length} shift on closed day (${closed}) — click to edit or cancel`}
+                          aria-label={`Review ${s.name}'s shift on closed day ${iso}`}
+                        >⚠</button>
+                      </td>
+                    );
+                  }
+                  return (
+                    <td key={d} style={{
+                      background: "#f8fafc", textAlign: "center",
+                      color: "#94a3b8", fontSize: 10, fontStyle: "italic",
+                      padding: "4px 2px",
+                    }} title={`Closed — ${closed}`}>·</td>
+                  );
+                }
+                if (live.length === 0) {
+                  return (
+                    <td key={d}>
+                      <button
+                        onClick={() => onCellClick(String(s.id), iso)}
+                        style={monthEmptyCell}
+                        aria-label={`Add shift for ${s.name} on ${iso}`}
+                      >+</button>
+                    </td>
+                  );
+                }
+                const primary = live[0];
+                // v2.6.3: absence rows show a 1-char glyph (V/S/O) instead
+                // of "0.0h" — hours are zero by construction and a letter
+                // reads faster in a dense grid.
+                const absLabel = absenceLabel(primary.status);
+                const cellLabel = absLabel ? absLabel.charAt(0) : hours.toFixed(1);
+                return (
+                  <td key={d}>
+                    <button
+                      onClick={() => onCellClick(String(s.id), iso)}
+                      style={monthFilledCell(primary.status)}
+                      title={absLabel
+                        ? `${absLabel} — ${s.name}`
+                        : live.map((sh) => `${sh.startTime}–${sh.endTime}${sh.room ? " · " + sh.room : ""}`).join("\n")}
+                    >{cellLabel}</button>
+                  </td>
+                );
+              })}
+              <td style={{ padding: "6px 8px", textAlign: "right", fontWeight: 600 }}>
+                {(monthHoursByStaff.get(String(s.id)) ?? 0).toFixed(1)}h
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+const monthEmptyCell: React.CSSProperties = {
+  width: "100%", minWidth: 30, padding: "4px 0",
+  background: "transparent", border: "1px dashed var(--border, #cbd5e1)",
+  borderRadius: 4, cursor: "pointer", color: "#94a3b8", fontSize: 12,
+};
+function monthFilledCell(status: StaffShift["status"]): React.CSSProperties {
+  const bg =
+    status === "confirmed" ? "rgba(34,197,94,.18)"
+    : status === "swapped" ? "rgba(217,119,6,.18)"
+    : status === "vacation" ? "rgba(22,163,74,.18)"
+    : status === "sick" ? "rgba(220,38,38,.18)"
+    : status === "day_off" ? "rgba(107,114,128,.20)"
+    : "rgba(37,99,235,.18)";
+  const bd =
+    status === "confirmed" ? "#22c55e"
+    : status === "swapped" ? "#d97706"
+    : status === "vacation" ? "#16a34a"
+    : status === "sick" ? "#dc2626"
+    : status === "day_off" ? "#6b7280"
+    : "#2563eb";
+  return {
+    width: "100%", minWidth: 30, padding: "4px 0",
+    background: bg, border: `1px solid ${bd}55`,
+    borderRadius: 4, cursor: "pointer", color: "inherit",
+    fontWeight: 600, fontSize: 11,
+  };
+}
+
+const toggleActiveStyle: React.CSSProperties = {
+  background: "#2563eb", color: "#fff", border: "none",
+  borderRadius: 0, padding: "6px 12px", cursor: "pointer", fontSize: 13,
+};
+const toggleInactiveStyle: React.CSSProperties = {
+  background: "transparent", color: "var(--muted, #6b7280)", border: "none",
+  borderRadius: 0, padding: "6px 12px", cursor: "pointer", fontSize: 13,
+};
+
 const emptyCellStyle: React.CSSProperties = {
   width: "100%", padding: "12px 6px", background: "transparent",
   border: "1px dashed var(--border, #334155)", borderRadius: 6, cursor: "pointer",
   color: "var(--muted)", fontSize: 11,
 };
+// Closed-day empty cell (v2.6.3): same footprint as `emptyCellStyle`
+// but visually inert — no dashed border, no hover cursor, muted text —
+// to communicate "you cannot schedule this day" without a disabled
+// button that keyboard users would still tab through.
+const closedCellStyle: React.CSSProperties = {
+  width: "100%", padding: "12px 6px", background: "transparent",
+  border: "1px solid transparent", borderRadius: 6,
+  color: "var(--muted)", fontSize: 11, textAlign: "center",
+  fontStyle: "italic", opacity: 0.6, cursor: "not-allowed",
+  userSelect: "none",
+};
 function cellStyle(status: StaffShift["status"]): React.CSSProperties {
   const bg = status === "cancelled" ? "rgba(220,38,38,.10)"
     : status === "confirmed" ? "rgba(34,197,94,.14)"
     : status === "swapped" ? "rgba(217,119,6,.14)"
+    : status === "vacation" ? "rgba(22,163,74,.14)"
+    : status === "sick" ? "rgba(220,38,38,.14)"
+    : status === "day_off" ? "rgba(107,114,128,.14)"
     : "rgba(37,99,235,.14)";
   const bd = status === "cancelled" ? "#dc2626"
     : status === "confirmed" ? "#22c55e"
-    : status === "swapped" ? "#d97706" : "#2563eb";
+    : status === "swapped" ? "#d97706"
+    : status === "vacation" ? "#16a34a"
+    : status === "sick" ? "#dc2626"
+    : status === "day_off" ? "#6b7280"
+    : "#2563eb";
   return {
     display: "block", width: "100%",
     padding: "6px 8px", background: bg, border: `1px solid ${bd}55`,
     color: "inherit", borderRadius: 6, cursor: "pointer", textAlign: "left",
     textDecoration: status === "cancelled" ? "line-through" : "none",
     fontSize: 12,
+  };
+}
+// v2.6.3: a shift that lives on a day the centre is now marked closed
+// (e.g. shift was created, then owner flipped the calendar). Amber outline
+// signals "this needs your attention — either reopen the day, cancel the
+// shift, or leave it as an exception". Reuses the status colour ramp for
+// the background so cancelled shifts still read as cancelled.
+function closedShiftWarningStyle(status: StaffShift["status"]): React.CSSProperties {
+  const base = cellStyle(status);
+  return {
+    ...base,
+    border: "1px dashed #d97706",
+    boxShadow: "0 0 0 1px rgba(217,119,6,.35) inset",
+    background: "rgba(254,215,170,.35)",
+    color: "#7c2d12",
   };
 }
 const backdrop: React.CSSProperties = {

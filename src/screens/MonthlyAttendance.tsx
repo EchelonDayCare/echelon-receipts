@@ -17,7 +17,9 @@ import { extractMonthAttendance, fileToMime } from "../lib/ai";
 import { h } from "../lib/html";
 import { showConfirm, showPrompt } from "../lib/dialogs";
 import { inactiveLabel } from "../lib/inactiveLabel";
-import { isBcHolidaysEnabled, setBcHolidaysEnabled } from "../lib/centreCalendar";
+import { isBcHolidaysEnabled, setBcHolidaysEnabled, getDisabledBcHolidayIds } from "../lib/centreCalendar";
+import { runClosureImpact, type ClosureImpactDate } from "../components/ClosureImpactDialog";
+import { bcStatHolidays } from "../lib/bcHolidays";
 import { printHtmlDocument } from "../lib/print";
 import { OcrProgressBanner, MONTH_OCR_STAGES } from "../components/OcrProgressBanner";
 
@@ -35,6 +37,12 @@ function daysInMonth(year: number, month: number): number {
 
 function isoDay(year: number, month: number, day: number): string {
   return `${year}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
+}
+
+function formatDayForPrompt(iso: string): string {
+  const [y, m, d] = iso.split("-").map(Number);
+  const dt = new Date(y, m - 1, d);
+  return dt.toLocaleDateString(undefined, { weekday: "long", month: "long", day: "numeric", year: "numeric" });
 }
 
 function nextMark(current: MonthMark | undefined | null): MonthMark | null {
@@ -57,6 +65,40 @@ export default function MonthlyAttendance() {
   useEffect(() => { void isBcHolidaysEnabled().then(setHolidaysOn); }, []);
 
   async function toggleHolidays(next: boolean) {
+    // v2.6.3 fix: guard OFF → ON like HolidaysSettingsSection does.
+    // Turning stat holidays back on can close upcoming scheduled days;
+    // the old direct-flip bypassed the closure-impact safety feature
+    // sitting inches away in the same screen. Both Codex and functional
+    // review flagged this.
+    if (next && !holidaysOn) {
+      const disabled = await getDisabledBcHolidayIds();
+      const today = new Date();
+      const todayIso =
+        `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, "0")}-` +
+        `${String(today.getDate()).padStart(2, "0")}`;
+      const endDate = new Date(today);
+      endDate.setDate(endDate.getDate() + 26 * 7);
+      const endIso =
+        `${endDate.getFullYear()}-${String(endDate.getMonth() + 1).padStart(2, "0")}-` +
+        `${String(endDate.getDate()).padStart(2, "0")}`;
+      const upcoming: ClosureImpactDate[] = [];
+      for (let y = today.getFullYear(); y <= endDate.getFullYear(); y++) {
+        for (const h of bcStatHolidays(y)) {
+          if (disabled.has(h.id)) continue;
+          if (h.iso >= todayIso && h.iso <= endIso) upcoming.push({ iso: h.iso, reason: h.name });
+        }
+      }
+      if (upcoming.length > 0) {
+        const choice = await runClosureImpact({
+          title: "Turning on stat holidays would close scheduled days",
+          intro:
+            `Some scheduled staff shifts fall on upcoming BC statutory holidays. ` +
+            `Choose what to do with those shifts before turning the setting on.`,
+          dates: upcoming,
+        });
+        if (choice === "cancel") return;
+      }
+    }
     await setBcHolidaysEnabled(next);
     setHolidaysOn(next);
     if (next) await seedBcHolidays(year, month);
@@ -182,8 +224,24 @@ export default function MonthlyAttendance() {
   }
 
   async function toggleCalendarDay(day: string, current: CalendarDay | undefined) {
-    const nextOpen = current ? !current.is_open : false; // first click closes it
+    const wasOpen = current ? !!current.is_open : true;
+    const nextOpen = !wasOpen; // first click on an undefined day closes it (was open by default)
     const reason = nextOpen ? null : (current?.reason || "Closed");
+    // v2.6.3: open → closed transition. Check whether the flip would
+    // orphan live staff shifts on this day; if so, prompt the owner to
+    // (a) abort, (b) close + cancel affected shifts, or (c) close and
+    // leave the shifts in place (they'll show as warning-tinted in
+    // Schedule). Open → open and closed → open transitions are safe.
+    if (wasOpen && !nextOpen) {
+      const choice = await runClosureImpact({
+        title: "This day has scheduled shifts",
+        intro:
+          `You're about to mark ${formatDayForPrompt(day)} as closed. ` +
+          `Choose what to do with the scheduled shifts before continuing.`,
+        dates: [{ iso: day, reason: reason || "Closed" }],
+      });
+      if (choice === "cancel") return;
+    }
     await setCalendarDay(day, nextOpen, reason);
     setCalendar(await calendarForMonth(year, month));
   }

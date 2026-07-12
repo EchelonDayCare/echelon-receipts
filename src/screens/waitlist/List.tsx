@@ -47,6 +47,21 @@ function formatDob(iso: string | null | undefined): string {
   return d.toLocaleDateString("en-CA", { day: "2-digit", month: "short", year: "numeric" });
 }
 
+/**
+ * Return the last day of a given month as an ISO YYYY-MM-DD string.
+ * Used to make the birth-range "To" bound inclusive of the whole month
+ * (so picking "To = Dec 2024" catches Dec 31 births, not just Dec 1).
+ * `yyyy` is a 4-digit year string, `mm` is "01".."12".
+ */
+function lastDayOfMonth(yyyy: string, mm: string): string {
+  const y = Number(yyyy);
+  const m = Number(mm);
+  // Day 0 of the NEXT month is the last day of the target month.
+  const d = new Date(y, m, 0);
+  const day = String(d.getDate()).padStart(2, "0");
+  return `${yyyy}-${mm}-${day}`;
+}
+
 export default function WaitlistList() {
   const [rows, setRows] = useState<WaitlistEntry[]>([]);
   const [statuses, setStatuses] = useState<Set<WaitlistStatus>>(
@@ -55,12 +70,22 @@ export default function WaitlistList() {
   const [bands, setBands] = useState<Set<AgeBand>>(new Set());
   const [inBuildingOnly, setInBuildingOnly] = useState(false);
   const [search, setSearch] = useState("");
-  // Two-part month/year picker. Filter only applies when BOTH are chosen.
-  // Kept as separate UI state so a partial pick never fires a query.
-  const [birthMonthPick, setBirthMonthPick] = useState("");  // "" or "01".."12"
-  const [birthYearPick, setBirthYearPick] = useState("");    // "" or "YYYY"
-  const birthMonthFrom =
-    birthMonthPick && birthYearPick ? `${birthYearPick}-${birthMonthPick}` : "";
+  // Two-part month/year pickers per side of the range. Each side only
+  // fires a query when BOTH its month AND year are picked (partial
+  // picks show an inline hint but never fire). Either side can be left
+  // blank for an open-ended range.
+  const [birthFromMonthPick, setBirthFromMonthPick] = useState("");
+  const [birthFromYearPick, setBirthFromYearPick] = useState("");
+  const [birthToMonthPick, setBirthToMonthPick] = useState("");
+  const [birthToYearPick, setBirthToYearPick] = useState("");
+  const birthFrom =
+    birthFromMonthPick && birthFromYearPick
+      ? `${birthFromYearPick}-${birthFromMonthPick}-01`
+      : "";
+  const birthTo =
+    birthToMonthPick && birthToYearPick
+      ? lastDayOfMonth(birthToYearPick, birthToMonthPick)
+      : "";
   const [openId, setOpenId] = useState<number | null>(null);
   const [weights, setWeights] = useState<PriorityWeights>(DEFAULT_PRIORITY_WEIGHTS);
   const [siblingActive, setSiblingActive] = useState<Map<number, number>>(new Map());
@@ -76,17 +101,23 @@ export default function WaitlistList() {
   // post-sync refresh snapping the UI back to initial intent.
   const statusesRef = useRef(statuses);
   const searchRef = useRef(search);
-  const birthFromRef = useRef(birthMonthFrom);
+  const birthFromRef = useRef(birthFrom);
+  const birthToRef = useRef(birthTo);
   useEffect(() => { statusesRef.current = statuses; }, [statuses]);
   useEffect(() => { searchRef.current = search; }, [search]);
-  useEffect(() => { birthFromRef.current = birthMonthFrom; }, [birthMonthFrom]);
+  useEffect(() => { birthFromRef.current = birthFrom; }, [birthFrom]);
+  useEffect(() => { birthToRef.current = birthTo; }, [birthTo]);
 
   const refresh = async () => {
     // Guard against out-of-order responses: only the latest refresh wins.
     const mySeq = ++refreshSeqRef.current;
-    const birthFrom = birthFromRef.current ? `${birthFromRef.current}-01` : undefined;
     const [r, w, sm] = await Promise.all([
-      listWaitlist({ statuses: [...statusesRef.current], search: searchRef.current, birthFrom }),
+      listWaitlist({
+        statuses: [...statusesRef.current],
+        search: searchRef.current,
+        birthFrom: birthFromRef.current || undefined,
+        birthTo: birthToRef.current || undefined,
+      }),
       loadPriorityWeights(),
       loadActiveStudentMap(),
     ]);
@@ -103,7 +134,7 @@ export default function WaitlistList() {
     })();
   }, []);
 
-  useEffect(() => { void refresh();   }, [statuses, search, birthMonthFrom]);
+  useEffect(() => { void refresh();   }, [statuses, search, birthFrom, birthTo]);
 
   const toggleSort = (key: SortKey) => {
     if (sortKey === key) {
@@ -150,15 +181,17 @@ export default function WaitlistList() {
     statuses.size === DEFAULT_STATUSES.length &&
     DEFAULT_STATUSES.every((s) => statuses.has(s));
   const filtersActive =
-    !defaultStatusSet || bands.size > 0 || inBuildingOnly || search.trim().length > 0 || birthMonthFrom !== "";
+    !defaultStatusSet || bands.size > 0 || inBuildingOnly || search.trim().length > 0 || birthFrom !== "" || birthTo !== "";
 
   const clearFilters = () => {
     setStatuses(new Set(DEFAULT_STATUSES));
     setBands(new Set());
     setInBuildingOnly(false);
     setSearch("");
-    setBirthMonthPick("");
-    setBirthYearPick("");
+    setBirthFromMonthPick("");
+    setBirthFromYearPick("");
+    setBirthToMonthPick("");
+    setBirthToYearPick("");
   };
 
   const handleDelete = async (entry: WaitlistEntry, e: React.MouseEvent) => {
@@ -236,49 +269,51 @@ export default function WaitlistList() {
             </label>
           </div>
           <div>
-            <label style={labelSmall} title="Show only kids born in or after this month. Pick both a month and year to apply.">
-              Born on/after
+            <label style={labelSmall} title="Show only kids born within this month range. Each side needs both a month and a year to apply; leave a side blank for open-ended.">
+              Born between
             </label>
-            <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
-              <select
-                value={birthMonthPick}
-                onChange={(e) => setBirthMonthPick(e.target.value)}
-                style={{ fontSize: 13, padding: "3px 6px" }}
-                aria-label="Birth month"
-              >
-                <option value="">Month</option>
-                {MONTH_LABELS.map((label, i) => (
-                  <option key={i} value={String(i + 1).padStart(2, "0")}>{label}</option>
-                ))}
-              </select>
-              <select
-                value={birthYearPick}
-                onChange={(e) => setBirthYearPick(e.target.value)}
-                style={{ fontSize: 13, padding: "3px 6px" }}
-                aria-label="Birth year"
-              >
-                <option value="">Year</option>
-                {BIRTH_YEARS.map((y) => (
-                  <option key={y} value={y}>{y}</option>
-                ))}
-              </select>
-              {(birthMonthPick || birthYearPick) && (
+            <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+              <BirthMonthYearRow
+                prefix="From"
+                monthValue={birthFromMonthPick}
+                yearValue={birthFromYearPick}
+                onMonthChange={setBirthFromMonthPick}
+                onYearChange={setBirthFromYearPick}
+              />
+              <BirthMonthYearRow
+                prefix="To"
+                monthValue={birthToMonthPick}
+                yearValue={birthToYearPick}
+                onMonthChange={setBirthToMonthPick}
+                onYearChange={setBirthToYearPick}
+              />
+              {(birthFrom !== "" || birthTo !== "") && (
                 <button
                   type="button"
-                  onClick={() => { setBirthMonthPick(""); setBirthYearPick(""); }}
-                  title="Clear birth-month filter"
-                  aria-label="Clear birth-month filter"
+                  onClick={() => {
+                    setBirthFromMonthPick(""); setBirthFromYearPick("");
+                    setBirthToMonthPick("");   setBirthToYearPick("");
+                  }}
                   style={{
+                    alignSelf: "flex-start",
                     border: "1px solid var(--border)", background: "transparent",
                     color: "var(--muted)", borderRadius: 6, padding: "2px 8px",
-                    fontSize: 12, cursor: "pointer", lineHeight: 1,
+                    fontSize: 11, cursor: "pointer", lineHeight: 1.4, marginTop: 2,
                   }}
-                >✕</button>
+                >
+                  ✕ Clear range
+                </button>
               )}
             </div>
-            {(birthMonthPick && !birthYearPick) || (!birthMonthPick && birthYearPick) ? (
+            {((birthFromMonthPick && !birthFromYearPick) || (!birthFromMonthPick && birthFromYearPick) ||
+              (birthToMonthPick && !birthToYearPick)   || (!birthToMonthPick && birthToYearPick)) ? (
               <div style={{ fontSize: 11, color: "var(--muted)", marginTop: 4 }}>
-                Pick both month and year to apply.
+                Pick both month and year on each side to apply.
+              </div>
+            ) : null}
+            {birthFrom !== "" && birthTo !== "" && birthFrom > birthTo ? (
+              <div style={{ fontSize: 11, color: "var(--danger, #b91c1c)", marginTop: 4 }}>
+                “From” is after “To” — no kids will match.
               </div>
             ) : null}
           </div>
@@ -497,4 +532,56 @@ function scoreChipStyle(total: number): React.CSSProperties {
     fontSize: 13, fontWeight: 700, cursor: "help",
     fontVariantNumeric: "tabular-nums",
   };
+}
+
+
+// ── Small filter sub-component ────────────────────────────────────────────
+
+/**
+ * One row of the birth-range filter: a small "From"/"To" label plus
+ * Month + Year dropdowns. Kept as its own component so the two rows in
+ * the filter bar stay visually identical without repeating markup.
+ */
+function BirthMonthYearRow(props: {
+  prefix: "From" | "To";
+  monthValue: string;
+  yearValue: string;
+  onMonthChange: (v: string) => void;
+  onYearChange: (v: string) => void;
+}) {
+  const { prefix, monthValue, yearValue, onMonthChange, onYearChange } = props;
+  return (
+    <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+      <span
+        style={{
+          fontSize: 11, color: "var(--muted)", width: 32,
+          textAlign: "right", fontVariantNumeric: "tabular-nums",
+        }}
+      >
+        {prefix}
+      </span>
+      <select
+        value={monthValue}
+        onChange={(e) => onMonthChange(e.target.value)}
+        style={{ fontSize: 13, padding: "3px 6px" }}
+        aria-label={`Birth month (${prefix.toLowerCase()})`}
+      >
+        <option value="">Month</option>
+        {MONTH_LABELS.map((label, i) => (
+          <option key={i} value={String(i + 1).padStart(2, "0")}>{label}</option>
+        ))}
+      </select>
+      <select
+        value={yearValue}
+        onChange={(e) => onYearChange(e.target.value)}
+        style={{ fontSize: 13, padding: "3px 6px" }}
+        aria-label={`Birth year (${prefix.toLowerCase()})`}
+      >
+        <option value="">Year</option>
+        {BIRTH_YEARS.map((y) => (
+          <option key={y} value={y}>{y}</option>
+        ))}
+      </select>
+    </div>
+  );
 }
