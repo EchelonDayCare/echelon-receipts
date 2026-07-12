@@ -1,7 +1,7 @@
 // Waitlist list view — /waitlist/list
 // Full table with filter bar, sort by priority score.
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   listWaitlist, syncOnScreenOpen, ageBand, waitDays, priorityScore, scoreBreakdown,
   loadPriorityWeights, loadActiveStudentMap,
@@ -26,6 +26,16 @@ const BAND_INFO: Record<AgeBand, { range: string; note: string }> = {
 
 const DEFAULT_STATUSES: WaitlistStatus[] = ["new", "contacted", "offered"];
 
+const MONTH_LABELS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+// Years for the birth-year dropdown: current year down to 12 years ago.
+// Waitlist kids are 0–5; the extra buffer covers stale entries + siblings.
+const BIRTH_YEARS: string[] = (() => {
+  const now = new Date().getFullYear();
+  const arr: string[] = [];
+  for (let y = now + 1; y >= now - 12; y--) arr.push(String(y));
+  return arr;
+})();
+
 type SortKey = "priority" | "dob" | "submitted";
 type SortDir = "asc" | "desc";
 
@@ -45,21 +55,42 @@ export default function WaitlistList() {
   const [bands, setBands] = useState<Set<AgeBand>>(new Set());
   const [inBuildingOnly, setInBuildingOnly] = useState(false);
   const [search, setSearch] = useState("");
-  // YYYY-MM string from <input type="month">, e.g. "2024-08". Empty = no filter.
-  const [birthMonthFrom, setBirthMonthFrom] = useState("");
+  // Two-part month/year picker. Filter only applies when BOTH are chosen.
+  // Kept as separate UI state so a partial pick never fires a query.
+  const [birthMonthPick, setBirthMonthPick] = useState("");  // "" or "01".."12"
+  const [birthYearPick, setBirthYearPick] = useState("");    // "" or "YYYY"
+  const birthMonthFrom =
+    birthMonthPick && birthYearPick ? `${birthYearPick}-${birthMonthPick}` : "";
   const [openId, setOpenId] = useState<number | null>(null);
   const [weights, setWeights] = useState<PriorityWeights>(DEFAULT_PRIORITY_WEIGHTS);
   const [siblingActive, setSiblingActive] = useState<Map<number, number>>(new Map());
   const [sortKey, setSortKey] = useState<SortKey>("priority");
   const [sortDir, setSortDir] = useState<SortDir>("desc");
 
+  const refreshSeqRef = useRef(0);
+  // Filter values are also mirrored to refs so the mount-time refresh
+  // (which runs after `syncOnScreenOpen` completes) uses whatever the
+  // user has picked WHILE sync was in flight, not the initial values
+  // captured in the effect's closure. Without this, changing filters
+  // during sync (a fast user, a slow network) results in the delayed
+  // post-sync refresh snapping the UI back to initial intent.
+  const statusesRef = useRef(statuses);
+  const searchRef = useRef(search);
+  const birthFromRef = useRef(birthMonthFrom);
+  useEffect(() => { statusesRef.current = statuses; }, [statuses]);
+  useEffect(() => { searchRef.current = search; }, [search]);
+  useEffect(() => { birthFromRef.current = birthMonthFrom; }, [birthMonthFrom]);
+
   const refresh = async () => {
-    const birthFrom = birthMonthFrom ? `${birthMonthFrom}-01` : undefined;
+    // Guard against out-of-order responses: only the latest refresh wins.
+    const mySeq = ++refreshSeqRef.current;
+    const birthFrom = birthFromRef.current ? `${birthFromRef.current}-01` : undefined;
     const [r, w, sm] = await Promise.all([
-      listWaitlist({ statuses: [...statuses], search, birthFrom }),
+      listWaitlist({ statuses: [...statusesRef.current], search: searchRef.current, birthFrom }),
       loadPriorityWeights(),
       loadActiveStudentMap(),
     ]);
+    if (mySeq !== refreshSeqRef.current) return;
     setRows(r);
     setWeights(w);
     setSiblingActive(sm);
@@ -126,7 +157,8 @@ export default function WaitlistList() {
     setBands(new Set());
     setInBuildingOnly(false);
     setSearch("");
-    setBirthMonthFrom("");
+    setBirthMonthPick("");
+    setBirthYearPick("");
   };
 
   const handleDelete = async (entry: WaitlistEntry, e: React.MouseEvent) => {
@@ -204,15 +236,51 @@ export default function WaitlistList() {
             </label>
           </div>
           <div>
-            <label style={labelSmall} title="Show only kids born in or after this month.">
+            <label style={labelSmall} title="Show only kids born in or after this month. Pick both a month and year to apply.">
               Born on/after
             </label>
-            <input
-              type="month"
-              value={birthMonthFrom}
-              onChange={(e) => setBirthMonthFrom(e.target.value)}
-              style={{ fontSize: 13, padding: "3px 6px" }}
-            />
+            <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+              <select
+                value={birthMonthPick}
+                onChange={(e) => setBirthMonthPick(e.target.value)}
+                style={{ fontSize: 13, padding: "3px 6px" }}
+                aria-label="Birth month"
+              >
+                <option value="">Month</option>
+                {MONTH_LABELS.map((label, i) => (
+                  <option key={i} value={String(i + 1).padStart(2, "0")}>{label}</option>
+                ))}
+              </select>
+              <select
+                value={birthYearPick}
+                onChange={(e) => setBirthYearPick(e.target.value)}
+                style={{ fontSize: 13, padding: "3px 6px" }}
+                aria-label="Birth year"
+              >
+                <option value="">Year</option>
+                {BIRTH_YEARS.map((y) => (
+                  <option key={y} value={y}>{y}</option>
+                ))}
+              </select>
+              {(birthMonthPick || birthYearPick) && (
+                <button
+                  type="button"
+                  onClick={() => { setBirthMonthPick(""); setBirthYearPick(""); }}
+                  title="Clear birth-month filter"
+                  aria-label="Clear birth-month filter"
+                  style={{
+                    border: "1px solid var(--border)", background: "transparent",
+                    color: "var(--muted)", borderRadius: 6, padding: "2px 8px",
+                    fontSize: 12, cursor: "pointer", lineHeight: 1,
+                  }}
+                >✕</button>
+              )}
+            </div>
+            {(birthMonthPick && !birthYearPick) || (!birthMonthPick && birthYearPick) ? (
+              <div style={{ fontSize: 11, color: "var(--muted)", marginTop: 4 }}>
+                Pick both month and year to apply.
+              </div>
+            ) : null}
           </div>
           <div style={{ flex: 1, minWidth: 220 }}>
             <label style={labelSmall}>Search</label>

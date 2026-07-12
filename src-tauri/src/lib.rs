@@ -28,7 +28,7 @@ mod graduation;
 /// are stable across v1.x → v2.0.0 so entries backfilled from the
 /// legacy tauri-plugin-sql `_sqlx_migrations` tracker line up with
 /// our new `_migrations` table 1:1 (no re-execution on upgrade).
-fn embedded_migrations() -> Vec<(i64, &'static str, &'static str)> {
+pub fn embedded_migrations() -> Vec<(i64, &'static str, &'static str)> {
     vec![
         (1, "create_initial_tables", include_str!("../migrations/001_initial.sql")),
         (2, "add_pdf_folder_setting", include_str!("../migrations/002_pdf_folder.sql")),

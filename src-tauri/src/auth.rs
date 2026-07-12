@@ -28,6 +28,25 @@ use zeroize::Zeroizing;
 
 use crate::db_gate::DbGate;
 use crate::db_migration::{self, Encryptor, MigrationError, Paths};
+
+/// Apply any schema migrations that haven't been recorded yet.
+///
+/// Called after every encrypted-DB open (unlock, recovery, and the
+/// tail of the plaintext→encrypted flip). Without this, migrations
+/// added AFTER a user first encrypted their DB would never run — the
+/// setup path in `lib.rs::run` only calls `run_migrations` on the
+/// plaintext branch, so any encrypted install would be stuck at the
+/// schema version they had at encryption time. Idempotent.
+///
+/// Failure MUST propagate — if we swallow it and let the caller
+/// return `Ok(())`, the app enters an unlocked state on a stale
+/// schema (exactly the class of breakage this fix is meant to
+/// prevent).
+async fn run_pending_migrations(gate: &DbGate) -> Result<(), AuthError> {
+    let migrations = crate::embedded_migrations();
+    gate.run_migrations(&migrations).await?;
+    Ok(())
+}
 use crate::device_secret;
 use crate::security::{
     self, ArgonParams, Mdk, MigrationState, SecurityEnvelope, SecurityError, SlotKind,
@@ -565,6 +584,7 @@ pub async fn v2_create_pin(
 
     // Reopen the (now-encrypted) DB with the fresh MDK.
     gate.open_encrypted(&db, &mdk).await?;
+    run_pending_migrations(&gate).await?;
     auth.set_mdk(mdk);
     Ok(())
 }
@@ -604,6 +624,7 @@ pub async fn v2_unlock(
     gate.close().await;
     let db = db_path(&app)?;
     gate.open_encrypted(&db, &mdk).await?;
+    run_pending_migrations(&gate).await?;
     auth.set_mdk(mdk); // set_mdk clears rate-limit state
     Ok(())
 }
@@ -850,6 +871,7 @@ pub async fn v2_unlock_with_recovery(
     gate.close().await;
     let db = db_path(&app)?;
     gate.open_encrypted(&db, &mdk).await?;
+    run_pending_migrations(&gate).await?;
     auth.set_mdk(mdk);
     Ok(())
 }

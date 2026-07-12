@@ -326,10 +326,24 @@ pub fn build_reel_cmd(spec: &ReelSpec) -> Vec<String> {
             }
         }
         HwEncoder::MediaFoundation => {
+            // v2.6.2: h264_mf's real ffmpeg option is `-rate_control`
+            // (NOT `-rc_mode` — that's silently ignored, as confirmed
+            // by the "AVOption rc_mode ... has not been used" warning
+            // in every prior render log). Valid VBR modes are
+            // u_vbr / pc_vbr / ld_vbr / g_vbr / gld_vbr — not plain
+            // "vbr". `u_vbr` (unconstrained VBR) + `camera_record`
+            // scenario (B-frames=0, low-latency) is the fastest path
+            // through MFT that still respects our target bitrate.
+            // `-quality` is 0..100 higher=better; 40 trades some
+            // quality for encode speed, invisible at 720p per-child.
             args.push("-b:v".into());
             args.push(format!("{}k", spec.video_bitrate_kbps));
-            args.push("-rc_mode".into());
-            args.push("cbr".into());
+            args.push("-rate_control".into());
+            args.push("u_vbr".into());
+            args.push("-scenario".into());
+            args.push("camera_record".into());
+            args.push("-quality".into());
+            args.push("40".into());
         }
         HwEncoder::OpenH264 => {
             args.push("-b:v".into());

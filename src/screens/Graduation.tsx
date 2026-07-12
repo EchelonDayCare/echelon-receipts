@@ -57,6 +57,11 @@ export default function Graduation() {
   const [progress, setProgress] = useState<ProgressTick | null>(null);
   const [log, setLog] = useState<string[]>([]);
   const [savedOk, setSavedOk] = useState(false);
+  // Terminal batch summary — set when a render function fully completes
+  // (not cancelled, no error). Rendered as a big green banner so the
+  // user gets an unmissable "done" signal after long Windows encodes.
+  const [runSummary, setRunSummary] = useState<{ title: string; detail: string } | null>(null);
+  const runStartRef = useRef<number>(0);
   // Tracks a user-initiated cancel so a batch loop bails between
   // renders instead of continuing after killing the current FFmpeg.
   const cancelledRef = useRef(false);
@@ -98,6 +103,14 @@ export default function Graduation() {
 
   function appendLog(line: string) {
     setLog((prev) => (prev.length > 400 ? [...prev.slice(-400), line] : [...prev, line]));
+  }
+
+  function fmtElapsed(ms: number): string {
+    const s = Math.round(ms / 1000);
+    if (s < 60) return `${s}s`;
+    const m = Math.floor(s / 60);
+    const rs = s % 60;
+    return `${m}m ${rs}s`;
   }
 
   async function pickBaseFolder() {
@@ -155,7 +168,7 @@ export default function Graduation() {
 
   async function renderReel(nested = false) {
     if (!layout) return;
-    if (!nested) setBusy("reel");
+    if (!nested) { setBusy("reel"); setRunSummary(null); runStartRef.current = Date.now(); }
     setProgress(null);
     const job = `reel-${Date.now()}`;
     try {
@@ -175,6 +188,10 @@ export default function Graduation() {
         },
       );
       appendLog(`✓ Reel done in ${(out.duration_ms / 1000).toFixed(1)}s → ${out.output_path}`);
+      if (!nested) setRunSummary({
+        title: "✓ Reel complete",
+        detail: `1 video in ${fmtElapsed(Date.now() - runStartRef.current)} → ${out.output_path}`,
+      });
     } catch (e) {
       appendLog(`reel error: ${e}`);
       throw e;
@@ -189,7 +206,9 @@ export default function Graduation() {
       appendLog("No graduating students for " + year);
       return;
     }
-    if (!nested) setBusy("child");
+    if (!nested) { setBusy("child"); setRunSummary(null); runStartRef.current = Date.now(); }
+    let successCount = 0;
+    let failCount = 0;
     for (const c of layout.child_folders) {
       if (cancelledRef.current) {
         appendLog("↳ Cancelled — skipping remaining students");
@@ -218,8 +237,10 @@ export default function Graduation() {
             },
           },
         );
+        successCount++;
         appendLog(`  ✓ ${c.display_name} in ${(out.duration_ms / 1000).toFixed(1)}s → ${out.output_path}`);
       } catch (e) {
+        failCount++;
         appendLog(`  ✗ ${c.display_name}: ${e}`);
         // Distinguish user cancel from per-child failure. On cancel,
         // stop the batch immediately; on plain failure, continue with
@@ -228,7 +249,16 @@ export default function Graduation() {
         if (cancelledRef.current) break;
       }
     }
-    if (!nested) setBusy(null);
+    if (!nested) {
+      setBusy(null);
+      if (!cancelledRef.current) {
+        const failNote = failCount > 0 ? ` · ${failCount} failed` : "";
+        setRunSummary({
+          title: `✓ Per-child renders complete`,
+          detail: `${successCount} of ${graduating.length} videos in ${fmtElapsed(Date.now() - runStartRef.current)}${failNote} → ${layout.output}`,
+        });
+      }
+    }
   }
 
   async function renderSlides(nested = false) {
@@ -237,7 +267,7 @@ export default function Graduation() {
       appendLog("No graduating students for " + year);
       return;
     }
-    if (!nested) setBusy("slides");
+    if (!nested) { setBusy("slides"); setRunSummary(null); runStartRef.current = Date.now(); }
     try {
       const out = await invoke<{ output_path: string; slides_written: number; template_used: string }>(
         "graduation_render_slides",
@@ -260,6 +290,10 @@ export default function Graduation() {
       );
       appendLog(`✓ Slides done: ${out.slides_written} kids → ${out.output_path}`);
       appendLog(`  (template: ${out.template_used})`);
+      if (!nested) setRunSummary({
+        title: "✓ Slides deck complete",
+        detail: `${out.slides_written} slides in ${fmtElapsed(Date.now() - runStartRef.current)} → ${out.output_path}`,
+      });
     } catch (e) {
       appendLog(`slides error: ${e}`);
       throw e;
@@ -274,12 +308,18 @@ export default function Graduation() {
     cancelledRef.current = false;
     try { await invoke("graduation_reset_cancel"); } catch { /* ok */ }
     setBusy("all");
+    setRunSummary(null);
+    runStartRef.current = Date.now();
     try {
       await renderReel(true);
       if (cancelledRef.current) { appendLog("↳ Cancelled after reel"); return; }
       await renderPerChild(true);
       if (cancelledRef.current) { appendLog("↳ Cancelled before slides"); return; }
       await renderSlides(true);
+      setRunSummary({
+        title: "✓ Graduation batch complete",
+        detail: `Reel + ${graduating.length} kid videos + slides deck in ${fmtElapsed(Date.now() - runStartRef.current)} → ${layout?.output ?? ""}`,
+      });
     } catch (e) {
       // Individual renders already logged; renderAll bails on the
       // first hard error so the user isn't waiting for downstream
@@ -532,9 +572,43 @@ export default function Graduation() {
       )}
 
       {/* Progress + log */}
-      {(progress || log.length > 0 || preflight) && (
+      {(progress || log.length > 0 || preflight || runSummary) && (
         <section className="card" style={{ padding: 20 }}>
           <h2 style={{ marginTop: 0 }}>Progress</h2>
+          {runSummary && !isBusy && (
+            <div
+              role="status"
+              aria-live="polite"
+              style={{
+                marginBottom: 16,
+                padding: "14px 16px",
+                background: "#ecfdf5",
+                border: "1px solid #6ee7b7",
+                borderRadius: 8,
+                display: "flex",
+                justifyContent: "space-between",
+                alignItems: "flex-start",
+                gap: 12,
+              }}
+            >
+              <div style={{ minWidth: 0 }}>
+                <div style={{ fontWeight: 700, color: "#065f46", fontSize: 15, marginBottom: 4 }}>
+                  {runSummary.title}
+                </div>
+                <div style={{ color: "#047857", fontSize: 13, wordBreak: "break-all" }}>
+                  {runSummary.detail}
+                </div>
+              </div>
+              <button
+                className="btn"
+                style={{ flexShrink: 0 }}
+                onClick={() => setRunSummary(null)}
+                aria-label="Dismiss completion banner"
+              >
+                Dismiss
+              </button>
+            </div>
+          )}
           {progress && (
             <div style={{ marginBottom: 12 }}>
               <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 4 }}>
