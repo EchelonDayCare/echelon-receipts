@@ -7,6 +7,7 @@ import { db, getSettings, listStudents, listYears } from "../../lib/db";
 import { MARK_COLOR, MARK_LABEL, type MonthMark } from "../../lib/monthAttendance";
 import { daysOpenInRange, getDefaultOpenDays, isBcHolidaysEnabled, mergeBcHolidayOverridesAsync } from "../../lib/centreCalendar";
 import type { Student, SettingsMap } from "../../types";
+import { printCurrentWindow } from "../../lib/print";
 
 // ─── Types ────────────────────────────────────────────────────────────
 interface StudentTotals {
@@ -262,7 +263,7 @@ export default function AttendanceAnalytics() {
     a.click();
     URL.revokeObjectURL(url);
   }
-  function printReport() { window.print(); }
+  function printReport() { void printCurrentWindow(); }
 
   const daycareName = settings.daycare_name || "Echelon Daycare";
   const today = new Date().toLocaleDateString(undefined, { year: "numeric", month: "long", day: "numeric" });

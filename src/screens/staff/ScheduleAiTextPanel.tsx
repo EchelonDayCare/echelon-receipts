@@ -211,9 +211,36 @@ export default function ScheduleAiTextPanel({
 
   async function save() {
     if (!rows) return;
-    const toSave = rows.filter((r) => r.include && r.staffId);
-    const skipped = rows.length - toSave.length;
-    if (toSave.length === 0) { setErr("Nothing to save — every row is either excluded or missing a staff match."); return; }
+    const rawToSave = rows.filter((r) => r.include && r.staffId);
+    const skipped = rows.length - rawToSave.length;
+    if (rawToSave.length === 0) { setErr("Nothing to save — every row is either excluded or missing a staff match."); return; }
+
+    // v2.6.4 (Sonnet R1 #7): dedupe by (staffId, shiftDate) — keep the
+    // LAST row so a manual edit ("actually make this vacation") wins
+    // over an earlier duplicate in the same batch. Without this the
+    // second row's cancel+create runs against a stale `existingByKey`
+    // entry and throws a cryptic StaleWriteError.
+    const dedupeByKey = new Map<string, typeof rawToSave[number]>();
+    const droppedDupes: string[] = [];
+    for (const r of rawToSave) {
+      const key = `${r.staffId}|${r.shiftDate}`;
+      if (dedupeByKey.has(key)) {
+        droppedDupes.push(`${r.staffName} ${r.shiftDate}`);
+      }
+      dedupeByKey.set(key, r);
+    }
+    const toSave = Array.from(dedupeByKey.values());
+    if (droppedDupes.length > 0) {
+      const uniq = Array.from(new Set(droppedDupes));
+      window.setTimeout(
+        () => void showAlert(
+          `Skipped ${uniq.length} earlier duplicate row(s) — only the last of each (staff, date) is saved:\n• ${uniq.join("\n• ")}`,
+          { kind: "info" },
+        ),
+        50,
+      );
+    }
+
     setBusy("saving"); setErr(null);
     // Save-time backstop: user can manually change dates in the review
     // grid, so re-check every kept row against the closed-day set right
@@ -221,19 +248,23 @@ export default function ScheduleAiTextPanel({
     const dates = toSave.map((r) => r.shiftDate).sort();
     const closedMap = await closedDayReasonsForRange(dates[0], dates[dates.length - 1]);
 
-    // v2.6.3: for absence rows (vacation/sick/day_off) we may need to
-    // soft-cancel a planned shift the same person already has on that
-    // date, so the new marker doesn't collide with the one-per-day rule.
-    // Batch that lookup up front (single SQL) and index by (staffId|date).
-    // Include past dates too — sick-yesterday flows are the common case.
-    // We also capture the ORIGINAL STATUS so that if createShift fails
-    // after cancelShift succeeded we can restore the shift to exactly
-    // where it was (planned / confirmed / swapped), not blindly downgrade.
-    const absenceRows = toSave.filter((r) => r.kind !== "shift");
+    // v2.6.4: Replacement is now SYMMETRIC. Whether the user is
+    // overlaying vacation on a shift ("Judy vacation this week") OR
+    // shifts on a vacation ("Judy 8-11 Mon-Fri" after she was marked
+    // vacation), the AI acts as the source of truth for that (staff,
+    // date) cell: cancel whatever's there and create the new row.
+    // Previously we only did this for absence rows, so the reverse
+    // flow hit the one-shift-per-day DB constraint with a confusing
+    // "already has a shift on this day" error.
+    //
+    // We also capture the ORIGINAL STATUS so that if createShift
+    // fails after cancelShift succeeded we can restore the shift
+    // to exactly where it was (planned / confirmed / swapped /
+    // vacation / etc.), not blindly downgrade.
     const existingByKey = new Map<string, { id: string; version: number; status: ShiftStatus }>();
-    if (absenceRows.length > 0) {
-      const absenceDates = Array.from(new Set(absenceRows.map((r) => r.shiftDate)));
-      const existing = await listLiveShiftsOnDates(absenceDates, { includePast: true });
+    if (toSave.length > 0) {
+      const allDates = Array.from(new Set(toSave.map((r) => r.shiftDate)));
+      const existing = await listLiveShiftsOnDates(allDates, { includePast: true });
       for (const s of existing) {
         existingByKey.set(`${s.staffId}|${s.shiftDate}`, { id: s.id, version: s.version, status: s.status });
       }
@@ -250,20 +281,18 @@ export default function ScheduleAiTextPanel({
       }
       let cancelledForRollback: { id: string; prevStatus: ShiftStatus } | null = null;
       try {
-        // Absence rows first cancel any conflicting live shift for the
-        // same (staff, date). If createShift fails afterwards we roll
-        // back via restoreShift so we never leave the schedule with a
-        // silent gap (Codex M3).
-        if (r.kind !== "shift") {
-          const existing = existingByKey.get(`${r.staffId!}|${r.shiftDate}`);
-          if (existing) {
-            await cancelShift(existing.id, existing.version, `Replaced by ${kindChipLabel(r.kind)} marker (AI)`);
-            cancelledForRollback = { id: existing.id, prevStatus: existing.status };
-            replacedNotes.push({
-              label: `${r.staffName} ${r.shiftDate}`,
-              prevStatus: existing.status,
-            });
-          }
+        // Cancel any existing live shift for the same (staff, date)
+        // regardless of the incoming row's kind. Rollback on failure
+        // via restoreShift so we never leave a silent gap.
+        const existing = existingByKey.get(`${r.staffId!}|${r.shiftDate}`);
+        if (existing) {
+          const replacementLabel = kindChipLabel(r.kind);
+          await cancelShift(existing.id, existing.version, `Replaced by ${replacementLabel} (AI)`);
+          cancelledForRollback = { id: existing.id, prevStatus: existing.status };
+          replacedNotes.push({
+            label: `${r.staffName} ${r.shiftDate}`,
+            prevStatus: existing.status,
+          });
         }
         await createShift({
           staffId: r.staffId!,

@@ -170,6 +170,7 @@ pub fn run() {
             voice::parse_meeting_notes,
             voice::amend_meeting_notes,
             printing::print_current_window,
+            printing::print_html_via_browser,
             graduation::commands::graduation_preflight,
             graduation::commands::graduation_scaffold,
             graduation::commands::graduation_curate_photos,

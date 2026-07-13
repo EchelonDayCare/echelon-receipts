@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { getSettings, listStudents, listYears } from "../../lib/db";
 import type { Student, SettingsMap } from "../../types";
+import { printCurrentWindow } from "../../lib/print";
 
 export default function EnrollmentRoster() {
   const [settings, setSettings] = useState<SettingsMap>({});
@@ -58,7 +59,7 @@ export default function EnrollmentRoster() {
             <input type="checkbox" checked={activeOnly} onChange={(e) => setActiveOnly(e.target.checked)} /> Active only
           </label>
           <button className="btn secondary" onClick={exportCsv}>Export CSV</button>
-          <button className="btn" onClick={() => window.print()}>Print</button>
+          <button className="btn" onClick={() => { void printCurrentWindow(); }}>Print</button>
         </div>
       </div>
 

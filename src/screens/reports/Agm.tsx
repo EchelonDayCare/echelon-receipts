@@ -3,6 +3,7 @@ import { db, getSettings, listYears } from "../../lib/db";
 import type { SettingsMap } from "../../types";
 import { fiscalYearBounds, fiscalYearLabel } from "../../lib/fiscalYear";
 import { showConfirm } from "../../lib/dialogs";
+import { printCurrentWindow } from "../../lib/print";
 import AgmMinutesEditor from "./AgmMinutes";
 
 interface YearRow {
@@ -156,7 +157,7 @@ function BoardPackage() {
             <option value="calendar">Calendar (Jan–Dec)</option>
           </select>
           <button className="btn secondary" onClick={exportCsv}>Export CSV</button>
-          <button className="btn" onClick={() => window.print()}>Print</button>
+          <button className="btn" onClick={() => { void printCurrentWindow(); }}>Print</button>
         </div>
       </div>
 

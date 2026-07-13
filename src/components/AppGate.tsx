@@ -1,6 +1,40 @@
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { showAlert } from "../lib/dialogs";
+import { printHtmlDocument } from "../lib/print";
+
+// v2.6.4 (Codex R3 HIGH): produce a self-contained minimal print
+// document for the master recovery code. This route means: (a) if
+// in-app native print works, the dialog opens as expected; (b) if
+// native silently no-ops on WebView2, we escalate to a browser tab
+// that contains ONLY the code + a heading (no other DOM leakage);
+// (c) errors bubble up so the caller can showAlert instead of the
+// user thinking they printed something they didn't.
+function recoveryCodePrintHtml(code: string): string {
+  const escaped = code.replace(/[&<>"']/g, (c) =>
+    ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", "\"": "&quot;", "'": "&#39;" })[c]!,
+  );
+  const now = new Date().toLocaleString();
+  return `<!doctype html>
+<html><head><meta charset="utf-8"><title>Echelon Recovery Code</title>
+<style>
+  body { font-family: system-ui, sans-serif; color: #000; background: #fff; padding: 32px; margin: 0; }
+  h1 { font-size: 22px; margin: 0 0 12px 0; }
+  .code { font-family: ui-monospace, "Courier New", monospace; font-size: 20px;
+          letter-spacing: 2px; padding: 20px; border: 2px dashed #333;
+          text-align: center; word-break: break-all; white-space: pre-wrap; margin: 20px 0; }
+  .warn { color: #b45309; font-size: 13px; margin-top: 12px; }
+  .meta { color: #666; font-size: 12px; margin-top: 24px; }
+  @page { margin: 0.75in; }
+</style></head>
+<body>
+  <h1>Echelon Daycare — Master Recovery Code</h1>
+  <p>Store this somewhere safe. This is the ONLY way to unlock your database if you forget your PIN. It will not be shown again.</p>
+  <div class="code">${escaped}</div>
+  <p class="warn">⚠ Anyone with this code can decrypt your daycare records. Keep it private.</p>
+  <p class="meta">Printed ${now}</p>
+</body></html>`;
+}
 
 // v2.0.0 AppLock overlay + Setup Wizard gate.
 //
@@ -544,7 +578,17 @@ function MandatoryRecoveryStep({ code, onDone }: { code: string; onDone: () => v
           <button
             type="button"
             style={{ ...styles.button, flex: 1, background: "#eee", color: "#333" }}
-            onClick={() => window.print()}
+            onClick={async () => {
+              try {
+                await printHtmlDocument(recoveryCodePrintHtml(code));
+              } catch (e) {
+                await showAlert(
+                  `Print failed: ${String((e as any)?.message ?? e)}.\n\n` +
+                  `Please use "Copy to clipboard" and paste into a text editor, or write the code down before continuing.`,
+                  { kind: "error" },
+                );
+              }
+            }}
           >
             Print
           </button>

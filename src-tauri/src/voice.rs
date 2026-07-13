@@ -492,7 +492,13 @@ pub async fn parse_staff_shifts(args: ParseShiftsArgs) -> Result<ParseShiftsResu
             { "role": "user",   "content": text }
         ],
         "temperature": 0,
-        "max_tokens": 1500,
+        // v2.6.4: "vacation all July for whole team" can produce 5 staff × 31
+        // days = 155 objects × ~150 tokens ≈ 23k. Cap at 16k which fits the
+        // deployment's output budget and covers the vast majority of
+        // real-world requests. Bigger requests will still truncate and the
+        // caller sees a parse error with the original prompt to retry
+        // per-staff. Empty rows are cheap; only pay for what's parsed.
+        "max_tokens": 16000,
         "response_format": {
             "type": "json_schema",
             "json_schema": { "name": "StaffShifts", "schema": schema, "strict": true }
@@ -504,7 +510,9 @@ pub async fn parse_staff_shifts(args: ParseShiftsArgs) -> Result<ParseShiftsResu
     );
     let start = std::time::Instant::now();
     let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(60))
+        // v2.6.4: 60s truncated the "everyone vacation all month" call which
+        // now streams up to 16k tokens back. 120s covers it with headroom.
+        .timeout(std::time::Duration::from_secs(120))
         .build()
         .map_err(|e| redact(format!("http client: {e}"), &api_key))?;
     let resp = client

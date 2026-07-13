@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { getSettings, subsidyReconciliation, type SubsidyMonthRow } from "../../lib/db";
 import type { SettingsMap } from "../../types";
 import { type YearMode, parseYearMode, currentFiscalYear, fiscalYearLabel, fiscalMonthOrder } from "../../lib/fiscalYear";
+import { printCurrentWindow } from "../../lib/print";
 
 const MONTH_NAMES = ["", "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 
@@ -101,7 +102,7 @@ export default function Subsidy() {
           <span style={{ minWidth: 90, textAlign: "center", fontWeight: 600 }}>{yearLabel}</span>
           <button className="btn secondary" onClick={() => setYear(year + 1)}>›</button>
           <button className="btn secondary" onClick={exportCsv}>Export CSV</button>
-          <button className="btn" onClick={() => window.print()}>Print</button>
+          <button className="btn" onClick={() => { void printCurrentWindow(); }}>Print</button>
         </div>
       </div>
 

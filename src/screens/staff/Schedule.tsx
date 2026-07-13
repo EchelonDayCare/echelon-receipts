@@ -13,6 +13,7 @@ import { buildWaMeUrl, buildWhatsappDeepLink, renderTemplate } from "../../lib/w
 import { getSettings } from "../../lib/db";
 import { isAiTextConfigured } from "../../lib/voice";
 import { showAlert, showConfirm } from "../../lib/dialogs";
+import { printCurrentWindowViaBrowser } from "../../lib/print";
 import { inactiveLabel } from "../../lib/inactiveLabel";
 import ShiftDrawer, { loadStaffWithShiftsInWeek, notifyShiftCancel, type DrawerState } from "./ShiftDrawer";
 import ScheduleAiTextPanel from "./ScheduleAiTextPanel";
@@ -283,7 +284,17 @@ export default function StaffSchedule() {
           </div>
         </div>
         <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
-          <button className="btn" onClick={() => window.print()} title="Print schedule">🖨 Print</button>
+          <button
+            className="btn"
+            onClick={async () => {
+              try {
+                await printCurrentWindowViaBrowser();
+              } catch (e: any) {
+                await showAlert(`Could not open print dialog: ${String(e?.message ?? e)}`);
+              }
+            }}
+            title="Print schedule (opens in default browser)"
+          >🖨 Print</button>
           {viewMode === "week" && (
             <>
               <button className="btn" onClick={() => doCopy(1)} disabled={busy}>Copy → next week</button>
@@ -558,55 +569,66 @@ export default function StaffSchedule() {
       )}
 
       {/* Print-only view — hidden on screen, shown on print, fits 1 landscape page. */}
-      <div className="print-only print-schedule">
-        <div className="print-header">
-          <div className="print-title">Weekly Staff Schedule</div>
-          <div className="print-week">{weekLabel}</div>
-        </div>
-        <table className="print-grid">
-          <thead>
-            <tr>
-              <th style={{ textAlign: "left" }}>Staff</th>
-              {DAY_LABELS.map((d, i) => {
-                const iso = addDays(weekStart, i);
-                const [y, m, dd] = iso.split("-").map(Number);
-                const dt = new Date(y, m - 1, dd);
-                return <th key={d}>{d} {dt.getMonth() + 1}/{dt.getDate()}</th>;
+      {viewMode === "week" ? (
+        <div className="print-only print-schedule">
+          <div className="print-header">
+            <div className="print-title">Weekly Staff Schedule</div>
+            <div className="print-week">{weekLabel}</div>
+          </div>
+          <table className="print-grid">
+            <thead>
+              <tr>
+                <th style={{ textAlign: "left" }}>Staff</th>
+                {DAY_LABELS.map((d, i) => {
+                  const iso = addDays(weekStart, i);
+                  const [y, m, dd] = iso.split("-").map(Number);
+                  const dt = new Date(y, m - 1, dd);
+                  return <th key={d}>{d} {dt.getMonth() + 1}/{dt.getDate()}</th>;
+                })}
+                <th style={{ textAlign: "right" }}>Total</th>
+              </tr>
+            </thead>
+            <tbody>
+              {staff.map((s) => {
+                const total = hoursByStaff.get(String(s.id)) ?? 0;
+                return (
+                  <tr key={s.id}>
+                    <td style={{ textAlign: "left", fontWeight: 600 }}>{s.name}</td>
+                    {DAY_LABELS.map((_, i) => {
+                      const iso = addDays(weekStart, i);
+                      const cellShifts = (shiftsByCell.get(`${s.id}|${iso}`) ?? []).filter((sh) => sh.status !== "cancelled");
+                      return (
+                        <td key={i}>
+                          {cellShifts.map((sh, ix) => {
+                            const abs = absenceLabel(sh.status);
+                            return (
+                              <div key={sh.id} style={{ marginTop: ix ? 2 : 0 }}>
+                                {abs ? abs : `${sh.startTime}–${sh.endTime}`}
+                                {sh.room && <span className="print-room"> · {sh.room}</span>}
+                              </div>
+                            );
+                          })}
+                        </td>
+                      );
+                    })}
+                    <td style={{ textAlign: "right", fontWeight: 600 }}>{total.toFixed(1)}h</td>
+                  </tr>
+                );
               })}
-              <th style={{ textAlign: "right" }}>Total</th>
-            </tr>
-          </thead>
-          <tbody>
-            {staff.map((s) => {
-              const total = hoursByStaff.get(String(s.id)) ?? 0;
-              return (
-                <tr key={s.id}>
-                  <td style={{ textAlign: "left", fontWeight: 600 }}>{s.name}</td>
-                  {DAY_LABELS.map((_, i) => {
-                    const iso = addDays(weekStart, i);
-                    const cellShifts = (shiftsByCell.get(`${s.id}|${iso}`) ?? []).filter((sh) => sh.status !== "cancelled");
-                    return (
-                      <td key={i}>
-                        {cellShifts.map((sh, ix) => {
-                          const abs = absenceLabel(sh.status);
-                          return (
-                            <div key={sh.id} style={{ marginTop: ix ? 2 : 0 }}>
-                              {abs ? abs : `${sh.startTime}–${sh.endTime}`}
-                              {sh.room && <span className="print-room"> · {sh.room}</span>}
-                            </div>
-                          );
-                        })}
-                      </td>
-                    );
-                  })}
-                  <td style={{ textAlign: "right", fontWeight: 600 }}>{total.toFixed(1)}h</td>
-                </tr>
-              );
-            })}
-          </tbody>
-        </table>
-        <div className="print-footer">Printed {new Date().toLocaleString()}</div>
-      </div>
+            </tbody>
+          </table>
+          <div className="print-footer">Printed {new Date().toLocaleString()}</div>
+        </div>
+      ) : (
+        <MonthPrintView
+          year={monthOf(weekStart).year}
+          month={monthOf(weekStart).month}
+          staff={staff}
+          shifts={monthShifts}
+          monthHoursByStaff={monthHoursByStaff}
+          closedDays={closedDaysMonth}
+        />
+      )}
 
       <ShiftDrawer state={drawer} onClose={() => setDrawer({ mode: "closed" })} onSaved={() => { void refresh(); }} staffList={staff} />
 
@@ -794,6 +816,95 @@ function prettyDate(iso: string): string {
   const [y, m, d] = iso.split("-").map(Number);
   const dt = new Date(y, m - 1, d);
   return dt.toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric" });
+}
+
+// v2.6.4: month print view. Renders a compact staff × day-of-month grid
+// that fits on one landscape page. Cells show hours (or a single-letter
+// absence marker) so 31 columns × 15 staff rows stay legible. Uses the
+// same .print-only visibility gate as the week grid.
+function MonthPrintView({
+  year, month, staff, shifts, monthHoursByStaff, closedDays,
+}: {
+  year: number;
+  month: number;
+  staff: StaffLite[];
+  shifts: StaffShift[];
+  monthHoursByStaff: Map<string, number>;
+  closedDays: Map<string, string>;
+}) {
+  const daysInMonth = new Date(year, month, 0).getDate();
+  const days = Array.from({ length: daysInMonth }, (_, i) => i + 1);
+  const shiftsByCell = useMemo(() => {
+    const map = new Map<string, StaffShift[]>();
+    for (const s of shifts) {
+      const key = `${s.staffId}|${s.shiftDate}`;
+      const arr = map.get(key) ?? [];
+      arr.push(s);
+      map.set(key, arr);
+    }
+    return map;
+  }, [shifts]);
+  const isoFor = (d: number) =>
+    `${year}-${String(month).padStart(2, "0")}-${String(d).padStart(2, "0")}`;
+  const dow = (d: number) => ["S", "M", "T", "W", "T", "F", "S"][new Date(year, month - 1, d).getDay()];
+  const monthTitle = new Date(year, month - 1, 1).toLocaleDateString(undefined, { month: "long", year: "numeric" });
+  return (
+    <div className="print-only print-schedule print-schedule-month">
+      <div className="print-header">
+        <div className="print-title">Monthly Staff Schedule</div>
+        <div className="print-week">{monthTitle}</div>
+      </div>
+      <table className="print-grid print-grid-month">
+        <thead>
+          <tr>
+            <th style={{ textAlign: "left" }}>Staff</th>
+            {days.map((d) => {
+              const closed = closedDays.has(isoFor(d));
+              return (
+                <th key={d} className={closed ? "print-closed-col" : undefined}>
+                  <div style={{ fontSize: "6pt", opacity: 0.75 }}>{dow(d)}</div>
+                  <div>{d}</div>
+                </th>
+              );
+            })}
+            <th style={{ textAlign: "right" }}>Total</th>
+          </tr>
+        </thead>
+        <tbody>
+          {staff.map((s) => {
+            const total = monthHoursByStaff.get(String(s.id)) ?? 0;
+            return (
+              <tr key={s.id}>
+                <td style={{ textAlign: "left", fontWeight: 600 }}>{s.name}</td>
+                {days.map((d) => {
+                  const iso = isoFor(d);
+                  const closed = closedDays.has(iso);
+                  const cell = (shiftsByCell.get(`${s.id}|${iso}`) ?? []).filter((sh) => sh.status !== "cancelled");
+                  if (cell.length === 0) {
+                    return <td key={d} className={closed ? "print-closed-cell" : undefined}>{closed ? "×" : ""}</td>;
+                  }
+                  // Prefer the absence marker for its single-letter code
+                  // (V / S / D) — matches the on-screen month view.
+                  const abs = cell.find((sh) => absenceLabel(sh.status));
+                  if (abs) {
+                    const code = absenceLabel(abs.status)!.charAt(0).toUpperCase();
+                    return <td key={d} className="print-absence-cell">{code}</td>;
+                  }
+                  const hours = cell.reduce((sum, sh) => sum + shiftHours(sh), 0);
+                  return <td key={d}>{hours ? hours.toFixed(1) : ""}</td>;
+                })}
+                <td style={{ textAlign: "right", fontWeight: 600 }}>{total.toFixed(1)}h</td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+      <div className="print-legend" style={{ marginTop: 4, fontSize: "7pt", color: "#555" }}>
+        V = Vacation · S = Sick · D = Day off · × = Centre closed · Numbers = paid hours
+      </div>
+      <div className="print-footer">Printed {new Date().toLocaleString()}</div>
+    </div>
+  );
 }
 
 // v2.6.3: month view — staff × day-of-month grid. Each cell shows the
@@ -1096,6 +1207,34 @@ const PRINT_CSS = `
       text-align: center;
     }
     .print-grid td { text-align: center; }
+    .print-grid-month {
+      font-size: 7pt;
+      table-layout: auto;
+    }
+    .print-grid-month th, .print-grid-month td {
+      padding: 1px 2px;
+      min-width: 12px;
+    }
+    .print-grid-month th:first-child, .print-grid-month td:first-child {
+      min-width: 90px; max-width: 120px; text-align: left;
+    }
+    .print-grid-month .print-closed-col {
+      background: #eee !important;
+      -webkit-print-color-adjust: exact;
+      print-color-adjust: exact;
+    }
+    .print-grid-month .print-closed-cell {
+      background: #f5f5f5 !important;
+      color: #999;
+      -webkit-print-color-adjust: exact;
+      print-color-adjust: exact;
+    }
+    .print-grid-month .print-absence-cell {
+      background: #e5e7eb !important;
+      font-weight: 700;
+      -webkit-print-color-adjust: exact;
+      print-color-adjust: exact;
+    }
     .print-room { font-size: 7pt; color: #444; }
     .print-footer { margin-top: 6px; font-size: 8pt; color: #666; text-align: right; }
     /* Auto-shrink font/padding when many staff to keep to 1 page */

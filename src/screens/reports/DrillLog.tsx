@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { db, execRetry, getSettings } from "../../lib/db";
 import { showAlert, showConfirm } from "../../lib/dialogs";
 import type { SettingsMap } from "../../types";
+import { printCurrentWindow } from "../../lib/print";
 
 interface Drill {
   id: number;
@@ -108,7 +109,7 @@ export default function DrillLog() {
             </select>
           </label>
           <button className="btn secondary" onClick={exportCsv}>Export CSV</button>
-          <button className="btn secondary" onClick={() => window.print()}>Print</button>
+          <button className="btn secondary" onClick={() => { void printCurrentWindow(); }}>Print</button>
           <button className="btn" onClick={() => setShowAdd(true)}>+ Log drill</button>
         </div>
       </div>

@@ -1,6 +1,6 @@
 [package]
 name = "echelon-receipts"
-version = "2.6.3"
+version = "2.6.4"
 description = "Echelon Daycare receipt generator"
 authors = ["Echelon Daycare Society"]
 edition = "2021"
@@ -73,5 +73,6 @@ codegen-units = 1
 panic = "abort"
 strip = true
 incremental = false
+
 
 

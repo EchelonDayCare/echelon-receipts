@@ -6,6 +6,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 import { showConfirm } from "../../lib/dialogs";
+import { printCurrentWindow } from "../../lib/print";
 import { listUpcoming, type UpcomingItem, type UpcomingSource } from "../../repo/organizerRepo";
 import { listRecentMeetings, type Meeting } from "../../repo/meetingsRepo";
 import {
@@ -142,7 +143,7 @@ export default function Organizer() {
                 🎤 Voice add
               </button>
             )}
-            <button className="btn secondary" onClick={() => window.print()}>Print</button>
+            <button className="btn secondary" onClick={() => { void printCurrentWindow(); }}>Print</button>
           </div>
         </div>
 

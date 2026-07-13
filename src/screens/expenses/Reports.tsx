@@ -6,6 +6,7 @@ import {
   CATEGORY_LABEL, type RevenueBasis,
 } from "../../lib/expenses";
 import { type YearMode, parseYearMode, currentFiscalYear, fiscalYearBounds, fiscalYearLabel, fiscalMonthOrder } from "../../lib/fiscalYear";
+import { printCurrentWindow } from "../../lib/print";
 
 // SubsidyMonthRow re-imported so we can share label patterns
 export type _ = SubsidyMonthRow;
@@ -157,7 +158,7 @@ export default function ExpenseReports() {
           <span style={{ minWidth: 100, textAlign: "center", fontWeight: 600 }}>{bounds.label}</span>
           <button className="btn secondary" onClick={() => setYear(year + 1)}>›</button>
           <button className="btn secondary" onClick={exportCsv}>Export CSV</button>
-          <button className="btn" onClick={() => window.print()}>Print</button>
+          <button className="btn" onClick={() => { void printCurrentWindow(); }}>Print</button>
         </div>
       </div>
 

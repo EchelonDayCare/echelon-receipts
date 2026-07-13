@@ -3,6 +3,7 @@ import { getSettings } from "../../lib/db";
 import { listAllCredentialsWithStaff, credStatus, daysUntil, type CredStatus } from "../../lib/credentials";
 import { inactiveLabel } from "../../lib/inactiveLabel";
 import type { StaffCredential, SettingsMap } from "../../types";
+import { printCurrentWindow } from "../../lib/print";
 
 type Row = StaffCredential & { staff_name: string; staff_active: number; staff_terminated_at: string | null };
 
@@ -74,7 +75,7 @@ export default function CredentialsCompliance() {
             Include archived staff
           </label>
           <button className="btn secondary" onClick={exportCsv}>Export CSV</button>
-          <button className="btn" onClick={() => window.print()}>Print</button>
+          <button className="btn" onClick={() => { void printCurrentWindow(); }}>Print</button>
         </div>
       </div>
 
