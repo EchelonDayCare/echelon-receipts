@@ -3,13 +3,14 @@
 // the paper doesn't capture it either. See /reports/attendance for the
 // analytics view (centre-wide + per-child).
 import { useEffect, useMemo, useState } from "react";
+import { useSearchParams } from "react-router-dom";
 import { open } from "@tauri-apps/plugin-dialog";
 import { readFile } from "@tauri-apps/plugin-fs";
 import { invoke } from "@tauri-apps/api/core";
 import { getSettings, listYears } from "../lib/db";
 import { matchStudentByName } from "../lib/attendance";
 import {
-  monthGrid, setMark, calendarForMonth, seedWeekends, seedBcHolidays, setCalendarDay,
+  monthGrid, setMark, calendarForMonth, seedWeekends, seedBcHolidays,
   daysOpenInMonth, MARK_LABEL, MARK_COLOR, clearMonthMarks, countMarksInMonth,
   type MonthMark, type MonthCell, type CalendarDay,
 } from "../lib/monthAttendance";
@@ -17,9 +18,7 @@ import { extractMonthAttendance, fileToMime } from "../lib/ai";
 import { h } from "../lib/html";
 import { showConfirm, showPrompt } from "../lib/dialogs";
 import { inactiveLabel } from "../lib/inactiveLabel";
-import { isBcHolidaysEnabled, setBcHolidaysEnabled, getDisabledBcHolidayIds } from "../lib/centreCalendar";
-import { runClosureImpact, type ClosureImpactDate } from "../components/ClosureImpactDialog";
-import { bcStatHolidays } from "../lib/bcHolidays";
+import { isBcHolidaysEnabled } from "../lib/centreCalendar";
 import { printHtmlDocument } from "../lib/print";
 import { OcrProgressBanner, MONTH_OCR_STAGES } from "../components/OcrProgressBanner";
 
@@ -39,12 +38,6 @@ function isoDay(year: number, month: number, day: number): string {
   return `${year}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
 }
 
-function formatDayForPrompt(iso: string): string {
-  const [y, m, d] = iso.split("-").map(Number);
-  const dt = new Date(y, m - 1, d);
-  return dt.toLocaleDateString(undefined, { weekday: "long", month: "long", day: "numeric", year: "numeric" });
-}
-
 function nextMark(current: MonthMark | undefined | null): MonthMark | null {
   const idx = MARK_CYCLE.indexOf((current ?? null) as any);
   const next = MARK_CYCLE[(idx + 1) % MARK_CYCLE.length];
@@ -52,7 +45,15 @@ function nextMark(current: MonthMark | undefined | null): MonthMark | null {
 }
 
 export default function MonthlyAttendance() {
-  const start = todayYm();
+  const [searchParams] = useSearchParams();
+  const start = (() => {
+    const qy = Number(searchParams.get("year"));
+    const qm = Number(searchParams.get("month"));
+    if (Number.isFinite(qy) && qy >= 2000 && Number.isFinite(qm) && qm >= 1 && qm <= 12) {
+      return { year: qy, month: qm };
+    }
+    return todayYm();
+  })();
   const [year, setYear] = useState(start.year);
   const [month, setMonthState] = useState(start.month);
   const [cells, setCells] = useState<MonthCell[]>([]);
@@ -60,50 +61,6 @@ export default function MonthlyAttendance() {
   const [daycareName, setDaycareName] = useState("");
   const [dataYears, setDataYears] = useState<number[]>([]);
   const [toast, setToast] = useState<{ msg: string; tone: "ok" | "err" } | null>(null);
-  const [showCalendar, setShowCalendar] = useState(false);
-  const [holidaysOn, setHolidaysOn] = useState(true);
-  useEffect(() => { void isBcHolidaysEnabled().then(setHolidaysOn); }, []);
-
-  async function toggleHolidays(next: boolean) {
-    // v2.6.3 fix: guard OFF → ON like HolidaysSettingsSection does.
-    // Turning stat holidays back on can close upcoming scheduled days;
-    // the old direct-flip bypassed the closure-impact safety feature
-    // sitting inches away in the same screen. Both Codex and functional
-    // review flagged this.
-    if (next && !holidaysOn) {
-      const disabled = await getDisabledBcHolidayIds();
-      const today = new Date();
-      const todayIso =
-        `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, "0")}-` +
-        `${String(today.getDate()).padStart(2, "0")}`;
-      const endDate = new Date(today);
-      endDate.setDate(endDate.getDate() + 26 * 7);
-      const endIso =
-        `${endDate.getFullYear()}-${String(endDate.getMonth() + 1).padStart(2, "0")}-` +
-        `${String(endDate.getDate()).padStart(2, "0")}`;
-      const upcoming: ClosureImpactDate[] = [];
-      for (let y = today.getFullYear(); y <= endDate.getFullYear(); y++) {
-        for (const h of bcStatHolidays(y)) {
-          if (disabled.has(h.id)) continue;
-          if (h.iso >= todayIso && h.iso <= endIso) upcoming.push({ iso: h.iso, reason: h.name });
-        }
-      }
-      if (upcoming.length > 0) {
-        const choice = await runClosureImpact({
-          title: "Turning on stat holidays would close scheduled days",
-          intro:
-            `Some scheduled staff shifts fall on upcoming BC statutory holidays. ` +
-            `Choose what to do with those shifts before turning the setting on.`,
-          dates: upcoming,
-        });
-        if (choice === "cancel") return;
-      }
-    }
-    await setBcHolidaysEnabled(next);
-    setHolidaysOn(next);
-    if (next) await seedBcHolidays(year, month);
-    setCalendar(await calendarForMonth(year, month));
-  }
 
   // OCR state
   const [ocrBusy, setOcrBusy] = useState(false);
@@ -221,35 +178,6 @@ export default function MonthlyAttendance() {
       else marks[String(day)] = next;
       return { ...c, marks };
     }));
-  }
-
-  async function toggleCalendarDay(day: string, current: CalendarDay | undefined) {
-    const wasOpen = current ? !!current.is_open : true;
-    const nextOpen = !wasOpen; // first click on an undefined day closes it (was open by default)
-    const reason = nextOpen ? null : (current?.reason || "Closed");
-    // v2.6.3: open → closed transition. Check whether the flip would
-    // orphan live staff shifts on this day; if so, prompt the owner to
-    // (a) abort, (b) close + cancel affected shifts, or (c) close and
-    // leave the shifts in place (they'll show as warning-tinted in
-    // Schedule). Open → open and closed → open transitions are safe.
-    if (wasOpen && !nextOpen) {
-      const choice = await runClosureImpact({
-        title: "This day has scheduled shifts",
-        intro:
-          `You're about to mark ${formatDayForPrompt(day)} as closed. ` +
-          `Choose what to do with the scheduled shifts before continuing.`,
-        dates: [{ iso: day, reason: reason || "Closed" }],
-      });
-      if (choice === "cancel") return;
-    }
-    await setCalendarDay(day, nextOpen, reason);
-    setCalendar(await calendarForMonth(year, month));
-  }
-
-  async function updateCalendarReason(day: string, reason: string) {
-    const cur = calendar.find((c) => c.day === day);
-    await setCalendarDay(day, cur ? cur.is_open : false, reason || null);
-    setCalendar(await calendarForMonth(year, month));
   }
 
   // ─── OCR flow ─────────────────────────────────────────────────────────
@@ -556,7 +484,6 @@ export default function MonthlyAttendance() {
         </select>
         <button className="btn secondary" onClick={() => { const t = todayYm(); setYear(t.year); setMonthState(t.month); }}>This month</button>
         <div className="grow" />
-        <button className="btn secondary" onClick={() => setShowCalendar((v) => !v)}>{showCalendar ? "Hide" : "Show"} Centre Calendar</button>
         <button
           className="btn secondary"
           onClick={async () => {
@@ -639,67 +566,9 @@ export default function MonthlyAttendance() {
         </div>
       </section>
 
-      {/* Centre Calendar side panel */}
-      {showCalendar && (
-        <section className="card" style={{ marginBottom: 16 }}>
-          <h3 style={{ marginTop: 0 }}>Centre Calendar — {monthLabel}</h3>
-          <p style={{ margin: "0 0 10px", color: "var(--muted)", fontSize: 13 }}>
-            Toggle days when the Centre is closed (stat holidays, PD days, closures). Weekends are seeded automatically. The "Days Centre open" figure updates live.
-          </p>
-          <label style={{ display: "inline-flex", alignItems: "center", gap: 8, marginBottom: 10, fontSize: 13 }}>
-            <input type="checkbox" checked={holidaysOn} onChange={(e) => toggleHolidays(e.target.checked)} />
-            Include BC statutory holidays as closed days (12 dates/year — New Year, Family Day, Good Friday, Victoria Day, Canada Day, BC Day, Labour Day, Truth &amp; Reconciliation, Thanksgiving, Remembrance Day, Christmas, Boxing Day)
-          </label>
-          <div style={{ display: "grid", gridTemplateColumns: "repeat(7, minmax(0, 1fr))", gap: 8 }}>
-            {["Mon","Tue","Wed","Thu","Fri","Sat","Sun"].map((label) => (
-              <div key={label} style={{
-                fontSize: 11, fontWeight: 700, letterSpacing: 0.5,
-                textTransform: "uppercase", color: "var(--muted)",
-                padding: "4px 6px", textAlign: "center",
-              }}>{label}</div>
-            ))}
-            {(() => {
-              // Leading blanks so day 1 lands under its correct weekday column
-              // (Mon-first: Mon=0..Sun=6).
-              const firstDow = new Date(year, month - 1, 1).getDay(); // 0=Sun
-              const leading = (firstDow + 6) % 7;
-              const blanks = Array.from({ length: leading }, (_, i) => (
-                <div key={`blank-${i}`} />
-              ));
-              const cells = dayNums.map((d) => {
-                const iso = isoDay(year, month, d);
-                const entry = calendar.find((c) => c.day === iso);
-                const closed = entry && !entry.is_open;
-                const dt = new Date(year, month - 1, d);
-                const dow = ["Sun","Mon","Tue","Wed","Thu","Fri","Sat"][dt.getDay()];
-                return (
-                  <div key={iso} style={{
-                    border: "1px solid var(--border, #e5e7eb)", borderRadius: 8, padding: 8,
-                    background: closed ? "#fef2f2" : "#f0fdf4",
-                    minHeight: 68,
-                  }}>
-                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-                      <div style={{ fontWeight: 600 }}>{d} <span style={{ color: "var(--muted)", fontWeight: 400, fontSize: 11 }}>{dow}</span></div>
-                      <button className="btn secondary" style={{ padding: "2px 8px", fontSize: 11 }} onClick={() => toggleCalendarDay(iso, entry)}>
-                        {closed ? "Open" : "Close"}
-                      </button>
-                    </div>
-                    {closed && (
-                      <input
-                        style={{ marginTop: 6, width: "100%", fontSize: 12, boxSizing: "border-box" }}
-                        placeholder="Reason (Stat holiday, PD day…)"
-                        defaultValue={entry?.reason || ""}
-                        onBlur={(e) => updateCalendarReason(iso, e.target.value)}
-                      />
-                    )}
-                  </div>
-                );
-              });
-              return [...blanks, ...cells];
-            })()}
-          </div>
-        </section>
-      )}
+      {/* Centre Calendar edit surface removed in v2.6.7 — moved to Home's
+          Today drawer + Settings → Holidays & Closures. Attendance grid
+          still uses the calendar data below for open/closed day tinting. */}
 
       {/* Grid */}
       <div style={{ overflowX: "auto", border: "1px solid var(--border, #e5e7eb)", borderRadius: 8 }}>

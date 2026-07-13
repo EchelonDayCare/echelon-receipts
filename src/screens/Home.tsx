@@ -8,6 +8,7 @@ import { checkForUpdates, type UpdateStatus } from "../lib/updateCheck";
 import { askEchelon, logQuestion, type AskResult } from "../lib/askEchelon";
 import { useHomeAlerts } from "../hooks/useHomeAlerts";
 import AlertDot from "../components/AlertDot";
+import TodayCard from "../components/TodayCard";
 import type { TileKey } from "../lib/homeAlerts";
 import type { SettingsMap } from "../types";
 
@@ -229,6 +230,8 @@ export default function Home() {
           <span>Some checks didn't finish — click to retry</span>
         </button>
       )}
+
+      <TodayCard />
 
       <div className="home-tiles">
         <button className="home-tile students" style={{ position: "relative" }} onClick={() => nav(tileRoute("students", "/students/today"))}>

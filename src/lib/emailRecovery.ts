@@ -19,6 +19,7 @@
 
 import { invoke } from "@tauri-apps/api/core";
 import { getSettings } from "./db";
+import { deliverabilityExtras } from "./email";
 
 export type EmailRecoveryResult =
   | { ok: true; recipient: string }
@@ -80,6 +81,7 @@ Security notes:
         subject: `[Echelon Recovery Code] ${daycare} — ${stamp}`,
         body_text: body,
         attachments: [],
+        ...deliverabilityExtras(s, sender),
       },
     });
     return { ok: true, recipient };

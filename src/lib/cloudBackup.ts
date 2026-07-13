@@ -4,6 +4,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { readFile, remove } from "@tauri-apps/plugin-fs";
 import { appDataDir, join } from "@tauri-apps/api/path";
 import { getSettings, setSetting } from "./db";
+import { deliverabilityExtras } from "./email";
 import type { SettingsMap } from "../types";
 
 function bytesToBase64(bytes: Uint8Array): string {
@@ -109,6 +110,7 @@ export async function sendCloudBackup(forMonthKey: string): Promise<CloudBackupR
       attachment_b64: encryptedB64,
       attachment_filename: `echelon-${forMonthKey}-${stamp}.db.enc`,
       attachment_mime: "application/octet-stream",
+      ...deliverabilityExtras(s, sender),
     },
   });
 

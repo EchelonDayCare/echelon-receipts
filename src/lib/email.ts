@@ -18,6 +18,35 @@ export function parseRecipients(emailField: string | null | undefined): string[]
     .filter((e) => e.includes("@"));
 }
 
+// Deliverability extras threaded into every send_email call.
+//
+// reply_to:
+//   Gmail (free tier) rewrites the From header to match the authenticated
+//   account. Reply-To, however, is preserved — so if the owner authenticates
+//   as echelondaycare@gmail.com but has a real inbox at contact@daycare.ca,
+//   parents replying will still reach that inbox.
+//
+// list_unsubscribe:
+//   Google's Feb-2024 sender rules made List-Unsubscribe (RFC 8058) a strong
+//   inbox-placement signal even at low volume. mailto: with subject=unsubscribe
+//   is honored by Gmail and lands the request in the sender's own inbox for
+//   manual handling.
+export function deliverabilityExtras(s: SettingsMap, sender: string): {
+  reply_to?: string;
+  list_unsubscribe?: string;
+} {
+  const contact = (s.contact_email || "").trim();
+  const senderLc = sender.trim().toLowerCase();
+  const out: { reply_to?: string; list_unsubscribe?: string } = {};
+  if (contact && contact.toLowerCase() !== senderLc) {
+    out.reply_to = contact;
+  }
+  if (senderLc) {
+    out.list_unsubscribe = `mailto:${senderLc}?subject=unsubscribe`;
+  }
+  return out;
+}
+
 function fmtAmount(n: number): string {
   return n.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 }
@@ -141,6 +170,7 @@ export async function sendAnnualReceiptEmail(opts: {
         subject, body_text: body,
         attachment_b64: bytesToBase64(pdfBytes),
         attachment_filename: filename,
+        ...deliverabilityExtras(s, sender),
       },
     });
   } catch (e: any) {
@@ -201,6 +231,7 @@ export async function sendReceiptEmail(opts: {
         body_text: body,
         attachment_b64: b64,
         attachment_filename: filename,
+        ...deliverabilityExtras(s, sender),
       },
     });
   } catch (e: any) {
@@ -257,6 +288,7 @@ export async function sendTestEmail(s: SettingsMap): Promise<void> {
       body_text: "✅ SMTP is working. You can now email receipts from the app.",
       attachment_b64: btoa("test"),
       attachment_filename: "test.txt",
+      ...deliverabilityExtras(s, sender),
     },
   });
 }

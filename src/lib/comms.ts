@@ -2,7 +2,7 @@
 // See src/screens/comms/* for the UI.
 import { invoke } from "@tauri-apps/api/core";
 import { db, execRetry, listStudents } from "./db";
-import { parseRecipients } from "./email";
+import { parseRecipients, deliverabilityExtras } from "./email";
 import type { Student, SettingsMap } from "../types";
 
 export interface MessageTemplate {
@@ -383,6 +383,7 @@ export async function sendGroupEmail(opts: GroupSendOptions): Promise<GroupSendR
           subject: perSubject,
           body_text: perBody,
           attachments,
+          ...deliverabilityExtras(s, sender),
         },
       });
       sent++;

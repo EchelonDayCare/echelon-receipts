@@ -1,5 +1,5 @@
 use base64::Engine;
-use lettre::message::header::ContentType;
+use lettre::message::header::{ContentType, HeaderName, HeaderValue};
 use lettre::message::{Attachment, MultiPart, SinglePart};
 use lettre::transport::smtp::authentication::Credentials;
 use lettre::{Message, SmtpTransport, Transport};
@@ -36,6 +36,18 @@ pub struct SendEmailArgs {
     // single-attachment fields. Pass an empty array for body-only emails.
     #[serde(default)]
     pub attachments: Option<Vec<EmailAttachment>>,
+    // Deliverability additions (v2.6.7): all optional so existing callers work.
+    // reply_to: where replies should go. If different from from_email, we set
+    // the header. Gmail rewrites From to match SMTP auth, but Reply-To is kept
+    // intact — parents replying still reach the intended inbox.
+    #[serde(default)]
+    pub reply_to: Option<String>,
+    // list_unsubscribe: RFC 8058 mailto:/https: value. When set we also emit
+    // List-Unsubscribe-Post so Gmail can honour one-click unsubscribe. Required
+    // for bulk sends under Google's Feb-2024 sender rules; harmless on
+    // one-off transactional receipts.
+    #[serde(default)]
+    pub list_unsubscribe: Option<String>,
 }
 
 #[tauri::command]
@@ -48,6 +60,12 @@ pub async fn send_email(args: SendEmailArgs) -> Result<(), String> {
             .parse()
             .map_err(|e: lettre::address::AddressError| format!("from: {e}"))?;
         let mut builder = Message::builder().from(from).subject(args.subject);
+        if let Some(rt) = args.reply_to.as_ref().map(|s| s.trim()).filter(|s| !s.is_empty()) {
+            let parsed = rt
+                .parse()
+                .map_err(|e: lettre::address::AddressError| format!("reply_to {rt}: {e}"))?;
+            builder = builder.reply_to(parsed);
+        }
         for t in &args.to {
             builder = builder.to(t.parse().map_err(|e: lettre::address::AddressError| format!("to {t}: {e}"))?);
         }
@@ -92,7 +110,7 @@ pub async fn send_email(args: SendEmailArgs) -> Result<(), String> {
         })();
         let attachments = bytes_result?;
 
-        let email = if attachments.is_empty() {
+        let mut email = if attachments.is_empty() {
             builder
                 .singlepart(SinglePart::plain(args.body_text))
                 .map_err(|e| format!("build: {e}"))?
@@ -103,6 +121,46 @@ pub async fn send_email(args: SendEmailArgs) -> Result<(), String> {
             }
             builder.multipart(mp).map_err(|e| format!("build: {e}"))?
         };
+
+        // Deliverability headers, injected after build because lettre 0.11
+        // requires a typed `Header` impl on the builder API but exposes raw
+        // insertion on `Message::headers_mut()`.
+        //
+        // X-Mailer: identifies our transactional app to inbox providers.
+        // Cheap signal of legitimate tooling.
+        {
+            let headers = email.headers_mut();
+            headers.insert_raw(HeaderValue::new(
+                HeaderName::new_from_ascii_str("X-Mailer"),
+                format!("Echelon Receipts/{}", env!("CARGO_PKG_VERSION")),
+            ));
+            // List-Unsubscribe + List-Unsubscribe-Post: RFC 8058 one-click
+            // unsubscribe. Required by Gmail's Feb-2024 bulk sender rules;
+            // safe (and mildly positive) even on single-recipient receipts.
+            if let Some(lu) = args
+                .list_unsubscribe
+                .as_ref()
+                .map(|s| s.trim())
+                .filter(|s| !s.is_empty())
+            {
+                headers.insert_raw(HeaderValue::new(
+                    HeaderName::new_from_ascii_str("List-Unsubscribe"),
+                    format!("<{}>", lu),
+                ));
+                // RFC 8058 §3.1: List-Unsubscribe-Post: One-Click is only
+                // valid when the List-Unsubscribe value contains an HTTPS
+                // URI (POST-able). With a mailto:-only target, strict
+                // receivers treat the Post header as a misconfiguration.
+                // Gate accordingly so we can safely add an HTTPS endpoint
+                // later and get the One-Click benefit without changing Rust.
+                if lu.to_ascii_lowercase().contains("https:") {
+                    headers.insert_raw(HeaderValue::new(
+                        HeaderName::new_from_ascii_str("List-Unsubscribe-Post"),
+                        "List-Unsubscribe=One-Click".to_string(),
+                    ));
+                }
+            }
+        }
 
         let creds = Credentials::new(args.smtp_user, smtp_password.clone());
         let pw = smtp_password;
