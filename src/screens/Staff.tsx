@@ -1,4 +1,4 @@
-import { showConfirm, showPrompt } from "../lib/dialogs";
+import { showAlert, showConfirm, showPrompt } from "../lib/dialogs";
 import { useEffect, useMemo, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import { readFile } from "@tauri-apps/plugin-fs";
@@ -11,6 +11,7 @@ import {
   listHoursForMonth, upsertHour, deleteHour, hoursBetween, paidHours,
   assertStaffHoursSchema, countHoursForStaffMonth, deleteHoursForStaffMonth,
 } from "../lib/staff";
+import { listShiftsForMonth, shiftHours } from "../repo/scheduleRepo";
 import { fileToMime } from "../lib/ai";
 import { isValidE164 } from "../lib/whatsapp";
 import {
@@ -64,6 +65,92 @@ export default function StaffScreen() {
   // Per-employee collapse state on the entries card. Uses staff.id. Persists
   // for the life of the screen mount; refresh() does not reset it.
   const [collapsedStaff, setCollapsedStaff] = useState<Set<number>>(new Set());
+
+  // v2.6.5: Schedule-vs-Hours cross-validator. Owner clicks the
+  // "Validate with Schedule" button on the entries card → informative
+  // modal explains rules → confirm → we sum this month's Hours-tab
+  // total per staff and the same month's Schedule shifts (excluding
+  // cancelled + non-worked-status rows), and diff at 0.01h tolerance.
+  const [validationBusy, setValidationBusy] = useState(false);
+  const [validationInfoOpen, setValidationInfoOpen] = useState(false);
+  const [validationResult, setValidationResult] = useState<null | {
+    yearLabel: number;
+    monthLabel: number;
+    rows: Array<{
+      staffId: number;
+      staffName: string;
+      hoursTotal: number;
+      scheduleTotal: number;
+      delta: number;
+      match: boolean;
+      note?: string;
+    }>;
+  }>(null);
+
+  async function runScheduleValidation() {
+    setValidationBusy(true);
+    try {
+      // Capture month at click time and fetch BOTH sides fresh from DB.
+      // Avoid using `rows` state — it can lag behind month changes or
+      // overlapping refresh() calls, producing a mislabeled comparison.
+      const yr = year;
+      const mo = month;
+      const [shifts, hoursRows] = await Promise.all([
+        listShiftsForMonth(yr, mo),
+        listHoursForMonth(yr, mo),
+      ]);
+      // Sum schedule hours per staff (string staffId in the shifts table
+      // — the app stores staff IDs as strings on shifts and as numbers
+      // on staff_hours; join by casting to string).
+      const scheduleByStaff = new Map<string, number>();
+      for (const s of shifts) {
+        if (s.status === "cancelled") continue;
+        const h = shiftHours(s);
+        scheduleByStaff.set(s.staffId, (scheduleByStaff.get(s.staffId) ?? 0) + h);
+      }
+      // Sum Hours-tab per staff and note any noLunch=true entries.
+      const hoursByStaff = new Map<number, number>();
+      const noLunchIds = new Set<number>();
+      for (const r of hoursRows) {
+        hoursByStaff.set(r.staff_id, (hoursByStaff.get(r.staff_id) ?? 0) + r.hours_decimal);
+        if ((r as any).no_lunch) noLunchIds.add(r.staff_id);
+      }
+      // Build the union of staff that have any activity on either side.
+      const allIds = new Set<number>();
+      for (const id of hoursByStaff.keys()) allIds.add(id);
+      for (const idStr of scheduleByStaff.keys()) {
+        const n = Number(idStr);
+        if (!Number.isNaN(n)) allIds.add(n);
+      }
+      const staffById = new Map<number, string>();
+      for (const s of staff) staffById.set(s.id, s.name);
+      const out: NonNullable<typeof validationResult>["rows"] = [];
+      for (const id of Array.from(allIds).sort((a, b) => (staffById.get(a) ?? "").localeCompare(staffById.get(b) ?? ""))) {
+        const hoursTotal = Math.round((hoursByStaff.get(id) ?? 0) * 100) / 100;
+        const scheduleTotal = Math.round((scheduleByStaff.get(String(id)) ?? 0) * 100) / 100;
+        const delta = Math.round((hoursTotal - scheduleTotal) * 100) / 100;
+        const notes: string[] = [];
+        if (noLunchIds.has(id)) notes.push("has no-lunch override");
+        if (!hoursByStaff.has(id)) notes.push("no Hours entries");
+        if (!scheduleByStaff.has(String(id))) notes.push("no scheduled shifts");
+        out.push({
+          staffId: id,
+          staffName: staffById.get(id) ?? `#${id}`,
+          hoursTotal,
+          scheduleTotal,
+          delta,
+          match: Math.abs(delta) < 0.01,
+          note: notes.length ? notes.join(" · ") : undefined,
+        });
+      }
+      setValidationResult({ yearLabel: yr, monthLabel: mo, rows: out });
+    } catch (e: any) {
+      await showAlert(`Validation failed: ${String(e?.message ?? e)}`, { kind: "error" });
+    } finally {
+      setValidationBusy(false);
+    }
+  }
+
   function toggleCollapsed(staffId: number) {
     setCollapsedStaff((prev) => {
       const next = new Set(prev);
@@ -954,6 +1041,15 @@ export default function StaffScreen() {
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 12, flexWrap: "wrap", gap: 8 }}>
           <h3 style={{ margin: 0 }}>{MONTHS[month - 1]} {year} entries</h3>
           <div style={{ display: "flex", alignItems: "baseline", gap: 12, flexWrap: "wrap" }}>
+            <button
+              type="button"
+              className="btn secondary"
+              onClick={() => setValidationInfoOpen(true)}
+              style={{ fontSize: 12, padding: "4px 10px" }}
+              title="Cross-check this month's Hours entries against the Schedule"
+            >
+              🔍 Validate with Schedule
+            </button>
             {rows.length > 0 && (() => {
               const staffWithRows = activeStaff.concat(staff.filter((s) => !s.active && rowsByStaff.has(s.id)))
                 .filter((s) => (rowsByStaff.get(s.id) || []).length > 0);
@@ -1037,6 +1133,113 @@ export default function StaffScreen() {
           })
         )}
       </section>
+
+      {/* v2.6.5: Schedule cross-validator — info modal */}
+      {validationInfoOpen && (
+        <div className="modal-backdrop" onClick={() => setValidationInfoOpen(false)}>
+          <div className="modal" onClick={(e) => e.stopPropagation()} style={{ maxWidth: 560 }}>
+            <h2 style={{ marginTop: 0, marginBottom: 8 }}>Validate Hours against Schedule</h2>
+            <p style={{ marginTop: 0, marginBottom: 12, color: "var(--muted)" }}>
+              Compares each staff member's {MONTHS[month - 1]} {year} Hours-tab total
+              against the sum of their scheduled shifts for the same month. Totals
+              should match to the cent.
+            </p>
+            <div style={{ background: "#f8fafc", border: "1px solid var(--border)", borderRadius: 8, padding: 12, fontSize: 13, marginBottom: 12 }}>
+              <div style={{ fontWeight: 600, marginBottom: 6 }}>Shared rules (both sides)</div>
+              <ul style={{ margin: "0 0 10px 18px", padding: 0 }}>
+                <li>Calendar month only (1st through last day)</li>
+                <li>Auto-deduct 30 minutes for shifts ≥ 5 hours</li>
+                <li>Vacation, sick, and personal days are unpaid → not counted</li>
+                <li>Statutory holidays and centre-closed days are unpaid → not counted</li>
+                <li>Cancelled shifts are excluded</li>
+              </ul>
+              <div style={{ fontWeight: 600, marginBottom: 6 }}>Legitimate reasons for a mismatch</div>
+              <ul style={{ margin: "0 0 0 18px", padding: 0, color: "#92400e" }}>
+                <li>A Schedule shift has an <b>explicit break other than 30 min</b> in its drawer</li>
+                <li>An Hours row has <b>"worked through lunch" (no-lunch)</b> ticked</li>
+                <li>A shift was added to only one side (data-entry gap)</li>
+                <li>The AI misread a timesheet — <b>this is what this check is for</b></li>
+              </ul>
+            </div>
+            <div style={{ display: "flex", justifyContent: "flex-end", gap: 8 }}>
+              <button className="btn secondary" onClick={() => setValidationInfoOpen(false)}>Cancel</button>
+              <button
+                className="btn"
+                disabled={validationBusy}
+                onClick={async () => {
+                  setValidationInfoOpen(false);
+                  await runScheduleValidation();
+                }}
+              >
+                {validationBusy ? "Running…" : "Run validation"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* v2.6.5: Schedule cross-validator — result modal */}
+      {validationResult && (
+        <div className="modal-backdrop" onClick={() => setValidationResult(null)}>
+          <div className="modal" onClick={(e) => e.stopPropagation()} style={{ maxWidth: 720 }}>
+            <h2 style={{ marginTop: 0, marginBottom: 4 }}>
+              {MONTHS[validationResult.monthLabel - 1]} {validationResult.yearLabel} — Hours vs Schedule
+            </h2>
+            {(() => {
+              const mismatches = validationResult.rows.filter((r) => !r.match);
+              return (
+                <p style={{ marginTop: 0, marginBottom: 12, color: mismatches.length === 0 ? "#166534" : "#991b1b", fontWeight: 600 }}>
+                  {mismatches.length === 0
+                    ? `✓ All ${validationResult.rows.length} staff totals match.`
+                    : `✗ ${mismatches.length} of ${validationResult.rows.length} staff totals do not match.`}
+                </p>
+              );
+            })()}
+            <div style={{ maxHeight: "50vh", overflow: "auto", border: "1px solid var(--border)", borderRadius: 8 }}>
+              <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
+                <thead style={{ position: "sticky", top: 0, background: "#f8fafc" }}>
+                  <tr>
+                    <th style={{ textAlign: "left", padding: 8, borderBottom: "1px solid var(--border)" }}>Staff</th>
+                    <th style={{ textAlign: "right", padding: 8, borderBottom: "1px solid var(--border)" }}>Hours tab</th>
+                    <th style={{ textAlign: "right", padding: 8, borderBottom: "1px solid var(--border)" }}>Schedule</th>
+                    <th style={{ textAlign: "right", padding: 8, borderBottom: "1px solid var(--border)" }}>Δ</th>
+                    <th style={{ textAlign: "left", padding: 8, borderBottom: "1px solid var(--border)" }}>Note</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {validationResult.rows.map((r) => (
+                    <tr key={r.staffId} style={{ background: r.match ? "transparent" : "#fef2f2" }}>
+                      <td style={{ padding: 8, borderBottom: "1px solid var(--border)" }}>
+                        {r.match ? "✓" : "✗"} {r.staffName}
+                      </td>
+                      <td style={{ padding: 8, borderBottom: "1px solid var(--border)", textAlign: "right", fontFamily: "ui-monospace, monospace" }}>
+                        {r.hoursTotal.toFixed(2)}
+                      </td>
+                      <td style={{ padding: 8, borderBottom: "1px solid var(--border)", textAlign: "right", fontFamily: "ui-monospace, monospace" }}>
+                        {r.scheduleTotal.toFixed(2)}
+                      </td>
+                      <td style={{
+                        padding: 8, borderBottom: "1px solid var(--border)", textAlign: "right",
+                        fontFamily: "ui-monospace, monospace",
+                        color: r.match ? "var(--muted)" : "#991b1b",
+                        fontWeight: r.match ? 400 : 600,
+                      }}>
+                        {r.delta > 0 ? "+" : ""}{r.delta.toFixed(2)}
+                      </td>
+                      <td style={{ padding: 8, borderBottom: "1px solid var(--border)", color: "var(--muted)", fontSize: 12 }}>
+                        {r.note ?? ""}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+            <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 12 }}>
+              <button className="btn" onClick={() => setValidationResult(null)}>Close</button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Edit modal */}
       {editing && (
