@@ -583,7 +583,7 @@ export default function MonthlyAttendance() {
         col.day.narrow { width: 1.6%; }
         col.day.wide { width: auto; }
         th, td {
-          border: 1px solid #333; padding: ${padY}px 2px;
+          border: 1px solid #333; padding: ${padY}px 1px;
           text-align: center; height: ${rowH}px;
           overflow: hidden;
         }
