@@ -15,7 +15,7 @@ import { listShiftsForMonth, shiftHours } from "../repo/scheduleRepo";
 import { fileToMime } from "../lib/ai";
 import { isValidE164 } from "../lib/whatsapp";
 import {
-  extractTimesheetConsensus, computeConsensus, editCell, PROVIDER_LABELS,
+  editCell, PROVIDER_LABELS,
   extractTimesheetGrid, projectV2ToConsensus,
   type ConsensusAlignment, type ConsensusRow, type Confidence, type ProviderName,
 } from "../lib/ocr";
@@ -505,14 +505,14 @@ export default function StaffScreen() {
       const bytes = await readFile(picked);
       const mime = fileToMime(picked);
 
-      const useV2 = settings.use_ocr_v2 === "1";
+      // v2 pipeline is the only OCR path — v1 fallback removed in v2.6.8.
       let align: ConsensusAlignment;
       let providerMeta: Array<{ provider: ProviderName; ok: boolean; error: string | null; latency_ms: number; rowCount: number; rawText: string }>;
       let sheetMonthKey: string | undefined;
       let ambiguousBanner = "";
       let couldntReadBanner = "";
 
-      if (useV2) {
+      {
         const scanMonthKey = qrMonthKey || monthKey(year, month);
         // STAT dates for this month, sourced from Settings (not from AI).
         // Weekends are handled deterministically by the backend.
@@ -564,24 +564,6 @@ export default function StaffScreen() {
         if (projected.couldntReadCount > 0) {
           couldntReadBanner = `⚠ ${projected.couldntReadCount} row(s) couldn't be read confidently — review them at the bottom before importing.`;
         }
-      } else {
-        const result = await extractTimesheetConsensus({
-          imageBytes: bytes, mimeType: mime,
-          monthYear: qrMonthKey || monthKey(year, month),
-          knownStaffNames: activeStaff.map((s) => s.name),
-          enableMistralOcr: settings.enable_mistral_ocr !== "0",
-          enableAzureDi: settings.enable_azure_di !== "0",
-        });
-        align = computeConsensus(result, activeStaff, qrMonthKey || null);
-        sheetMonthKey = qrMonthKey || align.detectedMonthYear || undefined;
-        providerMeta = result.providers.map((p) => ({
-          provider: p.provider as ProviderName,
-          ok: p.ok,
-          error: p.error,
-          latency_ms: p.latency_ms,
-          rowCount: p.rows.length,
-          rawText: p.raw_text,
-        }));
       }
 
       const uiMonthKey = monthKey(year, month);

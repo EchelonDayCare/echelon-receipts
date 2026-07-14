@@ -718,8 +718,8 @@ export function editCell(cell: ConsensusCell, newValue: string | null): Consensu
 
 
 // ═════════════════════════════════════════════════════════════════════════
-// v2 pipeline (consensus_v2.rs) — grid-primitive backend.
-// Called only when settings.use_ocr_v2 === "1". Projects the new backend's
+// v2 pipeline (consensus_v2.rs) — grid-primitive backend. This is the only
+// OCR path since v2.6.8. Projects the new backend's
 // {confident, please_check, couldnt_read} shape into the existing
 // ConsensusResult so the current UI can render it without changes.
 // ═════════════════════════════════════════════════════════════════════════
