@@ -715,3 +715,198 @@ function rank(c: Confidence): number {
 export function editCell(cell: ConsensusCell, newValue: string | null): ConsensusCell {
   return { ...cell, value: newValue, confidence: "green", edited: true };
 }
+
+
+// ═════════════════════════════════════════════════════════════════════════
+// v2 pipeline (consensus_v2.rs) — grid-primitive backend.
+// Called only when settings.use_ocr_v2 === "1". Projects the new backend's
+// {confident, please_check, couldnt_read} shape into the existing
+// ConsensusResult so the current UI can render it without changes.
+// ═════════════════════════════════════════════════════════════════════════
+
+export interface V2ColumnCandidate { staff_id: number; staff_name: string; score: number; }
+export type V2ColumnDecision =
+  | { kind: "Confident"; staff_id: number; staff_name: string }
+  | { kind: "Ambiguous"; candidates: V2ColumnCandidate[] }
+  | { kind: "Empty" }
+  | { kind: "Unknown"; header_read: string };
+export interface V2ResolvedColumn {
+  col: number;
+  decision: V2ColumnDecision;
+  confidence: number;
+  header_reads: Array<{ engine: string; col: number; text: string; confidence: number }>;
+}
+export type V2Verdict =
+  | { verdict: "Confident" }
+  | { verdict: "PleaseCheck"; reasons: string[] }
+  | { verdict: "CouldntRead"; reasons: string[] };
+export type V2DayType = "worked" | "stat" | "sick" | "vacation" | "off";
+export interface V2ProposedRow {
+  staff_id: number | null;
+  staff_name: string | null;
+  column_index: number;
+  work_date: string;
+  in_time: string | null;
+  out_time: string | null;
+  no_lunch: boolean;
+  day_type: V2DayType;
+  verdict: V2Verdict;
+  confidence: number;
+  column_candidates: V2ColumnCandidate[];
+}
+export interface V2GridResult {
+  confident: V2ProposedRow[];
+  please_check: V2ProposedRow[];
+  couldnt_read: V2ProposedRow[];
+  columns: V2ResolvedColumn[];
+  stat_days: number[];
+  detected_month_year: string | null;
+  engines_ok: string[];
+  engines_failed: Array<[string, string]>;
+  month_key: string;
+  raw_by_engine: Array<[string, string]>;
+  cells_by_engine?: Array<[string, number]>;
+}
+
+export async function extractTimesheetGrid(opts: {
+  imageBytes: Uint8Array;
+  mimeType: string;
+  monthYear: string;
+  roster: Array<{ id: number; name: string }>;
+  centreOpenTime: string;
+  centreCloseTime: string;
+  centreHoursSlackMin: string;
+  manifest?: Array<{ col: number; staff_id: number; staff_name: string }>;
+  enableMistralOcr?: boolean;
+  enableAzureDi?: boolean;
+  /** ISO YYYY-MM-DD dates that are statutory holidays for the month
+   *  being scanned. The backend emits a STAT row per non-empty column
+   *  for each date and silently drops any AI-reported time value that
+   *  falls on these days. Weekends are handled by the backend
+   *  deterministically; do NOT include them here. */
+  statDates?: string[];
+}): Promise<V2GridResult> {
+  const image_b64 = bytesToB64(opts.imageBytes);
+  return await invoke<V2GridResult>("extract_timesheet_grid", {
+    args: {
+      image_b64,
+      mime_type: opts.mimeType,
+      month_year: opts.monthYear,
+      roster: opts.roster,
+      manifest: opts.manifest ?? null,
+      centre_open_time: opts.centreOpenTime,
+      centre_close_time: opts.centreCloseTime,
+      centre_hours_slack_min: opts.centreHoursSlackMin,
+      enable_mistral_ocr: opts.enableMistralOcr ?? true,
+      enable_azure_di: opts.enableAzureDi ?? true,
+      stat_dates: opts.statDates ?? [],
+    },
+  });
+}
+
+// Project v2 result into the existing ConsensusAlignment shape. Every row
+// gets 3 synthetic "agreeing" votes so the existing consensus UI renders
+// them as green/yellow/red based on the v2 verdict, not per-provider spread.
+export function projectV2ToConsensus(
+  v2: V2GridResult,
+  staff: Staff[],
+  uiMonthKey: string,
+): { align: ConsensusAlignment; providerMeta: Array<{ provider: ProviderName; ok: boolean; error: string | null; latency_ms: number; rowCount: number; rawText: string }>; ambiguousColumns: V2ResolvedColumn[]; couldntReadCount: number } {
+  const _monthKey = v2.detected_month_year ?? v2.month_key ?? uiMonthKey;
+  void _monthKey;
+  const semanticOrder: ProviderName[] = ["gpt5", "azure_di"];
+  const engineOk = new Set(v2.engines_ok);
+
+  const mkVotes = (val: string | null, isEffective: boolean): CellVote[] =>
+    semanticOrder.map((prov) => ({
+      provider: prov,
+      value: val,
+      sawRow: isEffective && val !== null,
+    })).concat([{ provider: "mistral_ocr" as ProviderName, value: null, sawRow: false }]);
+
+  const toRow = (r: V2ProposedRow, effective: boolean): ConsensusRow => {
+    const conf: Confidence = r.verdict.verdict === "Confident" ? "green"
+      : r.verdict.verdict === "PleaseCheck" ? "yellow" : "red";
+    const reasons = "reasons" in r.verdict ? r.verdict.reasons : [];
+    const isStat = r.day_type === "stat";
+    const nlValue = r.no_lunch ? "true" : "false";
+    const staffMatch = r.staff_id != null ? staff.find((s) => s.id === r.staff_id) : null;
+    const canonName = staffMatch?.name ?? r.staff_name ?? `Column ${r.column_index + 1}`;
+
+    const inVotes = mkVotes(r.in_time, effective);
+    const outVotes = mkVotes(r.out_time, effective);
+    const nlVotes = mkVotes(nlValue, effective);
+
+    const warnings: string[] = [...reasons];
+    if (isStat) warnings.unshift("STAT holiday — recorded, not paid as hours");
+    if (r.column_candidates.length > 0) {
+      warnings.unshift(
+        `Ambiguous column ${r.column_index + 1}: ` +
+        r.column_candidates.map((c) => c.staff_name).join(" / ") +
+        ". Pick the right staff before importing."
+      );
+    }
+
+    // Rows without a resolved staff_id can't be keyed into an existing
+    // staff — give them a negative synthetic id keyed on column so the
+    // UI still renders them (ImportUI will skip staff_id<0 on import).
+    const effectiveStaffId = r.staff_id ?? -(r.column_index + 1);
+
+    return {
+      key: `${effectiveStaffId}|${r.work_date}`,
+      staff_id: effectiveStaffId,
+      staff_name_canonical: canonName,
+      staff_names_seen: [canonName],
+      work_date: r.work_date,
+      in_time: { value: r.in_time, votes: inVotes, confidence: conf, edited: false },
+      out_time: { value: r.out_time, votes: outVotes, confidence: conf, edited: false },
+      no_lunch: { value: nlValue, votes: nlVotes, confidence: "green", edited: false },
+      phantom: false,
+      row_confidence: conf,
+      warnings,
+    };
+  };
+
+  const effective = engineOk.size > 0;
+  const rows: ConsensusRow[] = [];
+  for (const r of v2.confident) rows.push(toRow(r, effective));
+  for (const r of v2.please_check) rows.push(toRow(r, effective));
+  for (const r of v2.couldnt_read) rows.push(toRow(r, effective));
+
+  rows.sort((a, b) =>
+    a.staff_name_canonical.localeCompare(b.staff_name_canonical) ||
+    a.work_date.localeCompare(b.work_date)
+  );
+
+  const ambiguousColumns = v2.columns.filter((c) =>
+    c.decision.kind === "Ambiguous" || c.decision.kind === "Unknown"
+  );
+
+  const cellsFor = (name: string): number =>
+    v2.cells_by_engine?.find(([n]) => n === name)?.[1] ?? 0;
+
+  const providerMeta = [
+    { provider: "gpt5" as ProviderName, ok: engineOk.has("doc_ai"),
+      error: v2.engines_failed.find(([n]) => n === "doc_ai")?.[1] ?? null,
+      latency_ms: 0, rowCount: cellsFor("doc_ai"),
+      rawText: v2.raw_by_engine.find(([n]) => n === "doc_ai")?.[1] ?? "" },
+    { provider: "mistral_ocr" as ProviderName, ok: engineOk.has("mistral_ocr"),
+      error: v2.engines_failed.find(([n]) => n === "mistral_ocr")?.[1] ?? null,
+      latency_ms: 0, rowCount: cellsFor("mistral_ocr"),
+      rawText: v2.raw_by_engine.find(([n]) => n === "mistral_ocr")?.[1] ?? "" },
+    { provider: "azure_di" as ProviderName, ok: engineOk.has("azure_di"),
+      error: v2.engines_failed.find(([n]) => n === "azure_di")?.[1] ?? null,
+      latency_ms: 0, rowCount: cellsFor("azure_di"),
+      rawText: v2.raw_by_engine.find(([n]) => n === "azure_di")?.[1] ?? "" },
+  ];
+
+  const align: ConsensusAlignment = {
+    rows,
+    unmatchedNames: [],
+    detectedMonthYear: v2.detected_month_year ?? null,
+    succeededProviders: providerMeta.filter((p) => p.ok).map((p) => p.provider),
+    failedProviders: providerMeta.filter((p) => !p.ok).map((p) => ({ provider: p.provider, error: p.error ?? "unknown" })),
+  };
+
+  return { align, providerMeta, ambiguousColumns, couldntReadCount: v2.couldnt_read.length };
+}

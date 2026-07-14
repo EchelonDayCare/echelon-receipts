@@ -7,8 +7,15 @@ function hoursBetween(inT: string | null, outT: string | null): number {
   const [ih, im] = inT.split(":").map(Number);
   const [oh, om] = outT.split(":").map(Number);
   if ([ih, im, oh, om].some((n) => Number.isNaN(n))) return 0;
-  let mins = (oh * 60 + om) - (ih * 60 + im);
-  if (mins < 0) mins += 24 * 60; // crossed midnight
+  const inMins = ih * 60 + im;
+  const outMins = oh * 60 + om;
+  // Daycare shifts never cross midnight. Previous behaviour of adding 24h
+  // produced 20-hour phantom shifts (e.g. handwritten "7 40" PM in an OUT
+  // cell was read as 07:40 AM). Rust temporal_validator is the primary
+  // enforcement point; this is defence-in-depth.
+  if (outMins <= inMins) return 0;
+  const mins = outMins - inMins;
+  if (mins > 16 * 60) return 0; // >16h is corruption regardless of context
   return Math.round((mins / 60) * 100) / 100;
 }
 

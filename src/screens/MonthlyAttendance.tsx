@@ -18,7 +18,8 @@ import { extractMonthAttendance, fileToMime } from "../lib/ai";
 import { h } from "../lib/html";
 import { showConfirm, showPrompt } from "../lib/dialogs";
 import { inactiveLabel } from "../lib/inactiveLabel";
-import { isBcHolidaysEnabled } from "../lib/centreCalendar";
+import { isBcHolidaysEnabled, getDisabledBcHolidayIds } from "../lib/centreCalendar";
+import { bcStatHolidays } from "../lib/bcHolidays";
 import { printHtmlDocument } from "../lib/print";
 import { OcrProgressBanner, MONTH_OCR_STAGES } from "../components/OcrProgressBanner";
 
@@ -368,24 +369,76 @@ export default function MonthlyAttendance() {
   }
 
   function printBlank() {
+    void _printBlank().catch((e) => show("Print failed: " + (e as Error).message, "err"));
+  }
+
+  async function _printBlank() {
     const monthLabel = `${MONTH_NAMES[month-1]}'${String(year).slice(-2)}`;
+
+    // STAT holidays for the year, honouring per-holiday opt-out. Rendered
+    // as amber cells distinct from generic closed-day grey.
+    let statSet = new Set<string>();
+    try {
+      if (await isBcHolidaysEnabled()) {
+        const disabled = new Set(await getDisabledBcHolidayIds());
+        for (const h of bcStatHolidays(year)) {
+          if (!disabled.has(h.id)) statSet.add(h.iso);
+        }
+      }
+    } catch { /* non-fatal: sheet still prints without STAT tint */ }
+
+    // QR manifest — encodes the printed roster IDs in the exact row order
+    // the table renders below. Must match `cells` (which can include
+    // inactive students with attendance history) so downstream OCR can map
+    // row N → student_ids[N-1] without ambiguity.
+    const sheetId = `ED-STU-${year}-${String(month).padStart(2, "0")}`;
+    const qrPayload = {
+      centre: daycareName || "Echelon",
+      year,
+      month,
+      sheet_id: sheetId,
+      kind: "attendance",
+      student_ids: cells.map((c) => c.student_id),
+      rows: cells.length,
+      v: 2,
+    };
+    const QRCode = await import("qrcode");
+    const qrDataUrl = await QRCode.toDataURL(JSON.stringify(qrPayload), {
+      errorCorrectionLevel: "M",
+      margin: 1,
+      width: 128,
+      color: { dark: "#000000", light: "#FFFFFF" },
+    });
+
     // Fit strictly on one landscape page — shrink row height + font as the
     // child count grows. Landscape Letter usable area (with 6mm body padding)
-    // is roughly 800px of vertical space for the table.
+    // is roughly 780px of vertical space for the table. Row min/max bumped
+    // by 4px per user request (Jul'26) — the sheet now breathes vertically.
     const nRows = Math.max(1, cells.length);
-    const TABLE_AVAIL_PX = 780; // after header + legend + margins
-    const rowH = Math.max(11, Math.min(22, Math.floor(TABLE_AVAIL_PX / (nRows + 1))));
-    const fontPx = rowH <= 13 ? 8 : rowH <= 16 ? 9 : 10;
+    const TABLE_AVAIL_PX = 780;
+    const rowH = Math.max(15, Math.min(26, Math.floor(TABLE_AVAIL_PX / (nRows + 1)) - 1));
+    const fontPx = rowH <= 17 ? 8 : rowH <= 20 ? 9 : 10;
     const nameFontPx = fontPx + 1;
     const padY = Math.max(1, Math.floor(rowH / 8));
+    // Print variant of the child name — first + last only. Drops middle
+    // names so 25-child months don't ellipsis-truncate. Keeps trailing
+    // possessive ("'s") that Luxmi's original sheet uses.
+    const firstLast = (full: string): string => {
+      const parts = full.trim().split(/\s+/).filter(Boolean);
+      if (parts.length <= 2) return full.trim();
+      return `${parts[0]} ${parts[parts.length - 1]}`;
+    };
+
     const rowsHtml = cells.map((c) => `
       <tr${c.active ? "" : ' style="opacity:0.6"'}>
-        <td class="name">${h(c.student_name)}${c.active ? "" : ` <span style="font-style:italic;color:#6b7280">${h(inactiveLabel("student", c.withdrawn_at))}</span>`}</td>
+        <td class="name">${h(firstLast(c.student_name))}${c.active ? "" : ` <span style="font-style:italic;color:#6b7280">${h(inactiveLabel("student", c.withdrawn_at))}</span>`}</td>
         ${dayNums.map((d) => {
           const iso = isoDay(year, month, d);
+          const isStat = statSet.has(iso);
           const closed = closedByIso.get(iso);
-          const style = closed ? ' class="closed"' : "";
-          return `<td${style}></td>`;
+          const cls = isStat ? "stat" : closed ? "closed" : "";
+          const content = isStat ? '<span class="statmark">STAT</span>' : "";
+          return `<td${cls ? ` class="${cls}"` : ""}>${content}</td>`;
         }).join("")}
       </tr>`).join("");
     const headerCells = dayNums.map((d) => `<th>${d}</th>`).join("");
@@ -399,15 +452,31 @@ export default function MonthlyAttendance() {
         body {
           font-family: -apple-system, "Segoe UI", sans-serif;
           font-size: ${fontPx}px;
-          padding: 6mm 8mm;
+          padding: 5mm 3mm;
           -webkit-print-color-adjust: exact;
           print-color-adjust: exact;
+          position: relative;
         }
-        h1 { margin: 0 0 2px; font-size: 14px; }
-        .meta { margin: 0 0 6px; font-size: 10px; }
-        table { border-collapse: collapse; width: 100%; table-layout: fixed; }
-        col.day { width: 2.7%; }
-        col.name { width: 15%; }
+        h1 { margin: 0 0 2px; font-size: 14px; padding-right: 24mm; }
+        .meta { margin: 0 0 6px; font-size: 10px; padding-right: 24mm; }
+        .qr {
+          position: absolute; top: 4mm; right: 4mm;
+          width: 14mm; height: 14mm;
+          background: #fff; padding: 1mm; box-sizing: content-box;
+          border: 1px solid #d1d5db; border-radius: 2px;
+        }
+        .qr img { width: 14mm; height: 14mm; display: block; }
+        .sheet-id {
+          position: absolute; top: 21mm; right: 4mm;
+          font-size: 7px; color: #6b7280; letter-spacing: 0.5px;
+          text-align: right; width: 16mm;
+        }
+        table { border-collapse: collapse; width: 100%; table-layout: fixed; margin-top: 8mm; }
+        /* Wider day cells reclaimed from narrower body margin (4mm each
+           side vs 8mm) rather than from the name column. Name col holds
+           its size so First-Last never truncates. */
+        col.day { width: 2.85%; }
+        col.name { width: 14%; }
         th, td {
           border: 1px solid #333; padding: ${padY}px 2px;
           text-align: center; height: ${rowH}px;
@@ -419,11 +488,24 @@ export default function MonthlyAttendance() {
           text-overflow: ellipsis;
         }
         td.closed { background: #e5e5e5; }
+        td.stat { background: #fef3c7; }
+        td.stat .statmark {
+          font-size: 7px; color: #78350f; font-weight: 700;
+          letter-spacing: 1px;
+        }
         thead th { background: #f0f0f0; font-size: ${fontPx}px; }
         .legend { margin-top: 4px; font-size: 9px; color: #333; }
+        .legend .sw {
+          display: inline-block; width: 10px; height: 10px;
+          border: 1px solid #333; vertical-align: -1px; margin: 0 3px 0 8px;
+        }
+        .legend .sw.wk { background: #e5e5e5; }
+        .legend .sw.st { background: #fef3c7; }
         /* Belt-and-braces: never spill onto a 2nd page. */
         table, tr, td, th { page-break-inside: avoid; break-inside: avoid; }
       </style></head><body>
+      <div class="qr"><img src="${qrDataUrl}" alt="sheet code" /></div>
+      <div class="sheet-id">${h(sheetId)}</div>
       <h1>${h(daycareName || "Echelon Day Care")}</h1>
       <p class="meta">Attendance report for month of ${monthLabel}. Number of days Centre <b>____</b> open</p>
       <table>
@@ -434,9 +516,13 @@ export default function MonthlyAttendance() {
         <thead><tr><th style="text-align:left;">Child</th>${headerCells}</tr></thead>
         <tbody>${rowsHtml}</tbody>
       </table>
-      <p class="legend">Legend — P = Present · A = Absent. Weekends &amp; closed days pre-shaded.</p>
+      <p class="legend">
+        Legend — <b>&#x2715;</b> = Present &middot; <b>&ndash;</b> = Absent
+        <span class="sw st"></span>STAT holiday
+        <span class="sw wk"></span>Weekend / closed
+      </p>
       </body></html>`;
-    void printHtmlDocument(html).catch((e) => show("Print failed: " + (e as Error).message, "err"));
+    await printHtmlDocument(html);
   }
 
   const monthLabel = `${MONTH_NAMES[month-1]} ${year}`;

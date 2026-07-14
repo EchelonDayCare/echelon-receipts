@@ -394,11 +394,21 @@ function UnlockScreen({
 
   return (
     <FullScreenCentered>
-      <form onSubmit={submitPin} style={styles.card}>
-        <div style={styles.logo}>🔒</div>
-        <div style={styles.title}>Echelon Receipts</div>
-        <div style={styles.subtitle}>Enter your PIN</div>
-        <div style={{ position: "relative", width: "100%" }}>
+      <form onSubmit={submitPin} style={styles.winShell}>
+        <div style={styles.winAvatar} aria-hidden>
+          <svg width="72" height="72" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round">
+            <rect x="4.5" y="10.5" width="15" height="10" rx="2" />
+            <path d="M8 10.5V7a4 4 0 0 1 8 0v3.5" />
+            <circle cx="12" cy="15.4" r="1.1" fill="currentColor" stroke="none" />
+          </svg>
+        </div>
+        <div style={styles.winName}>Echelon</div>
+        <div style={styles.winDotsRow} aria-hidden>
+          <span style={styles.winDot} /><span style={styles.winDot} /><span style={styles.winDot} />
+          <span style={styles.winDot} /><span style={styles.winDot} /><span style={styles.winDot} />
+        </div>
+        <div style={styles.winHint}>Enter your PIN</div>
+        <div style={styles.winInputWrap}>
           <input
             type={showPin ? "text" : "password"}
             inputMode="text"
@@ -406,43 +416,65 @@ function UnlockScreen({
             value={pin}
             onChange={(e) => { setPin(e.target.value); setErr(null); }}
             maxLength={64}
-            style={{ ...styles.pinInput, paddingRight: 56, letterSpacing: showPin ? "0.2em" : styles.pinInput.letterSpacing }}
-            placeholder="••••••"
+            style={styles.winInput}
+            className="echelon-win-pin"
+            placeholder="PIN"
             disabled={disabled}
+            aria-label="PIN"
           />
+          <button
+            type="submit"
+            disabled={disabled || pin.length < 4}
+            aria-label="Unlock"
+            title="Unlock"
+            style={{
+              ...styles.winSubmitBtn,
+              opacity: (disabled || pin.length < 4) ? 0.35 : 1,
+              cursor: (disabled || pin.length < 4) ? "default" : "pointer",
+            }}
+          >
+            {busy
+              ? <span style={styles.winSpinner} />
+              : (
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M5 12h14M13 6l6 6-6 6" />
+                </svg>
+              )}
+          </button>
           <button
             type="button"
             onClick={() => setShowPin((v) => !v)}
             aria-label={showPin ? "Hide PIN" : "Show PIN"}
             title={showPin ? "Hide PIN" : "Show PIN"}
-            style={{
-              position: "absolute", right: 6, top: "50%", transform: "translateY(-50%)",
-              background: "none", border: "none", cursor: "pointer",
-              padding: "6px 10px", fontSize: 18, lineHeight: 1, color: "#4a5568",
-            }}
             tabIndex={-1}
+            style={styles.winEyeBtn}
           >
-            {showPin ? "🙈" : "👁"}
+            {showPin
+              ? (
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M17.94 17.94A10.94 10.94 0 0 1 12 20c-7 0-11-8-11-8a20.7 20.7 0 0 1 5.06-5.94M9.9 4.24A10.94 10.94 0 0 1 12 4c7 0 11 8 11 8a20.9 20.9 0 0 1-3.16 4.19M1 1l22 22" />
+                  <path d="M14.12 14.12a3 3 0 1 1-4.24-4.24" />
+                </svg>
+              )
+              : (
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z" />
+                  <circle cx="12" cy="12" r="3" />
+                </svg>
+              )}
           </button>
         </div>
-        {err && <div style={styles.error}>{err}</div>}
-        {cooldown > 0 && <div style={styles.error}>Locked out for {cooldown}s</div>}
-        <button type="submit" disabled={disabled || pin.length < 4} style={styles.button}>
-          {busy ? "Unlocking…" : cooldown > 0 ? `Wait ${cooldown}s` : "Unlock"}
-        </button>
+        {err && <div style={styles.winError}>{err}</div>}
+        {cooldown > 0 && <div style={styles.winError}>Locked out for {cooldown}s</div>}
         {hasRecovery && (
           <button
             type="button"
             onClick={() => { setMode("recovery"); setErr(null); }}
-            style={{ background: "none", border: "none", color: "#2c5282", fontSize: 13, marginTop: 6, cursor: "pointer" }}
+            style={styles.winLink}
+            className="echelon-win-link"
           >
-            Forgot PIN? Use recovery code
+            I forgot my PIN
           </button>
-        )}
-        {hasRecovery && (
-          <div style={{ fontSize: 11, color: "#999", marginTop: 4, textAlign: "center", lineHeight: 1.4 }}>
-            Tip: check your email inbox for "Echelon Recovery Code" if you didn't save the printed copy.
-          </div>
         )}
       </form>
     </FullScreenCentered>
@@ -628,9 +660,18 @@ function FullScreenCentered({ children }: { children: ReactNode }) {
     <div style={{
       position: "fixed", inset: 0, display: "flex",
       alignItems: "center", justifyContent: "center",
-      background: "linear-gradient(135deg, #1e3a5f 0%, #2c5282 100%)",
-      color: "#fff", fontFamily: "system-ui, sans-serif", zIndex: 9999,
+      background:
+        "radial-gradient(1200px 800px at 30% 20%, #2c5282 0%, transparent 60%)," +
+        "radial-gradient(900px 700px at 75% 80%, #4c1d95 0%, transparent 55%)," +
+        "linear-gradient(160deg, #0f172a 0%, #1e293b 50%, #0f172a 100%)",
+      color: "#fff", fontFamily: "system-ui, -apple-system, 'Segoe UI', sans-serif", zIndex: 9999,
     }}>
+      <style>{`
+        @keyframes echelon-spin { to { transform: rotate(360deg); } }
+        input.echelon-win-pin::placeholder { color: rgba(255,255,255,0.55); letter-spacing: 0.5px; font-weight: 400; }
+        input.echelon-win-pin:focus { outline: none; }
+        button.echelon-win-link:hover { color: #fff; text-decoration: underline; }
+      `}</style>
       {children}
     </div>
   );
@@ -677,5 +718,82 @@ const styles: Record<string, React.CSSProperties> = {
     fontWeight: 600,
     cursor: "pointer",
     flex: 1,
+  },
+  // ---- Windows 11-style unlock screen ----
+  winShell: {
+    display: "flex", flexDirection: "column", alignItems: "center",
+    gap: 0, padding: 0, background: "transparent",
+    width: 340, color: "#fff",
+  },
+  winAvatar: {
+    width: 128, height: 128, borderRadius: "50%",
+    display: "flex", alignItems: "center", justifyContent: "center",
+    background: "rgba(255,255,255,0.10)",
+    border: "1px solid rgba(255,255,255,0.18)",
+    backdropFilter: "blur(8px)",
+    WebkitBackdropFilter: "blur(8px)",
+    color: "#fff",
+    boxShadow: "0 8px 30px rgba(0,0,0,0.35)",
+  },
+  winName: {
+    marginTop: 22, fontSize: 28, fontWeight: 600,
+    letterSpacing: 0.2, textAlign: "center",
+    textShadow: "0 1px 2px rgba(0,0,0,0.35)",
+  },
+  winDotsRow: {
+    marginTop: 18, display: "grid",
+    gridTemplateColumns: "repeat(3, 6px)", gap: 6,
+    justifyContent: "center",
+  },
+  winDot: {
+    width: 6, height: 6, borderRadius: "50%",
+    background: "rgba(255,255,255,0.85)",
+  },
+  winHint: {
+    marginTop: 14, fontSize: 15, textAlign: "center",
+    color: "rgba(255,255,255,0.9)", fontWeight: 400,
+  },
+  winInputWrap: {
+    marginTop: 18, width: 280, position: "relative",
+    display: "flex", alignItems: "center",
+    background: "rgba(0,0,0,0.35)",
+    borderRadius: 4,
+    borderBottom: "2px solid #b78af7",
+    boxShadow: "0 0 0 1px rgba(255,255,255,0.08) inset",
+  },
+  winInput: {
+    flex: 1, minWidth: 0,
+    background: "transparent", color: "#fff",
+    border: "none", outline: "none",
+    fontSize: 15, fontFamily: "system-ui, -apple-system, 'Segoe UI', sans-serif",
+    padding: "9px 12px", letterSpacing: 2,
+    caretColor: "#fff",
+  },
+  winEyeBtn: {
+    background: "transparent", border: "none", color: "rgba(255,255,255,0.75)",
+    cursor: "pointer", padding: "4px 8px",
+    display: "flex", alignItems: "center", justifyContent: "center",
+  },
+  winSubmitBtn: {
+    background: "transparent", border: "none", color: "#fff",
+    padding: "0 10px", height: 32,
+    display: "flex", alignItems: "center", justifyContent: "center",
+    borderLeft: "1px solid rgba(255,255,255,0.15)",
+  },
+  winSpinner: {
+    display: "inline-block", width: 14, height: 14, borderRadius: "50%",
+    border: "2px solid rgba(255,255,255,0.35)", borderTopColor: "#fff",
+    animation: "echelon-spin 0.7s linear infinite",
+  },
+  winError: {
+    marginTop: 12, fontSize: 12, textAlign: "center",
+    color: "#fecaca",
+    textShadow: "0 1px 2px rgba(0,0,0,0.35)",
+    maxWidth: 300,
+  },
+  winLink: {
+    marginTop: 22, background: "transparent", border: "none",
+    color: "rgba(255,255,255,0.85)", fontSize: 13, cursor: "pointer",
+    padding: 6,
   },
 };

@@ -733,6 +733,57 @@ export default function Settings() {
           </small>
         </div>
 
+        {/* ── OCR pipeline (v2 grid engine) — v2.6.8 ─────────────────── */}
+        <hr style={{ border: 0, borderTop: "1px solid var(--border)", margin: "16px 0" }} />
+        <div className="field" style={{ marginBottom: 8 }}>
+          <label style={{ display: "flex", alignItems: "center", gap: 8, cursor: "pointer" }}>
+            <input
+              type="checkbox"
+              checked={s.use_ocr_v2 === "1"}
+              onChange={(e) => setS({ ...s, use_ocr_v2: e.target.checked ? "1" : "" })}
+            />
+            <strong>Use new OCR pipeline (v2)</strong>&nbsp;
+            <span style={{ color: "var(--muted)", fontWeight: 400 }}>
+              — Grid-primitive engine. Reads each staff column globally (no more silent drops), joint IN/OUT resolution (fixes "11:00 → 7:40" being read as 20 hours), three-bucket output (confident / needs review / couldn't read). Turn off to revert to the previous pipeline.
+            </span>
+          </label>
+        </div>
+        {s.use_ocr_v2 === "1" && (
+          <div style={{ paddingLeft: 24, borderLeft: "2px solid var(--border)", marginBottom: 14 }}>
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 10, marginBottom: 8 }}>
+              <div className="field">
+                <label>Centre opens</label>
+                <input
+                  type="time"
+                  value={s.centre_open_time || "07:00"}
+                  onChange={(e) => setS({ ...s, centre_open_time: e.target.value })}
+                />
+              </div>
+              <div className="field">
+                <label>Centre closes</label>
+                <input
+                  type="time"
+                  value={s.centre_close_time || "18:30"}
+                  onChange={(e) => setS({ ...s, centre_close_time: e.target.value })}
+                />
+              </div>
+              <div className="field">
+                <label>Slack (minutes)</label>
+                <input
+                  type="number"
+                  min={0}
+                  max={240}
+                  value={s.centre_hours_slack_min || "60"}
+                  onChange={(e) => setS({ ...s, centre_hours_slack_min: e.target.value })}
+                />
+              </div>
+            </div>
+            <small style={{ color: "var(--muted)" }}>
+              Times outside <code>[open − slack, close + slack]</code> get flagged for review. Shifts over 12h are flagged; over 16h are rejected outright.
+            </small>
+          </div>
+        )}
+
         {/* ── Voice capture (Whisper) — v1.8.0 ─────────────────────────── */}
         <hr style={{ border: 0, borderTop: "1px solid var(--border)", margin: "16px 0" }} />
         <div className="field" style={{ marginBottom: 8 }}>

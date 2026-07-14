@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { showAlert, showConfirm } from "../lib/dialogs";
+import { showAlert } from "../lib/dialogs";
 
 type V2State = { isSetUp: boolean; isUnlocked: boolean; hasRecovery: boolean };
 
@@ -25,7 +25,6 @@ export default function LockButton({ size = 40 }: { size?: number }) {
       );
       return;
     }
-    if (!(await showConfirm("Lock the app now? You'll need to enter your PIN to continue."))) return;
     try {
       await invoke("v2_lock");
       window.location.reload();

@@ -1501,6 +1501,60 @@ Thanks,
     "WHERE pending_amount > 0 AND voided = 0"
   );
 
+  // ─── Migration 033 — OCR pipeline redesign (v2.7.0) ──────────────────
+  // See files/OCR_REDESIGN_PLAN_FINAL.md for full rationale.
+  //
+  // Adds:
+  //   • settings: centre_open_time / centre_close_time / centre_hours_slack_min
+  //   • staff_hours.day_type          — 'worked' | 'stat' | 'sick' | 'vacation' | 'off'
+  //   • staff_hours.import_id         — FK to ocr_imports (nullable; manual rows are NULL)
+  //   • staff_hours.column_index      — physical column on the sheet (for debug/UI)
+  //   • staff_hours.ocr_confidence    — 0..1 (nullable; manual rows are NULL)
+  //   • ocr_imports table             — every OCR scan is staged here first
+  //   • print_manifests table         — printed sheets embed a v2 QR that ties
+  //                                     column_index -> staff_id a priori.
+  //
+  // day_type has no CHECK constraint here because SQLite can't ALTER TABLE ADD
+  // CONSTRAINT after the fact and the app enforces the enum at the write layer.
+  for (const [k, v] of [
+    ["centre_open_time",       "07:00"],
+    ["centre_close_time",      "18:30"],
+    ["centre_hours_slack_min", "60"],
+  ] as const) await setting(k, v);
+  await addCol("staff_hours", "day_type",       "TEXT NOT NULL DEFAULT 'worked'");
+  await addCol("staff_hours", "import_id",      "TEXT");
+  await addCol("staff_hours", "column_index",   "INTEGER");
+  await addCol("staff_hours", "ocr_confidence", "REAL");
+  await d.execute("CREATE INDEX IF NOT EXISTS ix_staff_hours_import ON staff_hours(import_id)");
+  await d.execute("CREATE INDEX IF NOT EXISTS ix_staff_hours_day_type ON staff_hours(day_type)");
+  if (!(await tableExists("ocr_imports"))) {
+    console.warn("[ensureSchema] creating ocr_imports");
+    await d.execute(`CREATE TABLE ocr_imports (
+      import_id     TEXT PRIMARY KEY,
+      print_run_id  TEXT,
+      page          INTEGER,
+      month         TEXT,                       -- 'YYYY-MM'
+      image_hash    TEXT,                       -- sha256 of the normalised image
+      image_path    TEXT,
+      imported_at   TEXT NOT NULL DEFAULT (datetime('now')),
+      status        TEXT NOT NULL DEFAULT 'staged' -- 'staged' | 'committed' | 'discarded'
+    )`);
+    await d.execute("CREATE INDEX ix_ocr_imports_print_run ON ocr_imports(print_run_id)");
+    await d.execute("CREATE INDEX ix_ocr_imports_month     ON ocr_imports(month)");
+    await d.execute("CREATE INDEX ix_ocr_imports_hash      ON ocr_imports(image_hash)");
+  }
+  if (!(await tableExists("print_manifests"))) {
+    console.warn("[ensureSchema] creating print_manifests");
+    await d.execute(`CREATE TABLE print_manifests (
+      print_run_id  TEXT PRIMARY KEY,
+      month         TEXT NOT NULL,               -- 'YYYY-MM'
+      page          INTEGER NOT NULL DEFAULT 1,
+      manifest_json TEXT NOT NULL,               -- [{col:int, staff_id:int, staff_name:str}]
+      printed_at    TEXT NOT NULL DEFAULT (datetime('now'))
+    )`);
+    await d.execute("CREATE INDEX ix_print_manifests_month ON print_manifests(month)");
+  }
+
   await logIntegrityWarnings(d);
 }
 

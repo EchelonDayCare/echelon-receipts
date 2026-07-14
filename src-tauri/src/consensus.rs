@@ -25,6 +25,23 @@ pub struct ExtractedRow {
     pub no_lunch: bool,
 }
 
+// Shared helpers made pub(crate) so consensus_v2 can reuse them without
+// duplicating the exact same OCR endpoint plumbing.
+pub(crate) const PROVIDER_TIMEOUT_SECS_PUB: u64 = PROVIDER_TIMEOUT_SECS;
+pub(crate) const PROVIDER_MAX_ATTEMPTS_PUB: u32 = PROVIDER_MAX_ATTEMPTS;
+pub(crate) const PROVIDER_RETRY_BACKOFF_MS_PUB: u64 = PROVIDER_RETRY_BACKOFF_MS;
+
+pub(crate) fn v2_normalize_image(b64: &str, mime: &str) -> (String, String) { normalize_image(b64, mime) }
+pub(crate) fn v2_scan_times(s: &str) -> Vec<String> { scan_times(s) }
+pub(crate) fn v2_days_in(y: i32, m: u32) -> u32 { days_in(y, m) }
+pub(crate) fn v2_detect_month_from_di(v: &serde_json::Value) -> Option<String> { detect_month_from_di(v) }
+pub(crate) fn v2_truncate(s: &str, n: usize) -> String { truncate(s, n) }
+pub(crate) fn v2_redact(s: String, secrets: &[&str]) -> String { redact(s, secrets) }
+pub(crate) fn v2_sniff_month_year(md: &str) -> Option<String> { sniff_month_year(md) }
+pub(crate) fn v2_normalize_time(s: &str) -> Option<String> { normalize_time(s) }
+pub(crate) fn v2_is_weekend_marker(s: &str) -> bool { is_weekend_marker(s) }
+pub(crate) fn v2_parse_leading_day(s: &str) -> Option<u32> { parse_leading_day(s) }
+
 const PROVIDER_TIMEOUT_SECS: u64 = 60;
 const PROVIDER_MAX_ATTEMPTS: u32 = 3;
 const PROVIDER_RETRY_BACKOFF_MS: u64 = 400;

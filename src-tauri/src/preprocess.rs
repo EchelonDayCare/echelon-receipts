@@ -19,6 +19,10 @@ pub struct SheetQr {
     pub year: Option<i32>,
     pub month: Option<u32>,
     pub layout_version: Option<String>,
+    /// Staff IDs in printed column order (0-based). Present when the
+    /// sheet was printed by the app with QR v2 payload. Lets the OCR
+    /// bypass column-header resolution entirely.
+    pub staff_ids: Option<Vec<i64>>,
 }
 
 #[derive(Serialize)]
@@ -65,8 +69,15 @@ fn normalize_sheet_blocking(path: &std::path::Path) -> Result<NormalizeResult, S
         });
     }
 
-    // Fall back to the bottom-right quadrant where our sheets place the QR.
-    // Also try rotations in case the photo was taken sideways.
+    // Fall back to quadrant crops. New sheets (Jul 2026+) place the QR
+    // top-right; older sheets used bottom-right. Try both before giving up.
+    let tr = img.crop_imm(w.saturating_sub(w / 2), 0, w / 2, h / 2);
+    if let Some(qr) = try_decode_qr(&tr.to_luma8()) {
+        return Ok(NormalizeResult {
+            qr: parse_payload(&qr),
+            note: "QR decoded from top-right crop".into(),
+        });
+    }
     let br_x = w.saturating_sub(w / 2);
     let br_y = h.saturating_sub(h / 2);
     let br = img.crop_imm(br_x, br_y, w / 2, h / 2);
@@ -121,6 +132,13 @@ fn parse_payload(raw: &str) -> SheetQr {
         qr.year = v["year"].as_i64().map(|n| n as i32);
         qr.month = v["month"].as_u64().map(|n| n as u32);
         qr.layout_version = v["layout_version"].as_str().map(String::from);
+        // v2 payload: staff_ids in printed column order.
+        if let Some(arr) = v["staff_ids"].as_array() {
+            let ids: Vec<i64> = arr.iter().filter_map(|x| x.as_i64()).collect();
+            if !ids.is_empty() {
+                qr.staff_ids = Some(ids);
+            }
+        }
     } else {
         // Fallback: parse ED-YYYY-MM from any string (defensive if payload
         // format ever changes to a plain URL / ID).

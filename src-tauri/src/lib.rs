@@ -5,6 +5,7 @@ mod errlog;
 mod azure_ai;
 mod ask_echelon;
 mod consensus;
+mod consensus_v2;
 mod inbox;
 mod preprocess;
 mod restore;
@@ -143,6 +144,8 @@ pub fn run() {
             azure_ai::extract_credential,
             ask_echelon::ask_echelon,
             consensus::extract_timesheet_consensus,
+            consensus_v2::extract_timesheet_grid,
+            consensus_v2::revalidate_row,
             inbox::inbox_list_recent,
             preprocess::normalize_sheet,
             errlog::append_error_log,

@@ -16,9 +16,14 @@ import { fileToMime } from "../lib/ai";
 import { isValidE164 } from "../lib/whatsapp";
 import {
   extractTimesheetConsensus, computeConsensus, editCell, PROVIDER_LABELS,
+  extractTimesheetGrid, projectV2ToConsensus,
   type ConsensusAlignment, type ConsensusRow, type Confidence, type ProviderName,
 } from "../lib/ocr";
+import { bcStatHolidays } from "../lib/bcHolidays";
+import { getDisabledBcHolidayIds, isBcHolidaysEnabled } from "../lib/centreCalendar";
 import { loadXLSX } from "../lib/lazy";
+import { printHtmlDocument } from "../lib/print";
+import { h } from "../lib/html";
 import type { Staff, StaffHour, SettingsMap } from "../types";
 
 type HourRow = StaffHour & { staff_name: string };
@@ -166,6 +171,205 @@ export default function StaffScreen() {
   }
   useEffect(() => { refresh();   }, [year, month]);
 
+  // Print a blank staff sign-in sheet for the currently-selected month.
+  // Mirrors the format the OCR expects: title + month banner, 30-31 day rows
+  // (weekends pre-shaded), IN/OUT/No.Ln triple per active staff, corner
+  // fiducials for OCR alignment, and the "ED-YYYY-MM" sheet ID token that
+  // Rust preprocess.rs regex looks for. Owner posts this on the wall each
+  // month and photographs it at month-end to feed the OCR.
+  function printBlankStaffSheet() {
+    if (activeStaff.length === 0) return;
+    void _printBlankStaffSheet();
+  }
+  async function _printBlankStaffSheet() {
+    const monthLabel = `${MONTHS[month - 1].toUpperCase()} ${year}`;
+    const sheetId = `ED-${year}-${String(month).padStart(2, "0")}`;
+    // Max 6 staff per page in landscape so IN/OUT columns stay wide enough
+    // to write two-digit hh:mm by hand. If there are more, callers can pad
+    // extra "(name)" placeholder columns instead (future: multi-page).
+    const MAX_STAFF_PER_PAGE = 6;
+    // Roles that never sign in on the ECE staff sheet — MD/Director/Owner
+    // handle their own time separately (payroll, exempt, etc.). Compared
+    // case-insensitively against staff.role. Set the role on the Staff
+    // row in the roster to opt them out.
+    const NON_SIGNIN_ROLES = new Set(["md", "managing director", "director", "owner"]);
+    const isSignInStaff = (s: { role: string | null; name: string }) => {
+      const r = (s.role ?? "").trim().toLowerCase();
+      return !NON_SIGNIN_ROLES.has(r);
+    };
+    const staffColsWithId = activeStaff
+      .filter(isSignInStaff)
+      .slice(0, MAX_STAFF_PER_PAGE);
+    const staffCols = staffColsWithId.map((s) => s.name);
+    while (staffCols.length < 5) staffCols.push(""); // always at least 5 slots — matches printed template
+    // Build QR payload so the OCR pipeline can bypass header text detection
+    // and map columns → staff IDs deterministically. Only real staff (no
+    // padding blanks) are included; the col index in staff_ids is the
+    // printed column position (0-based).
+    const qrPayload = {
+      centre: "Echelon",
+      year,
+      month,
+      sheet_id: sheetId,
+      staff_ids: staffColsWithId.map((s) => s.id),
+      cols: staffCols.filter((n) => n).length,
+      v: 2,
+    };
+    const QRCode = await import("qrcode");
+    const qrDataUrl = await QRCode.toDataURL(JSON.stringify(qrPayload), {
+      errorCorrectionLevel: "M",
+      margin: 1,
+      width: 128,
+    });
+    const daysInMonth = new Date(year, month, 0).getDate();
+    const DAY_ABBR = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+    // Load stat holidays from Settings so 01 Jul / 25 Dec / etc. are pre-marked.
+    const monthKeyStr = `${year}-${String(month).padStart(2, "0")}`;
+    let statDatesForMonth = new Map<number, string>(); // day-of-month → holiday name
+    try {
+      if (await isBcHolidaysEnabled()) {
+        const disabled = await getDisabledBcHolidayIds();
+        for (const h of bcStatHolidays(year)) {
+          if (disabled.has(h.id)) continue;
+          if (!h.iso.startsWith(monthKeyStr)) continue;
+          statDatesForMonth.set(Number(h.iso.split("-")[2]), h.name);
+        }
+      }
+    } catch { /* silent — worst case stat days render as normal blank rows */ }
+    const rowsHtml = Array.from({ length: daysInMonth }, (_, i) => {
+      const day = i + 1;
+      const dow = new Date(year, month - 1, day).getDay();
+      const isWeekend = dow === 0 || dow === 6;
+      const statName = statDatesForMonth.get(day);
+      const label = DAY_ABBR[dow];
+      const rowClass = statName ? "stat" : (isWeekend ? "weekend" : "");
+      const rowStyle = rowClass ? ` class="${rowClass}"` : "";
+      const cells = staffCols.map(() => {
+        if (statName) {
+          return `<td class="stat-cell" colspan="2"><span class="wk">STAT</span></td><td class="spacer"></td>`;
+        }
+        if (isWeekend) {
+          return `<td class="weekend-cell" colspan="2"><span class="wk">${label.toUpperCase()}</span></td><td class="spacer"></td>`;
+        }
+        return `<td><span class="ph">:</span></td><td><span class="ph">:</span></td><td class="spacer"></td>`;
+      }).join("");
+      const dayCellLabel = statName
+        ? `${String(day).padStart(2, "0")} ${label}`
+        : `${String(day).padStart(2, "0")} ${label}`;
+      const dayTitle = statName ? ` title="${h(statName)}"` : "";
+      return `<tr${rowStyle}${dayTitle}><td class="day">${dayCellLabel}</td>${cells}</tr>`;
+    }).join("");
+    // Header row 1: names spanning IN/OUT pairs (no more No.Ln column —
+    // paid_hours() auto-deducts 30-min lunch on shifts ≥5h per BC ESA;
+    // the owner can still toggle no_lunch manually on the Hours row).
+    const headerNames = staffCols.map((n) => `<th colspan="2" class="staff-name">${n ? h(n) : ''}</th><th class="spacer"></th>`).join("");
+    // Header row 2: repeating IN / OUT subheads.
+    const headerSubs = staffCols.map(() => `<th>IN</th><th>OUT</th><th class="spacer"></th>`).join("");
+    const html = `<!doctype html><html><head><title>Staff Sign-In ${monthLabel}</title>
+      <style>
+        @page { size: 11in 8.5in; margin: 0; }
+        html, body { margin: 0; padding: 0; }
+        body {
+          font-family: -apple-system, "Segoe UI", sans-serif;
+          font-size: 9px;
+          padding: 10mm 12mm 6mm;
+          -webkit-print-color-adjust: exact;
+          print-color-adjust: exact;
+          position: relative;
+        }
+        /* Corner fiducials — 4mm black squares, one per page corner. Help
+           OCR find the sheet extents even if the photo is skewed. */
+        .fid { position: fixed; width: 4mm; height: 4mm; background: #000; }
+        .fid.tl { top: 5mm; left: 5mm; }
+        .fid.tr { top: 5mm; right: 5mm; }
+        .fid.bl { bottom: 5mm; left: 5mm; }
+        .fid.br { bottom: 5mm; right: 5mm; }
+        .sheet-id { position: absolute; top: 5mm; left: 12mm; font-size: 8px; color: #333; font-family: "Courier New", monospace; }
+        .qr { position: absolute; top: 5mm; right: 12mm; width: 14mm; height: 14mm; background: #fff; padding: 0; }
+        .qr img { display: block; width: 100%; height: 100%; }
+        .title { text-align: center; margin: 0 0 3px; font-size: 13px; font-weight: 700; letter-spacing: .5px; }
+        .topnote {
+          margin: 0 auto 4px; padding: 3px 8px; max-width: 200mm;
+          font-size: 9px; text-align: center; color: #78350f;
+          background: #fef3c7; border: 1px solid #fcd34d;
+          border-radius: 3px;
+        }
+        table { border-collapse: collapse; width: 100%; table-layout: fixed; }
+        col.day  { width: 8%; }
+        /* Slot width computed for the actual staff count so 1–6 staff all
+           fit the 100% table width. Wider IN/OUT cells help handwritten
+           legibility and OCR. */
+        col.slot { width: ${((92 - 0.7 * staffCols.length) / (2 * staffCols.length)).toFixed(3)}%; }
+        /* Wider gap column doubles as a solid 2px between-staff divider
+           via td.spacer/background:#222 below. Helps the column resolver
+           on skewed phone photos. */
+        col.gap  { width: 0.7%; }
+        th, td { border: 1px solid #222; text-align: center; overflow: hidden; padding: 0 2px; }
+        td { height: 19px; }
+        th { background: #f2f2f2; font-size: 9px; font-weight: 600; height: 13px; }
+        th.staff-name { font-size: 10px; font-weight: 700; }
+        th.staff-name .ph { color: #999; font-style: italic; font-weight: 400; }
+        th.spacer, td.spacer { border: none; background: #222; }
+        /* Faint colon at cell center — visually anchors where the h:mm
+           separator goes, so staff naturally writes digits on either side
+           instead of extreme-left or extreme-right. If left untouched,
+           normalize_time() in the OCR pipeline discards a lone ":" as
+           empty (no digits to parse). */
+        td .ph {
+          color: #9ca3af; font-weight: 500; font-size: 12px;
+          letter-spacing: 0; user-select: none;
+        }
+        td.day { text-align: left; padding-left: 6px; font-weight: 600; font-size: 9px; }
+        tr.weekend td { background: #f5f5f5; }
+        td.weekend-cell { background: #e5e5e5; }
+        td.weekend-cell .wk { color: #666; font-weight: 700; letter-spacing: 2px; font-size: 9px; }
+        tr.stat td { background: #fef3c7; }
+        td.stat-cell { background: #fde68a; }
+        td.stat-cell .wk { color: #78350f; font-weight: 700; letter-spacing: 2px; font-size: 9px; }
+        .footer { display: flex; justify-content: space-between; gap: 20px; margin-top: 4mm; font-size: 10px; }
+        .footer .field { flex: 1; }
+        .footer .field .lbl { font-weight: 600; margin-bottom: 2px; }
+        .footer .field .line { border-bottom: 1px solid #333; height: 14px; }
+        .instr { margin: 2mm 0 0; font-size: 9px; color: #555; text-align: center; font-style: italic; }
+        .watermark {
+          position: absolute; top: 50%; left: 50%;
+          transform: translate(-50%, -50%) rotate(-20deg);
+          font-size: 72px; font-weight: 800; letter-spacing: 4px;
+          color: rgba(180, 40, 40, 0.18);
+          border: 6px solid rgba(180, 40, 40, 0.18);
+          padding: 20px 40px; border-radius: 12px;
+          pointer-events: none; white-space: nowrap;
+        }
+        table, tr, td, th { page-break-inside: avoid; break-inside: avoid; }
+      </style></head><body>
+      <div class="fid tl"></div><div class="fid tr"></div>
+      <div class="fid bl"></div><div class="fid br"></div>
+      <div class="sheet-id">Sheet ID: ${sheetId}</div>
+      <div class="qr" title="Machine-readable staff column manifest"><img src="${qrDataUrl}" alt="QR"/></div>
+      <h1 class="title">${h(settings.daycare_name || "ECHELON DAYCARE")} &nbsp;—&nbsp; Monthly Staff Sign-In Sheet<br/>${monthLabel}</h1>
+      <p class="topnote">Hours are calculated by AI reading your handwriting. Please write clearly and avoid overwriting or scribbling &mdash; unclear entries may affect your hours.</p>
+      ${staffColsWithId.length === 0 ? '<div class="watermark">NO STAFF CONFIGURED</div>' : ''}
+      <table>
+        <colgroup>
+          <col class="day" />
+          ${staffCols.map(() => `<col class="slot"/><col class="slot"/><col class="gap"/>`).join("")}
+        </colgroup>
+        <thead>
+          <tr><th rowspan="2">Day</th>${headerNames}</tr>
+          <tr>${headerSubs}</tr>
+        </thead>
+        <tbody>${rowsHtml}</tbody>
+      </table>
+      <div class="footer">
+        <div class="field" style="flex: 0 0 30%"><div class="lbl">Days centre was open:</div></div>
+        <div class="field" style="flex: 1"><div class="lbl">Notes:</div></div>
+        <div class="field" style="flex: 0 0 30%"><div class="lbl">Director signature:</div></div>
+      </div>
+      <p class="instr">Leave the cell empty if absent. Do not write &ldquo;off&rdquo;, &ldquo;sick&rdquo;, &ldquo;X&rdquo;, or dashes.</p>
+      </body></html>`;
+    void printHtmlDocument(html).catch((e) => setToast({ msg: "Print failed: " + (e as Error).message, tone: "err" }));
+  }
+
   const activeStaff = useMemo(() => staff.filter((s) => s.active === 1), [staff]);
   const totals = useMemo(() => {
     const t = new Map<number, { name: string; rate: number | null; hours: number }>();
@@ -281,13 +485,18 @@ export default function StaffScreen() {
       // QR month lock — same fast path as before.
       let qrMonthKey: string | undefined;
       let qrNote: string | undefined;
+      let qrStaffIds: number[] | undefined;
       try {
-        const norm = await invoke<{ qr: { year: number | null; month: number | null; sheet_id: string | null }; note: string }>(
-          "normalize_sheet", { args: { image_path: picked } }
-        );
+        const norm = await invoke<{
+          qr: { year: number | null; month: number | null; sheet_id: string | null; staff_ids: number[] | null };
+          note: string;
+        }>("normalize_sheet", { args: { image_path: picked } });
         qrNote = norm.note;
         if (norm.qr.year && norm.qr.month) {
           qrMonthKey = monthKey(norm.qr.year, norm.qr.month);
+        }
+        if (norm.qr.staff_ids && norm.qr.staff_ids.length > 0) {
+          qrStaffIds = norm.qr.staff_ids;
         }
       } catch (e) {
         qrNote = "QR pre-check failed: " + String((e as any)?.message || e);
@@ -295,17 +504,87 @@ export default function StaffScreen() {
 
       const bytes = await readFile(picked);
       const mime = fileToMime(picked);
-      const result = await extractTimesheetConsensus({
-        imageBytes: bytes, mimeType: mime,
-        monthYear: qrMonthKey || monthKey(year, month),
-        knownStaffNames: activeStaff.map((s) => s.name),
-        enableMistralOcr: settings.enable_mistral_ocr !== "0",
-        enableAzureDi: settings.enable_azure_di !== "0",
-      });
 
-      const align = computeConsensus(result, activeStaff, qrMonthKey || null);
+      const useV2 = settings.use_ocr_v2 === "1";
+      let align: ConsensusAlignment;
+      let providerMeta: Array<{ provider: ProviderName; ok: boolean; error: string | null; latency_ms: number; rowCount: number; rawText: string }>;
+      let sheetMonthKey: string | undefined;
+      let ambiguousBanner = "";
+      let couldntReadBanner = "";
+
+      if (useV2) {
+        const scanMonthKey = qrMonthKey || monthKey(year, month);
+        // STAT dates for this month, sourced from Settings (not from AI).
+        // Weekends are handled deterministically by the backend.
+        let statDates: string[] = [];
+        try {
+          if (await isBcHolidaysEnabled()) {
+            const disabled = await getDisabledBcHolidayIds();
+            const [yy] = scanMonthKey.split("-").map(Number);
+            statDates = bcStatHolidays(yy)
+              .filter((h) => !disabled.has(h.id))
+              .map((h) => h.iso)
+              .filter((iso) => iso.startsWith(scanMonthKey));
+          }
+        } catch { /* fall through with empty stat_dates */ }
+        // If the sheet's QR encoded the staff column order, build a manifest
+        // so the backend skips header OCR entirely and maps col → staff_id
+        // deterministically.
+        let manifest: Array<{ col: number; staff_id: number; staff_name: string }> | undefined;
+        if (qrStaffIds && qrStaffIds.length > 0) {
+          const rosterById = new Map(activeStaff.map((s) => [s.id, s.name]));
+          manifest = qrStaffIds
+            .map((sid, col) => {
+              const name = rosterById.get(sid);
+              return name ? { col, staff_id: sid, staff_name: name } : null;
+            })
+            .filter((m): m is { col: number; staff_id: number; staff_name: string } => m !== null);
+          if (manifest.length === 0) manifest = undefined;
+        }
+        const v2 = await extractTimesheetGrid({
+          imageBytes: bytes, mimeType: mime,
+          monthYear: scanMonthKey,
+          roster: activeStaff.map((s) => ({ id: s.id, name: s.name })),
+          manifest,
+          centreOpenTime: settings.centre_open_time || "07:00",
+          centreCloseTime: settings.centre_close_time || "18:30",
+          centreHoursSlackMin: settings.centre_hours_slack_min || "60",
+          enableMistralOcr: settings.enable_mistral_ocr !== "0",
+          enableAzureDi: settings.enable_azure_di !== "0",
+          statDates,
+        });
+        const projected = projectV2ToConsensus(v2, activeStaff, monthKey(year, month));
+        align = projected.align;
+        providerMeta = projected.providerMeta;
+        sheetMonthKey = qrMonthKey || v2.detected_month_year || v2.month_key || undefined;
+        if (projected.ambiguousColumns.length > 0) {
+          const cols = projected.ambiguousColumns.map((c) => `col ${c.col + 1}`).join(", ");
+          ambiguousBanner = `⚠ ${projected.ambiguousColumns.length} column(s) unresolved (${cols}). Rows from these columns are marked "Please check".`;
+        }
+        if (projected.couldntReadCount > 0) {
+          couldntReadBanner = `⚠ ${projected.couldntReadCount} row(s) couldn't be read confidently — review them at the bottom before importing.`;
+        }
+      } else {
+        const result = await extractTimesheetConsensus({
+          imageBytes: bytes, mimeType: mime,
+          monthYear: qrMonthKey || monthKey(year, month),
+          knownStaffNames: activeStaff.map((s) => s.name),
+          enableMistralOcr: settings.enable_mistral_ocr !== "0",
+          enableAzureDi: settings.enable_azure_di !== "0",
+        });
+        align = computeConsensus(result, activeStaff, qrMonthKey || null);
+        sheetMonthKey = qrMonthKey || align.detectedMonthYear || undefined;
+        providerMeta = result.providers.map((p) => ({
+          provider: p.provider as ProviderName,
+          ok: p.ok,
+          error: p.error,
+          latency_ms: p.latency_ms,
+          rowCount: p.rows.length,
+          rawText: p.raw_text,
+        }));
+      }
+
       const uiMonthKey = monthKey(year, month);
-      const sheetMonthKey = qrMonthKey || align.detectedMonthYear || undefined;
 
       // Hour validation on the consensus-picked values.
       const flags = new Map<string, string>();
@@ -318,18 +597,11 @@ export default function StaffScreen() {
         else if (paid > 10) flags.set(r.key, `Shift too long (${paid.toFixed(2)}h)`);
       }
 
-      const providerMeta = result.providers.map((p) => ({
-        provider: p.provider as ProviderName,
-        ok: p.ok,
-        error: p.error,
-        latency_ms: p.latency_ms,
-        rowCount: p.rows.length,
-        rawText: p.raw_text,
-      }));
+      const providerMetaOut = providerMeta;
 
       setConsensus({
         align,
-        providerMeta,
+        providerMeta: providerMetaOut,
         qrMonth: sheetMonthKey,
         monthMismatch: !!sheetMonthKey && sheetMonthKey !== uiMonthKey,
         qrNote,
@@ -344,7 +616,8 @@ export default function StaffScreen() {
         const yellow = align.rows.filter((r) => r.row_confidence === "yellow").length;
         const green = align.rows.filter((r) => r.row_confidence === "green").length;
         const flagged = flags.size;
-        const msg = `${nSuccess}/3 models: ${green} agree, ${yellow} majority, ${red} disagree${flagged ? `, ${flagged} flagged` : ""}.`;
+        const banners = [ambiguousBanner, couldntReadBanner].filter(Boolean).join(" ");
+        const msg = `${nSuccess}/3 models: ${green} confident, ${yellow} needs review, ${red} could not read${flagged ? `, ${flagged} flagged` : ""}. ${banners}`.trim();
         notify(msg, red || flagged ? "err" : "ok");
       }
     } catch (e: any) {
@@ -476,9 +749,12 @@ export default function StaffScreen() {
     }
     // ─────────────────────────────────────────────────────────────────────
 
-    let saved = 0, blocked = 0, flaggedSkipped = 0, dbErrors = 0;
+    let saved = 0, blocked = 0, flaggedSkipped = 0, dbErrors = 0, unresolvedSkipped = 0;
     let lastError: unknown = null;
     for (const r of consensus.align.rows) {
+      // v2 projector uses negative staff_id for unresolved columns —
+      // never write these to the DB regardless of force mode.
+      if (r.staff_id < 0) { unresolvedSkipped++; continue; }
       if (!force && r.row_confidence === "red") { blocked++; continue; }
       if (!force && consensus.flags.has(r.key)) { flaggedSkipped++; continue; }
       // Skip rows with no times captured (e.g. calendar-synth fillers where
@@ -503,6 +779,7 @@ export default function StaffScreen() {
       const wiped = buckets.reduce((a, b) => a + b.existing, 0);
       bits.push(`replaced ${wiped} prior entr${wiped === 1 ? "y" : "ies"}`);
     }
+    if (unresolvedSkipped) bits.push(`${unresolvedSkipped} unresolved columns skipped`);
     if (blocked) bits.push(`${blocked} blocked (models disagree)`);
     if (flaggedSkipped) bits.push(`${flaggedSkipped} flagged (fix and re-import)`);
     if (dbErrors) bits.push(`${dbErrors} DB errors (see console)`);
@@ -617,6 +894,7 @@ export default function StaffScreen() {
               <option key={y} value={y}>{y}</option>
             )}
           </select>
+          <button className="btn secondary" onClick={printBlankStaffSheet} disabled={activeStaff.length === 0} title="Print a blank sheet for ${MONTHS[month-1]} — pre-filled with active staff names">🖨 Print Blank Sheet</button>
           <button className="btn" onClick={exportExcel} disabled={rows.length === 0} style={{ marginLeft: 6 }}>⬇ Export Excel</button>
         </div>
       </div>

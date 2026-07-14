@@ -159,9 +159,18 @@ export default function Students() {
         await upsertStudent({ ...s, year: targetYear });
         added++;
       }
-      void showAlert(`Imported: ${added} added, ${skipped} skipped (duplicates).`);
       setYear(targetYear);
-      refresh();
+      await refresh();
+      // After import, scan for fuzzy duplicates (email/parent-matched, 90% name).
+      // Re-read the roster because state updates asynchronously.
+      const fresh = await listStudents(targetYear, false);
+      const groups = findDuplicatesIn(fresh);
+      if (groups.length > 0) {
+        setDupePreview(groups);
+        void showAlert(`Imported: ${added} added, ${skipped} skipped. Found ${groups.length} possible duplicate ${groups.length === 1 ? "group" : "groups"} — review below.`);
+      } else {
+        void showAlert(`Imported: ${added} added, ${skipped} skipped (duplicates).`);
+      }
     } catch (err) {
       void showAlert("Import failed: " + (err instanceof Error ? err.message : String(err)));
     }
@@ -169,6 +178,98 @@ export default function Students() {
 
   const [searchQ, setSearchQ] = useState("");
   const [missingEmailOnly, setMissingEmailOnly] = useState(false);
+  const [dupePreview, setDupePreview] = useState<Student[][] | null>(null);
+
+  function findDuplicatesIn(list: Student[]): Student[][] {
+    const stripPoss = (x: string) => x.replace(/['']s\b/g, "");
+    const cleanTokens = (s: string): string[] => {
+      const x = stripPoss((s || "").toLowerCase());
+      return x.replace(/[^a-z\s]/g, " ").split(/\s+/).filter(Boolean);
+    };
+    const norm = (s: string) => cleanTokens(s).slice().sort().join(" ");
+    // Split "First Middle Last" → { first, last } for sibling-safe compare.
+    // Single-word names get first=last=that word (rare edge case).
+    const splitName = (s: string): { first: string; last: string } => {
+      const t = cleanTokens(s);
+      if (t.length === 0) return { first: "", last: "" };
+      if (t.length === 1) return { first: t[0], last: t[0] };
+      return { first: t[0], last: t[t.length - 1] };
+    };
+    const normEmail = (s: string | null | undefined) => (s || "").trim().toLowerCase();
+    function similar(a: string, b: string): number {
+      if (!a || !b) return 0;
+      if (a === b) return 1;
+      const m = a.length, n = b.length;
+      const dp: number[][] = Array.from({ length: m + 1 }, () => new Array(n + 1).fill(0));
+      for (let i = 0; i <= m; i++) dp[i][0] = i;
+      for (let j = 0; j <= n; j++) dp[0][j] = j;
+      for (let i = 1; i <= m; i++) for (let j = 1; j <= n; j++) {
+        dp[i][j] = a[i - 1] === b[j - 1]
+          ? dp[i - 1][j - 1]
+          : 1 + Math.min(dp[i - 1][j - 1], dp[i - 1][j], dp[i][j - 1]);
+      }
+      return 1 - dp[m][n] / Math.max(m, n);
+    }
+    const parent: number[] = list.map((_, i) => i);
+    const find = (x: number): number => (parent[x] === x ? x : (parent[x] = find(parent[x])));
+    const union = (a: number, b: number) => { const ra = find(a), rb = find(b); if (ra !== rb) parent[ra] = rb; };
+    for (let a = 0; a < list.length; a++) {
+      for (let b = a + 1; b < list.length; b++) {
+        const A = list[a], B = list[b];
+        const na = splitName(A.name), nb = splitName(B.name);
+        // Sibling-safe: last names must match exactly (after norm), and
+        // first names must be ≥95% similar. Blocks Sara/Sarah, Alex/Alexa,
+        // Jayden/Kayden even when parents match.
+        if (!na.last || !nb.last || na.last !== nb.last) continue;
+        if (similar(na.first, nb.first) < 0.95) continue;
+        const ea = normEmail(A.email), eb = normEmail(B.email);
+        const fa = norm(A.father_name || ""), fb = norm(B.father_name || "");
+        const ma = norm(A.mother_name || ""), mb = norm(B.mother_name || "");
+        const emailMatch = ea && eb && ea === eb;
+        const fatherMatch = fa && fb && fa === fb;
+        const motherMatch = ma && mb && ma === mb;
+        if (emailMatch || fatherMatch || motherMatch) union(a, b);
+      }
+    }
+    const groups = new Map<number, Student[]>();
+    list.forEach((s, i) => {
+      const r = find(i);
+      if (!groups.has(r)) groups.set(r, []);
+      groups.get(r)!.push(s);
+    });
+    return [...groups.values()].filter((g) => g.length > 1);
+  }
+
+  function findDuplicates(): Student[][] {
+    return findDuplicatesIn(students);
+  }
+
+  async function runDedupe() {
+    if (!dupePreview) return;
+    let deleted = 0;
+    let skipped = 0;
+    for (const group of dupePreview) {
+      // Keep priority: active first, then highest id (newest). All others
+      // are removal candidates.
+      const sorted = [...group].sort((a, b) => {
+        if (a.active !== b.active) return b.active - a.active; // active=1 first
+        return b.id - a.id;                                    // newest first
+      });
+      const [, ...dupes] = sorted;
+      for (const d of dupes) {
+        try {
+          const res = await hardDeleteStudent(d.id);
+          if (res.deleted) deleted++; else skipped++;
+        } catch { skipped++; }
+      }
+    }
+    setDupePreview(null);
+    refresh();
+    const parts: string[] = [];
+    parts.push(`Removed ${deleted} duplicate${deleted === 1 ? "" : "s"}`);
+    if (skipped > 0) parts.push(`${skipped} skipped (have receipts)`);
+    void showAlert(parts.join(", ") + ".");
+  }
 
   const visibleStudents = (() => {
     const q = searchQ.trim().toLowerCase();
@@ -203,6 +304,32 @@ export default function Students() {
         </label>
         <div className="grow" />
         <button className="btn secondary" onClick={() => setEditing({ year, active: 1 })}>+ Add Student</button>
+        <button className="btn secondary" onClick={async () => {
+          const strip = (v: string | null | undefined): string | null => {
+            if (v == null) return null;
+            let out = String(v).replace(/[\u2019']s\b\s*$/i, "");
+            out = out.replace(/[\u2019']s\s+/gi, " ").replace(/\s{2,}/g, " ").trim();
+            return out || null;
+          };
+          let fixed = 0;
+          for (const s of students) {
+            const n = strip(s.name);
+            const f = strip(s.father_name);
+            const m = strip(s.mother_name);
+            if (n !== s.name || f !== s.father_name || m !== s.mother_name) {
+              if (!n) continue; // don't blank a name
+              await upsertStudent({ ...s, name: n, father_name: f, mother_name: m });
+              fixed++;
+            }
+          }
+          await refresh();
+          void showAlert(fixed === 0 ? "No names needed cleaning." : `Cleaned ${fixed} record${fixed === 1 ? "" : "s"}.`);
+        }}>Clean names</button>
+        <button className="btn secondary" onClick={() => {
+          const groups = findDuplicates();
+          if (groups.length === 0) { void showAlert("No duplicates found."); return; }
+          setDupePreview(groups);
+        }}>Find duplicates</button>
         <button className="btn" onClick={onImport}>Import from Excel</button>
       </div>
 
@@ -387,6 +514,55 @@ export default function Students() {
             }}>Save</button>
             <button className="btn secondary" onClick={() => setEditing(null)}>Cancel</button>
           </div>
+          </div>
+        </div>
+      )}
+      {dupePreview && (
+        <div
+          onClick={(e) => { if (e.target === e.currentTarget) setDupePreview(null); }}
+          style={{
+            position: "fixed", inset: 0, background: "rgba(0,0,0,0.45)",
+            display: "flex", alignItems: "flex-start", justifyContent: "center",
+            paddingTop: 80, zIndex: 1000,
+          }}
+        >
+          <div className="card" style={{ width: "min(720px, 94vw)", maxHeight: "82vh", overflow: "auto", margin: 0 }}>
+            <h3 style={{ marginTop: 0 }}>Duplicate Students</h3>
+            <p style={{ color: "var(--muted)", fontSize: 13, marginTop: -4 }}>
+              Matched on same email (exact) and/or student name (≥90% similar). The oldest record in each group will be kept; the rest will be permanently removed.
+            </p>
+            <div style={{ display: "flex", flexDirection: "column", gap: 10, marginTop: 8 }}>
+              {dupePreview.map((group, gi) => {
+                const sorted = [...group].sort((a, b) => {
+                  if (a.active !== b.active) return b.active - a.active;
+                  return b.id - a.id;
+                });
+                return (
+                  <div key={gi} style={{ border: "1px solid var(--border, #ddd)", borderRadius: 6, padding: 8 }}>
+                    <div style={{ fontSize: 12, color: "var(--muted)", marginBottom: 4 }}>Group {gi + 1}</div>
+                    {sorted.map((s, i) => (
+                      <div key={s.id} style={{ display: "flex", gap: 8, fontSize: 13, padding: "2px 0" }}>
+                        <span style={{ minWidth: 60, color: i === 0 ? "var(--ok, #15803d)" : "var(--danger, #b91c1c)" }}>
+                          {i === 0 ? "KEEP" : "REMOVE"}
+                        </span>
+                        <span style={{ flex: 1 }}><b>{s.name}</b></span>
+                        <span style={{ flex: 1, color: "var(--muted)" }}>{s.email || "—"}</span>
+                        <span style={{ color: s.active ? "var(--ok, #15803d)" : "var(--muted)" }}>
+                          {s.active ? "active" : "inactive"}
+                        </span>
+                        <span style={{ color: "var(--muted)" }}>id {s.id}</span>
+                      </div>
+                    ))}
+                  </div>
+                );
+              })}
+            </div>
+            <div style={{ display: "flex", gap: 10, marginTop: 12 }}>
+              <button className="btn" style={{ background: "var(--danger, #b91c1c)", color: "#fff" }} onClick={runDedupe}>
+                Remove {dupePreview.reduce((n, g) => n + (g.length - 1), 0)} duplicate{dupePreview.reduce((n, g) => n + (g.length - 1), 0) === 1 ? "" : "s"}
+              </button>
+              <button className="btn secondary" onClick={() => setDupePreview(null)}>Cancel</button>
+            </div>
           </div>
         </div>
       )}
