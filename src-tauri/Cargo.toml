@@ -1,6 +1,6 @@
 [package]
 name = "echelon-receipts"
-version = "2.6.8"
+version = "3.0.0"
 description = "Echelon Daycare receipt generator"
 authors = ["Echelon Daycare Society"]
 edition = "2021"

@@ -449,7 +449,10 @@ export default function MonthlyAttendance() {
     // by 4px per user request (Jul'26) — the sheet now breathes vertically.
     const nRows = Math.max(1, cells.length);
     const TABLE_AVAIL_PX = 780;
-    const rowH = Math.max(15, Math.min(17, Math.floor(TABLE_AVAIL_PX / (nRows + 1)) - 1));
+    // Auto-fit rows to fill the landscape page. Cap at 28px per row so
+     // a very small roster (5 kids) doesn't give absurdly tall cells;
+     // floor at 15px so a very large roster still fits on one page.
+    const rowH = Math.max(15, Math.min(25, Math.floor(TABLE_AVAIL_PX / (nRows + 1)) - 1));
     const fontPx = rowH <= 17 ? 8 : rowH <= 20 ? 9 : 10;
     const nameFontPx = fontPx + 1;
     const padY = Math.max(1, Math.floor(rowH / 8));
@@ -526,13 +529,13 @@ export default function MonthlyAttendance() {
         .fid.tr { top: 2mm; right: 2mm; }
         .fid.bl { bottom: 2mm; left: 2mm; }
         .fid.br { bottom: 2mm; right: 2mm; }
-        h1 { margin: 10px 0 2px; font-size: 14px; padding-right: 24mm; }
-        .meta { margin: 0; font-size: 10px; padding-right: 24mm; }
+        h1 { margin: 10px 0 2px; font-size: 14px; padding-right: 40mm; }
+        .meta { margin: 0; font-size: 10px; padding-right: 40mm; }
         .qr {
-          /* 2mm gap between the top-right corner fiducial (2-6mm inset)
-             and the QR box (now 8mm+ inset) so a scanner can distinguish
-             the fiducial from the QR's own alignment eye. */
-          position: absolute; top: 8mm; right: 8mm;
+          /* QR shifted left so the TR corner fiducial can occupy the very
+             corner (matches TL/BL/BR fiducial geometry). QR sits at
+             right: 20mm inset — clear of the fiducial's 2-6mm zone. */
+          position: absolute; top: 4mm; right: 20mm;
           width: 14mm; height: 14mm;
           background: #fff; padding: 1mm; box-sizing: content-box;
           border: 1px solid #d1d5db; border-radius: 2px;
