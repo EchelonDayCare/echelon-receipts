@@ -98,6 +98,12 @@ export async function extractMonthAttendance(opts: {
   mimeType: string;
   targetMonth: string; // YYYY-MM
   knownStudentNames: string[];
+  /** Weekend days (1..31) for the target month. Used as corroboration hints in the OCR prompt. */
+  weekendDays?: number[];
+  /** STAT holidays (1..31) for the target month. */
+  statDays?: number[];
+  /** Custom centre-closed days (1..31). */
+  closedDays?: number[];
 }): Promise<ExtractMonthAttendanceResult> {
   const image_b64 = bytesToB64(opts.imageBytes);
   return await invoke<ExtractMonthAttendanceResult>("extract_month_attendance", {
@@ -106,6 +112,9 @@ export async function extractMonthAttendance(opts: {
       mime_type: opts.mimeType,
       target_month: opts.targetMonth,
       known_student_names: opts.knownStudentNames,
+      weekend_days: opts.weekendDays ?? [],
+      stat_days: opts.statDays ?? [],
+      closed_days: opts.closedDays ?? [],
     },
   });
 }

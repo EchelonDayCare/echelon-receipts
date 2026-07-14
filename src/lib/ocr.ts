@@ -7,8 +7,8 @@ import type { ExtractedRow } from "./ai";
 
 export type ProviderName = "gpt5" | "mistral_ocr" | "azure_di";
 export const PROVIDER_LABELS: Record<ProviderName, string> = {
-  gpt5: "Mistral Document AI",
-  mistral_ocr: "Mistral OCR (digits)",
+  gpt5: "(retired)",
+  mistral_ocr: "Mistral OCR",
   azure_di: "Azure Document Intelligence",
 };
 
@@ -886,10 +886,6 @@ export function projectV2ToConsensus(
     v2.cells_by_engine?.find(([n]) => n === name)?.[1] ?? 0;
 
   const providerMeta = [
-    { provider: "gpt5" as ProviderName, ok: engineOk.has("doc_ai"),
-      error: v2.engines_failed.find(([n]) => n === "doc_ai")?.[1] ?? null,
-      latency_ms: 0, rowCount: cellsFor("doc_ai"),
-      rawText: v2.raw_by_engine.find(([n]) => n === "doc_ai")?.[1] ?? "" },
     { provider: "mistral_ocr" as ProviderName, ok: engineOk.has("mistral_ocr"),
       error: v2.engines_failed.find(([n]) => n === "mistral_ocr")?.[1] ?? null,
       latency_ms: 0, rowCount: cellsFor("mistral_ocr"),

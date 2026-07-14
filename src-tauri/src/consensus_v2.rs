@@ -1408,7 +1408,10 @@ pub async fn extract_grid_impl(args: GridArgs) -> Result<GridConsensusResult, St
         (Vec::new(), Vec::new(), Vec::new(), None, 0u8);
     match docai_res {
         Ok((c, h, s, d, n, raw)) => {
-            engines_ok.push("doc_ai".to_string());
+            // NOTE: doc_ai is a retired no-op stub (returns Ok(empty)) as of 2026-07-14.
+            // Do NOT count it as a successful engine — otherwise `all OCR engines
+            // failed` becomes unreachable and both-real-engines-failed scans return
+            // a misleading empty "success". See v2.6.8 review issue #2.
             docai_cells = c; docai_headers = h; docai_stat = s; docai_detected = d; docai_n_cols = n;
             docai_cell_count = docai_cells.len();
             #[cfg(debug_assertions)]

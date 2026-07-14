@@ -341,6 +341,17 @@ pub struct ExtractMonthAttendanceArgs {
     pub mime_type: String,
     pub target_month: String,             // "YYYY-MM"
     pub known_student_names: Vec<String>,
+    // Calendar metadata for the target month. All optional — when supplied
+    // the OCR prompt uses them as ground truth for column classification
+    // (weekend/STAT/closed cells should contain NO handwriting; if the
+    // model sees ink there it's a column-drift signal, not a real mark).
+    // Days are 1..31 integers relative to the target month.
+    #[serde(default)]
+    pub weekend_days: Vec<u32>,
+    #[serde(default)]
+    pub stat_days: Vec<u32>,
+    #[serde(default)]
+    pub closed_days: Vec<u32>,
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -383,6 +394,36 @@ pub struct MonthProviderMeta {
     pub row_count: usize,
     pub mark_count: usize,
     pub error: Option<String>,
+}
+
+// Days in the target month. Best-effort — returns 31 if the string can't
+// be parsed as YYYY-MM. Used only for a hint string in the OCR prompt,
+// so a wrong answer degrades output quality but never crashes.
+fn expected_days_in_month(target_month: &str) -> u32 {
+    expected_days_in_month_strict(target_month).unwrap_or(31)
+}
+
+// Strict variant: returns an error for malformed input instead of falling
+// back to 31. Callers use this at the OCR entry point so bad inputs fail
+// loud rather than corrupting the prompt.
+fn expected_days_in_month_strict(target_month: &str) -> Result<u32, &'static str> {
+    let parts: Vec<&str> = target_month.split('-').collect();
+    if parts.len() != 2 { return Err("expected format YYYY-MM"); }
+    if parts[0].len() != 4 { return Err("year must be 4 digits"); }
+    if parts[1].len() != 2 { return Err("month must be 2 digits"); }
+    let y: i32 = parts[0].parse().map_err(|_| "year is not a number")?;
+    let m: u32 = parts[1].parse().map_err(|_| "month is not a number")?;
+    if !(1..=12).contains(&m) { return Err("month must be 01..12"); }
+    if !(1900..=2100).contains(&y) { return Err("year must be 1900..2100"); }
+    Ok(match m {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 => {
+            let leap = (y % 4 == 0 && y % 100 != 0) || (y % 400 == 0);
+            if leap { 29 } else { 28 }
+        }
+        _ => unreachable!(),
+    })
 }
 
 // Parse a single provider's raw JSON annotation into (month, days_open, rows).
@@ -523,6 +564,12 @@ fn merge_month_consensus(
 
 #[tauri::command]
 pub async fn extract_month_attendance(args: ExtractMonthAttendanceArgs) -> Result<ExtractMonthAttendanceResult, String> {
+    // Strict-validate target_month early (L3 fix). Malformed input now
+    // returns an error instead of silently degrading OCR quality via the
+    // best-effort 31-day fallback in expected_days_in_month.
+    let expected_days = expected_days_in_month_strict(&args.target_month)
+        .map_err(|e| format!("invalid target_month {:?}: {}", args.target_month, e))?;
+
     let known_hint = if args.known_student_names.is_empty() {
         "(none - use names exactly as written on the sheet)".to_string()
     } else {
@@ -547,16 +594,15 @@ pub async fn extract_month_attendance(args: ExtractMonthAttendanceArgs) -> Resul
                             "items": {
                                 "type": "object",
                                 "properties": {
-                                    "day":  { "type": "string", "description": "Day-of-month as string, '1'..'31'." },
-                                    "mark": { "type": "string", "enum": ["P","A"], "description": "\
+                                    "day":  { "type": "string", "description": format!("Day-of-month as string, '1'..'{}' (the target month has {} days).", expected_days, expected_days) },
+                                    "mark": { "type": "string", "enum": ["P","A"], "description": format!("\
                                         VISUAL RULES (apply strictly, in order):\n\
-                                        (1) 'P' = ONLY when the cell contains a clear CROSS or X shape (two strokes crossing) OR a checkmark ✓ OR an asterisk/star ✱ ★ OR the hand-written letter 'P'. Two diagonal strokes that intersect = P.\n\
-                                        (2) 'A' = ANY horizontal line (dash '-', en-dash, hyphen, minus sign, single stroke roughly parallel to the row) OR a hand-written 'A'. A single stroke is NEVER P — only two crossing strokes are P.\n\
-                                        (3) BLANK / EMPTY / UNFILLED cells: OMIT this array entry entirely. Do NOT emit 'A' for a truly empty cell — the sheet has many future/not-yet-filled days and marking them absent corrupts the record.\n\
-                                        (4) The wide vertical bands labelled 'Saturday & Sunday' between weeks are NOT day columns — do NOT emit anything for cells inside those bands. Skip them entirely.\n\
-                                        (5) Any column that carries a vertical multi-row text label like 'Stat Holiday', 'Holiday', 'Statutory Holiday', 'Closed', 'Public Holiday' is NOT a day column — do NOT emit anything for cells inside those columns. Skip them entirely.\n\
-                                        (6) COLUMN ALIGNMENT: use the numeric day labels ('1', '2', '3', … '31') at the top of the sheet as ground truth for which cell corresponds to which day. After each Saturday & Sunday band or Stat Holiday column, the next numbered column is the following weekday — do NOT let visual bands shift your column count.\n\
-                                        (7) When uncertain between P and A for a cell that clearly has ink, prefer 'A'. When uncertain whether a cell has ink at all, prefer OMITTING (rule 3)." }
+                                        (1) 'P' = the cell contains TWO strokes that intersect — a clear X or +, a checkmark ✓, an asterisk/star ✱ ★, or the hand-written letter 'P'. The intersection is the deciding feature. A single stroke is NEVER 'P'.\n\
+                                        (2) 'A' = a single stroke roughly parallel to the row (dash '-', en-dash, hyphen, minus sign, underscore) OR a hand-written 'A'. Never emit 'A' for two crossing strokes.\n\
+                                        (3) BLANK / EMPTY cell: OMIT this array entry entirely. Do NOT emit 'A' for a truly empty cell — the sheet is filled progressively and future days are legitimately blank. Emitting 'A' for a blank cell corrupts payroll and subsidy math.\n\
+                                        (4) Cells inside a shaded/tinted grey weekend column, a yellow/tan STAT column, or any column labelled vertically 'STAT'/'Stat Holiday'/'Closed' are NOT data cells — OMIT them. Staff never write in these columns; if you see ink there you have drifted, recount columns from the header.\n\
+                                        (5) COLUMN ALIGNMENT: the top-of-sheet numeric labels are ground truth. This month has {n} day columns. On the Echelon printed sheet, weekend columns are visibly narrower but are still numbered — do NOT merge adjacent narrow columns (e.g. '4' and '5') into one. On the older Luxmi hand-drawn sheet, weekend days are inside wide 'Saturday & Sunday' bands with no per-day numbering; the numbered day columns pick up on the next weekday after each band. Count exactly {n} day columns before assigning marks; if you count fewer, you have merged something and must recount.\n\
+                                        (6) When uncertain P vs A for a cell that clearly has ink, prefer 'A' (single-stroke is more common than accidental cross). When uncertain whether a cell has ink at all, prefer OMITTING (rule 3).", n = expected_days) }
                                 },
                                 "required": ["day", "mark"],
                                 "additionalProperties": false
@@ -573,19 +619,76 @@ pub async fn extract_month_attendance(args: ExtractMonthAttendanceArgs) -> Resul
     });
 
     let key = crate::secrets::get_secret("azure_ai_key")?;
-    let system_prompt = "You are a strict OCR service. You read a handwritten daycare monthly attendance grid and emit ONLY strict JSON matching the provided schema. Do NOT add prose. Do NOT invent marks. Follow the visual rules in the user prompt exactly.".to_string();
+    let system_prompt = "You are a precise OCR service. You read a paper daycare monthly attendance grid photographed by staff and emit ONLY strict JSON matching the provided schema. Never add prose. Never invent marks. Never emit 'A' for a blank cell. When the image is ambiguous, prefer omission over guessing. Column drift (assigning a mark to the wrong day) is the single most damaging error and must be avoided even at the cost of leaving a row incomplete.".to_string();
+
+    // Calendar hints: pass the caller's known weekend / STAT / closed days
+    // for the target month. These are corroboration ONLY — never override
+    // what the model reads from the image, but they let the model detect
+    // its own drift (ink in a weekend cell = mis-aligned columns).
+    let fmt_days = |v: &Vec<u32>| -> String {
+        if v.is_empty() { "(none)".to_string() }
+        else { v.iter().map(|d| d.to_string()).collect::<Vec<_>>().join(", ") }
+    };
+    let weekend_hint = fmt_days(&args.weekend_days);
+    let stat_hint = fmt_days(&args.stat_days);
+    let closed_hint = fmt_days(&args.closed_days);
+    let roster_size = args.known_student_names.len();
+    let numbered_roster = if args.known_student_names.is_empty() {
+        "(unknown — read names as written)".to_string()
+    } else {
+        args.known_student_names.iter().enumerate()
+            .map(|(i, n)| format!("{}. {}", i + 1, n))
+            .collect::<Vec<_>>().join("\n")
+    };
+
     let user_prompt = format!(
-        "This is a photograph of a paper monthly attendance sheet for {}. \
-         Rows are children (names in the leftmost column). Columns are days \
-         1..31 numbered along the top row. Between weeks there are wider \
-         vertical bands labelled 'Saturday & Sunday' that separate work weeks. \
-         Some columns are labelled 'Stat Holiday' vertically to indicate a \
-         closed day. Emit strict JSON per the schema. Follow the visual \
-         rules encoded on the mark.description carefully — especially: \
-         omit day entries for blank cells, skip weekend/stat-holiday columns, \
-         use the numeric day labels at the top as ground truth for column \
-         alignment. Known children on this centre roster: {}.",
-        args.target_month, known_hint,
+        "TASK\n\
+         Extract handwritten attendance marks from a paper monthly grid for {month}. The target month has exactly {expected_days} day columns.\n\
+         \n\
+         SHEET LAYOUT — two variants are in circulation. Detect which one the photo matches, then apply the matching rules.\n\
+         \n\
+         Variant A: Echelon printed sheet (most common).\n\
+         - Landscape Letter. Four corner black squares (fiducials); a QR code sits top-right.\n\
+         - Title 'Echelon Daycare Society'. Subtitle 'Attendance report for month of {month}...'.\n\
+         - Table header lists 'Child' then EVERY day number 1..{expected_days} across the top. Exactly {expected_days} numbered day columns.\n\
+         - Weekend columns (Sat & Sun) are grey-tinted and visibly NARROWER but ARE still numbered — do not merge '4' and '5' into '45'.\n\
+         - STAT columns are yellow/tan tinted with a vertical 'STAT' label; also narrower.\n\
+         - Thicker vertical dividers appear on Sundays (visual week boundary).\n\
+         - First column of the body table = child name (first + last).\n\
+         \n\
+         Variant B: Luxmi hand-drawn sheet (older, still accepted).\n\
+         - Portrait or landscape hand-drawn grid on lined paper.\n\
+         - Between weeks, wide vertical bands span both Saturday AND Sunday together — those bands have NO per-day numbering and are NOT day columns; skip them entirely and pick numbering back up on the next weekday.\n\
+         - STAT columns carry a vertical multi-row text label like 'Stat Holiday' / 'Holiday' / 'Closed' — also NOT day columns; skip them.\n\
+         - Day numbers appear only above the weekday columns and re-anchor after each band.\n\
+         \n\
+         Both variants: handwritten marks are 'X' = present (two crossing strokes), '-' or '–' = absent (single horizontal stroke), empty = future/unmarked.\n\
+         \n\
+         GROUND TRUTH (from the centre's records — trust these over anything the image seems to say)\n\
+         - Target month: {month}\n\
+         - Total day columns to find (Variant A) or day numbers to see across the whole grid (Variant B): {expected_days}\n\
+         - Weekend days this month: {weekend_hint}\n\
+         - STAT holidays this month: {stat_hint}\n\
+         - Centre-closed days (custom closures): {closed_hint}\n\
+         - Roster (exactly {roster_size} children — every row you emit MUST match one of these names verbatim, or be flagged as an unknown extra row):\n{numbered_roster}\n\
+         \n\
+         HARD RULES\n\
+         1. NEVER emit a mark for a cell that corresponds to a weekend day, a STAT holiday, or a centre-closed day per the ground truth above. Staff do not write in those cells. If you see ink there, you have drifted — recount columns from the leftmost day label '1' before emitting anything.\n\
+         2. Count exactly {expected_days} day columns (Variant A) or day numbers (Variant B) BEFORE you start reading marks. If your count is off, restart column detection using the numeric day labels as anchors.\n\
+         3. Every row you emit must match a roster name via first-name AND last-name (case-insensitive; ignore middle names). If a handwritten name does not clearly match any roster entry, emit the row anyway with the name as read — the downstream reviewer will resolve it.\n\
+         4. BLANK cells (no visible ink) → OMIT the day entry from that row's marks array. Never emit 'A' for a blank cell. Better to under-report than to invent absences.\n\
+         5. Single horizontal stroke = 'A' (absent). Two crossing strokes = 'P' (present). No third category exists. If ink is present but the shape is unclear, prefer 'A'.\n\
+         6. Preserve column alignment across corroboration: if the ground truth says day D is a weekend/STAT/closed but your read shows any mark at that position, you have almost certainly counted columns wrong — re-anchor on the day-number header and try again.\n\
+         7. The 'days_centre_open' field is the underline-blanked value in the subtitle ('Number of days Centre ___ open'). If it's not filled in on the sheet, return null. Do NOT compute it yourself.\n\
+         \n\
+         Emit JSON matching the schema. No prose, no comments, no wrapping ```json fences.",
+        month = args.target_month,
+        expected_days = expected_days,
+        weekend_hint = weekend_hint,
+        stat_hint = stat_hint,
+        closed_hint = closed_hint,
+        roster_size = roster_size,
+        numbered_roster = numbered_roster,
     );
 
     // Downscale once up-front so both providers get the same compact input.

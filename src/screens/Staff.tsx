@@ -5,11 +5,11 @@ import { readFile } from "@tauri-apps/plugin-fs";
 import { invoke } from "@tauri-apps/api/core";
 import { save as saveDialog } from "@tauri-apps/plugin-dialog";
 import { writeFile } from "@tauri-apps/plugin-fs";
-import { getSettings, setSetting } from "../lib/db";
+import { getSettings } from "../lib/db";
 import {
-  listStaff, createStaff, updateStaff, archiveStaff,
+  listStaff, createStaff, updateStaff, archiveStaff, hardDeleteStaff,
   listHoursForMonth, upsertHour, deleteHour, hoursBetween, paidHours,
-  assertStaffHoursSchema, countHoursForStaffMonth, deleteHoursForStaffMonth,
+  assertStaffHoursSchema,   countHoursForStaffMonth, listMonthsForStaff, deleteHoursForStaffMonth, countMeetingActionsForStaff,
 } from "../lib/staff";
 import { listShiftsForMonth, shiftHours } from "../repo/scheduleRepo";
 import { fileToMime } from "../lib/ai";
@@ -262,7 +262,7 @@ export default function StaffScreen() {
     // Header row 1: names spanning IN/OUT pairs (no more No.Ln column —
     // paid_hours() auto-deducts 30-min lunch on shifts ≥5h per BC ESA;
     // the owner can still toggle no_lunch manually on the Hours row).
-    const headerNames = staffCols.map((n) => `<th colspan="2" class="staff-name">${n ? h(n) : ''}</th><th class="spacer"></th>`).join("");
+    const headerNames = staffCols.map((n) => `<th colspan="2" class="staff-name">${n ? h(n) : '<span class="ph">write name</span>'}</th><th class="spacer"></th>`).join("");
     // Header row 2: repeating IN / OUT subheads.
     const headerSubs = staffCols.map(() => `<th>IN</th><th>OUT</th><th class="spacer"></th>`).join("");
     const html = `<!doctype html><html><head><title>Staff Sign-In ${monthLabel}</title>
@@ -289,11 +289,12 @@ export default function StaffScreen() {
         .qr img { display: block; width: 100%; height: 100%; }
         .title { text-align: center; margin: 0 0 3px; font-size: 13px; font-weight: 700; letter-spacing: .5px; }
         .topnote {
-          margin: 0 auto 4px; padding: 3px 8px; max-width: 200mm;
-          font-size: 9px; text-align: center; color: #78350f;
-          background: #fef3c7; border: 1px solid #fcd34d;
+          margin: 0 auto 4px; padding: 4px 10px; max-width: 200mm;
+          font-size: 9px; text-align: center; color: #111827;
+          background: #f3f4f6; border: 1px solid #6b7280;
           border-radius: 3px;
         }
+        .topnote .hint { display: block; margin-top: 2px; font-size: 8.5px; font-style: italic; color: #374151; }
         table { border-collapse: collapse; width: 100%; table-layout: fixed; }
         col.day  { width: 8%; }
         /* Slot width computed for the actual staff count so 1–6 staff all
@@ -305,7 +306,7 @@ export default function StaffScreen() {
            on skewed phone photos. */
         col.gap  { width: 0.7%; }
         th, td { border: 1px solid #222; text-align: center; overflow: hidden; padding: 0 2px; }
-        td { height: 19px; }
+        td { height: 22px; }
         th { background: #f2f2f2; font-size: 9px; font-weight: 600; height: 13px; }
         th.staff-name { font-size: 10px; font-weight: 700; }
         th.staff-name .ph { color: #999; font-style: italic; font-weight: 400; }
@@ -316,21 +317,21 @@ export default function StaffScreen() {
            normalize_time() in the OCR pipeline discards a lone ":" as
            empty (no digits to parse). */
         td .ph {
-          color: #9ca3af; font-weight: 500; font-size: 12px;
+          color: #e5e7eb; font-weight: 400; font-size: 10px;
           letter-spacing: 0; user-select: none;
         }
         td.day { text-align: left; padding-left: 6px; font-weight: 600; font-size: 9px; }
-        tr.weekend td { background: #f5f5f5; }
+        tr.weekend td { background: #f5f5f5; height: 14px; }
         td.weekend-cell { background: #e5e5e5; }
         td.weekend-cell .wk { color: #666; font-weight: 700; letter-spacing: 2px; font-size: 9px; }
-        tr.stat td { background: #fef3c7; }
+        tr.stat td { background: #fef3c7; height: 14px; }
         td.stat-cell { background: #fde68a; }
         td.stat-cell .wk { color: #78350f; font-weight: 700; letter-spacing: 2px; font-size: 9px; }
         .footer { display: flex; justify-content: space-between; gap: 20px; margin-top: 4mm; font-size: 10px; }
         .footer .field { flex: 1; }
         .footer .field .lbl { font-weight: 600; margin-bottom: 2px; }
         .footer .field .line { border-bottom: 1px solid #333; height: 14px; }
-        .instr { margin: 2mm 0 0; font-size: 9px; color: #555; text-align: center; font-style: italic; }
+        .instr { margin: calc(2mm - 10px) 0 0; font-size: 9px; color: #555; text-align: center; font-style: italic; }
         .watermark {
           position: absolute; top: 50%; left: 50%;
           transform: translate(-50%, -50%) rotate(-20deg);
@@ -347,7 +348,7 @@ export default function StaffScreen() {
       <div class="sheet-id">Sheet ID: ${sheetId}</div>
       <div class="qr" title="Machine-readable staff column manifest"><img src="${qrDataUrl}" alt="QR"/></div>
       <h1 class="title">${h(settings.daycare_name || "ECHELON DAYCARE")} &nbsp;—&nbsp; Monthly Staff Sign-In Sheet<br/>${monthLabel}</h1>
-      <p class="topnote">Hours are calculated by AI reading your handwriting. Please write clearly and avoid overwriting or scribbling &mdash; unclear entries may affect your hours.</p>
+      <p class="topnote">Hours are calculated by AI reading your handwriting. Please write clearly and avoid overwriting or scribbling &mdash; unclear entries may affect your hours.<span class="hint">Leave the cell empty if absent. Do not write &ldquo;off&rdquo;, &ldquo;sick&rdquo;, &ldquo;X&rdquo;, or dashes.</span></p>
       ${staffColsWithId.length === 0 ? '<div class="watermark">NO STAFF CONFIGURED</div>' : ''}
       <table>
         <colgroup>
@@ -365,7 +366,6 @@ export default function StaffScreen() {
         <div class="field" style="flex: 1"><div class="lbl">Notes:</div></div>
         <div class="field" style="flex: 0 0 30%"><div class="lbl">Director signature:</div></div>
       </div>
-      <p class="instr">Leave the cell empty if absent. Do not write &ldquo;off&rdquo;, &ldquo;sick&rdquo;, &ldquo;X&rdquo;, or dashes.</p>
       </body></html>`;
     void printHtmlDocument(html).catch((e) => setToast({ msg: "Print failed: " + (e as Error).message, tone: "err" }));
   }
@@ -421,6 +421,95 @@ export default function StaffScreen() {
     if (!await showConfirm("Archive this staff member? Their past hours are preserved.")) return;
     await archiveStaff(id);
     await refresh();
+  }
+
+  async function purgeArchived() {
+    const archived = staff.filter((s) => !s.active);
+    if (archived.length === 0) { notify("No archived staff to purge.", "err"); return; }
+
+    // Guard: any archived staff with past hours is protected. Deletion is
+    // only allowed once the user has manually cleared their monthly hours
+    // via the Hours tab — this keeps historical data honest.
+    const MONTH_NAMES = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
+    const fmtMonth = (ym: string) => {
+      const [y, m] = ym.split("-").map(Number);
+      return `${MONTH_NAMES[(m || 1) - 1]} ${y}`;
+    };
+    const withMonths = await Promise.all(
+      archived.map(async (s) => ({
+        s,
+        months: await listMonthsForStaff(s.id),
+        meetingActions: await countMeetingActionsForStaff(s.id),
+      }))
+    );
+    // A staff is safely deletable iff there are NO hour rows AND NO meeting
+    // actions assigned to them. Both are non-cascading FK references from
+    // other tables into staff(id) — either will fail the raw DELETE.
+    const deletable = withMonths.filter((x) => x.months.length === 0 && x.meetingActions === 0).map((x) => x.s);
+    const blocked = withMonths.filter((x) => x.months.length > 0 || x.meetingActions > 0);
+
+    if (deletable.length === 0) {
+      const list = blocked.map((x) => {
+        const total = x.months.reduce((a, m) => a + m.n, 0);
+        const parts: string[] = [];
+        if (total > 0) {
+          const monthList = x.months.map((m) => `${fmtMonth(m.ym)} (${m.n})`).join(", ");
+          parts.push(`${total} hour entr${total === 1 ? "y" : "ies"} across ${monthList}`);
+        }
+        if (x.meetingActions > 0) {
+          parts.push(`${x.meetingActions} meeting action item${x.meetingActions === 1 ? "" : "s"}`);
+        }
+        return `• ${x.s.name} — ${parts.join(" + ")}`;
+      }).join("\n\n");
+      await showAlert(
+        `Nothing can be deleted right now.\n\n` +
+        `The following archived staff still have records on file and are protected from deletion:\n\n${list}\n\n` +
+        `── How to permanently delete them ──\n` +
+        `1. Go to the Hours tab and delete every hour row listed.\n` +
+        `2. Reassign or delete any meeting action items owned by them.\n` +
+        `3. Come back here and click "Purge archived" again.\n\n` +
+        `This two-step guard prevents accidental loss of payroll and meeting history.`
+      );
+      return;
+    }
+
+    const deletableList = deletable.map((s) => `• ${s.name}`).join("\n");
+    let blockedSection = "";
+    if (blocked.length > 0) {
+      const detail = blocked.map((x) => {
+        const parts: string[] = [];
+        if (x.months.length > 0) {
+          parts.push(`hours in ${x.months.map((m) => fmtMonth(m.ym)).join(", ")}`);
+        }
+        if (x.meetingActions > 0) {
+          parts.push(`${x.meetingActions} meeting action${x.meetingActions === 1 ? "" : "s"}`);
+        }
+        return `• ${x.s.name} — ${parts.join("; ")}`;
+      }).join("\n");
+      blockedSection =
+        `\n\n⚠ ${blocked.length} archived staff CANNOT be deleted (still have records on file):\n${detail}\n\n` +
+        `To delete them later:\n` +
+        `  1. Go to the Hours tab and clear their monthly hours.\n` +
+        `  2. Reassign or delete any meeting action items they own.\n` +
+        `  3. Return here and click "Purge archived" again.`;
+    }
+
+    const ok = await showConfirm(
+      `Permanently delete ${deletable.length} archived staff (no past hours)?\n\n${deletableList}${blockedSection}\n\n` +
+      `This CANNOT be undone.`
+    );
+    if (!ok) return;
+
+    let deleted = 0, failed = 0;
+    for (const s of deletable) {
+      try { await hardDeleteStaff(s.id); deleted++; }
+      catch (e) { console.error(`purge failed for ${s.name}:`, e); failed++; }
+    }
+    await refresh();
+    const parts = [`Permanently deleted ${deleted}`];
+    if (failed) parts.push(`${failed} failed (see console)`);
+    if (blocked.length) parts.push(`${blocked.length} kept (had past hours)`);
+    notify(parts.join(" · "), failed ? "err" : "ok");
   }
 
   // ---- Manual hour entry ----
@@ -549,8 +638,8 @@ export default function StaffScreen() {
           centreOpenTime: settings.centre_open_time || "07:00",
           centreCloseTime: settings.centre_close_time || "18:30",
           centreHoursSlackMin: settings.centre_hours_slack_min || "60",
-          enableMistralOcr: settings.enable_mistral_ocr !== "0",
-          enableAzureDi: settings.enable_azure_di !== "0",
+          enableMistralOcr: true,
+          enableAzureDi: true,
           statDates,
         });
         const projected = projectV2ToConsensus(v2, activeStaff, monthKey(year, month));
@@ -888,7 +977,7 @@ export default function StaffScreen() {
           <div style={{ flex: 1, minWidth: 240 }}>
             <h3 style={{ margin: "0 0 4px" }}>Upload {MONTHS[month - 1]} sign-in sheet</h3>
             <p style={{ margin: 0, color: "var(--muted)", fontSize: 13 }}>
-              Snap a clear photo or scan of the monthly sheet. Azure Document AI + GPT-5.4 + Mistral OCR run in parallel and agree on the in/out times; you review any low-confidence cells.
+              Snap a clear photo or scan of the monthly sheet. Mistral OCR reads the times and Azure Document Intelligence resolves the staff columns; you review any low-confidence cells.
             </p>
             {activeStaff.length === 0 && (
               <p style={{ margin: "6px 0 0", color: "var(--danger)", fontSize: 13 }}>Add at least one staff member below before uploading.</p>
@@ -935,56 +1024,6 @@ export default function StaffScreen() {
             >
               {ocrBusy ? "Reading sheet…" : "…or choose file manually"}
             </button>
-            <label
-              title="When ON, a second OCR pass reads raw digits and cross-checks Doc AI's times. Turn OFF to use only Mistral Document AI (faster, but no digit witness cross-check)."
-              style={{
-                display: "flex", alignItems: "center", gap: 8,
-                fontSize: 12, color: "var(--muted)", cursor: "pointer",
-                marginTop: 4, userSelect: "none",
-              }}
-            >
-              <input
-                type="checkbox"
-                checked={settings.enable_mistral_ocr !== "0"}
-                onChange={async (e) => {
-                  const val = e.target.checked ? "1" : "0";
-                  await setSetting("enable_mistral_ocr", val);
-                  setSettings({ ...settings, enable_mistral_ocr: val });
-                }}
-                disabled={ocrBusy}
-              />
-              <span>
-                Use Mistral OCR digit cross-check{" "}
-                <span style={{ opacity: 0.7 }}>
-                  ({settings.enable_mistral_ocr === "0" ? "OFF — Doc AI only" : "ON"})
-                </span>
-              </span>
-            </label>
-            <label
-              title="Azure Document Intelligence — third semantic voter with strong table-structure understanding. Recommended ON for handwritten sheets."
-              style={{
-                display: "flex", alignItems: "center", gap: 8,
-                fontSize: 12, color: "var(--muted)", cursor: "pointer",
-                marginTop: 2, userSelect: "none",
-              }}
-            >
-              <input
-                type="checkbox"
-                checked={settings.enable_azure_di !== "0"}
-                onChange={async (e) => {
-                  const val = e.target.checked ? "1" : "0";
-                  await setSetting("enable_azure_di", val);
-                  setSettings({ ...settings, enable_azure_di: val });
-                }}
-                disabled={ocrBusy}
-              />
-              <span>
-                Use Azure Document Intelligence{" "}
-                <span style={{ opacity: 0.7 }}>
-                  ({settings.enable_azure_di === "0" ? "OFF" : "ON — 3rd voter"})
-                </span>
-              </span>
-            </label>
           </div>
         </div>
 
@@ -993,10 +1032,9 @@ export default function StaffScreen() {
             {/* Provider health strip — one badge per model with latency + row count. */}
             <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 10, fontSize: 12 }}>
               {((): ProviderName[] => {
-                const arr: ProviderName[] = ["gpt5"];
-                if (settings.enable_azure_di !== "0") arr.push("azure_di");
-                if (settings.enable_mistral_ocr !== "0") arr.push("mistral_ocr");
-                return arr;
+                // v2 pipeline: Mistral OCR reads times, Azure DI resolves staff columns.
+                // Both are always on (v2.6.8+); doc_ai (gpt5) is retired.
+                return ["mistral_ocr", "azure_di"];
               })().map((p) => {
                 const meta = consensus.providerMeta.find((m) => m.provider === p);
                 const ok = meta?.ok;
@@ -1012,14 +1050,9 @@ export default function StaffScreen() {
                   </span>
                 );
               })}
-              {settings.enable_mistral_ocr === "0" && (
-                <span style={{ padding: "3px 10px", borderRadius: 999, background: "#e0e7ff", border: "1px solid #6366f1", color: "#3730a3", fontWeight: 600 }}>
-                  Digit cross-check OFF — trusting Doc AI verbatim
-                </span>
-              )}
               {(() => {
-                const expected = 1 + (settings.enable_azure_di !== "0" ? 1 : 0) + (settings.enable_mistral_ocr !== "0" ? 1 : 0);
-                const got = consensus.align.succeededProviders.length;
+                const expected = 2;
+                const got = consensus.align.succeededProviders.filter((p) => p !== "gpt5").length;
                 return got < expected ? (
                   <span style={{ padding: "3px 10px", borderRadius: 999, background: "#fef3c7", border: "1px solid #f59e0b", color: "#92400e", fontWeight: 600 }}>
                     ⚠ Only {got}/{expected} responded — reduced cross-check
@@ -1235,7 +1268,19 @@ export default function StaffScreen() {
         <section className="card">
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
             <h3 style={{ margin: 0 }}>Staff <span style={{ color: "var(--muted)", fontWeight: 400, fontSize: 13 }}>({activeStaff.length} active)</span></h3>
-            <button className="btn secondary" onClick={newStaff}>+ Add staff</button>
+            <div style={{ display: "flex", gap: 8 }}>
+              {staff.some((s) => !s.active) && (
+                <button
+                  className="btn secondary"
+                  onClick={purgeArchived}
+                  title="Permanently delete every archived staff row"
+                  style={{ color: "var(--danger)", borderColor: "var(--danger)" }}
+                >
+                  🗑 Purge archived ({staff.filter((s) => !s.active).length})
+                </button>
+              )}
+              <button className="btn secondary" onClick={newStaff}>+ Add staff</button>
+            </div>
           </div>
           {staff.length === 0 ? (
             <p style={{ color: "var(--muted)", margin: "10px 0 0" }}>No staff yet — click <strong>+ Add staff</strong> to add your first teacher.</p>

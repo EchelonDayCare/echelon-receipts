@@ -189,11 +189,44 @@ export default function MonthlyAttendance() {
       const mime = fileToMime(path);
       const targetMonth = `${year}-${String(month).padStart(2, "0")}`;
       const knownNames = cells.map((c) => c.student_name);
+      // Recompute STAT holidays inline instead of trusting the component
+      // state `statSet` — that state is populated by a `useEffect([year])`
+      // and could still be empty on the first render (M4 race). Building
+      // it here from the same primitives makes the OCR corroboration hints
+      // deterministic regardless of render timing.
+      const liveStatSet = new Set<string>();
+      try {
+        if (await isBcHolidaysEnabled()) {
+          const disabled = new Set(await getDisabledBcHolidayIds());
+          for (const h of bcStatHolidays(year)) if (!disabled.has(h.id)) liveStatSet.add(h.iso);
+        }
+      } catch { /* non-fatal — degrade to no stat hints */ }
+      // Corroboration hints for the OCR prompt: pass the calendar so the
+      // model knows which columns should be empty (weekend/STAT/closed)
+      // and can detect its own column drift when ink appears there.
+      const weekendDays: number[] = [];
+      const statDaysArr: number[] = [];
+      const closedDaysArr: number[] = [];
+      for (const d of dayNums) {
+        const iso = isoDay(year, month, d);
+        const dow = new Date(year, month - 1, d).getDay();
+        if (dow === 0 || dow === 6) weekendDays.push(d);
+        if (liveStatSet.has(iso)) statDaysArr.push(d);
+        // closedByIso is a Map<string, closureReason>; only truly custom-
+        // closed non-weekend/non-stat days are "closed" hints. Skip
+        // weekend/stat to avoid double-counting.
+        if (closedByIso.has(iso) && !(dow === 0 || dow === 6) && !liveStatSet.has(iso)) {
+          closedDaysArr.push(d);
+        }
+      }
       const res = await extractMonthAttendance({
         imageBytes: bytes as Uint8Array,
         mimeType: mime,
         targetMonth,
         knownStudentNames: knownNames,
+        weekendDays,
+        statDays: statDaysArr,
+        closedDays: closedDaysArr,
       });
       const roster = cells.map((c) => ({ id: c.student_id, name: c.student_name }));
       // Bucket uncertain cells by child name for quick lookup while building review rows.
@@ -416,7 +449,7 @@ export default function MonthlyAttendance() {
     // by 4px per user request (Jul'26) — the sheet now breathes vertically.
     const nRows = Math.max(1, cells.length);
     const TABLE_AVAIL_PX = 780;
-    const rowH = Math.max(15, Math.min(26, Math.floor(TABLE_AVAIL_PX / (nRows + 1)) - 1));
+    const rowH = Math.max(15, Math.min(17, Math.floor(TABLE_AVAIL_PX / (nRows + 1)) - 1));
     const fontPx = rowH <= 17 ? 8 : rowH <= 20 ? 9 : 10;
     const nameFontPx = fontPx + 1;
     const padY = Math.max(1, Math.floor(rowH / 8));
@@ -429,6 +462,21 @@ export default function MonthlyAttendance() {
       return `${parts[0]} ${parts[parts.length - 1]}`;
     };
 
+    // Compute longest name in chars so the name column auto-fits (+20px
+     // slack). Anything narrower truncates; anything wider wastes space
+     // that day columns could use for handwriting.
+    const maxNameChars = Math.max(6, ...cells.map((c) => firstLast(c.student_name).length));
+
+    // Per-day column classes so we can shrink weekend/STAT columns
+    // horizontally (nobody writes X's there — save the pixels for weekdays).
+    const dayColClass = (d: number): string => {
+      const iso = isoDay(year, month, d);
+      if (statSet.has(iso)) return "day narrow";
+      const dow = new Date(year, month - 1, d).getDay();
+      if (dow === 0 || dow === 6) return "day narrow";
+      if (closedByIso.get(iso)) return "day narrow";
+      return "day wide";
+    };
     const rowsHtml = cells.map((c) => `
       <tr${c.active ? "" : ' style="opacity:0.6"'}>
         <td class="name">${h(firstLast(c.student_name))}${c.active ? "" : ` <span style="font-style:italic;color:#6b7280">${h(inactiveLabel("student", c.withdrawn_at))}</span>`}</td>
@@ -436,12 +484,26 @@ export default function MonthlyAttendance() {
           const iso = isoDay(year, month, d);
           const isStat = statSet.has(iso);
           const closed = closedByIso.get(iso);
-          const cls = isStat ? "stat" : closed ? "closed" : "";
-          const content = isStat ? '<span class="statmark">STAT</span>' : "";
-          return `<td${cls ? ` class="${cls}"` : ""}>${content}</td>`;
+          // Thicker vertical divider on the LEFT edge of every Sunday
+          // column — visually separates each week. Helps humans track
+          // columns and gives OCR a periodic anchor on skewed photos.
+          const weekBoundary = new Date(year, month - 1, d).getDay() === 0;
+          const classes = [
+            isStat ? "stat" : closed ? "closed" : "",
+            weekBoundary ? "wkbound" : "",
+          ].filter(Boolean).join(" ");
+          // Empty content — STAT tint alone conveys "no data expected"
+          // to humans; the OCR prompt gets the STAT day list via the
+          // calendar hints and never depends on reading the label. This
+          // avoids clipping vertical text inside a 17-19px row.
+          const content = "";
+          return `<td${classes ? ` class="${classes}"` : ""}>${content}</td>`;
         }).join("")}
       </tr>`).join("");
-    const headerCells = dayNums.map((d) => `<th>${d}</th>`).join("");
+    const headerCells = dayNums.map((d) => {
+      const weekBoundary = new Date(year, month - 1, d).getDay() === 0;
+      return `<th${weekBoundary ? ' class="wkbound"' : ""}>${d}</th>`;
+    }).join("");
     const html = `<!doctype html><html><head><title>Attendance ${monthLabel}</title>
       <style>
         /* margin:0 tells Chromium/WebView2 not to draw its default header &
@@ -457,31 +519,49 @@ export default function MonthlyAttendance() {
           print-color-adjust: exact;
           position: relative;
         }
-        h1 { margin: 0 0 2px; font-size: 14px; padding-right: 24mm; }
-        .meta { margin: 0 0 6px; font-size: 10px; padding-right: 24mm; }
+        /* Corner fiducials — 4mm black squares, one per page corner.
+           Give OCR strong registration marks even under photo skew. */
+        .fid { position: fixed; width: 4mm; height: 4mm; background: #000; }
+        .fid.tl { top: 2mm; left: 2mm; }
+        .fid.tr { top: 2mm; right: 2mm; }
+        .fid.bl { bottom: 2mm; left: 2mm; }
+        .fid.br { bottom: 2mm; right: 2mm; }
+        h1 { margin: 10px 0 2px; font-size: 14px; padding-right: 24mm; }
+        .meta { margin: 0; font-size: 10px; padding-right: 24mm; }
         .qr {
-          position: absolute; top: 4mm; right: 4mm;
+          /* 2mm gap between the top-right corner fiducial (2-6mm inset)
+             and the QR box (now 8mm+ inset) so a scanner can distinguish
+             the fiducial from the QR's own alignment eye. */
+          position: absolute; top: 8mm; right: 8mm;
           width: 14mm; height: 14mm;
           background: #fff; padding: 1mm; box-sizing: content-box;
           border: 1px solid #d1d5db; border-radius: 2px;
         }
         .qr img { width: 14mm; height: 14mm; display: block; }
-        .sheet-id {
-          position: absolute; top: 21mm; right: 4mm;
-          font-size: 7px; color: #6b7280; letter-spacing: 0.5px;
-          text-align: right; width: 16mm;
-        }
-        table { border-collapse: collapse; width: 100%; table-layout: fixed; margin-top: 8mm; }
-        /* Wider day cells reclaimed from narrower body margin (4mm each
-           side vs 8mm) rather than from the name column. Name col holds
-           its size so First-Last never truncates. */
-        col.day { width: 2.85%; }
-        col.name { width: 14%; }
+        table { border-collapse: collapse; width: 100%; table-layout: fixed; margin-top: 16px; }
+        /* Auto-fit name column: longest first-last name (in ch units)
+           plus 20px slack. Prevents wasted space for short-name months
+           and prevents ellipsis truncation for long-name months. */
+        col.name { width: calc(${maxNameChars}ch + 20px); }
+        /* Weekend / STAT / closed columns get a slimmer allotment — they
+           carry a label, not handwriting. The reclaimed pixels go to the
+           weekday columns where staff actually write. */
+        col.day.narrow { width: 1.6%; }
+        col.day.wide { width: auto; }
         th, td {
           border: 1px solid #333; padding: ${padY}px 2px;
           text-align: center; height: ${rowH}px;
           overflow: hidden;
         }
+        /* Zebra-striping: alternate rows get a very light background so the
+           eye (and OCR row-splitter) has a stronger row rhythm — helps
+           phone-scan photos where thin 1px grid lines can drop out. */
+        tbody tr:nth-child(even) td { background: #f9fafb; }
+        tbody tr:nth-child(even) td.closed { background: #dcdcdc; }
+        tbody tr:nth-child(even) td.stat { background: #fdecc4; }
+        /* Thicker vertical divider on the first day of each week (8, 15,
+           22, 29) — a periodic anchor for OCR column detection. */
+        th.wkbound, td.wkbound { border-left-width: 2px; border-left-color: #111; }
         td.name {
           text-align: left; white-space: nowrap;
           padding-left: 4px; font-size: ${nameFontPx}px;
@@ -492,6 +572,12 @@ export default function MonthlyAttendance() {
         td.stat .statmark {
           font-size: 7px; color: #78350f; font-weight: 700;
           letter-spacing: 1px;
+          /* Rotate STAT vertically so it fits inside the slim STAT column
+             (~1.6% of page width) without truncating to "STA". */
+          writing-mode: vertical-rl;
+          transform: rotate(180deg);
+          display: inline-block;
+          line-height: 1;
         }
         thead th { background: #f0f0f0; font-size: ${fontPx}px; }
         .legend { margin-top: 4px; font-size: 9px; color: #333; }
@@ -504,14 +590,17 @@ export default function MonthlyAttendance() {
         /* Belt-and-braces: never spill onto a 2nd page. */
         table, tr, td, th { page-break-inside: avoid; break-inside: avoid; }
       </style></head><body>
+      <div class="fid tl"></div>
+      <div class="fid tr"></div>
+      <div class="fid bl"></div>
+      <div class="fid br"></div>
       <div class="qr"><img src="${qrDataUrl}" alt="sheet code" /></div>
-      <div class="sheet-id">${h(sheetId)}</div>
       <h1>${h(daycareName || "Echelon Day Care")}</h1>
       <p class="meta">Attendance report for month of ${monthLabel}. Number of days Centre <b>____</b> open</p>
       <table>
         <colgroup>
           <col class="name" />
-          ${dayNums.map(() => `<col class="day" />`).join("")}
+          ${dayNums.map((d) => `<col class="${dayColClass(d)}" />`).join("")}
         </colgroup>
         <thead><tr><th style="text-align:left;">Child</th>${headerCells}</tr></thead>
         <tbody>${rowsHtml}</tbody>

@@ -81,6 +81,16 @@ export async function archiveStaff(id: number): Promise<void> {
   await updateStaff(id, { active: 0 });
 }
 
+/**
+ * Permanently deletes a staff row. Cascades to staff_hours via ON DELETE
+ * CASCADE. Fails if the staff owns any staff_meetings or other non-cascading
+ * references. Prefer archiveStaff() unless the row is a genuine mistake
+ * (typo, test entry) with no history worth keeping.
+ */
+export async function hardDeleteStaff(id: number): Promise<void> {
+  await execRetry("DELETE FROM staff WHERE id = ?", [id]);
+}
+
 export async function listHoursForMonth(year: number, month: number): Promise<(StaffHour & { staff_name: string })[]> {
   const d = await db();
   const ym = `${year}-${String(month).padStart(2, "0")}`;
@@ -135,6 +145,46 @@ export async function countHoursForStaffMonth(staffId: number, ym: string): Prom
     [staffId, ym]
   );
   return rows[0]?.n ?? 0;
+}
+
+export async function countHoursForStaff(staffId: number): Promise<number> {
+  const d = await db();
+  const rows = await d.select<Array<{ n: number }>>(
+    "SELECT COUNT(*) AS n FROM staff_hours WHERE staff_id=?",
+    [staffId]
+  );
+  return rows[0]?.n ?? 0;
+}
+
+export async function listMonthsForStaff(staffId: number): Promise<Array<{ ym: string; n: number }>> {
+  const d = await db();
+  return d.select<Array<{ ym: string; n: number }>>(
+    `SELECT substr(work_date,1,7) AS ym, COUNT(*) AS n
+       FROM staff_hours WHERE staff_id=?
+      GROUP BY ym ORDER BY ym DESC`,
+    [staffId]
+  );
+}
+
+/**
+ * Count meeting-action rows owned by this staff. `staff_meeting_actions`
+ * has REFERENCES staff(id) with NO cascade, so any assigned action will
+ * block hardDeleteStaff with a foreign-key error. Purge UI must surface
+ * this as a blocker alongside `staff_hours` rows.
+ */
+export async function countMeetingActionsForStaff(staffId: number): Promise<number> {
+  const d = await db();
+  try {
+    const rows = await d.select<Array<{ n: number }>>(
+      "SELECT COUNT(*) AS n FROM staff_meeting_actions WHERE owner_staff_id=?",
+      [staffId]
+    );
+    return rows[0]?.n ?? 0;
+  } catch {
+    // Table may not exist on very old databases pre-meetings migration —
+    // treat as no blocker in that case.
+    return 0;
+  }
 }
 
 /**
