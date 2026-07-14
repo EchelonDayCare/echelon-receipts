@@ -312,13 +312,12 @@ function UnlockScreen({
 
   const disabled = busy || cooldown > 0;
 
-  const submitPin = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (disabled || pin.length < 4) return;
+  const submitPin = useCallback(async (pinValue: string) => {
+    if (disabled || pinValue.length < 6) return;
     setBusy(true);
     setErr(null);
     try {
-      await invoke("v2_unlock", { pin });
+      await invoke("v2_unlock", { pin: pinValue });
       setPin("");
       onUnlocked();
     } catch (e: unknown) {
@@ -334,7 +333,24 @@ function UnlockScreen({
     } finally {
       setBusy(false);
     }
+  }, [disabled, onUnlocked]);
+
+  const onSubmitForm = (e: React.FormEvent) => {
+    e.preventDefault();
+    void submitPin(pin);
   };
+
+  // v3.0.3: auto-unlock 350ms after the user stops typing (once PIN is 6+
+  // chars). Removes the extra Enter/Submit tap for the common case where
+  // the PIN they typed is correct. If they're still typing a longer PIN,
+  // the timer resets on each keystroke. On wrong PIN the input is cleared
+  // and they can retype — same as the manual submit flow.
+  useEffect(() => {
+    if (pin.length < 6 || disabled) return;
+    const t = window.setTimeout(() => { void submitPin(pin); }, 350);
+    return () => window.clearTimeout(t);
+  }, [pin, disabled, submitPin]);
+
 
   const submitRecovery = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -394,7 +410,7 @@ function UnlockScreen({
 
   return (
     <FullScreenCentered>
-      <form onSubmit={submitPin} style={styles.winShell}>
+      <form onSubmit={onSubmitForm} style={styles.winShell}>
         <div style={styles.winAvatar} aria-hidden>
           <svg width="72" height="72" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round">
             <rect x="4.5" y="10.5" width="15" height="10" rx="2" />
@@ -424,13 +440,13 @@ function UnlockScreen({
           />
           <button
             type="submit"
-            disabled={disabled || pin.length < 4}
+            disabled={disabled || pin.length < 6}
             aria-label="Unlock"
             title="Unlock"
             style={{
               ...styles.winSubmitBtn,
-              opacity: (disabled || pin.length < 4) ? 0.35 : 1,
-              cursor: (disabled || pin.length < 4) ? "default" : "pointer",
+              opacity: (disabled || pin.length < 6) ? 0.35 : 1,
+              cursor: (disabled || pin.length < 6) ? "default" : "pointer",
             }}
           >
             {busy

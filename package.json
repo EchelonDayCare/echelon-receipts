@@ -1,7 +1,7 @@
 {
   "name": "echelon-receipts",
   "private": true,
-  "version": "3.0.2",
+  "version": "3.0.3",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -46,4 +46,5 @@
     "vitest": "^4.1.9"
   }
 }
+
 
