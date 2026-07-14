@@ -178,14 +178,40 @@ export async function printCurrentWindowViaBrowser(): Promise<void> {
 // opens. Instead we inject the HTML into the main document behind an @media
 // print overlay that hides everything else, then trigger the native print via
 // the Rust command. Cleans up afterward regardless of user action.
+//
+// v3.0.2 (macOS regression): the in-app injection + native print path on
+// macOS WKWebView was found to snapshot the on-screen viewport rather than
+// applying the injected `@media print` rules — users got printouts of the
+// app UI (title, upload zone, buttons) instead of the print sheet HTML.
+// Route macOS through the browser fallback first (which opens the HTML in
+// the default browser and calls window.print() there — reliable everywhere).
+const IS_MAC: boolean = typeof navigator !== "undefined"
+  && /Macintosh|Mac OS X/i.test(navigator.userAgent);
+
 export async function printHtmlDocument(html: string, opts?: { delayMs?: number }): Promise<void> {
-  // v2.6.4: primary path is the legacy DOM-inject + native print. This
-  // keeps PII-heavy receipts and reports inside the Tauri webview, off
-  // the disk, and out of browser history. Only if native print fails
-  // (rare — user's default browser is closed, temp dir is unwritable,
-  // etc.) do we escalate to the browser fallback, and even then the
-  // caller controls exactly what HTML we write to temp.
   const delayMs = opts?.delayMs ?? 350;
+
+  // macOS-first: browser fallback is the reliable path. The legacy in-app
+  // path silently printed the on-screen viewport instead of our HTML,
+  // shipping child-name-only sheets to the printer (v3.0.2 bug report).
+  if (IS_MAC) {
+    try {
+      await browserPrintHtmlDocument(html);
+      return;
+    } catch (e) {
+      if (!warned) {
+        console.warn("[print] macOS browser path failed, trying in-app native as fallback:", e);
+        warned = true;
+      }
+      // Fall through to legacy path as last resort.
+    }
+  }
+
+  // Windows / Linux (and macOS last-resort): primary path is the legacy
+  // DOM-inject + native print. This keeps PII-heavy receipts and reports
+  // inside the Tauri webview, off the disk, and out of browser history.
+  // Only if native print fails (rare — user's default browser is closed,
+  // temp dir is unwritable, etc.) do we escalate to the browser fallback.
   try {
     await legacyPrintHtmlDocument(html, delayMs);
     return;
@@ -197,6 +223,10 @@ export async function printHtmlDocument(html: string, opts?: { delayMs?: number 
   }
   // Browser fallback — the caller-provided HTML has already been
   // reviewed for what it contains, so this is safe.
+  await browserPrintHtmlDocument(html);
+}
+
+async function browserPrintHtmlDocument(html: string): Promise<void> {
   const hasHtmlTag = /<html[\s>]/i.test(html);
   const printable = hasHtmlTag
     ? injectPrintScript(html)
