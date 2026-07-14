@@ -1511,8 +1511,13 @@ Thanks,
   //   • staff_hours.column_index      — physical column on the sheet (for debug/UI)
   //   • staff_hours.ocr_confidence    — 0..1 (nullable; manual rows are NULL)
   //   • ocr_imports table             — every OCR scan is staged here first
-  //   • print_manifests table         — printed sheets embed a v2 QR that ties
-  //                                     column_index -> staff_id a priori.
+  //   • print_manifests table         — deprecated (v2.6.8+): the printed
+  //                                     QR now carries staff_ids/student_ids
+  //                                     directly, so no DB lookup is needed
+  //                                     to seed column-resolver priors.
+  //                                     Table remains for forward-compat
+  //                                     with any existing DBs; no code
+  //                                     reads or writes it.
   //
   // day_type has no CHECK constraint here because SQLite can't ALTER TABLE ADD
   // CONSTRAINT after the fact and the app enforces the enum at the write layer.

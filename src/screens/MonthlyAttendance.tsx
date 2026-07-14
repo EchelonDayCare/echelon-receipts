@@ -187,34 +187,63 @@ export default function MonthlyAttendance() {
     try {
       const bytes = await readFile(path);
       const mime = fileToMime(path);
-      const targetMonth = `${year}-${String(month).padStart(2, "0")}`;
+      // QR pre-check: if the printed sheet embeds a v2 QR with year+month,
+      // lock extraction to THAT month regardless of the UI period picker.
+      // Prevents "wrong month selected in UI, right month printed on paper"
+      // → wrong-month imports. Staff Hours has done this since v2.6.0;
+      // student attendance now matches.
+      let qrYear: number | null = null;
+      let qrMonth: number | null = null;
+      let qrNote: string | null = null;
+      try {
+        const norm = await invoke<{
+          qr: { year: number | null; month: number | null; sheet_id: string | null; student_ids: number[] | null };
+          note: string;
+        }>("normalize_sheet", { args: { image_path: path } });
+        if (norm.qr.year && norm.qr.month) {
+          qrYear = norm.qr.year;
+          qrMonth = norm.qr.month;
+          if (qrYear !== year || qrMonth !== month) {
+            qrNote = `QR on the scanned sheet says ${qrYear}-${String(qrMonth).padStart(2, "0")}; UI has ${year}-${String(month).padStart(2, "0")}. Reading as printed.`;
+          }
+        }
+      } catch { /* non-fatal — fall through with UI-selected month */ }
+      const effYear = qrYear ?? year;
+      const effMonth = qrMonth ?? month;
+      const targetMonth = `${effYear}-${String(effMonth).padStart(2, "0")}`;
       const knownNames = cells.map((c) => c.student_name);
       // Recompute STAT holidays inline instead of trusting the component
       // state `statSet` — that state is populated by a `useEffect([year])`
       // and could still be empty on the first render (M4 race). Building
       // it here from the same primitives makes the OCR corroboration hints
-      // deterministic regardless of render timing.
+      // deterministic regardless of render timing. Compute against the
+      // effective year (which may differ from UI year when QR overrode).
       const liveStatSet = new Set<string>();
       try {
         if (await isBcHolidaysEnabled()) {
           const disabled = new Set(await getDisabledBcHolidayIds());
-          for (const h of bcStatHolidays(year)) if (!disabled.has(h.id)) liveStatSet.add(h.iso);
+          for (const h of bcStatHolidays(effYear)) if (!disabled.has(h.id)) liveStatSet.add(h.iso);
         }
       } catch { /* non-fatal — degrade to no stat hints */ }
       // Corroboration hints for the OCR prompt: pass the calendar so the
       // model knows which columns should be empty (weekend/STAT/closed)
       // and can detect its own column drift when ink appears there.
+      // Iterate 1..N for the EFFECTIVE month, not the UI-selected month,
+      // so hints stay aligned with `targetMonth` when QR forced a shift.
       const weekendDays: number[] = [];
       const statDaysArr: number[] = [];
       const closedDaysArr: number[] = [];
-      for (const d of dayNums) {
-        const iso = isoDay(year, month, d);
-        const dow = new Date(year, month - 1, d).getDay();
+      const effDaysInMonth = daysInMonth(effYear, effMonth);
+      for (let d = 1; d <= effDaysInMonth; d++) {
+        const iso = isoDay(effYear, effMonth, d);
+        const dow = new Date(effYear, effMonth - 1, d).getDay();
         if (dow === 0 || dow === 6) weekendDays.push(d);
         if (liveStatSet.has(iso)) statDaysArr.push(d);
         // closedByIso is a Map<string, closureReason>; only truly custom-
         // closed non-weekend/non-stat days are "closed" hints. Skip
-        // weekend/stat to avoid double-counting.
+        // weekend/stat to avoid double-counting. Note: closedByIso was
+        // computed for the UI year/month, so it only contributes hints
+        // when QR agrees with the UI selection.
         if (closedByIso.has(iso) && !(dow === 0 || dow === 6) && !liveStatSet.has(iso)) {
           closedDaysArr.push(d);
         }
@@ -264,7 +293,9 @@ export default function MonthlyAttendance() {
         providers: res.providers ?? [],
       });
       const uncertainCount = (res.uncertain_cells ?? []).length;
+      const prefix = qrNote ? `${qrNote} ` : "";
       show(
+        prefix +
         `OCR read ${review.length} rows${unmatched.length ? `; ${unmatched.length} unmatched` : ""}` +
         (uncertainCount ? `; ${uncertainCount} cells flagged for review` : ""),
       );
