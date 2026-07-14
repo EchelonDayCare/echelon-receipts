@@ -554,14 +554,21 @@ export default function MonthlyAttendance() {
           position: relative;
         }
         /* Corner fiducials — 4mm black squares, one per page corner.
-           Give OCR strong registration marks even under photo skew. */
+           Give OCR strong registration marks even under photo skew.
+           v3.0.5: horizontal inset bumped 2mm -> 15mm so they sit just
+           outside the table's left/right edges (~20mm inset) rather than
+           the paper corners. Still safely clear of the QR (right: 20mm)
+           and the title/legend text (indented 64.5px). */
         .fid { position: fixed; width: 4mm; height: 4mm; background: #000; }
-        .fid.tl { top: 2mm; left: 2mm; }
-        .fid.tr { top: 2mm; right: 2mm; }
-        .fid.bl { bottom: 2mm; left: 2mm; }
-        .fid.br { bottom: 2mm; right: 2mm; }
-        h1 { margin: 10px 0 2px; font-size: 14px; padding-right: 40mm; }
-        .meta { margin: 0; font-size: 10px; padding-right: 40mm; }
+        .fid.tl { top: 2mm; left: 15mm; }
+        .fid.tr { top: 2mm; right: 15mm; }
+        .fid.bl { bottom: 10mm; left: 15mm; }
+        .fid.br { bottom: 10mm; right: 15mm; }
+        /* v3.0.5: title, meta, and legend indented 64.5px to align with
+           the table's left edge (which is centered with 64.5px margin
+           on each side per the width: calc(100% - 129px) rule). */
+        h1 { margin: 10px 0 2px 64.5px; font-size: 14px; padding-right: 40mm; }
+        .meta { margin: 0 0 0 64.5px; font-size: 10px; padding-right: 40mm; }
         .qr {
           /* QR shifted left so the TR corner fiducial can occupy the very
              corner (matches TL/BL/BR fiducial geometry). QR sits at
@@ -572,11 +579,18 @@ export default function MonthlyAttendance() {
           border: 1px solid #d1d5db; border-radius: 2px;
         }
         .qr img { width: 14mm; height: 14mm; display: block; }
-        table { border-collapse: collapse; width: 100%; table-layout: fixed; margin-top: 16px; }
-        /* Auto-fit name column: longest first-last name (in ch units)
-           plus 20px slack. Prevents wasted space for short-name months
-           and prevents ellipsis truncation for long-name months. */
-        col.name { width: calc(${maxNameChars}ch + 20px); }
+        /* v3.0.5: table narrower than 100% (by 129px, half the reclaim)
+           and centered — leaves ~64.5px margin on each side of the sheet.
+           The other half of the reclaim (129px) is distributed across
+           the 31 data cells since the name column got compact. */
+        table {
+          border-collapse: collapse;
+          width: calc(100% - 129px);
+          table-layout: fixed;
+          margin: 16px auto 0;
+        }
+        /* Compact name column: longest first-last name + 10px slack. */
+        col.name { width: calc(${maxNameChars}ch + 10px); }
         /* Weekend / STAT / closed columns get a slimmer allotment — they
            carry a label, not handwriting. The reclaimed pixels go to the
            weekday columns where staff actually write. */
@@ -614,7 +628,7 @@ export default function MonthlyAttendance() {
           line-height: 1;
         }
         thead th { background: #f0f0f0; font-size: ${fontPx}px; }
-        .legend { margin-top: 4px; font-size: 9px; color: #333; }
+        .legend { margin: 4px 0 0 64.5px; font-size: 9px; color: #333; }
         .legend .sw {
           display: inline-block; width: 10px; height: 10px;
           border: 1px solid #333; vertical-align: -1px; margin: 0 3px 0 8px;
