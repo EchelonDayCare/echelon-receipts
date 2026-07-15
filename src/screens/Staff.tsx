@@ -306,7 +306,7 @@ export default function StaffScreen() {
            on skewed phone photos. */
         col.gap  { width: 0.7%; }
         th, td { border: 1px solid #222; text-align: center; overflow: hidden; padding: 0 2px; }
-        td { height: 22px; }
+        td { height: 21px; }
         th { background: #f2f2f2; font-size: 9px; font-weight: 600; height: 13px; }
         th.staff-name { font-size: 10px; font-weight: 700; }
         th.staff-name .ph { color: #999; font-style: italic; font-weight: 400; }
@@ -321,10 +321,10 @@ export default function StaffScreen() {
           letter-spacing: 0; user-select: none;
         }
         td.day { text-align: left; padding-left: 6px; font-weight: 600; font-size: 9px; }
-        tr.weekend td { background: #f5f5f5; height: 14px; }
+        tr.weekend td { background: #f5f5f5; height: 13px; }
         td.weekend-cell { background: #e5e5e5; }
         td.weekend-cell .wk { color: #666; font-weight: 700; letter-spacing: 2px; font-size: 9px; }
-        tr.stat td { background: #fef3c7; height: 14px; }
+        tr.stat td { background: #fef3c7; height: 13px; }
         td.stat-cell { background: #fde68a; }
         td.stat-cell .wk { color: #78350f; font-weight: 700; letter-spacing: 2px; font-size: 9px; }
         .footer { display: flex; justify-content: space-between; gap: 20px; margin-top: 4mm; font-size: 10px; }

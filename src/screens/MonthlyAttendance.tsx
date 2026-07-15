@@ -483,7 +483,8 @@ export default function MonthlyAttendance() {
     // Auto-fit rows to fill the landscape page. Cap at 28px per row so
      // a very small roster (5 kids) doesn't give absurdly tall cells;
      // floor at 15px so a very large roster still fits on one page.
-    const rowH = Math.max(15, Math.min(25, Math.floor(TABLE_AVAIL_PX / (nRows + 1)) - 1));
+     // v3.0.6: min/max reduced by 2px per user request — tighter rows.
+    const rowH = Math.max(13, Math.min(23, Math.floor(TABLE_AVAIL_PX / (nRows + 1)) - 3));
     const fontPx = rowH <= 17 ? 8 : rowH <= 20 ? 9 : 10;
     const nameFontPx = fontPx + 1;
     const padY = Math.max(1, Math.floor(rowH / 8));
