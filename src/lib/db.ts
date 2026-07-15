@@ -1560,6 +1560,54 @@ Thanks,
     await d.execute("CREATE INDEX ix_print_manifests_month ON print_manifests(month)");
   }
 
+  // ─── Migration 034 — Attendance OCR audit log (v3.0.7) ────────────────
+  // Every extract_month_attendance round-trip is logged here so we can
+  // reconstruct what happened when a scan looks off. Motivating incident:
+  // Jul 2026 KidsJuly.jpeg — primary model (gpt-5.4) silently returned 2
+  // of 25 rows in 145s while secondary (gpt-4.1) got all 25 in 67s; the
+  // review modal showed only primary's 2 with the other 23 as "review
+  // manually". Post-mortem was impossible because nothing was persisted.
+  //
+  // This table gives us: image identity (sha256), target month, roster
+  // size at scan time, per-model row/mark/latency, the consensus action
+  // taken ("primary" | "secondary_promoted" | "primary_only" |
+  // "secondary_only"), rotation applied by normalize_sheet, and the final
+  // imported row/mark counts. 90-day rolling purge — audit, not history.
+  if (!(await tableExists("attendance_ai_events"))) {
+    console.warn("[ensureSchema] creating attendance_ai_events");
+    await d.execute(`CREATE TABLE attendance_ai_events (
+      id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+      created_at          TEXT NOT NULL DEFAULT (datetime('now')),
+      image_sha256        TEXT,
+      image_filename      TEXT,
+      target_month        TEXT,               -- 'YYYY-MM'
+      roster_size         INTEGER,
+      rotation_applied    INTEGER,            -- 0/90/180/270 from normalize_sheet
+      qr_year             INTEGER,
+      qr_month            INTEGER,
+      primary_model       TEXT,
+      primary_ok          INTEGER,
+      primary_row_count   INTEGER,
+      primary_mark_count  INTEGER,
+      primary_latency_ms  INTEGER,
+      primary_error       TEXT,
+      secondary_model     TEXT,
+      secondary_ok        INTEGER,
+      secondary_row_count INTEGER,
+      secondary_mark_count INTEGER,
+      secondary_latency_ms INTEGER,
+      secondary_error     TEXT,
+      consensus_action    TEXT,               -- 'primary'|'secondary_promoted'|'primary_only'|'secondary_only'
+      imported_row_count  INTEGER,
+      imported_mark_count INTEGER,
+      uncertain_count     INTEGER
+    )`);
+    await d.execute("CREATE INDEX ix_attendance_ai_events_created ON attendance_ai_events(created_at DESC)");
+    await d.execute("CREATE INDEX ix_attendance_ai_events_month ON attendance_ai_events(target_month)");
+  }
+  // 90-day rolling purge.
+  await d.execute("DELETE FROM attendance_ai_events WHERE created_at < datetime('now', '-90 days')");
+
   await logIntegrityWarnings(d);
 }
 

@@ -91,6 +91,13 @@ export interface ExtractMonthAttendanceResult {
   uncertain_cells?: MonthUncertainCell[];
   /** Per-provider metadata (deployment name, latency, row/mark counts). */
   providers?: MonthProviderMeta[];
+  /** v3.0.7: Which model's rows drove the import.
+   *  - "primary"            — primary model (normal)
+   *  - "secondary_promoted" — primary silently under-read; secondary promoted
+   *  - "primary_only"       — secondary failed; primary passed through
+   *  - "secondary_only"     — primary hard-failed; secondary was used
+   */
+  consensus_action?: string;
 }
 
 export async function extractMonthAttendance(opts: {

@@ -22,6 +22,7 @@ import { isBcHolidaysEnabled, getDisabledBcHolidayIds } from "../lib/centreCalen
 import { bcStatHolidays } from "../lib/bcHolidays";
 import { printHtmlDocument } from "../lib/print";
 import { OcrProgressBanner, MONTH_OCR_STAGES } from "../components/OcrProgressBanner";
+import { logAttendanceAiEvent } from "../lib/attendanceAiAudit";
 
 const MARK_CYCLE: (MonthMark | null)[] = ["P", "A", null];
 const MONTH_NAMES = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
@@ -84,6 +85,10 @@ export default function MonthlyAttendance() {
     /** Cells where the primary model saw blank but the secondary saw a mark. */
     missedByPrimary: { childName: string; day: string; secondaryMark: string }[];
     providers: { provider: string; ok: boolean; latency_ms: number; row_count: number; mark_count: number; error: string | null }[];
+    /** v3.0.7: consensus action taken by the Rust layer. */
+    consensusAction: string;
+    /** v3.0.7: rotation applied by normalize_sheet (0/90/180/270). */
+    rotationApplied: number;
   }>(null);
 
   async function refresh() {
@@ -184,21 +189,29 @@ export default function MonthlyAttendance() {
   // ─── OCR flow ─────────────────────────────────────────────────────────
   async function runExtractOnPath(path: string) {
     setOcrBusy(true);
+    const scanStartedAt = Date.now();
     try {
-      const bytes = await readFile(path);
-      const mime = fileToMime(path);
+      const originalMime = fileToMime(path);
       // QR pre-check: if the printed sheet embeds a v2 QR with year+month,
       // lock extraction to THAT month regardless of the UI period picker.
       // Prevents "wrong month selected in UI, right month printed on paper"
       // → wrong-month imports. Staff Hours has done this since v2.6.0;
       // student attendance now matches.
+      //
+      // v3.0.7: normalize_sheet also returns rotation_applied + oriented_path
+      // when the QR only decoded after a rotation. We MUST feed the oriented
+      // pixels to OCR (root cause of Jul 2026 primary-underread incident).
       let qrYear: number | null = null;
       let qrMonth: number | null = null;
       let qrNote: string | null = null;
+      let rotationApplied = 0;
+      let orientedPath: string | null = null;
       try {
         const norm = await invoke<{
           qr: { year: number | null; month: number | null; sheet_id: string | null; student_ids: number[] | null };
           note: string;
+          rotation_applied?: number;
+          oriented_path?: string | null;
         }>("normalize_sheet", { args: { image_path: path } });
         if (norm.qr.year && norm.qr.month) {
           qrYear = norm.qr.year;
@@ -207,7 +220,18 @@ export default function MonthlyAttendance() {
             qrNote = `QR on the scanned sheet says ${qrYear}-${String(qrMonth).padStart(2, "0")}; UI has ${year}-${String(month).padStart(2, "0")}. Reading as printed.`;
           }
         }
+        rotationApplied = norm.rotation_applied ?? 0;
+        if (rotationApplied !== 0 && norm.oriented_path) {
+          orientedPath = norm.oriented_path;
+          console.info(`[month-ocr] using oriented image (rotated ${rotationApplied}°): ${orientedPath}`);
+        }
       } catch { /* non-fatal — fall through with UI-selected month */ }
+      // v3.0.7: read the ORIENTED image bytes when available, else original.
+      const readPath = orientedPath ?? path;
+      const bytes = await readFile(readPath);
+      // Oriented image is always JPEG (written by persist_oriented_jpeg);
+      // for the original path fall back to the sniffed mime.
+      const mime = orientedPath ? "image/jpeg" : originalMime;
       const effYear = qrYear ?? year;
       const effMonth = qrMonth ?? month;
       const targetMonth = `${effYear}-${String(effMonth).padStart(2, "0")}`;
@@ -284,6 +308,12 @@ export default function MonthlyAttendance() {
         };
       });
       const unmatched = review.filter((r) => !r.matchedId).map((r) => r.inputName);
+      const importedRowCount = review.filter((r) => !r.skip).length;
+      const importedMarkCount = review.reduce(
+        (acc, r) => acc + (r.skip ? 0 : Object.keys(r.marks).length),
+        0,
+      );
+      const consensusAction = res.consensus_action ?? "primary";
       setOcrReview({
         month: res.month || targetMonth,
         daysOpen: res.days_centre_open,
@@ -291,6 +321,8 @@ export default function MonthlyAttendance() {
         unmatched,
         missedByPrimary,
         providers: res.providers ?? [],
+        consensusAction,
+        rotationApplied,
       });
       const uncertainCount = (res.uncertain_cells ?? []).length;
       const prefix = qrNote ? `${qrNote} ` : "";
@@ -299,6 +331,36 @@ export default function MonthlyAttendance() {
         `OCR read ${review.length} rows${unmatched.length ? `; ${unmatched.length} unmatched` : ""}` +
         (uncertainCount ? `; ${uncertainCount} cells flagged for review` : ""),
       );
+      // v3.0.7: audit log — fire-and-forget, never blocks the UI.
+      const filename = path.split(/[\\/]/).pop() ?? null;
+      const primaryMeta = (res.providers ?? [])[0];
+      const secondaryMeta = (res.providers ?? [])[1];
+      void logAttendanceAiEvent({
+        imageFilename: filename,
+        targetMonth,
+        rosterSize: knownNames.length,
+        rotationApplied,
+        qrYear,
+        qrMonth,
+        primaryModel: primaryMeta?.provider ?? null,
+        primaryOk: primaryMeta?.ok ?? null,
+        primaryRowCount: primaryMeta?.row_count ?? null,
+        primaryMarkCount: primaryMeta?.mark_count ?? null,
+        primaryLatencyMs: primaryMeta?.latency_ms ?? null,
+        primaryError: primaryMeta?.error ?? null,
+        secondaryModel: secondaryMeta?.provider ?? null,
+        secondaryOk: secondaryMeta?.ok ?? null,
+        secondaryRowCount: secondaryMeta?.row_count ?? null,
+        secondaryMarkCount: secondaryMeta?.mark_count ?? null,
+        secondaryLatencyMs: secondaryMeta?.latency_ms ?? null,
+        secondaryError: secondaryMeta?.error ?? null,
+        consensusAction,
+        importedRowCount,
+        importedMarkCount,
+        uncertainCount,
+      });
+      // scanStartedAt is captured for future end-to-end latency reporting.
+      void scanStartedAt;
     } catch (e: any) {
       show(String(e?.message || e), "err");
     } finally {
@@ -574,7 +636,7 @@ export default function MonthlyAttendance() {
           /* QR shifted left so the TR corner fiducial can occupy the very
              corner (matches TL/BL/BR fiducial geometry). QR sits at
              right: 20mm inset — clear of the fiducial's 2-6mm zone. */
-          position: absolute; top: 4mm; right: 20mm;
+          position: absolute; top: 2.5mm; right: 3mm;
           width: 14mm; height: 14mm;
           background: #fff; padding: 1mm; box-sizing: content-box;
           border: 1px solid #d1d5db; border-radius: 2px;
@@ -916,6 +978,43 @@ export default function MonthlyAttendance() {
                 </div>
               );
             })()}
+            {/* v3.0.7: consensus-action banner — surfaces when the source
+                model was NOT the default primary, so the reviewer knows
+                which model's numbers they're actually looking at. */}
+            {ocrReview.consensusAction && ocrReview.consensusAction !== "primary" && (
+              <div style={{
+                marginBottom: 10, padding: "8px 10px",
+                background: "#fef3c7", border: "1px solid #f59e0b",
+                borderRadius: 6, fontSize: 12, color: "#78350f",
+              }}>
+                <div style={{ fontWeight: 700, marginBottom: 2 }}>
+                  {ocrReview.consensusAction === "secondary_promoted" && "⚠ Backup model used — primary under-read the sheet"}
+                  {ocrReview.consensusAction === "primary_only" && "ℹ Second-opinion model unavailable — primary result used alone"}
+                  {ocrReview.consensusAction === "secondary_only" && "⚠ Primary model failed — backup model used alone"}
+                </div>
+                <div>
+                  {ocrReview.consensusAction === "secondary_promoted" && (
+                    <>The primary vision model saw far fewer rows than your roster of {(ocrReview.providers[0]?.row_count ?? 0)} vs {(ocrReview.providers[1]?.row_count ?? 0)}. We automatically switched to the secondary model. <b>Please double-check</b> the numbers below before importing.</>
+                  )}
+                  {ocrReview.consensusAction === "primary_only" && (
+                    <>Without a cross-check the rows below have no second opinion. If anything looks off, retake the photo (all 4 black squares must be visible) and try again.</>
+                  )}
+                  {ocrReview.consensusAction === "secondary_only" && (
+                    <>The primary model didn't respond in time. Rows below come from the backup model alone — worth an extra careful review.</>
+                  )}
+                </div>
+              </div>
+            )}
+            {/* v3.0.7: rotation-normalized banner (informational). */}
+            {ocrReview.rotationApplied !== 0 && (
+              <div style={{
+                marginBottom: 10, padding: "6px 10px",
+                background: "#ecfdf5", border: "1px solid #86efac",
+                borderRadius: 6, fontSize: 12, color: "#065f46",
+              }}>
+                ✓ Photo was rotated {ocrReview.rotationApplied}° automatically so the sheet reads landscape — no action needed.
+              </div>
+            )}
             {/* Consensus diagnostic strip — how each vision model performed + how many cells disagreed. */}
             {ocrReview.providers.length > 0 && (
               <div style={{ marginBottom: 10, padding: 8, background: "#f0f9ff", border: "1px solid #bae6fd", borderRadius: 6, fontSize: 12, color: "#0c4a6e" }}>

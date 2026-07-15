@@ -73,6 +73,9 @@ export default function Settings() {
   const [backupPassphrase, setBackupPassphrase] = useState<string>("");
   const [backupPassphraseConfirm, setBackupPassphraseConfirm] = useState<string>("");
   const [hasBackupPassphrase, setHasBackupPassphrase] = useState(false);
+  const [showOcrHistory, setShowOcrHistory] = useState(false);
+  const [ocrHistoryRows, setOcrHistoryRows] = useState<import("../lib/attendanceAiAudit").AttendanceAiEventRow[]>([]);
+  const [ocrHistoryLoading, setOcrHistoryLoading] = useState(false);
 
   useEffect(() => {
     (async () => {
@@ -933,6 +936,86 @@ export default function Settings() {
                 color: "var(--text)", padding: 8, borderRadius: 6, fontSize: 11,
                 whiteSpace: "pre-wrap", wordBreak: "break-word"
               }}>{errorLogText}</pre>
+            </div>
+          )}
+        </div>
+        {/* v3.0.7: Attendance OCR audit log — every extraction is recorded
+            so a bad scan can be diagnosed after the fact. 90-day rolling. */}
+        <div className="field" style={{ marginTop: 16 }}>
+          <label>Attendance OCR history<HelpTip text="Every attendance sheet you scan is logged here for 90 days: which model was used, how many rows each returned, whether the backup was promoted, and whether the photo was auto-rotated. Handy when a scan looks wrong and you want to know why." /></label>
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+            <button className="btn" type="button" onClick={async () => {
+              setOcrHistoryLoading(true);
+              try {
+                const { listRecentAttendanceAiEvents } = await import("../lib/attendanceAiAudit");
+                const rows = await listRecentAttendanceAiEvents(50);
+                setOcrHistoryRows(rows);
+                setShowOcrHistory(true);
+              } catch (e) {
+                console.warn("[settings] load ocr history failed:", e);
+              } finally {
+                setOcrHistoryLoading(false);
+              }
+            }} disabled={ocrHistoryLoading}>
+              {ocrHistoryLoading ? "Loading…" : "View OCR history"}
+            </button>
+            {showOcrHistory && (
+              <button className="btn ghost" type="button" onClick={() => setShowOcrHistory(false)}>Hide</button>
+            )}
+          </div>
+          {showOcrHistory && (
+            <div style={{ marginTop: 8, maxHeight: 360, overflow: "auto", border: "1px solid var(--border)", borderRadius: 6 }}>
+              {ocrHistoryRows.length === 0 ? (
+                <div style={{ padding: 12, color: "var(--muted)", fontSize: 12 }}>
+                  No scans logged in the last 90 days.
+                </div>
+              ) : (
+                <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 11 }}>
+                  <thead>
+                    <tr style={{ background: "var(--bg2, #f3f4f6)", position: "sticky", top: 0 }}>
+                      <th style={{ textAlign: "left", padding: "6px 8px" }}>When</th>
+                      <th style={{ textAlign: "left", padding: "6px 8px" }}>File</th>
+                      <th style={{ textAlign: "left", padding: "6px 8px" }}>Month</th>
+                      <th style={{ textAlign: "right", padding: "6px 8px" }}>Roster</th>
+                      <th style={{ textAlign: "right", padding: "6px 8px" }}>Rot.</th>
+                      <th style={{ textAlign: "left", padding: "6px 8px" }}>Primary</th>
+                      <th style={{ textAlign: "left", padding: "6px 8px" }}>Secondary</th>
+                      <th style={{ textAlign: "left", padding: "6px 8px" }}>Action</th>
+                      <th style={{ textAlign: "right", padding: "6px 8px" }}>Imported</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {ocrHistoryRows.map((r) => {
+                      const promoted = r.consensus_action === "secondary_promoted";
+                      const failed = r.consensus_action === "secondary_only" || r.primary_ok === 0;
+                      return (
+                        <tr key={r.id} style={{ borderTop: "1px solid var(--border)", background: promoted ? "#fef3c7" : failed ? "#fee2e2" : "transparent" }}>
+                          <td style={{ padding: "4px 8px", whiteSpace: "nowrap" }}>{(r.created_at || "").replace("T", " ").slice(0, 19)}</td>
+                          <td style={{ padding: "4px 8px" }}>{r.image_filename || "-"}</td>
+                          <td style={{ padding: "4px 8px" }}>{r.target_month || "-"}</td>
+                          <td style={{ padding: "4px 8px", textAlign: "right" }}>{r.roster_size ?? "-"}</td>
+                          <td style={{ padding: "4px 8px", textAlign: "right" }}>{r.rotation_applied ?? 0}°</td>
+                          <td style={{ padding: "4px 8px" }}>
+                            {r.primary_model || "-"}: {r.primary_ok ? `${r.primary_row_count}r/${r.primary_mark_count}m` : "fail"} ({((r.primary_latency_ms ?? 0)/1000).toFixed(1)}s)
+                          </td>
+                          <td style={{ padding: "4px 8px" }}>
+                            {r.secondary_model || "-"}: {r.secondary_ok ? `${r.secondary_row_count}r/${r.secondary_mark_count}m` : "fail"} ({((r.secondary_latency_ms ?? 0)/1000).toFixed(1)}s)
+                          </td>
+                          <td style={{ padding: "4px 8px", fontWeight: promoted || failed ? 700 : 400 }}>
+                            {r.consensus_action || "-"}
+                          </td>
+                          <td style={{ padding: "4px 8px", textAlign: "right" }}>
+                            {r.imported_row_count ?? "-"}r / {r.imported_mark_count ?? "-"}m
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              )}
+              <div style={{ padding: "6px 8px", fontSize: 10, color: "var(--muted)", borderTop: "1px solid var(--border)" }}>
+                Auto-purged after 90 days. Highlighted rows: <span style={{ background: "#fef3c7", padding: "0 4px" }}>yellow = backup model promoted</span>, <span style={{ background: "#fee2e2", padding: "0 4px" }}>red = primary failed</span>.
+              </div>
             </div>
           )}
         </div>

@@ -35,6 +35,18 @@ pub struct NormalizeResult {
     pub qr: SheetQr,
     /// Best-effort diagnostic message (localised at surface layer if needed).
     pub note: String,
+    /// v3.0.7: Deterministic orientation normalization. When QR decode succeeded
+    /// only after rotating the source image N degrees clockwise, that N is
+    /// reported here (0/90/180/270). Value 0 means the source was already
+    /// canonical (or we had no orientation signal at all).
+    #[serde(default)]
+    pub rotation_applied: u32,
+    /// v3.0.7: When `rotation_applied != 0` and we successfully wrote the
+    /// rotated pixels to a temp file, this is its absolute path. Callers
+    /// (frontend OCR flow) MUST prefer this path over the original — sending
+    /// off-orientation pixels to the vision models causes silent primary
+    /// under-reads (root cause of the July 2026 25-vs-2-row incident).
+    pub oriented_path: Option<String>,
 }
 
 #[tauri::command]
@@ -52,6 +64,8 @@ pub async fn normalize_sheet(args: NormalizeArgs) -> Result<NormalizeResult, Str
         return Ok(NormalizeResult {
             qr: SheetQr::default(),
             note: format!("QR decode skipped for .{ext} (unsupported here)"),
+            rotation_applied: 0,
+            oriented_path: None,
         });
     }
     // Whole rest of the pipeline (open image, luma8 conversions, rotations,
@@ -71,6 +85,8 @@ fn normalize_sheet_blocking(path: &std::path::Path) -> Result<NormalizeResult, S
         return Ok(NormalizeResult {
             qr: parse_payload(&qr),
             note: "QR decoded from full image".into(),
+            rotation_applied: 0,
+            oriented_path: None,
         });
     }
 
@@ -81,6 +97,8 @@ fn normalize_sheet_blocking(path: &std::path::Path) -> Result<NormalizeResult, S
         return Ok(NormalizeResult {
             qr: parse_payload(&qr),
             note: "QR decoded from top-right crop".into(),
+            rotation_applied: 0,
+            oriented_path: None,
         });
     }
     let br_x = w.saturating_sub(w / 2);
@@ -90,20 +108,33 @@ fn normalize_sheet_blocking(path: &std::path::Path) -> Result<NormalizeResult, S
         return Ok(NormalizeResult {
             qr: parse_payload(&qr),
             note: "QR decoded from bottom-right crop".into(),
+            rotation_applied: 0,
+            oriented_path: None,
         });
     }
 
     // Rotations: 90 / 180 / 270 degrees (phone landscape vs portrait).
-    for (label, rot) in [
-        ("90", image::imageops::rotate90(&img)),
-        ("180", image::imageops::rotate180(&img)),
-        ("270", image::imageops::rotate270(&img)),
-    ] {
-        let dyn_rot = image::DynamicImage::ImageRgba8(rot);
-        if let Some(qr) = try_decode_qr(&dyn_rot.to_luma8()) {
+    // v3.0.7: when a rotation succeeds, persist the rotated pixels to a
+    // temp JPEG and return the path so the OCR pipeline reads the
+    // CANONICAL orientation. Sending off-orientation pixels to gpt-5.4
+    // is what caused the 2-of-25 primary silent-fail bug.
+    for (label, deg) in [("90", 90u32), ("180", 180), ("270", 270)] {
+        let rotated: image::DynamicImage = match deg {
+            90 => image::DynamicImage::ImageRgba8(image::imageops::rotate90(&img)),
+            180 => image::DynamicImage::ImageRgba8(image::imageops::rotate180(&img)),
+            270 => image::DynamicImage::ImageRgba8(image::imageops::rotate270(&img)),
+            _ => unreachable!(),
+        };
+        if let Some(qr) = try_decode_qr(&rotated.to_luma8()) {
+            // Persist. If save fails, still return the QR payload (OCR
+            // will just have to rely on its own multi-rotation prompting)
+            // — never block the QR decode signal on filesystem hiccups.
+            let oriented_path = persist_oriented_jpeg(path, &rotated, deg);
             return Ok(NormalizeResult {
                 qr: parse_payload(&qr),
-                note: format!("QR decoded after rotating {label}°"),
+                note: format!("QR decoded after rotating {label}° — image reoriented for OCR"),
+                rotation_applied: deg,
+                oriented_path,
             });
         }
     }
@@ -111,7 +142,52 @@ fn normalize_sheet_blocking(path: &std::path::Path) -> Result<NormalizeResult, S
     Ok(NormalizeResult {
         qr: SheetQr::default(),
         note: "No QR detected — falling back to UI-selected month".into(),
+        rotation_applied: 0,
+        oriented_path: None,
     })
+}
+
+/// Write the rotated pixels to the system temp dir as JPEG. Returns the
+/// absolute path on success, or None if we couldn't persist (in which case
+/// the caller still has the QR payload — the frontend just OCR's the
+/// original). The filename encodes source stem + degrees + a short hash so
+/// re-scans of the same sheet don't collide.
+fn persist_oriented_jpeg(
+    source: &std::path::Path,
+    rotated: &image::DynamicImage,
+    degrees: u32,
+) -> Option<String> {
+    use std::io::Write;
+    let stem = source.file_stem().and_then(|s| s.to_str()).unwrap_or("sheet");
+    // Short hash of the source path + degrees so parallel scans of
+    // different files (or the same file with different rotations) don't
+    // step on each other.
+    let mut h: u64 = 1469598103934665603;
+    for b in source.to_string_lossy().as_bytes() {
+        h ^= *b as u64;
+        h = h.wrapping_mul(1099511628211);
+    }
+    h ^= degrees as u64;
+    let tag = format!("{:x}", h & 0xFFFFFFFF);
+    let out = std::env::temp_dir().join(format!("echelon-oriented-{stem}-{degrees}-{tag}.jpg"));
+    // Encode as JPEG q90 — big enough to preserve handwriting fidelity,
+    // small enough to keep the extract POST body manageable.
+    let mut buf: Vec<u8> = Vec::new();
+    {
+        let mut enc = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut buf, 90);
+        // Encode from an RGB8 view; JPEG doesn't support alpha.
+        let rgb = rotated.to_rgb8();
+        enc.encode(
+            &rgb,
+            rgb.width(),
+            rgb.height(),
+            image::ExtendedColorType::Rgb8,
+        )
+        .ok()?;
+    }
+    let mut f = std::fs::File::create(&out).ok()?;
+    f.write_all(&buf).ok()?;
+    Some(out.to_string_lossy().into_owned())
 }
 
 fn try_decode_qr(img: &image::GrayImage) -> Option<String> {

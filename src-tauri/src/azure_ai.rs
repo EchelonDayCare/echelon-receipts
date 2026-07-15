@@ -373,6 +373,16 @@ pub struct ExtractMonthAttendanceResult {
     /// Per-provider metadata for the diagnostic panel + trust indicator.
     #[serde(default)]
     pub providers: Vec<MonthProviderMeta>,
+    /// v3.0.7: What the consensus layer decided. One of:
+    ///  - "primary"            — primary model's rows imported (normal path)
+    ///  - "secondary_promoted" — primary silently under-read vs roster;
+    ///                           secondary promoted to source of truth
+    ///  - "primary_only"       — secondary failed/degraded; primary passed through
+    ///  - "secondary_only"     — primary hard-failed; secondary was used
+    /// Frontend shows a banner when this is not "primary" so the user
+    /// knows why the numbers may look different from a naive read.
+    #[serde(default)]
+    pub consensus_action: String,
 }
 
 #[derive(Serialize)]
@@ -773,13 +783,13 @@ pub async fn extract_month_attendance(args: ExtractMonthAttendanceArgs) -> Resul
             }
         }
     };
-    let (month, days_centre_open, primary_rows) =
+    let (month, days_centre_open, primary_model_rows) =
         parse_month_annotation(&primary_annotation, &args.target_month)
             .map_err(|e| redact(e, &key))?;
 
     // Secondary is best-effort — degrade to primary-only if it failed OR if
     // we already promoted secondary into primary above.
-    let (secondary_rows, secondary_err): (Vec<ExtractedMonthAttendanceRow>, Option<String>) = if primary_ok {
+    let (secondary_model_rows, secondary_err): (Vec<ExtractedMonthAttendanceRow>, Option<String>) = if primary_ok {
         match s_res {
             Ok(ann) => match parse_month_annotation(&ann, &args.target_month) {
                 Ok((_, _, rows)) => (rows, None),
@@ -792,42 +802,97 @@ pub async fn extract_month_attendance(args: ExtractMonthAttendanceArgs) -> Resul
         (Vec::new(), Some("primary timed out; no second opinion available".to_string()))
     };
 
-    let (rows, uncertain_cells) = if secondary_rows.is_empty() && secondary_err.is_some() {
-        // No consensus available — pass through primary as-is.
-        (primary_rows.clone(), Vec::new())
+    // Raw per-model counts BEFORE any swap — used for `providers[]` metadata.
+    let primary_model_row_count = primary_model_rows.len();
+    let primary_model_mark_count: usize = primary_model_rows.iter().map(|r| r.marks.len()).sum();
+    let secondary_model_row_count = secondary_model_rows.len();
+    let secondary_model_mark_count: usize = secondary_model_rows.iter().map(|r| r.marks.len()).sum();
+
+    // ── v3.0.7 consensus row-count sanity check ─────────────────────────
+    // Silent primary failures are the single most damaging OCR bug: the
+    // review UI shows only what primary imported, so 23 missing rows look
+    // like the app said "not on sheet" when actually primary just gave up.
+    // The July 2026 test scan hit this exactly: primary returned 2 of 25
+    // rows in 145s (near-timeout), secondary returned all 25 in 67s — but
+    // the review modal imported only primary's 2.
+    //
+    // Rule: if BOTH models succeeded AND primary saw < 50% of the roster
+    // AND secondary saw >= 80% of it, swap. Asymmetric on purpose — never
+    // promote a chatty secondary over a solid primary (that would let a
+    // hallucinating secondary invent rows). Roster size 0 → skip (we have
+    // no yardstick).
+    let roster_size = args.known_student_names.len();
+    let (source_rows, cross_rows, consensus_action, action_note): (
+        Vec<ExtractedMonthAttendanceRow>,
+        Vec<ExtractedMonthAttendanceRow>,
+        String,
+        Option<String>,
+    ) = if !primary_ok {
+        // primary_model_rows already came from the promoted secondary above.
+        (primary_model_rows, secondary_model_rows, "secondary_only".to_string(), None)
+    } else if secondary_err.is_some() {
+        (primary_model_rows, secondary_model_rows, "primary_only".to_string(), None)
+    } else if roster_size > 0
+        && primary_model_row_count * 2 < roster_size            // primary < 50%
+        && secondary_model_row_count * 5 >= roster_size * 4     // secondary >= 80%
+    {
+        let note = format!(
+            "consensus: primary {} returned {}/{} rows; secondary {} returned {}/{} rows. Promoting secondary as source of truth.",
+            VISION_DEPLOY_PRIMARY, primary_model_row_count, roster_size,
+            VISION_DEPLOY_SECONDARY, secondary_model_row_count, roster_size,
+        );
+        eprintln!("[month-ocr] {}", note);
+        // Swap: secondary becomes the source, primary becomes the cross-check.
+        (secondary_model_rows, primary_model_rows, "secondary_promoted".to_string(), Some(note))
     } else {
-        merge_month_consensus(&primary_rows, &secondary_rows)
+        (primary_model_rows, secondary_model_rows, "primary".to_string(), None)
     };
 
-    let primary_mark_count: usize = primary_rows.iter().map(|r| r.marks.len()).sum();
-    let secondary_mark_count: usize = secondary_rows.iter().map(|r| r.marks.len()).sum();
+    let (rows, uncertain_cells) = if cross_rows.is_empty()
+        && (consensus_action == "primary_only" || consensus_action == "secondary_only")
+    {
+        // No consensus available — pass through source as-is.
+        (source_rows.clone(), Vec::new())
+    } else {
+        merge_month_consensus(&source_rows, &cross_rows)
+    };
 
+    // Providers metadata reports RAW per-model output — never the swap.
+    // Consumers use `consensus_action` to know what the source was.
     let providers = vec![
         MonthProviderMeta {
             provider: VISION_DEPLOY_PRIMARY.to_string(),
             ok: primary_ok,
             latency_ms: p_ms,
-            row_count: if primary_ok { primary_rows.len() } else { 0 },
-            mark_count: if primary_ok { primary_mark_count } else { 0 },
+            row_count: if primary_ok { primary_model_row_count } else { 0 },
+            mark_count: if primary_ok { primary_model_mark_count } else { 0 },
             error: primary_err_str,
         },
         MonthProviderMeta {
             provider: VISION_DEPLOY_SECONDARY.to_string(),
-            ok: secondary_err.is_none(),
+            ok: primary_ok && secondary_err.is_none(),
             latency_ms: s_ms,
-            row_count: secondary_rows.len(),
-            mark_count: secondary_mark_count,
+            row_count: secondary_model_row_count,
+            mark_count: secondary_model_mark_count,
             error: secondary_err,
         },
     ];
+
+    // Prepend the promotion note (if any) to raw_text so it surfaces in
+    // debug output too. Keeps the diagnostic self-contained.
+    let raw_text = match action_note {
+        Some(n) => format!("[consensus] {}\n\n{}", n, primary_annotation),
+        None => primary_annotation,
+    };
 
     Ok(ExtractMonthAttendanceResult {
         month,
         days_centre_open,
         rows,
-        raw_text: primary_annotation,
+        raw_text,
         uncertain_cells,
         providers,
+        consensus_action,
     })
 }
 
