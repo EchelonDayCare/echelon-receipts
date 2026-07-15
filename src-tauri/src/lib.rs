@@ -8,6 +8,7 @@ mod consensus;
 mod consensus_v2;
 mod inbox;
 mod preprocess;
+mod kid_sheet_ocr;
 mod restore;
 mod waitlist;
 mod documents;
@@ -148,6 +149,7 @@ pub fn run() {
             consensus_v2::revalidate_row,
             inbox::inbox_list_recent,
             preprocess::normalize_sheet,
+            kid_sheet_ocr::extract_kid_attendance_local,
             errlog::append_error_log,
             errlog::read_error_log,
             errlog::error_log_path,

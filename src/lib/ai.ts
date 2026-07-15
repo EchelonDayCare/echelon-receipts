@@ -126,6 +126,28 @@ export async function extractMonthAttendance(opts: {
   });
 }
 
+// v3.1.0 — Deterministic local OCR for the kid attendance sheet.
+// Takes an image PATH (not bytes) so the Rust side can decode directly.
+export async function extractKidAttendanceLocal(opts: {
+  imagePath: string;
+  targetMonth: string;
+  weekendDays: number[];
+  statDays: number[];
+  closedDays: number[];
+  roster: { student_id: number; student_name: string }[];
+}): Promise<ExtractMonthAttendanceResult> {
+  return await invoke<ExtractMonthAttendanceResult>("extract_kid_attendance_local", {
+    args: {
+      image_path: opts.imagePath,
+      target_month: opts.targetMonth,
+      weekend_days: opts.weekendDays,
+      stat_days: opts.statDays,
+      closed_days: opts.closedDays,
+      roster: opts.roster,
+    },
+  });
+}
+
 // ─── Staff credential OCR ───────────────────────────────────────────────
 export interface ExtractCredentialResult {
   staff_name_guess: string | null;

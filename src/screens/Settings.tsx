@@ -849,6 +849,27 @@ export default function Settings() {
 
         <hr style={{ border: 0, borderTop: "1px solid var(--border)", margin: "16px 0" }} />
 
+        {/* v3.1.0: Local deterministic kid-sheet OCR (beta). No AI/network.
+            Reads the sheet via fiducial dewarp + grid-line detection + per-cell
+            classification. Fast (~500ms), free (no Azure tokens), and
+            hallucination-free (a blank cell has <3% ink, full stop). Falls
+            back to the vision-model pipeline if fiducials/grid can't be found. */}
+        <div className="field" style={{ marginBottom: 8 }}>
+          <label style={{ display: "flex", alignItems: "center", gap: 8, cursor: "pointer" }}>
+            <input
+              type="checkbox"
+              checked={s.fast_local_ocr_enabled === "1"}
+              onChange={(e) => setS({ ...s, fast_local_ocr_enabled: e.target.checked ? "1" : "0" })}
+            />
+            <strong>Fast local attendance OCR</strong>&nbsp;
+            <span style={{ color: "var(--muted)", fontWeight: 400 }}>
+              (beta) — Read the monthly kid attendance sheet locally in ~500ms with no AI. Uses the printed fiducials + grid to classify each cell as blank / X / dash deterministically. Falls back to the Azure vision pipeline if fiducials can't be found. Requires the sheet to be a recent Echelon printout (v3.0.5+ layout).
+            </span>
+          </label>
+        </div>
+
+        <hr style={{ border: 0, borderTop: "1px solid var(--border)", margin: "16px 0" }} />
+
         <div className="field" style={{ marginBottom: 8 }}>
           <label style={{ display: "flex", alignItems: "center", gap: 8, cursor: "pointer" }}>
             <input

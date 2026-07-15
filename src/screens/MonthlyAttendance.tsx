@@ -14,7 +14,7 @@ import {
   daysOpenInMonth, MARK_LABEL, MARK_COLOR, clearMonthMarks, countMarksInMonth,
   type MonthMark, type MonthCell, type CalendarDay,
 } from "../lib/monthAttendance";
-import { extractMonthAttendance, fileToMime } from "../lib/ai";
+import { extractMonthAttendance, extractKidAttendanceLocal, fileToMime } from "../lib/ai";
 import { h } from "../lib/html";
 import { showConfirm, showPrompt } from "../lib/dialogs";
 import { inactiveLabel } from "../lib/inactiveLabel";
@@ -272,15 +272,50 @@ export default function MonthlyAttendance() {
           closedDaysArr.push(d);
         }
       }
-      const res = await extractMonthAttendance({
-        imageBytes: bytes as Uint8Array,
-        mimeType: mime,
-        targetMonth,
-        knownStudentNames: knownNames,
-        weekendDays,
-        statDays: statDaysArr,
-        closedDays: closedDaysArr,
-      });
+      // v3.1.0: try local deterministic OCR first when enabled. Falls back
+      // to the Azure vision pipeline on any error (fiducials not found,
+      // grid detection failed, roster mismatch, etc). The local path uses
+      // the FILE PATH (oriented if rotated) so it can decode directly on
+      // the Rust side without a base64 round-trip.
+      const settingsNow = await getSettings().catch(() => ({} as Record<string, string>));
+      const useLocalOcr = settingsNow.fast_local_ocr_enabled === "1";
+      let res: Awaited<ReturnType<typeof extractMonthAttendance>>;
+      if (useLocalOcr) {
+        try {
+          console.info("[month-ocr] trying local deterministic OCR first");
+          const localRes = await extractKidAttendanceLocal({
+            imagePath: readPath,
+            targetMonth,
+            weekendDays,
+            statDays: statDaysArr,
+            closedDays: closedDaysArr,
+            roster: cells.map((c) => ({ student_id: c.student_id, student_name: c.student_name })),
+          });
+          res = localRes;
+        } catch (localErr) {
+          console.warn("[month-ocr] local OCR failed, falling back to Azure vision:", localErr);
+          show(`Fast local OCR couldn't lock onto the sheet (${String(localErr).slice(0, 60)}…). Falling back to Azure vision.`);
+          res = await extractMonthAttendance({
+            imageBytes: bytes as Uint8Array,
+            mimeType: mime,
+            targetMonth,
+            knownStudentNames: knownNames,
+            weekendDays,
+            statDays: statDaysArr,
+            closedDays: closedDaysArr,
+          });
+        }
+      } else {
+        res = await extractMonthAttendance({
+          imageBytes: bytes as Uint8Array,
+          mimeType: mime,
+          targetMonth,
+          knownStudentNames: knownNames,
+          weekendDays,
+          statDays: statDaysArr,
+          closedDays: closedDaysArr,
+        });
+      }
       const roster = cells.map((c) => ({ id: c.student_id, name: c.student_name }));
       // Bucket uncertain cells by child name for quick lookup while building review rows.
       const uncertainByChild = new Map<string, Set<string>>();
