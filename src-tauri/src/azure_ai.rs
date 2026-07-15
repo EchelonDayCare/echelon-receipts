@@ -629,7 +629,7 @@ pub async fn extract_month_attendance(args: ExtractMonthAttendanceArgs) -> Resul
     });
 
     let key = crate::secrets::get_secret("azure_ai_key")?;
-    let system_prompt = "You are a precise OCR service. You read a paper daycare monthly attendance grid photographed by staff and emit ONLY strict JSON matching the provided schema. Never add prose. Never invent marks. Never emit 'A' for a blank cell. When the image is ambiguous, prefer omission over guessing. Column drift (assigning a mark to the wrong day) is the single most damaging error and must be avoided even at the cost of leaving a row incomplete.".to_string();
+    let system_prompt = "You are a precise OCR service. You read a paper daycare monthly attendance grid photographed by staff and emit ONLY strict JSON matching the provided schema. Never add prose. Never invent marks. Never emit 'A' for a blank cell. Never fill in blank cells to make rows look complete. When the image is ambiguous, prefer omission over guessing. A hallucinated mark corrupts payroll math and subsidy claims; an omitted mark is trivially fixed by the reviewer. Column drift (assigning a mark to the wrong day) is the single most damaging error and must be avoided even at the cost of leaving a row incomplete. No child attends more than 22 days in a 31-day month; if you drafted more, you over-marked and must recount.".to_string();
 
     // Calendar hints: pass the caller's known weekend / STAT / closed days
     // for the target month. These are corroboration ONLY — never override
@@ -653,7 +653,7 @@ pub async fn extract_month_attendance(args: ExtractMonthAttendanceArgs) -> Resul
 
     let user_prompt = format!(
         "TASK\n\
-         Extract handwritten attendance marks from a paper monthly grid for {month}. The target month has exactly {expected_days} day columns.\n\
+         You are extracting handwritten attendance marks from a paper monthly grid for {month} at a small daycare in Vancouver, BC. The target month has exactly {expected_days} day columns. Your output feeds payroll and government subsidy math — every false mark you invent costs the centre real money, and every true mark you miss short-changes a family. Under-reporting is always safer than over-reporting; a human reviews your output before it lands in the ledger.\n\
          \n\
          SHEET LAYOUT — two variants are in circulation. Detect which one the photo matches, then apply the matching rules.\n\
          \n\
@@ -682,14 +682,23 @@ pub async fn extract_month_attendance(args: ExtractMonthAttendanceArgs) -> Resul
          - Centre-closed days (custom closures): {closed_hint}\n\
          - Roster (exactly {roster_size} children — every row you emit MUST match one of these names verbatim, or be flagged as an unknown extra row):\n{numbered_roster}\n\
          \n\
+         TYPICAL ROW DENSITY (calibration — this is the single biggest safeguard against hallucinated marks)\n\
+         - A full-time enrolled child typically attends 15-22 open days in a month with ~22 open days.\n\
+         - A part-time enrolled child typically attends 4-12 open days.\n\
+         - The centre is closed weekends, statutory holidays, and any listed closures above; NEVER emit a mark for those days regardless of what you think you see.\n\
+         - HARD CEILING: no single row should have more than 22 total marks (P + A combined) in a 30/31-day month. If your row draft exceeds this, you are hallucinating in blank cells — restart the row, and this time count blanks explicitly.\n\
+         - Row density is a self-audit: after drafting each row, ask 'does this pattern look like a real daycare attendance record, or does it look like I filled in cells that were actually blank?'\n\
+         - Sheets are filled progressively — TODAY is midway through the month. Days after the last-filled column across ALL rows are almost certainly all blank; do not project marks into the future.\n\
+         \n\
          HARD RULES\n\
          1. NEVER emit a mark for a cell that corresponds to a weekend day, a STAT holiday, or a centre-closed day per the ground truth above. Staff do not write in those cells. If you see ink there, you have drifted — recount columns from the leftmost day label '1' before emitting anything.\n\
          2. Count exactly {expected_days} day columns (Variant A) or day numbers (Variant B) BEFORE you start reading marks. If your count is off, restart column detection using the numeric day labels as anchors.\n\
          3. Every row you emit must match a roster name via first-name AND last-name (case-insensitive; ignore middle names). If a handwritten name does not clearly match any roster entry, emit the row anyway with the name as read — the downstream reviewer will resolve it.\n\
-         4. BLANK cells (no visible ink) → OMIT the day entry from that row's marks array. Never emit 'A' for a blank cell. Better to under-report than to invent absences.\n\
+         4. BLANK cells (no visible ink) → OMIT the day entry from that row's marks array. Never emit 'A' for a blank cell. Never 'fill in' a blank between two marked cells to make the row look complete. Better to under-report than to invent absences.\n\
          5. Single horizontal stroke = 'A' (absent). Two crossing strokes = 'P' (present). No third category exists. If ink is present but the shape is unclear, prefer 'A'.\n\
          6. Preserve column alignment across corroboration: if the ground truth says day D is a weekend/STAT/closed but your read shows any mark at that position, you have almost certainly counted columns wrong — re-anchor on the day-number header and try again.\n\
          7. The 'days_centre_open' field is the underline-blanked value in the subtitle ('Number of days Centre ___ open'). If it's not filled in on the sheet, return null. Do NOT compute it yourself.\n\
+         8. FINAL SELF-CHECK before emitting: for each row, count total marks. If any row exceeds 22 marks or if the total across all rows exceeds roster_size × 20, you have almost certainly over-marked; re-examine those rows and remove marks in cells you are not certain contain ink.\n\
          \n\
          Emit JSON matching the schema. No prose, no comments, no wrapping ```json fences.",
         month = args.target_month,
@@ -848,8 +857,52 @@ pub async fn extract_month_attendance(args: ExtractMonthAttendanceArgs) -> Resul
         (primary_model_rows, secondary_model_rows, "primary".to_string(), None)
     };
 
+    // v3.0.8: density signal — after choosing the source rows, compute
+    // avg marks per row. If both models return absurdly dense rows (>15
+    // avg, i.e. >~2x realistic daycare attendance) the source is almost
+    // certainly hallucinating. Surface this in the note so the UI can
+    // warn even more loudly and pre-uncheck rows for manual review.
+    let source_rows_snapshot: Vec<ExtractedMonthAttendanceRow>;
+    let cross_rows_snapshot: Vec<ExtractedMonthAttendanceRow>;
+    let final_consensus_action: String;
+    let final_action_note: Option<String>;
+    {
+        let (sr, cr, ca, an) = (source_rows, cross_rows, consensus_action, action_note);
+        let source_marks: usize = sr.iter().map(|r| r.marks.len()).sum();
+        let source_rows_with_marks = sr.iter().filter(|r| !r.marks.is_empty()).count().max(1);
+        let avg_marks_per_row = source_marks as f32 / source_rows_with_marks as f32;
+        // A realistic upper bound for a "normal" row is ~22 marks (fully
+        // filled full-time child in a 22-open-day month). 15 is our warn
+        // threshold — well above real life, well below full hallucination.
+        let (dense, new_action, note) = if avg_marks_per_row > 15.0 {
+            let n = format!(
+                "density warning: source rows average {:.1} marks/row (roster {}, total marks {}); realistic max is ~22. Recommend row-by-row review before import.",
+                avg_marks_per_row, roster_size, source_marks,
+            );
+            eprintln!("[month-ocr] {}", n);
+            let combined_note = match &an {
+                Some(existing) => format!("{} {}", existing, n),
+                None => n.clone(),
+            };
+            // Tag the action as "_dense" so the UI can gate the review flow.
+            let ca_dense = if ca.ends_with("_dense") { ca.clone() } else { format!("{}_dense", ca) };
+            (true, ca_dense, Some(combined_note))
+        } else {
+            (false, ca.clone(), an.clone())
+        };
+        source_rows_snapshot = sr;
+        cross_rows_snapshot = cr;
+        final_consensus_action = new_action;
+        final_action_note = note;
+        let _ = dense;
+    }
+    let source_rows = source_rows_snapshot;
+    let cross_rows = cross_rows_snapshot;
+    let consensus_action = final_consensus_action;
+    let action_note = final_action_note;
+
     let (rows, uncertain_cells) = if cross_rows.is_empty()
-        && (consensus_action == "primary_only" || consensus_action == "secondary_only")
+        && (consensus_action.starts_with("primary_only") || consensus_action.starts_with("secondary_only"))
     {
         // No consensus available — pass through source as-is.
         (source_rows.clone(), Vec::new())

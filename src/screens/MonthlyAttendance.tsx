@@ -314,10 +314,26 @@ export default function MonthlyAttendance() {
         0,
       );
       const consensusAction = res.consensus_action ?? "primary";
+      // v3.0.8: when the consensus action is anything but a clean primary
+      // read (secondary_promoted, *_only, *_dense), pre-uncheck the Import
+      // toggle so the user must actively confirm each row. Prevents
+      // one-click acceptance of a hallucinated 200-mark import.
+      const requiresConfirmation = consensusAction !== "primary";
+      // Also flag any single row with an unrealistic mark count (>22)
+      // as needing manual review, even in a clean-primary scan.
+      const denseRowThreshold = 22;
+      const review2 = review.map((r) => {
+        const markCount = Object.keys(r.marks).length;
+        const isDense = markCount > denseRowThreshold;
+        return {
+          ...r,
+          skip: r.skip || requiresConfirmation || isDense,
+        };
+      });
       setOcrReview({
         month: res.month || targetMonth,
         daysOpen: res.days_centre_open,
-        rows: review,
+        rows: review2,
         unmatched,
         missedByPrimary,
         providers: res.providers ?? [],
@@ -978,33 +994,60 @@ export default function MonthlyAttendance() {
                 </div>
               );
             })()}
-            {/* v3.0.7: consensus-action banner — surfaces when the source
-                model was NOT the default primary, so the reviewer knows
-                which model's numbers they're actually looking at. */}
-            {ocrReview.consensusAction && ocrReview.consensusAction !== "primary" && (
+            {/* v3.0.7 + v3.0.8: consensus-action banner. In v3.0.8 the action
+                string may carry a trailing "_dense" suffix (e.g. "primary_dense",
+                "secondary_promoted_dense") signalling that per-row mark counts
+                are unrealistically high. */}
+            {ocrReview.consensusAction && ocrReview.consensusAction !== "primary" && (() => {
+              const action = ocrReview.consensusAction;
+              const dense = action.endsWith("_dense");
+              const base = dense ? action.slice(0, -"_dense".length) : action;
+              const bg = dense ? "#fed7aa" : "#fef3c7";
+              const border = dense ? "#ea580c" : "#f59e0b";
+              const ink = dense ? "#7c2d12" : "#78350f";
+              return (
               <div style={{
                 marginBottom: 10, padding: "8px 10px",
-                background: "#fef3c7", border: "1px solid #f59e0b",
-                borderRadius: 6, fontSize: 12, color: "#78350f",
+                background: bg, border: `1px solid ${border}`,
+                borderRadius: 6, fontSize: 12, color: ink,
               }}>
                 <div style={{ fontWeight: 700, marginBottom: 2 }}>
-                  {ocrReview.consensusAction === "secondary_promoted" && "⚠ Backup model used — primary under-read the sheet"}
-                  {ocrReview.consensusAction === "primary_only" && "ℹ Second-opinion model unavailable — primary result used alone"}
-                  {ocrReview.consensusAction === "secondary_only" && "⚠ Primary model failed — backup model used alone"}
+                  {base === "primary" && dense && "⚠ Unrealistically dense read — please review row-by-row"}
+                  {base === "secondary_promoted" && "⚠ Backup model used — primary under-read the sheet"}
+                  {base === "primary_only" && "ℹ Second-opinion model unavailable — primary result used alone"}
+                  {base === "secondary_only" && "⚠ Primary model failed — backup model used alone"}
                 </div>
                 <div>
-                  {ocrReview.consensusAction === "secondary_promoted" && (
-                    <>The primary vision model saw far fewer rows than your roster of {(ocrReview.providers[0]?.row_count ?? 0)} vs {(ocrReview.providers[1]?.row_count ?? 0)}. We automatically switched to the secondary model. <b>Please double-check</b> the numbers below before importing.</>
+                  {base === "primary" && dense && (
+                    <>The model returned an unusually high number of marks per row (&gt;15 avg; realistic is 4-22). Some cells may have been filled in that were actually blank. Every row is pre-unchecked — <b>tick each row you've verified</b>, then Import.</>
                   )}
-                  {ocrReview.consensusAction === "primary_only" && (
-                    <>Without a cross-check the rows below have no second opinion. If anything looks off, retake the photo (all 4 black squares must be visible) and try again.</>
+                  {base === "secondary_promoted" && (
+                    <>The primary vision model saw far fewer rows than your roster of {(ocrReview.providers[0]?.row_count ?? 0)} vs {(ocrReview.providers[1]?.row_count ?? 0)}. We automatically switched to the secondary model. {dense ? <><b>AND</b> the secondary model returned unusually dense rows — likely hallucinated marks. </> : ""}<b>Every row is pre-unchecked</b> — tick each row you've verified before importing.</>
                   )}
-                  {ocrReview.consensusAction === "secondary_only" && (
-                    <>The primary model didn't respond in time. Rows below come from the backup model alone — worth an extra careful review.</>
+                  {base === "primary_only" && (
+                    <>Without a cross-check the rows below have no second opinion. {dense && "The mark density also looks unrealistically high. "}Rows are pre-unchecked — verify each before importing.</>
+                  )}
+                  {base === "secondary_only" && (
+                    <>The primary model didn't respond in time. Rows below come from the backup model alone{dense && ", AND the mark density looks unrealistically high"} — every row is pre-unchecked, verify each before importing.</>
                   )}
                 </div>
+                <div style={{ marginTop: 6, display: "flex", gap: 6 }}>
+                  <button className="btn secondary" style={{ fontSize: 11, padding: "2px 8px" }}
+                    onClick={() => setOcrReview((prev) => prev ? {
+                      ...prev, rows: prev.rows.map((x) => x.matchedId ? { ...x, skip: false } : x)
+                    } : prev)}>
+                    I've reviewed all rows — confirm all
+                  </button>
+                  <button className="btn secondary" style={{ fontSize: 11, padding: "2px 8px" }}
+                    onClick={() => setOcrReview((prev) => prev ? {
+                      ...prev, rows: prev.rows.map((x) => ({ ...x, skip: true }))
+                    } : prev)}>
+                    Uncheck all
+                  </button>
+                </div>
               </div>
-            )}
+              );
+            })()}
             {/* v3.0.7: rotation-normalized banner (informational). */}
             {ocrReview.rotationApplied !== 0 && (
               <div style={{
@@ -1055,11 +1098,22 @@ export default function MonthlyAttendance() {
                 </tr>
               </thead>
               <tbody>
-                {ocrReview.rows.map((r, i) => (
+                {ocrReview.rows.map((r, i) => {
+                  const markCount = Object.keys(r.marks).length;
+                  const pCount = Object.values(r.marks).filter((m) => m === "P").length;
+                  const aCount = markCount - pCount;
+                  // v3.0.8: any row above 22 marks in a 31-day month is
+                  // implausible for a real daycare — flag it.
+                  const dense = markCount > 22;
+                  return (
                   <tr key={i} style={{ borderTop: "1px solid #f3f4f6", opacity: r.skip ? 0.5 : 1 }}>
                     <td style={{ padding: 6 }}>{r.inputName}</td>
                     <td style={{ padding: 6 }}>{r.matchedName ?? <em style={{ color: "var(--danger)" }}>no match</em>}</td>
                     <td style={{ padding: 6, fontFamily: "monospace" }}>
+                      <div style={{ marginBottom: 3, fontSize: 10, color: dense ? "#c2410c" : "var(--muted)", fontFamily: "system-ui" }}>
+                        {pCount}P · {aCount}A · {markCount} total
+                        {dense && <span style={{ marginLeft: 6, background: "#fed7aa", color: "#7c2d12", padding: "1px 5px", borderRadius: 3, fontWeight: 700 }}>⚠ high — verify</span>}
+                      </div>
                       {Object.entries(r.marks).sort((a,b)=>parseInt(a[0])-parseInt(b[0]))
                         .map(([d,m]) => {
                           const flagged = r.uncertainDays.has(d);
@@ -1082,7 +1136,8 @@ export default function MonthlyAttendance() {
                         } : prev)} />
                     </td>
                   </tr>
-                ))}
+                  );
+                })}
               </tbody>
             </table>
             <div style={{ marginTop: 14, display: "flex", justifyContent: "flex-end", alignItems: "center", gap: 8 }}>
