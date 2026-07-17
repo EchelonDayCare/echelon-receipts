@@ -587,6 +587,23 @@ export default function MonthlyAttendance() {
       color: { dark: "#000000", light: "#FFFFFF" },
     });
 
+    // v3.2.0: corner fiducial QRs. Each encodes its own ID (ECHFID:TL/TR/BL/BR).
+    // The Rust OCR pipeline scans for these first; even a single decoded corner
+    // is enough to recover the full sheet transform via known geometry. Far more
+    // robust than plain black squares under uneven lighting / print fade.
+    const fidOpts = {
+      errorCorrectionLevel: "H" as const, // high — resilient to 30% loss
+      margin: 1,
+      width: 96,
+      color: { dark: "#000000", light: "#FFFFFF" },
+    };
+    const [fidQrTL, fidQrTR, fidQrBL, fidQrBR] = await Promise.all([
+      QRCode.toDataURL("ECHFID:TL", fidOpts),
+      QRCode.toDataURL("ECHFID:TR", fidOpts),
+      QRCode.toDataURL("ECHFID:BL", fidOpts),
+      QRCode.toDataURL("ECHFID:BR", fidOpts),
+    ]);
+
     // Fit strictly on one landscape page — shrink row height + font as the
     // child count grows. Landscape Letter usable area (with 6mm body padding)
     // is roughly 780px of vertical space for the table. Row min/max bumped
@@ -678,6 +695,22 @@ export default function MonthlyAttendance() {
         .fid.tr { top: 2mm; right: 15mm; }
         .fid.bl { bottom: 10mm; left: 15mm; }
         .fid.br { bottom: 10mm; right: 15mm; }
+        /* v3.2.0: self-identifying corner fiducial QR codes. Each encodes
+           its own corner ID; the Rust OCR reads even one and reconstructs
+           the full sheet transform from known 10mm-QR geometry. Kept
+           alongside the plain .fid squares so old prints keep working. */
+        .fid-qr {
+          position: fixed;
+          width: 10mm;
+          height: 10mm;
+          background: #fff;
+          display: block;
+        }
+        .fid-qr img { width: 10mm; height: 10mm; display: block; }
+        .fid-qr.tl { top: 4mm; left: 4mm; }
+        .fid-qr.tr { top: 4mm; right: 4mm; }
+        .fid-qr.bl { bottom: 4mm; left: 4mm; }
+        .fid-qr.br { bottom: 4mm; right: 4mm; }
         /* v3.0.5: title, meta, and legend indented 64.5px to align with
            the table's left edge (which is centered with 64.5px margin
            on each side per the width: calc(100% - 129px) rule).
@@ -761,6 +794,10 @@ export default function MonthlyAttendance() {
       <div class="fid tr"></div>
       <div class="fid bl"></div>
       <div class="fid br"></div>
+      <div class="fid-qr tl"><img src="${fidQrTL}" alt="fid-tl" /></div>
+      <div class="fid-qr tr"><img src="${fidQrTR}" alt="fid-tr" /></div>
+      <div class="fid-qr bl"><img src="${fidQrBL}" alt="fid-bl" /></div>
+      <div class="fid-qr br"><img src="${fidQrBR}" alt="fid-br" /></div>
       <div class="qr"><img src="${qrDataUrl}" alt="sheet code" /></div>
       <h1>${h(daycareName || "Echelon Day Care")}</h1>
       <p class="meta">Attendance report for month of ${monthLabel}. Number of days Centre <b>____</b> open</p>

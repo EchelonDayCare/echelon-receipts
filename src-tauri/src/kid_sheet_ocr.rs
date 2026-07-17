@@ -27,6 +27,7 @@
 #![allow(clippy::needless_range_loop)]
 
 use image::{DynamicImage, GenericImageView, GrayImage, Luma};
+use rqrr;
 use serde::{Deserialize, Serialize};
 
 // ─── Canonical geometry (11×8.5in landscape @ 200 DPI) ──────────────────
@@ -55,6 +56,23 @@ fn canonical_fiducial_targets() -> [(f64, f64); 4] {
         (w - FID_INSET_X_PX,       FID_INSET_Y_TOP_PX),               // TR
         (FID_INSET_X_PX,           h - FID_INSET_Y_BOT_PX),           // BL
         (w - FID_INSET_X_PX,       h - FID_INSET_Y_BOT_PX),           // BR
+    ]
+}
+
+// v3.2.0: self-identifying corner QR fiducials. Print CSS puts a 10mm QR
+// at 4mm inset from each paper corner, so each QR CENTER sits 9mm from
+// the two paper edges it hugs.
+//   9 mm × (200 / 25.4) ≈ 70.87 px in canonical space.
+const QR_FID_CENTER_INSET_PX: f64 = 70.87;
+
+fn canonical_qr_fiducial_targets() -> [(f64, f64); 4] {
+    let w = CANONICAL_W as f64;
+    let h = CANONICAL_H as f64;
+    [
+        (QR_FID_CENTER_INSET_PX,      QR_FID_CENTER_INSET_PX),        // TL
+        (w - QR_FID_CENTER_INSET_PX,  QR_FID_CENTER_INSET_PX),        // TR
+        (QR_FID_CENTER_INSET_PX,      h - QR_FID_CENTER_INSET_PX),    // BL
+        (w - QR_FID_CENTER_INSET_PX,  h - QR_FID_CENTER_INSET_PX),    // BR
     ]
 }
 
@@ -167,6 +185,165 @@ pub async fn extract_kid_attendance_local(
 
 // ─── Pipeline ────────────────────────────────────────────────────────────
 
+// v3.2.0: try QR-fiducial anchor first. Each corner of the printed sheet
+// carries a small QR encoding its own ID (`ECHFID:TL` / `TR` / `BL` / `BR`).
+// Even one decoded corner is enough to warp the sheet given known geometry:
+// we solve for the sheet's centre + rotation + scale from the QR center
+// and the known 260.26px × 1558.26px between opposite corner centres.
+//
+// Returns Some((decoded_corners, image_used_for_decode)) if at least one
+// QR was decoded; None otherwise. Includes small rotations of the image
+// (0/90/180/270) so a sideways scan still finds them; returns the
+// rotation-applied gray image alongside so downstream warp uses it.
+fn detect_qr_fiducials(img: &image::DynamicImage) -> Option<(u32, [Option<(f64, f64)>; 4], GrayImage)> {
+    for deg in [0u32, 90, 180, 270] {
+        let rotated = match deg {
+            0 => img.clone(),
+            90 => image::DynamicImage::ImageRgba8(image::imageops::rotate90(&img.to_rgba8())),
+            180 => image::DynamicImage::ImageRgba8(image::imageops::rotate180(&img.to_rgba8())),
+            270 => image::DynamicImage::ImageRgba8(image::imageops::rotate270(&img.to_rgba8())),
+            _ => unreachable!(),
+        };
+        let gray = rotated.to_luma8();
+        let mut prep = rqrr::PreparedImage::prepare(gray.clone());
+        let grids = prep.detect_grids();
+        let mut found: [Option<(f64, f64)>; 4] = [None; 4];
+        for grid in grids.iter() {
+            let mut buf: Vec<u8> = Vec::new();
+            if grid.decode_to(&mut buf).is_err() {
+                continue;
+            }
+            let s = match std::str::from_utf8(&buf) {
+                Ok(v) => v,
+                Err(_) => continue,
+            };
+            let idx = match s {
+                "ECHFID:TL" => 0,
+                "ECHFID:TR" => 1,
+                "ECHFID:BL" => 2,
+                "ECHFID:BR" => 3,
+                _ => continue,
+            };
+            let bounds = grid.bounds;
+            let cx = (bounds[0].x + bounds[1].x + bounds[2].x + bounds[3].x) as f64 / 4.0;
+            let cy = (bounds[0].y + bounds[1].y + bounds[2].y + bounds[3].y) as f64 / 4.0;
+            found[idx] = Some((cx, cy));
+        }
+        let n = found.iter().filter(|p| p.is_some()).count();
+        if n > 0 {
+            eprintln!("[kid-ocr-local] QR-fiducial rot {}°: {} decoded (TL={} TR={} BL={} BR={})",
+                deg, n,
+                if found[0].is_some() { "y" } else { "-" },
+                if found[1].is_some() { "y" } else { "-" },
+                if found[2].is_some() { "y" } else { "-" },
+                if found[3].is_some() { "y" } else { "-" },
+            );
+            return Some((deg, found, gray));
+        }
+    }
+    None
+}
+
+// Given 1-4 decoded QR-fiducial centers, synthesise all 4 corner positions
+// by solving for the sheet's affine transform (translation + rotation +
+// scale) from the known canonical geometry. Requires the missing corners
+// to be inferred from what we have:
+//   ≥2 QRs: solve 2D similarity transform directly (4 unknowns from 4 eqs)
+//   1 QR:   position known but rotation/scale unknown → fall back to
+//           assuming the image is upright & pxperMM matches print resolution.
+//           This is inherently uncertain; we scale from image dimensions
+//           heuristically.
+fn synthesise_from_qr_fiducials(
+    found: &[Option<(f64, f64)>; 4],
+    img_w: u32,
+    img_h: u32,
+) -> Option<[(f64, f64); 4]> {
+    let targets = canonical_qr_fiducial_targets();
+
+    let idxs: Vec<usize> = (0..4).filter(|i| found[*i].is_some()).collect();
+    if idxs.is_empty() {
+        return None;
+    }
+
+    if idxs.len() >= 2 {
+        // 2D similarity fit: [x'] = [a -b][x] + [tx]
+        //                    [y']   [b  a][y]   [ty]
+        // Least squares from all known pairs (image → canonical).
+        let (mut sx, mut sy) = (0.0, 0.0);
+        let (mut sxc, mut syc) = (0.0, 0.0);
+        let n = idxs.len() as f64;
+        for &i in &idxs {
+            let (u, v) = found[i].unwrap();
+            let (uc, vc) = targets[i];
+            sx += u; sy += v; sxc += uc; syc += vc;
+        }
+        let mu_x = sx / n; let mu_y = sy / n;
+        let mu_xc = sxc / n; let mu_yc = syc / n;
+
+        // Centered accumulators for [a, b].
+        let (mut sxx, mut syy, mut sxxc_yyc, mut sxyc_myxc) = (0.0, 0.0, 0.0, 0.0);
+        for &i in &idxs {
+            let (u, v) = found[i].unwrap();
+            let (uc, vc) = targets[i];
+            let du = u - mu_x; let dv = v - mu_y;
+            let duc = uc - mu_xc; let dvc = vc - mu_yc;
+            sxx += du * du + dv * dv;
+            syy += duc * duc + dvc * dvc;
+            sxxc_yyc += du * duc + dv * dvc; // → a term
+            sxyc_myxc += du * dvc - dv * duc; // → b term
+        }
+        if sxx < 1e-6 {
+            return None;
+        }
+        // Solve INVERSE transform: canonical → image.
+        // We want image_pos = R * canonical + t. Cleanest to invert.
+        // Recompute with roles swapped for image→canonical, then invert.
+        let a = sxxc_yyc / sxx; // canonical/image scale in one channel
+        let b = sxyc_myxc / sxx;
+        // Inverse (image = R^-1 * canonical + t_inv) has scale factor
+        // 1/(a²+b²) applied to a,b (with b negated).
+        let det = a * a + b * b;
+        if det < 1e-9 {
+            return None;
+        }
+        let ai = a / det;
+        let bi = -b / det;
+        let tx = mu_x - (ai * mu_xc - bi * mu_yc);
+        let ty = mu_y - (bi * mu_xc + ai * mu_yc);
+
+        let mut out = [(0.0, 0.0); 4];
+        for k in 0..4 {
+            let (uc, vc) = targets[k];
+            out[k] = (ai * uc - bi * vc + tx, bi * uc + ai * vc + ty);
+        }
+        eprintln!("[kid-ocr-local] QR-fiducial similarity fit from {} corners: scale={:.3} rot_deg={:.1}",
+            idxs.len(), det.sqrt(), b.atan2(a).to_degrees());
+        return Some(out);
+    }
+
+    // Single QR: no rotation/scale info. Fall back to assuming upright
+    // orientation and scale-from-image-width. This is the least reliable
+    // path — if the print is landscape 279.4mm wide and the image is
+    // img_w px wide, then pxperMM ≈ img_w / 279.4.
+    let (u, v) = found[idxs[0]].unwrap();
+    let corner = idxs[0];
+    let (canon_u, canon_v) = targets[corner];
+    let pxpermm = (img_w as f64 / 279.4).max(img_h as f64 / 215.9);
+    let scale = pxpermm / (200.0 / 25.4);
+    let tx = u - canon_u * scale;
+    let ty = v - canon_v * scale;
+    let mut out = [(0.0, 0.0); 4];
+    for k in 0..4 {
+        let (uc, vc) = targets[k];
+        out[k] = (uc * scale + tx, vc * scale + ty);
+    }
+    eprintln!(
+        "[kid-ocr-local] QR-fiducial single-anchor: corner {} at ({:.0},{:.0}), assumed pxperMM={:.2}",
+        corner, u, v, pxpermm
+    );
+    Some(out)
+}
+
 fn run_pipeline(
     path: &str,
     target_month: &str,
@@ -177,6 +354,48 @@ fn run_pipeline(
 ) -> Result<ExtractLocalResult, String> {
     let img = image::open(path).map_err(|e| format!("failed to open image: {}", e))?;
     let (orig_w, orig_h) = img.dimensions();
+
+    // v3.2.0: QR-fiducial detection runs FIRST. Each corner of a v3.2+
+    // print has a small QR encoding its own ID; even one decoded corner
+    // is enough to warp the whole sheet via known geometry. Fall through
+    // to the plain-fiducial + page-quad chain when nothing decodes
+    // (e.g. old prints, or the QRs are all off-frame / severely blurred).
+    if let Some((rot_deg, qr_found, gray_qr)) = detect_qr_fiducials(&img) {
+        if let Some(qr_fids) = synthesise_from_qr_fiducials(&qr_found, gray_qr.width(), gray_qr.height()) {
+            let decoded = qr_found.iter().filter(|p| p.is_some()).count();
+            eprintln!(
+                "[kid-ocr-local] QR-fiducial anchor (rot {}°, {} decoded): TL=({:.0},{:.0}) TR=({:.0},{:.0}) BL=({:.0},{:.0}) BR=({:.0},{:.0})",
+                rot_deg, decoded,
+                qr_fids[0].0, qr_fids[0].1,
+                qr_fids[1].0, qr_fids[1].1,
+                qr_fids[2].0, qr_fids[2].1,
+                qr_fids[3].0, qr_fids[3].1,
+            );
+            let warped = perspective_warp(
+                &gray_qr, &qr_fids, &canonical_qr_fiducial_targets(),
+                CANONICAL_W, CANONICAL_H,
+            );
+            let grid = detect_grid(&warped, roster.len(), target_month)?;
+            let (rows, uncertain) = classify_cells(&warped, &grid, roster, weekend, stat, closed);
+            let raw_text = format!(
+                "[local ocr v3.2] rotation={}° anchor=qr-fid-{}decoded ({} rows × {} day cols), roster {}",
+                rot_deg, decoded,
+                grid.row_ys.len().saturating_sub(1),
+                grid.col_xs.len().saturating_sub(1),
+                roster.len(),
+            );
+            return Ok(ExtractLocalResult {
+                month: target_month.to_string(),
+                rows, raw_text,
+                uncertain_cells: uncertain,
+                providers: vec![],
+                consensus_action: "local_deterministic".to_string(),
+                days_centre_open: None,
+            });
+        }
+    } else {
+        eprintln!("[kid-ocr-local] no QR fiducials decoded — falling back to visual detector chain");
+    }
 
     // The image may still be in portrait / rotated orientation. Try
     // fiducial detection at 0°, 90°, 180°, 270° and pick the rotation
@@ -1441,7 +1660,9 @@ mod tests {
     #[test]
     #[ignore]
     fn probe_kidsjuly_detection() {
-        let path = r"C:\Users\alosing\rs_scanner\sectoral\KidsJuly.jpeg";
+        let path_owned = std::env::var("KID_PROBE_PATH")
+            .unwrap_or_else(|_| r"C:\Users\alosing\rs_scanner\sectoral\KidsJuly.jpeg".to_string());
+        let path = path_owned.as_str();
         if !std::path::Path::new(path).exists() {
             eprintln!("[probe] skipped — {} not present", path);
             return;
@@ -1484,7 +1705,9 @@ mod tests {
     #[test]
     #[ignore]
     fn probe_kidsjuly_full_pipeline() {
-        let path = r"C:\Users\alosing\rs_scanner\sectoral\KidsJuly.jpeg";
+        let path_owned = std::env::var("KID_PROBE_PATH")
+            .unwrap_or_else(|_| r"C:\Users\alosing\rs_scanner\sectoral\KidsJuly.jpeg".to_string());
+        let path = path_owned.as_str();
         if !std::path::Path::new(path).exists() {
             eprintln!("[probe] skipped — {} not present", path);
             return;
