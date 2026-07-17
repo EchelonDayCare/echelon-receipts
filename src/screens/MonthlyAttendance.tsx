@@ -684,7 +684,7 @@ export default function MonthlyAttendance() {
            v3.1.1: daycare name centered so the TR fiducial has a clear
            corner and the title reads as a proper page header. */
         h1 { margin: 10px 0 2px 0; font-size: 14px; text-align: center; padding: 0 40mm; }
-        .meta { margin: 0 0 0 64.5px; font-size: 10px; padding-right: 40mm; }
+        .meta { margin: 0; font-size: 10px; text-align: center; padding: 0 40mm; }
         .qr {
           /* v3.1.1: QR shifted from right: 3mm to right: 20mm so it no
              longer overlaps the TR corner fiducial (which sits at
