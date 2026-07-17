@@ -680,14 +680,17 @@ export default function MonthlyAttendance() {
         .fid.br { bottom: 10mm; right: 15mm; }
         /* v3.0.5: title, meta, and legend indented 64.5px to align with
            the table's left edge (which is centered with 64.5px margin
-           on each side per the width: calc(100% - 129px) rule). */
-        h1 { margin: 10px 0 2px 64.5px; font-size: 14px; padding-right: 40mm; }
+           on each side per the width: calc(100% - 129px) rule).
+           v3.1.1: daycare name centered so the TR fiducial has a clear
+           corner and the title reads as a proper page header. */
+        h1 { margin: 10px 0 2px 0; font-size: 14px; text-align: center; padding: 0 40mm; }
         .meta { margin: 0 0 0 64.5px; font-size: 10px; padding-right: 40mm; }
         .qr {
-          /* QR shifted left so the TR corner fiducial can occupy the very
-             corner (matches TL/BL/BR fiducial geometry). QR sits at
-             right: 20mm inset — clear of the fiducial's 2-6mm zone. */
-          position: absolute; top: 2.5mm; right: 3mm;
+          /* v3.1.1: QR shifted from right: 3mm to right: 20mm so it no
+             longer overlaps the TR corner fiducial (which sits at
+             right: 15mm to right: 19mm). Restores the original design
+             intent — see the comment above .fid. */
+          position: absolute; top: 2.5mm; right: 20mm;
           width: 14mm; height: 14mm;
           background: #fff; padding: 1mm; box-sizing: content-box;
           border: 1px solid #d1d5db; border-radius: 2px;
