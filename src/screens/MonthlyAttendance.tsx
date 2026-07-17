@@ -689,8 +689,10 @@ export default function MonthlyAttendance() {
           /* v3.1.1: QR shifted from right: 3mm to right: 20mm so it no
              longer overlaps the TR corner fiducial (which sits at
              right: 15mm to right: 19mm). Restores the original design
-             intent — see the comment above .fid. */
-          position: absolute; top: 2.5mm; right: 20mm;
+             intent — see the comment above .fid.
+             v3.1.1b: nudged another 20px (~5mm) left → right: 25mm for
+             extra breathing room around the fiducial. */
+          position: absolute; top: 2.5mm; right: 25mm;
           width: 14mm; height: 14mm;
           background: #fff; padding: 1mm; box-sizing: content-box;
           border: 1px solid #d1d5db; border-radius: 2px;
