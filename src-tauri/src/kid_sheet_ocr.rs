@@ -185,7 +185,13 @@ fn run_pipeline(
     // result (most confident corners) even if the rectangle check fails.
     // Real-world photos frequently crop out 1-2 fiducials; we can still
     // recover using the remaining strong pair + known print aspect ratio.
-    let mut best_partial: Option<(u32, [Option<FiducialPick>; 4], GrayImage)> = None;
+    // v3.1.2: always keep the current rotation as a candidate (even at zero
+    // confident fiducials) so the page-quad fallback can still be tried.
+    // Tie-break equal confident counts using a landscape-aspect score:
+    // the sheet is designed 245.4×199.9mm (landscape), so we prefer
+    // rotations where any confident-fiducial pair's bounding box is wider
+    // than tall.
+    let mut best_partial: Option<(u32, [Option<FiducialPick>; 4], GrayImage, f64)> = None;
     for deg in [0u32, 90, 180, 270] {
         eprintln!("[kid-ocr-local] trying rotation {}°", deg);
         let rotated = match deg {
@@ -211,20 +217,36 @@ fn run_pipeline(
             ];
             if fiducials_look_sane(&fids, gray.width(), gray.height()) {
                 eprintln!("[kid-ocr-local] rotation {}° all 4 confident and rectangular", deg);
-                best_partial = Some((deg, picks, gray));
+                best_partial = Some((deg, picks, gray, f64::INFINITY));
                 break;
             }
         }
-        // Keep the rotation with the most confident picks.
-        let cur_best = best_partial.as_ref().map(|(_, p, _)| {
-            p.iter().filter(|q| q.as_ref().map_or(false, |r| r.confident)).count()
-        }).unwrap_or(0);
-        if strong_count > cur_best {
-            best_partial = Some((deg, picks, gray));
+        // Landscape-aspect score for tie-break: compute the bounding box
+        // of confident picks and reward width > height. Falls back to 0
+        // when fewer than 2 confident picks (no meaningful aspect).
+        let landscape_score = {
+            let cs: Vec<_> = picks.iter().filter_map(|p| p.as_ref().filter(|q| q.confident).map(|q| q.pos)).collect();
+            if cs.len() >= 2 {
+                let xs: Vec<f64> = cs.iter().map(|p| p.0).collect();
+                let ys: Vec<f64> = cs.iter().map(|p| p.1).collect();
+                let bw = xs.iter().cloned().fold(f64::NEG_INFINITY, f64::max)
+                    - xs.iter().cloned().fold(f64::INFINITY, f64::min);
+                let bh = ys.iter().cloned().fold(f64::NEG_INFINITY, f64::max)
+                    - ys.iter().cloned().fold(f64::INFINITY, f64::min);
+                // Aspect ratio bonus: landscape (bw > bh) is what we want.
+                if bh > 0.0 { bw / bh } else { 0.0 }
+            } else {
+                0.0
+            }
+        };
+        let this_key = (strong_count as f64) * 100.0 + landscape_score;
+        let cur_key = best_partial.as_ref().map(|(_, _, _, k)| *k);
+        if cur_key.map_or(true, |k| this_key > k) {
+            best_partial = Some((deg, picks, gray, this_key));
         }
     }
 
-    let (rotation_applied, picks, gray) = best_partial.ok_or_else(|| {
+    let (rotation_applied, picks, gray, _score) = best_partial.ok_or_else(|| {
         format!(
             "no fiducial candidates found in {}×{} image at any rotation",
             orig_w, orig_h
@@ -447,16 +469,16 @@ fn detect_fiducial_picks(gray: &GrayImage) -> [Option<FiducialPick>; 4] {
 /// Given per-corner picks (some may be missing or non-confident), return
 /// four fiducial positions in image coordinates. Falls back to inferring
 /// missing corners from confident ones using the known printed sheet
-/// aspect ratio (portrait 8.5×11 or landscape 11×8.5, whichever best
-/// matches the anchor pair distance and pixel size).
+/// geometry (always landscape 245.4×199.9mm — the CSS produces one design).
+///
+/// Corner indexing throughout: TL=0, TR=1, BL=2, BR=3.
 fn synthesize_fiducials(
     picks: &[Option<FiducialPick>; 4],
     _w: u32,
     _h: u32,
 ) -> Option<[(f64, f64); 4]> {
-    let confident: Vec<(usize, FiducialPick)> = picks.iter().enumerate()
-        .filter_map(|(i, p)| p.as_ref().map(|q| (i, *q)))
-        .filter(|(_, q)| q.confident)
+    let confident: Vec<usize> = picks.iter().enumerate()
+        .filter_map(|(i, p)| p.as_ref().and_then(|q| if q.confident { Some(i) } else { None }))
         .collect();
 
     // Fast path: all 4 confident.
@@ -469,74 +491,107 @@ fn synthesize_fiducials(
         ]);
     }
 
+    // 3-anchor path: complete the missing corner via parallelogram — the
+    // three known points fully determine an affine (rotation + skew) frame,
+    // so the missing corner is exactly determined and we should never
+    // discard the third measurement. For missing corner `m`, the diagonal
+    // opposite is d = 3 - m (TL↔BR, TR↔BL). The two adjacent corners are
+    // a, b (the remaining two indices). Then: p_m = p_a + p_b - p_d.
+    if confident.len() == 3 {
+        let all = [0usize, 1, 2, 3];
+        let missing = *all.iter().find(|i| !confident.contains(*i)).unwrap();
+        let diag = 3 - missing;
+        let adj: Vec<usize> = all.iter().copied()
+            .filter(|i| *i != missing && *i != diag)
+            .collect();
+        let pm = {
+            let pa = picks[adj[0]].as_ref().unwrap().pos;
+            let pb = picks[adj[1]].as_ref().unwrap().pos;
+            let pd = picks[diag].as_ref().unwrap().pos;
+            (pa.0 + pb.0 - pd.0, pa.1 + pb.1 - pd.1)
+        };
+        eprintln!(
+            "[kid-ocr-local] 3-anchor synthesis: missing corner {} (diag={}, adj={:?}) → ({:.0}, {:.0})",
+            missing, diag, adj, pm.0, pm.1
+        );
+        let mut out = [(0.0, 0.0); 4];
+        for i in 0..4 {
+            out[i] = if i == missing { pm } else { picks[i].as_ref().unwrap().pos };
+        }
+        return Some(out);
+    }
+
     if confident.len() < 2 {
         eprintln!("[kid-ocr-local] only {} confident fiducial(s) — cannot synthesize", confident.len());
         return None;
     }
 
-    // Pick two confident anchors. Prefer a diagonal pair (TL+BR or TR+BL),
-    // then adjacent-on-an-edge pairs (TL+BL, TR+BR, TL+TR, BL+BR).
-    // Order: TL=0, TR=1, BL=2, BR=3.
-    let diagonals = [(0, 3), (1, 2)];
-    let edges_lr = [(0, 2), (1, 3)]; // left edge, right edge — same-x pairs
-    let edges_tb = [(0, 1), (2, 3)]; // top edge, bottom edge — same-y pairs
+    // 2-anchor path. Order: TL=0, TR=1, BL=2, BR=3.
+    let diagonals = [(0usize, 3usize), (1, 2)];
+    let edges_lr = [(0usize, 2usize), (1, 3)]; // left edge, right edge — same-x pairs
+    let edges_tb = [(0usize, 1usize), (2, 3)]; // top edge, bottom edge — same-y pairs
 
-    let has = |i: usize| confident.iter().any(|(k, _)| *k == i);
+    let has = |i: usize| confident.contains(&i);
     let pick = |i: usize| picks[i].as_ref().unwrap().pos;
-    let size_of = |i: usize| picks[i].as_ref().unwrap().size;
 
     // Case: both diagonal points confident.
+    // The sheet is always designed landscape 245.4×199.9mm (long × short).
+    // Diagonal length = √(245.4² + 199.9²) = 316.5mm; we axis-align to the
+    // image, which is only correct when the sheet is roughly straight.
     for &(a, b) in &diagonals {
         if has(a) && has(b) {
             let pa = pick(a);
             let pb = pick(b);
-            // Assume the other two corners form an axis-aligned rectangle
-            // with pa and pb; use image axes as approximate sheet axes.
-            let (tl, br) = if a == 0 { (pa, pb) } else { (pb, pa) };
-            let tr = (br.0, tl.1);
-            let bl = (tl.0, br.1);
-            eprintln!("[kid-ocr-local] synthesizing from diagonal {}+{}", a, b);
+            // Figure out which pick is TL and which is BR (in image space).
+            // For diagonal (0,3): pa is TL by construction, pb is BR.
+            // For diagonal (1,2): pa is TR, pb is BL — need to derive TL/BR
+            // from image y-coordinates rather than from the (a,b) labels.
+            let (tl, tr, bl, br) = if (a, b) == (0, 3) {
+                let tl = pa; let br = pb;
+                (tl, (br.0, tl.1), (tl.0, br.1), br)
+            } else {
+                // (1, 2): pa is TR (top-right), pb is BL (bottom-left).
+                // Determine which is actually the top vs bottom by y.
+                let (top_right, bot_left) = if pa.1 < pb.1 { (pa, pb) } else { (pb, pa) };
+                let tl = (bot_left.0, top_right.1);
+                let br = (top_right.0, bot_left.1);
+                (tl, top_right, bot_left, br)
+            };
+            eprintln!(
+                "[kid-ocr-local] 2-anchor diagonal synthesis {}+{} → TL=({:.0},{:.0}) TR=({:.0},{:.0}) BL=({:.0},{:.0}) BR=({:.0},{:.0})",
+                a, b, tl.0, tl.1, tr.0, tr.1, bl.0, bl.1, br.0, br.1
+            );
             return Some([tl, tr, bl, br]);
         }
     }
 
     // Case: adjacent pair on the left or right edge (both share x).
+    // On a landscape sheet, this pair spans the SHORT dimension of the
+    // printed frame: axis = 199.9mm, perpendicular = 245.4mm.
     for &(a, b) in &edges_lr {
         if has(a) && has(b) {
             let pa = pick(a); let pb = pick(b);
             let (top, bot) = if pa.1 < pb.1 { (pa, pb) } else { (pb, pa) };
             let axis_len = (bot.0 - top.0).hypot(bot.1 - top.1);
-            let fid_side = (size_of(a) + size_of(b)) * 0.5;
-            let pxpermm_rough = fid_side / 4.0;
-            let axis_mm_rough = axis_len / pxpermm_rough;
-            // Match to known edge lengths:
-            //   portrait long edge (11in − 16mm insets) = 263.4 mm; perpendicular short = 181.9 mm
-            //   landscape short edge (8.5in − 16mm) = 199.9 mm; perpendicular long = 245.4 mm
-            let (axis_mm_true, perp_mm, orientation) = if (axis_mm_rough - 263.4).abs() < (axis_mm_rough - 199.9).abs() {
-                (263.4, 181.9, "portrait")
-            } else {
-                (199.9, 245.4, "landscape")
-            };
-            // Recompute pxpermm from SPACING (more accurate than tiny fid size).
+            let axis_mm_true = 199.9;
+            let perp_mm = 245.4;
             let pxpermm = axis_len / axis_mm_true;
             let perp_len_px = perp_mm * pxpermm;
             // Perpendicular unit vector (rotate axis 90° CW): (dy, -dx)/len.
             let dx = bot.0 - top.0;
             let dy = bot.1 - top.1;
             let perp = (dy / axis_len, -dx / axis_len);
-            // On the left edge, perp points RIGHT (into the sheet).
+            // Left edge (a in {0,2}): perp points RIGHT into sheet. Right edge: LEFT.
             let sign = if a == 0 || a == 2 { 1.0 } else { -1.0 };
             let (opp_top_x, opp_top_y) = (top.0 + sign * perp.0 * perp_len_px, top.1 + sign * perp.1 * perp_len_px);
             let (opp_bot_x, opp_bot_y) = (bot.0 + sign * perp.0 * perp_len_px, bot.1 + sign * perp.1 * perp_len_px);
             eprintln!(
-                "[kid-ocr-local] synthesizing from left/right edge pair {}+{} — {} orientation, axis={:.0}mm (rough={:.0}mm), perp={:.0}mm, pxperMM={:.2} (rough={:.2} from fid size)",
-                a, b, orientation, axis_mm_true, axis_mm_rough, perp_mm, pxpermm, pxpermm_rough
+                "[kid-ocr-local] 2-anchor edge-LR synthesis {}+{} — axis={:.0}mm, perp={:.0}mm, pxperMM={:.2}, axis_len_px={:.0}",
+                a, b, axis_mm_true, perp_mm, pxpermm, axis_len
             );
             let (tl, tr, bl, br) = if a == 0 || a == 2 {
-                // We have the LEFT edge (TL, BL). Synthesize TR, BR.
                 (top, (opp_top_x, opp_top_y), bot, (opp_bot_x, opp_bot_y))
             } else {
-                // We have the RIGHT edge (TR, BR). Synthesize TL, BL.
                 ((opp_top_x, opp_top_y), top, (opp_bot_x, opp_bot_y), bot)
             };
             return Some([tl, tr, bl, br]);
@@ -544,19 +599,15 @@ fn synthesize_fiducials(
     }
 
     // Case: adjacent pair on the top or bottom edge (both share y).
+    // On a landscape sheet, this pair spans the LONG dimension:
+    // axis = 245.4mm, perpendicular = 199.9mm.
     for &(a, b) in &edges_tb {
         if has(a) && has(b) {
             let pa = pick(a); let pb = pick(b);
             let (left, right) = if pa.0 < pb.0 { (pa, pb) } else { (pb, pa) };
             let axis_len = (right.0 - left.0).hypot(right.1 - left.1);
-            let fid_side = (size_of(a) + size_of(b)) * 0.5;
-            let pxpermm_rough = fid_side / 4.0;
-            let axis_mm_rough = axis_len / pxpermm_rough;
-            let (axis_mm_true, perp_mm, orientation) = if (axis_mm_rough - 245.4).abs() < (axis_mm_rough - 181.9).abs() {
-                (245.4, 199.9, "landscape")
-            } else {
-                (181.9, 263.4, "portrait")
-            };
+            let axis_mm_true = 245.4;
+            let perp_mm = 199.9;
             let pxpermm = axis_len / axis_mm_true;
             let perp_len_px = perp_mm * pxpermm;
             let dx = right.0 - left.0;
@@ -567,14 +618,12 @@ fn synthesize_fiducials(
             let (opp_l_x, opp_l_y) = (left.0 + sign * perp.0 * perp_len_px, left.1 + sign * perp.1 * perp_len_px);
             let (opp_r_x, opp_r_y) = (right.0 + sign * perp.0 * perp_len_px, right.1 + sign * perp.1 * perp_len_px);
             eprintln!(
-                "[kid-ocr-local] synthesizing from top/bottom edge pair {}+{} — {} orientation, axis={:.0}mm (rough={:.0}mm), perp={:.0}mm, pxperMM={:.2} (rough={:.2})",
-                a, b, orientation, axis_mm_true, axis_mm_rough, perp_mm, pxpermm, pxpermm_rough
+                "[kid-ocr-local] 2-anchor edge-TB synthesis {}+{} — axis={:.0}mm, perp={:.0}mm, pxperMM={:.2}, axis_len_px={:.0}",
+                a, b, axis_mm_true, perp_mm, pxpermm, axis_len
             );
             let (tl, tr, bl, br) = if a == 0 || a == 1 {
-                // We have the TOP edge (TL, TR). Synthesize BL, BR.
                 (left, right, (opp_l_x, opp_l_y), (opp_r_x, opp_r_y))
             } else {
-                // We have the BOTTOM edge (BL, BR). Synthesize TL, TR.
                 ((opp_l_x, opp_l_y), (opp_r_x, opp_r_y), left, right)
             };
             return Some([tl, tr, bl, br]);
@@ -1382,17 +1431,23 @@ mod tests {
         assert!(matches!(k, CellKind::P), "expected P for X strokes");
     }
 
+    /// Manual probe (run with `cargo test -- --ignored`) that inspects
+    /// per-rotation fiducial + page-quad detection on a real KidsJuly.jpeg
+    /// fixture on the developer machine. NOT a coverage test — the fixture
+    /// is developer-local and it prints diagnostics rather than asserting
+    /// end-to-end correctness. If the fixture is present, the test asserts
+    /// at least ONE rotation yields ≥2 confident fiducials so we don't
+    /// silently regress the detector.
     #[test]
-    fn page_quad_on_real_kidsjuly_jpeg() {
-        // Integration probe: if the real KidsJuly.jpeg is on this machine,
-        // print the page-quad + fiducial confidence at each rotation.
-        // Skips silently if the fixture is absent (CI safe).
+    #[ignore]
+    fn probe_kidsjuly_detection() {
         let path = r"C:\Users\alosing\rs_scanner\sectoral\KidsJuly.jpeg";
         if !std::path::Path::new(path).exists() {
-            eprintln!("[test] skipped — {} not present", path);
+            eprintln!("[probe] skipped — {} not present", path);
             return;
         }
         let img = image::open(path).expect("open KidsJuly.jpeg");
+        let mut best_conf = 0usize;
         for deg in [0u32, 90, 180, 270] {
             let rotated = match deg {
                 0 => img.clone(),
@@ -1408,21 +1463,30 @@ mod tests {
                     "  page-quad: TL=({:.0},{:.0}) TR=({:.0},{:.0}) BL=({:.0},{:.0}) BR=({:.0},{:.0})",
                     q[0].0, q[0].1, q[1].0, q[1].1, q[2].0, q[2].1, q[3].0, q[3].1
                 ),
-                None => eprintln!("  page-quad: FAILED"),
+                None => eprintln!("  page-quad: none"),
             }
             let picks = detect_fiducial_picks(&gray);
             let n_conf = picks.iter().filter(|p| p.as_ref().map_or(false, |q| q.confident)).count();
             eprintln!("  fiducials: {} confident", n_conf);
+            best_conf = best_conf.max(n_conf);
         }
+        assert!(
+            best_conf >= 2,
+            "regression: fiducial detector found 0 or 1 confident fiducials at every rotation on KidsJuly.jpeg (was 2 in v3.1.1)"
+        );
     }
 
+    /// Manual probe (run with `cargo test -- --ignored`) that runs the
+    /// full pipeline against KidsJuly.jpeg and prints the outcome. Does
+    /// NOT assert success — KidsJuly is a known-hard case where the
+    /// paper's right edge is off-frame — but it does assert the pipeline
+    /// runs to completion without panicking.
     #[test]
-    fn full_pipeline_on_real_kidsjuly_jpeg() {
-        // End-to-end probe: runs run_pipeline against KidsJuly.jpeg with a
-        // placeholder roster. Skips silently if the fixture is absent.
+    #[ignore]
+    fn probe_kidsjuly_full_pipeline() {
         let path = r"C:\Users\alosing\rs_scanner\sectoral\KidsJuly.jpeg";
         if !std::path::Path::new(path).exists() {
-            eprintln!("[test] skipped — {} not present", path);
+            eprintln!("[probe] skipped — {} not present", path);
             return;
         }
         let roster: Vec<RosterEntry> = (0..25)
@@ -1431,17 +1495,20 @@ mod tests {
                 student_name: format!("Kid {}", i + 1),
             })
             .collect();
-        match run_pipeline(path, "2026-07", &roster, &[4, 5, 11, 12, 18, 19, 25, 26], &[1], &[]) {
+        let outcome = std::panic::catch_unwind(|| {
+            run_pipeline(path, "2026-07", &roster, &[4, 5, 11, 12, 18, 19, 25, 26], &[1], &[])
+        });
+        assert!(outcome.is_ok(), "pipeline panicked — should Err, not panic");
+        match outcome.unwrap() {
             Ok(r) => {
                 let marks: usize = r.rows.iter().map(|row| row.marks.len()).sum();
                 let rows_with_marks = r.rows.iter().filter(|row| !row.marks.is_empty()).count();
                 eprintln!(
-                    "[test] SUCCESS — {} rows total, {} rows w/ marks, {} marks",
+                    "[probe] pipeline succeeded — {} rows total, {} rows w/ marks, {} marks",
                     r.rows.len(), rows_with_marks, marks
                 );
-                eprintln!("[test] raw: {}", r.raw_text.lines().next().unwrap_or(""));
             }
-            Err(e) => eprintln!("[test] pipeline error: {}", e),
+            Err(e) => eprintln!("[probe] pipeline returned Err (expected for KidsJuly): {}", e),
         }
     }
 }
