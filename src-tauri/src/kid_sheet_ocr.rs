@@ -181,8 +181,13 @@ fn run_pipeline(
     // The image may still be in portrait / rotated orientation. Try
     // fiducial detection at 0°, 90°, 180°, 270° and pick the rotation
     // that gives four well-placed fiducials (one per corner).
-    let mut best: Option<(u32, [(f64, f64); 4], GrayImage)> = None;
+    // Try per-corner detection at 4 rotations, keeping the BEST partial
+    // result (most confident corners) even if the rectangle check fails.
+    // Real-world photos frequently crop out 1-2 fiducials; we can still
+    // recover using the remaining strong pair + known print aspect ratio.
+    let mut best_partial: Option<(u32, [Option<FiducialPick>; 4], GrayImage)> = None;
     for deg in [0u32, 90, 180, 270] {
+        eprintln!("[kid-ocr-local] trying rotation {}°", deg);
         let rotated = match deg {
             0 => img.clone(),
             90 => image::DynamicImage::ImageRgba8(image::imageops::rotate90(&img.to_rgba8())),
@@ -191,23 +196,117 @@ fn run_pipeline(
             _ => unreachable!(),
         };
         let gray = rotated.to_luma8();
-        if let Some(fids) = detect_fiducials(&gray) {
-            // Sanity: the 4 must roughly form a rectangle. Reject skew > 30%.
+        let picks = detect_fiducial_picks(&gray);
+        let strong_count = picks.iter().filter(|p| p.as_ref().map_or(false, |q| q.confident)).count();
+        eprintln!(
+            "[kid-ocr-local] rotation {}° found {} confident fiducials",
+            deg, strong_count
+        );
+        if strong_count == 4 {
+            let fids = [
+                picks[0].as_ref().unwrap().pos,
+                picks[1].as_ref().unwrap().pos,
+                picks[2].as_ref().unwrap().pos,
+                picks[3].as_ref().unwrap().pos,
+            ];
             if fiducials_look_sane(&fids, gray.width(), gray.height()) {
-                best = Some((deg, fids, gray));
+                eprintln!("[kid-ocr-local] rotation {}° all 4 confident and rectangular", deg);
+                best_partial = Some((deg, picks, gray));
                 break;
             }
         }
+        // Keep the rotation with the most confident picks.
+        let cur_best = best_partial.as_ref().map(|(_, p, _)| {
+            p.iter().filter(|q| q.as_ref().map_or(false, |r| r.confident)).count()
+        }).unwrap_or(0);
+        if strong_count > cur_best {
+            best_partial = Some((deg, picks, gray));
+        }
     }
-    let (rotation_applied, fiducials, gray) = best.ok_or_else(|| {
+
+    let (rotation_applied, picks, gray) = best_partial.ok_or_else(|| {
         format!(
-            "could not find 4 corner fiducials in {}×{} image at any rotation — retake the photo with all 4 black corner squares visible",
+            "no fiducial candidates found in {}×{} image at any rotation",
             orig_w, orig_h
         )
     })?;
 
-    // Warp to canonical.
-    let warped = perspective_warp(&gray, &fiducials, CANONICAL_W, CANONICAL_H);
+    // Two anchoring strategies, in order of preference:
+    //   1. Fiducial-based warp: uses the 4 corner squares (or synthesizes
+    //      missing ones from partial + known geometry). Highest precision
+    //      when fiducials are visible.
+    //   2. Page-quad warp (OMRChecker CropPage-style): detects the sheet's
+    //      outer paper boundary as the largest bright rectangle and warps
+    //      paper corners → canonical page corners. Works even when ALL
+    //      fiducials are cropped or unprinted — as long as the paper edges
+    //      are visible against a darker background.
+    // We commit to fiducials only when at least 3 are confident (strong
+    // signal); otherwise we let the page-quad detector try first and only
+    // fall through to fiducial synthesis if page detection fails.
+    let strong = picks.iter().filter(|p| p.as_ref().map_or(false, |q| q.confident)).count();
+    let warped: GrayImage;
+    let anchor_desc: String;
+
+    if strong >= 3 {
+        let fiducials = synthesize_fiducials(&picks, gray.width(), gray.height()).ok_or_else(|| {
+            format!(
+                "3+ confident fiducials but synthesis failed in {}×{} image",
+                orig_w, orig_h
+            )
+        })?;
+        eprintln!(
+            "[kid-ocr-local] fiducial anchor (rot {}°, {} confident): TL=({:.0},{:.0}) TR=({:.0},{:.0}) BL=({:.0},{:.0}) BR=({:.0},{:.0})",
+            rotation_applied, strong,
+            fiducials[0].0, fiducials[0].1,
+            fiducials[1].0, fiducials[1].1,
+            fiducials[2].0, fiducials[2].1,
+            fiducials[3].0, fiducials[3].1,
+        );
+        warped = perspective_warp(
+            &gray, &fiducials, &canonical_fiducial_targets(),
+            CANONICAL_W, CANONICAL_H,
+        );
+        anchor_desc = format!("fiducials-{}confident", strong);
+    } else if let Some(page) = detect_page_quad(&gray) {
+        eprintln!(
+            "[kid-ocr-local] page-quad anchor (rot {}°, only {} confident fiducials): TL=({:.0},{:.0}) TR=({:.0},{:.0}) BL=({:.0},{:.0}) BR=({:.0},{:.0})",
+            rotation_applied, strong,
+            page[0].0, page[0].1,
+            page[1].0, page[1].1,
+            page[2].0, page[2].1,
+            page[3].0, page[3].1,
+        );
+        // Paper corners → canonical page corners (full 2200×1700).
+        let page_dst: [(f64, f64); 4] = [
+            (0.0, 0.0),
+            (CANONICAL_W as f64, 0.0),
+            (0.0, CANONICAL_H as f64),
+            (CANONICAL_W as f64, CANONICAL_H as f64),
+        ];
+        warped = perspective_warp(&gray, &page, &page_dst, CANONICAL_W, CANONICAL_H);
+        anchor_desc = format!("page-quad-{}fid", strong);
+    } else {
+        // Last resort: synthesize from whatever fiducials we have.
+        let fiducials = synthesize_fiducials(&picks, gray.width(), gray.height()).ok_or_else(|| {
+            format!(
+                "could not resolve sheet position in {}×{} image — retake the photo showing all 4 paper edges OR all 4 corner black squares",
+                orig_w, orig_h
+            )
+        })?;
+        eprintln!(
+            "[kid-ocr-local] fiducial-synthesis fallback (rot {}°, {} confident): TL=({:.0},{:.0}) TR=({:.0},{:.0}) BL=({:.0},{:.0}) BR=({:.0},{:.0})",
+            rotation_applied, strong,
+            fiducials[0].0, fiducials[0].1,
+            fiducials[1].0, fiducials[1].1,
+            fiducials[2].0, fiducials[2].1,
+            fiducials[3].0, fiducials[3].1,
+        );
+        warped = perspective_warp(
+            &gray, &fiducials, &canonical_fiducial_targets(),
+            CANONICAL_W, CANONICAL_H,
+        );
+        anchor_desc = format!("fid-synth-{}confident", strong);
+    }
 
     // Detect the grid.
     let grid = detect_grid(&warped, roster.len(), target_month)?;
@@ -216,8 +315,9 @@ fn run_pipeline(
     let (rows, uncertain) = classify_cells(&warped, &grid, roster, weekend, stat, closed);
 
     let raw_text = format!(
-        "[local ocr v1] rotation={}° fiducials=OK ({} rows × {} day cols), roster {}\n\ngrid: rows_y={:?}, cols_x={:?}",
+        "[local ocr v1.1] rotation={}° anchor={} ({} rows × {} day cols), roster {}\n\ngrid: rows_y={:?}, cols_x={:?}",
         rotation_applied,
+        anchor_desc,
         grid.row_ys.len().saturating_sub(1),
         grid.col_xs.len().saturating_sub(1),
         roster.len(),
@@ -238,95 +338,413 @@ fn run_pipeline(
 
 // ─── Fiducial detection ──────────────────────────────────────────────────
 
-/// Otsu-threshold the image, find connected black components, filter to
-/// roughly-square blobs of the expected fiducial size, then pick the one
-/// closest to each corner.
-fn detect_fiducials(gray: &GrayImage) -> Option<[(f64, f64); 4]> {
+// A per-corner detection result, with confidence so downstream code can
+// fall back to synthesis when a corner is off-frame or unprinted.
+#[derive(Clone, Copy, Debug)]
+struct FiducialPick {
+    pos: (f64, f64),
+    size: f64,   // max(bw, bh) of the picked blob, in pixels
+    fill: f64,
+    confident: bool,
+}
+
+/// Per-corner fiducial search. Splits the image into four 30%×30% corner
+/// crops and runs a local Otsu threshold on each independently, so uneven
+/// lighting or a shadowed corner doesn't kill detection elsewhere. Returns
+/// one Option per corner; confidence flag is set when the pick both is
+/// solid-square-shaped AND close to the expected size.
+fn detect_fiducial_picks(gray: &GrayImage) -> [Option<FiducialPick>; 4] {
+    let (w, h) = gray.dimensions();
+    if w < 400 || h < 300 {
+        eprintln!("[kid-ocr-local]   image too small: {}×{}", w, h);
+        return [None; 4];
+    }
+
+    let long_edge = w.max(h) as f64;
+    let expected_side = 4.0 / 25.4 * (long_edge / 11.0);
+    let min_side = (expected_side * 0.30).max(5.0);
+    let max_side = expected_side * 3.5;
+    let min_area = (min_side * min_side * 0.4) as u32;
+    let max_area = (max_side * max_side * 1.8) as u32;
+
+    let crop_frac = 0.30;
+    let cw = (w as f64 * crop_frac) as u32;
+    let ch = (h as f64 * crop_frac) as u32;
+
+    let regions = [
+        (0u32,   0u32,   "TL", 0.0f64,    0.0f64),
+        (w - cw, 0,      "TR", cw as f64, 0.0),
+        (0,      h - ch, "BL", 0.0,       ch as f64),
+        (w - cw, h - ch, "BR", cw as f64, ch as f64),
+    ];
+
+    let mut picked: [Option<FiducialPick>; 4] = [None; 4];
+    for (ci, &(x0, y0, label, ox, oy)) in regions.iter().enumerate() {
+        let sub = image::imageops::crop_imm(gray, x0, y0, cw, ch).to_image();
+        let local_thr = otsu_threshold(&sub).saturating_sub(8);
+        let labels = label_dark_components(&sub, local_thr);
+        let all = summarize_blobs(&labels, sub.width(), sub.height());
+
+        let candidates: Vec<&Blob> = all.iter().filter(|b| {
+            let bw = (b.x1 - b.x0 + 1) as f64;
+            let bh = (b.y1 - b.y0 + 1) as f64;
+            let aspect = if bw > bh { bw / bh } else { bh / bw };
+            b.area >= min_area
+                && b.area <= max_area
+                && bw >= min_side
+                && bh >= min_side
+                && bw <= max_side
+                && bh <= max_side
+                && aspect <= 1.8
+                && b.fill_ratio() >= 0.45
+        }).collect();
+
+        let diag = (cw as f64).hypot(ch as f64);
+        let mut scored: Vec<(&Blob, f64)> = candidates.iter().map(|b| {
+            let (bx, by) = b.centroid();
+            let bw = (b.x1 - b.x0 + 1) as f64;
+            let bh = (b.y1 - b.y0 + 1) as f64;
+            let side = bw.max(bh);
+            let size_err = (side - expected_side).abs() / expected_side;
+            let corner_d = ((bx - ox).powi(2) + (by - oy).powi(2)).sqrt() / diag;
+            let score = size_err + 0.15 * corner_d;
+            (*b, score)
+        }).collect();
+        scored.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+
+        if let Some(&(b, _)) = scored.first() {
+            let (bx, by) = b.centroid();
+            let full_x = bx + x0 as f64;
+            let full_y = by + y0 as f64;
+            let bw = (b.x1 - b.x0 + 1) as f64;
+            let bh = (b.y1 - b.y0 + 1) as f64;
+            let side = bw.max(bh);
+            let fill = b.fill_ratio();
+            // Confidence: strong fill AND size close to expected.
+            let size_ok = side >= expected_side * 0.70 && side <= expected_side * 1.35;
+            let confident = fill >= 0.85 && size_ok;
+            eprintln!(
+                "[kid-ocr-local]   {}: {} candidates (thr={}, exp {:.0}px), picked {:.0}×{:.0}@({:.0},{:.0}) fill={:.2} confident={}",
+                label, candidates.len(), local_thr, expected_side, bw, bh, full_x, full_y, fill, confident
+            );
+            picked[ci] = Some(FiducialPick {
+                pos: (full_x, full_y),
+                size: side,
+                fill,
+                confident,
+            });
+        } else {
+            eprintln!(
+                "[kid-ocr-local]   {}: NO candidate (crop {}×{} thr={}, exp {:.0}px, size window [{:.0}..{:.0}]px)",
+                label, cw, ch, local_thr, expected_side, min_side, max_side
+            );
+        }
+    }
+
+    picked
+}
+
+/// Given per-corner picks (some may be missing or non-confident), return
+/// four fiducial positions in image coordinates. Falls back to inferring
+/// missing corners from confident ones using the known printed sheet
+/// aspect ratio (portrait 8.5×11 or landscape 11×8.5, whichever best
+/// matches the anchor pair distance and pixel size).
+fn synthesize_fiducials(
+    picks: &[Option<FiducialPick>; 4],
+    _w: u32,
+    _h: u32,
+) -> Option<[(f64, f64); 4]> {
+    let confident: Vec<(usize, FiducialPick)> = picks.iter().enumerate()
+        .filter_map(|(i, p)| p.as_ref().map(|q| (i, *q)))
+        .filter(|(_, q)| q.confident)
+        .collect();
+
+    // Fast path: all 4 confident.
+    if confident.len() == 4 {
+        return Some([
+            picks[0].as_ref().unwrap().pos,
+            picks[1].as_ref().unwrap().pos,
+            picks[2].as_ref().unwrap().pos,
+            picks[3].as_ref().unwrap().pos,
+        ]);
+    }
+
+    if confident.len() < 2 {
+        eprintln!("[kid-ocr-local] only {} confident fiducial(s) — cannot synthesize", confident.len());
+        return None;
+    }
+
+    // Pick two confident anchors. Prefer a diagonal pair (TL+BR or TR+BL),
+    // then adjacent-on-an-edge pairs (TL+BL, TR+BR, TL+TR, BL+BR).
+    // Order: TL=0, TR=1, BL=2, BR=3.
+    let diagonals = [(0, 3), (1, 2)];
+    let edges_lr = [(0, 2), (1, 3)]; // left edge, right edge — same-x pairs
+    let edges_tb = [(0, 1), (2, 3)]; // top edge, bottom edge — same-y pairs
+
+    let has = |i: usize| confident.iter().any(|(k, _)| *k == i);
+    let pick = |i: usize| picks[i].as_ref().unwrap().pos;
+    let size_of = |i: usize| picks[i].as_ref().unwrap().size;
+
+    // Case: both diagonal points confident.
+    for &(a, b) in &diagonals {
+        if has(a) && has(b) {
+            let pa = pick(a);
+            let pb = pick(b);
+            // Assume the other two corners form an axis-aligned rectangle
+            // with pa and pb; use image axes as approximate sheet axes.
+            let (tl, br) = if a == 0 { (pa, pb) } else { (pb, pa) };
+            let tr = (br.0, tl.1);
+            let bl = (tl.0, br.1);
+            eprintln!("[kid-ocr-local] synthesizing from diagonal {}+{}", a, b);
+            return Some([tl, tr, bl, br]);
+        }
+    }
+
+    // Case: adjacent pair on the left or right edge (both share x).
+    for &(a, b) in &edges_lr {
+        if has(a) && has(b) {
+            let pa = pick(a); let pb = pick(b);
+            let (top, bot) = if pa.1 < pb.1 { (pa, pb) } else { (pb, pa) };
+            let axis_len = (bot.0 - top.0).hypot(bot.1 - top.1);
+            let fid_side = (size_of(a) + size_of(b)) * 0.5;
+            let pxpermm_rough = fid_side / 4.0;
+            let axis_mm_rough = axis_len / pxpermm_rough;
+            // Match to known edge lengths:
+            //   portrait long edge (11in − 16mm insets) = 263.4 mm; perpendicular short = 181.9 mm
+            //   landscape short edge (8.5in − 16mm) = 199.9 mm; perpendicular long = 245.4 mm
+            let (axis_mm_true, perp_mm, orientation) = if (axis_mm_rough - 263.4).abs() < (axis_mm_rough - 199.9).abs() {
+                (263.4, 181.9, "portrait")
+            } else {
+                (199.9, 245.4, "landscape")
+            };
+            // Recompute pxpermm from SPACING (more accurate than tiny fid size).
+            let pxpermm = axis_len / axis_mm_true;
+            let perp_len_px = perp_mm * pxpermm;
+            // Perpendicular unit vector (rotate axis 90° CW): (dy, -dx)/len.
+            let dx = bot.0 - top.0;
+            let dy = bot.1 - top.1;
+            let perp = (dy / axis_len, -dx / axis_len);
+            // On the left edge, perp points RIGHT (into the sheet).
+            let sign = if a == 0 || a == 2 { 1.0 } else { -1.0 };
+            let (opp_top_x, opp_top_y) = (top.0 + sign * perp.0 * perp_len_px, top.1 + sign * perp.1 * perp_len_px);
+            let (opp_bot_x, opp_bot_y) = (bot.0 + sign * perp.0 * perp_len_px, bot.1 + sign * perp.1 * perp_len_px);
+            eprintln!(
+                "[kid-ocr-local] synthesizing from left/right edge pair {}+{} — {} orientation, axis={:.0}mm (rough={:.0}mm), perp={:.0}mm, pxperMM={:.2} (rough={:.2} from fid size)",
+                a, b, orientation, axis_mm_true, axis_mm_rough, perp_mm, pxpermm, pxpermm_rough
+            );
+            let (tl, tr, bl, br) = if a == 0 || a == 2 {
+                // We have the LEFT edge (TL, BL). Synthesize TR, BR.
+                (top, (opp_top_x, opp_top_y), bot, (opp_bot_x, opp_bot_y))
+            } else {
+                // We have the RIGHT edge (TR, BR). Synthesize TL, BL.
+                ((opp_top_x, opp_top_y), top, (opp_bot_x, opp_bot_y), bot)
+            };
+            return Some([tl, tr, bl, br]);
+        }
+    }
+
+    // Case: adjacent pair on the top or bottom edge (both share y).
+    for &(a, b) in &edges_tb {
+        if has(a) && has(b) {
+            let pa = pick(a); let pb = pick(b);
+            let (left, right) = if pa.0 < pb.0 { (pa, pb) } else { (pb, pa) };
+            let axis_len = (right.0 - left.0).hypot(right.1 - left.1);
+            let fid_side = (size_of(a) + size_of(b)) * 0.5;
+            let pxpermm_rough = fid_side / 4.0;
+            let axis_mm_rough = axis_len / pxpermm_rough;
+            let (axis_mm_true, perp_mm, orientation) = if (axis_mm_rough - 245.4).abs() < (axis_mm_rough - 181.9).abs() {
+                (245.4, 199.9, "landscape")
+            } else {
+                (181.9, 263.4, "portrait")
+            };
+            let pxpermm = axis_len / axis_mm_true;
+            let perp_len_px = perp_mm * pxpermm;
+            let dx = right.0 - left.0;
+            let dy = right.1 - left.1;
+            // Perpendicular pointing DOWN into the sheet: (-dy, dx)/len.
+            let perp = (-dy / axis_len, dx / axis_len);
+            let sign = if a == 0 || a == 1 { 1.0 } else { -1.0 };
+            let (opp_l_x, opp_l_y) = (left.0 + sign * perp.0 * perp_len_px, left.1 + sign * perp.1 * perp_len_px);
+            let (opp_r_x, opp_r_y) = (right.0 + sign * perp.0 * perp_len_px, right.1 + sign * perp.1 * perp_len_px);
+            eprintln!(
+                "[kid-ocr-local] synthesizing from top/bottom edge pair {}+{} — {} orientation, axis={:.0}mm (rough={:.0}mm), perp={:.0}mm, pxperMM={:.2} (rough={:.2})",
+                a, b, orientation, axis_mm_true, axis_mm_rough, perp_mm, pxpermm, pxpermm_rough
+            );
+            let (tl, tr, bl, br) = if a == 0 || a == 1 {
+                // We have the TOP edge (TL, TR). Synthesize BL, BR.
+                (left, right, (opp_l_x, opp_l_y), (opp_r_x, opp_r_y))
+            } else {
+                // We have the BOTTOM edge (BL, BR). Synthesize TL, TR.
+                ((opp_l_x, opp_l_y), (opp_r_x, opp_r_y), left, right)
+            };
+            return Some([tl, tr, bl, br]);
+        }
+    }
+
+    eprintln!("[kid-ocr-local] 2+ confident fiducials but no usable pair (need diagonal or same-edge)");
+    None
+}
+
+// ─── Page-quad detection (OMRChecker-style CropPage) ────────────────────
+//
+// When fiducials are cropped, off-frame, or unprinted, we can still recover
+// the sheet position from the paper itself — the sheet is a nearly-full
+// bright rectangle against a darker background (table, hand, phone edge).
+//
+// Approach: downsample → global Otsu → label bright components → pick the
+// largest one → find its four diagonal extremes (min x+y, max x-y,
+// min x-y, max x+y). These are the paper's corners even under rotation.
+//
+// This is a Rust port of the core idea in OMRChecker's CropPage plugin,
+// stripped down to what Echelon needs (no OpenCV, no contour approximation,
+// just diagonal extremes on the largest bright blob).
+fn detect_page_quad(gray: &GrayImage) -> Option<[(f64, f64); 4]> {
     let (w, h) = gray.dimensions();
     if w < 400 || h < 300 {
         return None;
     }
-    let thr = otsu_threshold(gray);
-    // Slightly permissive threshold — ink can be lighter than the paper's
-    // brightest patches after JPEG compression.
-    let thr = thr.saturating_sub(10);
 
-    // 4mm fiducial at 200 DPI = ~32px. Photos are smaller than canonical
-    // typically (phone photos ~1600-3000px long edge). At 1600px long edge
-    // over 11in paper = 145 DPI, so 4mm ≈ 23px, area ≈ 530px². Give a wide
-    // tolerance because we may see anywhere from 800×600 to 4000×3000.
-    let long_edge = w.max(h) as f64;
-    let expected_side = 4.0 / 25.4 * (long_edge / 11.0); // mm → px on long axis
-    let min_side = (expected_side * 0.4).max(6.0);
-    let max_side = expected_side * 2.5;
-    let min_area = (min_side * min_side * 0.5) as u32;
-    let max_area = (max_side * max_side * 1.5) as u32;
+    // Downsample to ~800px max side for speed. Page corners don't need full
+    // resolution — we'll scale back at the end.
+    let long_side = w.max(h) as f64;
+    let scale = (long_side / 800.0).max(1.0);
+    let dw = ((w as f64) / scale).round().max(200.0) as u32;
+    let dh = ((h as f64) / scale).round().max(150.0) as u32;
+    let small = image::imageops::resize(gray, dw, dh, image::imageops::FilterType::Triangle);
 
-    let labels = label_dark_components(gray, thr);
-    let mut blobs: Vec<Blob> = summarize_blobs(&labels, gray.width(), gray.height());
-    blobs.retain(|b| {
-        let bw = (b.x1 - b.x0 + 1) as f64;
-        let bh = (b.y1 - b.y0 + 1) as f64;
-        let aspect = if bw > bh { bw / bh } else { bh / bw };
-        b.area >= min_area
-            && b.area <= max_area
-            && bw >= min_side
-            && bh >= min_side
-            && bw <= max_side
-            && bh <= max_side
-            && aspect <= 1.6
-            && b.fill_ratio() >= 0.55 // fiducials are SOLID squares
-    });
+    // Heavy Gaussian blur BEFORE threshold: the sheet has dark grid lines
+    // and text throughout, which would otherwise fragment the paper into
+    // hundreds of small bright polygons between the lines. Blurring with
+    // sigma ~= 4% of the long side smears those dark features into the
+    // surrounding white so the paper labels as one big bright blob.
+    let blur_sigma = (dw.max(dh) as f32) * 0.04;
+    let small = image::imageops::blur(&small, blur_sigma);
 
-    if blobs.len() < 4 {
+    // Otsu — but we want to separate paper (bright) from background (dark).
+    let thr = otsu_threshold(&small);
+
+    // Label bright components (pixels > thr) using flood fill.
+    let n = (dw * dh) as usize;
+    let mut labels = vec![0u32; n];
+    let mut next_label: u32 = 1;
+    let mut stack: Vec<u32> = Vec::with_capacity(4096);
+    for y in 0..dh {
+        for x in 0..dw {
+            let i = (y * dw + x) as usize;
+            if labels[i] != 0 { continue; }
+            if small.get_pixel(x, y).0[0] <= thr { continue; }
+            labels[i] = next_label;
+            stack.clear();
+            stack.push(i as u32);
+            while let Some(idx) = stack.pop() {
+                let px = idx % dw;
+                let py = idx / dw;
+                let neighbors = [
+                    (px.wrapping_sub(1), py, px > 0),
+                    (px + 1, py, px + 1 < dw),
+                    (px, py.wrapping_sub(1), py > 0),
+                    (px, py + 1, py + 1 < dh),
+                ];
+                for &(nx, ny, ok) in &neighbors {
+                    if !ok { continue; }
+                    let ni = (ny * dw + nx) as usize;
+                    if labels[ni] != 0 { continue; }
+                    if small.get_pixel(nx, ny).0[0] <= thr { continue; }
+                    labels[ni] = next_label;
+                    stack.push(ni as u32);
+                }
+            }
+            next_label += 1;
+        }
+    }
+
+    // Find the largest bright component.
+    if next_label < 2 { return None; }
+    let mut areas = vec![0u32; next_label as usize];
+    for &l in labels.iter() {
+        areas[l as usize] += 1;
+    }
+    let (paper_label, paper_area) = areas.iter().enumerate().skip(1)
+        .max_by_key(|(_, &a)| a)
+        .map(|(i, &a)| (i as u32, a))?;
+
+    // Reject if paper is too small — probably not the sheet.
+    let min_area = (dw * dh) / 4;
+    if paper_area < min_area {
+        eprintln!(
+            "[kid-ocr-local] page-quad: largest bright blob only {} px ({}% of image, need ≥25%)",
+            paper_area, paper_area * 100 / (dw * dh)
+        );
         return None;
     }
 
-    // Assign each blob a "corner affinity" score for TL / TR / BL / BR
-    // (lower = better). Consider only blobs in the outer 20% of the frame.
-    let margin_x = w as f64 * 0.20;
-    let margin_y = h as f64 * 0.20;
-    let corners = [
-        (0.0, 0.0),
-        (w as f64, 0.0),
-        (0.0, h as f64),
-        (w as f64, h as f64),
-    ];
-    let mut picked: [Option<(f64, f64)>; 4] = [None; 4];
-    let mut used = std::collections::HashSet::new();
-    for (ci, &(cx, cy)) in corners.iter().enumerate() {
-        let mut best_idx = None;
-        let mut best_d = f64::MAX;
-        for (bi, b) in blobs.iter().enumerate() {
-            if used.contains(&bi) {
-                continue;
-            }
-            let (bx, by) = b.centroid();
-            // Require the blob is on the correct side of the frame.
-            let ok_x = if cx < 1.0 { bx < w as f64 - margin_x } else { bx > margin_x };
-            let ok_y = if cy < 1.0 { by < h as f64 - margin_y } else { by > margin_y };
-            if !ok_x || !ok_y {
-                continue;
-            }
-            let d = (bx - cx).powi(2) + (by - cy).powi(2);
-            if d < best_d {
-                best_d = d;
-                best_idx = Some(bi);
-            }
-        }
-        if let Some(bi) = best_idx {
-            picked[ci] = Some(blobs[bi].centroid());
-            used.insert(bi);
-        } else {
-            return None;
+    // Find the four diagonal extremes on that blob.
+    // TL minimizes (x+y). TR maximizes (x-y). BL minimizes (x-y). BR maximizes (x+y).
+    let mut tl = (0i32, 0i32, i32::MAX);   // (x, y, x+y)
+    let mut br = (0i32, 0i32, i32::MIN);   // (x, y, x+y)
+    let mut tr = (0i32, 0i32, i32::MIN);   // (x, y, x-y)
+    let mut bl = (0i32, 0i32, i32::MAX);   // (x, y, x-y)
+    for y in 0..dh {
+        for x in 0..dw {
+            if labels[(y * dw + x) as usize] != paper_label { continue; }
+            let (xi, yi) = (x as i32, y as i32);
+            let sum = xi + yi;
+            let diff = xi - yi;
+            if sum < tl.2 { tl = (xi, yi, sum); }
+            if sum > br.2 { br = (xi, yi, sum); }
+            if diff > tr.2 { tr = (xi, yi, diff); }
+            if diff < bl.2 { bl = (xi, yi, diff); }
         }
     }
-    Some([
-        picked[0].unwrap(),
-        picked[1].unwrap(),
-        picked[2].unwrap(),
-        picked[3].unwrap(),
-    ])
+
+    // Scale back to original resolution.
+    let sx = w as f64 / dw as f64;
+    let sy = h as f64 / dh as f64;
+    let quad = [
+        ((tl.0 as f64 + 0.5) * sx, (tl.1 as f64 + 0.5) * sy),
+        ((tr.0 as f64 + 0.5) * sx, (tr.1 as f64 + 0.5) * sy),
+        ((bl.0 as f64 + 0.5) * sx, (bl.1 as f64 + 0.5) * sy),
+        ((br.0 as f64 + 0.5) * sx, (br.1 as f64 + 0.5) * sy),
+    ];
+    eprintln!(
+        "[kid-ocr-local] page-quad extremes: TL=({:.0},{:.0}) TR=({:.0},{:.0}) BL=({:.0},{:.0}) BR=({:.0},{:.0}) (paper {}% of {}x{})",
+        quad[0].0, quad[0].1, quad[1].0, quad[1].1,
+        quad[2].0, quad[2].1, quad[3].0, quad[3].1,
+        paper_area * 100 / (dw * dh), w, h
+    );
+
+    // Sanity-check the quad: sides should form a rough rectangle. Use
+    // looser tolerances than fiducial checks because paper edges are
+    // measured to blob-extreme pixels which are noisier.
+    if !page_quad_looks_sane(&quad, w, h) {
+        eprintln!("[kid-ocr-local] page-quad: extremes don't form a plausible rectangle");
+        return None;
+    }
+
+    // And the quad should cover most of the image (paper fills the frame).
+    let quad_w = ((quad[1].0 - quad[0].0).abs() + (quad[3].0 - quad[2].0).abs()) / 2.0;
+    let quad_h = ((quad[2].1 - quad[0].1).abs() + (quad[3].1 - quad[1].1).abs()) / 2.0;
+    if quad_w < w as f64 * 0.5 || quad_h < h as f64 * 0.5 {
+        eprintln!(
+            "[kid-ocr-local] page-quad: paper only {:.0}×{:.0} in {}×{} image (too small)",
+            quad_w, quad_h, w, h
+        );
+        return None;
+    }
+
+    // Reject quads that touch the image border — the paper is off-frame,
+    // so we can't measure its true corner. Better to fall through to the
+    // fiducial-synthesis path than warp using the wrong quad.
+    let margin = (w.min(h) as f64) * 0.01;
+    let touches_border = quad.iter().any(|(x, y)| {
+        *x < margin || *y < margin || *x > w as f64 - margin || *y > h as f64 - margin
+    });
+    if touches_border {
+        eprintln!("[kid-ocr-local] page-quad: at least one corner touches image border — paper is off-frame");
+        return None;
+    }
+
+    Some(quad)
 }
 
 fn fiducials_look_sane(fids: &[(f64, f64); 4], w: u32, h: u32) -> bool {
@@ -346,6 +764,33 @@ fn fiducials_look_sane(fids: &[(f64, f64); 4], w: u32, h: u32) -> bool {
         && br.0 > bl.0 + w as f64 * 0.3
         && bl.1 > tl.1 + h as f64 * 0.3
         && br.1 > tr.1 + h as f64 * 0.3
+}
+
+/// Looser rectangle check for page-quad extremes, which sit on real paper
+/// edges (skewed, cropped, noisy) rather than fixed fiducial squares.
+/// Requires: TR is to the right of TL, BL is below TL, BR is right-of-BL
+/// and below-of-TR, and no side is degenerate.
+fn page_quad_looks_sane(fids: &[(f64, f64); 4], w: u32, h: u32) -> bool {
+    let (tl, tr, bl, br) = (fids[0], fids[1], fids[2], fids[3]);
+    let wf = w as f64;
+    let hf = h as f64;
+    // Order sanity — each corner in its correct half.
+    if !(tr.0 > tl.0 + wf * 0.3
+        && br.0 > bl.0 + wf * 0.3
+        && bl.1 > tl.1 + hf * 0.3
+        && br.1 > tr.1 + hf * 0.3)
+    {
+        return false;
+    }
+    // Reject wildly non-parallel sides (>25% mismatch). Real paper photos
+    // can be perspective-skewed but sides should still be roughly parallel.
+    let top_len = ((tr.0 - tl.0).powi(2) + (tr.1 - tl.1).powi(2)).sqrt();
+    let bot_len = ((br.0 - bl.0).powi(2) + (br.1 - bl.1).powi(2)).sqrt();
+    let left_len = ((bl.0 - tl.0).powi(2) + (bl.1 - tl.1).powi(2)).sqrt();
+    let right_len = ((br.0 - tr.0).powi(2) + (br.1 - tr.1).powi(2)).sqrt();
+    let horiz_ratio = top_len.max(bot_len) / top_len.min(bot_len).max(1.0);
+    let vert_ratio = left_len.max(right_len) / left_len.min(right_len).max(1.0);
+    horiz_ratio < 1.4 && vert_ratio < 1.4
 }
 
 // ─── Otsu + connected components ─────────────────────────────────────────
@@ -475,13 +920,13 @@ fn summarize_blobs(labels: &[u32], w: u32, h: u32) -> Vec<Blob> {
 fn perspective_warp(
     src: &GrayImage,
     src_quad: &[(f64, f64); 4],
+    dst_quad: &[(f64, f64); 4],
     out_w: u32,
     out_h: u32,
 ) -> GrayImage {
-    let dst = canonical_fiducial_targets();
     // We compute the INVERSE homography (dst → src) directly, so for each
     // canonical output pixel we look up its source coordinate.
-    let h_inv = homography_from_quads(&dst, src_quad).expect("degenerate fiducial quad");
+    let h_inv = homography_from_quads(dst_quad, src_quad).expect("degenerate quad");
     let mut out = GrayImage::new(out_w, out_h);
     let (sw, sh) = (src.width() as f64, src.height() as f64);
     for y in 0..out_h {
@@ -935,5 +1380,68 @@ mod tests {
         }
         let (k, _) = classify_one_cell(&img, 10, 30, 30, 50, 200);
         assert!(matches!(k, CellKind::P), "expected P for X strokes");
+    }
+
+    #[test]
+    fn page_quad_on_real_kidsjuly_jpeg() {
+        // Integration probe: if the real KidsJuly.jpeg is on this machine,
+        // print the page-quad + fiducial confidence at each rotation.
+        // Skips silently if the fixture is absent (CI safe).
+        let path = r"C:\Users\alosing\rs_scanner\sectoral\KidsJuly.jpeg";
+        if !std::path::Path::new(path).exists() {
+            eprintln!("[test] skipped — {} not present", path);
+            return;
+        }
+        let img = image::open(path).expect("open KidsJuly.jpeg");
+        for deg in [0u32, 90, 180, 270] {
+            let rotated = match deg {
+                0 => img.clone(),
+                90 => image::DynamicImage::ImageRgba8(image::imageops::rotate90(&img.to_rgba8())),
+                180 => image::DynamicImage::ImageRgba8(image::imageops::rotate180(&img.to_rgba8())),
+                270 => image::DynamicImage::ImageRgba8(image::imageops::rotate270(&img.to_rgba8())),
+                _ => unreachable!(),
+            };
+            let gray = rotated.to_luma8();
+            eprintln!("=== rot {}° ({}x{}) ===", deg, gray.width(), gray.height());
+            match detect_page_quad(&gray) {
+                Some(q) => eprintln!(
+                    "  page-quad: TL=({:.0},{:.0}) TR=({:.0},{:.0}) BL=({:.0},{:.0}) BR=({:.0},{:.0})",
+                    q[0].0, q[0].1, q[1].0, q[1].1, q[2].0, q[2].1, q[3].0, q[3].1
+                ),
+                None => eprintln!("  page-quad: FAILED"),
+            }
+            let picks = detect_fiducial_picks(&gray);
+            let n_conf = picks.iter().filter(|p| p.as_ref().map_or(false, |q| q.confident)).count();
+            eprintln!("  fiducials: {} confident", n_conf);
+        }
+    }
+
+    #[test]
+    fn full_pipeline_on_real_kidsjuly_jpeg() {
+        // End-to-end probe: runs run_pipeline against KidsJuly.jpeg with a
+        // placeholder roster. Skips silently if the fixture is absent.
+        let path = r"C:\Users\alosing\rs_scanner\sectoral\KidsJuly.jpeg";
+        if !std::path::Path::new(path).exists() {
+            eprintln!("[test] skipped — {} not present", path);
+            return;
+        }
+        let roster: Vec<RosterEntry> = (0..25)
+            .map(|i| RosterEntry {
+                student_id: i as i64,
+                student_name: format!("Kid {}", i + 1),
+            })
+            .collect();
+        match run_pipeline(path, "2026-07", &roster, &[4, 5, 11, 12, 18, 19, 25, 26], &[1], &[]) {
+            Ok(r) => {
+                let marks: usize = r.rows.iter().map(|row| row.marks.len()).sum();
+                let rows_with_marks = r.rows.iter().filter(|row| !row.marks.is_empty()).count();
+                eprintln!(
+                    "[test] SUCCESS — {} rows total, {} rows w/ marks, {} marks",
+                    r.rows.len(), rows_with_marks, marks
+                );
+                eprintln!("[test] raw: {}", r.raw_text.lines().next().unwrap_or(""));
+            }
+            Err(e) => eprintln!("[test] pipeline error: {}", e),
+        }
     }
 }
