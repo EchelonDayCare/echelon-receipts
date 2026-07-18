@@ -581,7 +581,7 @@ export default function MonthlyAttendance() {
     };
     const QRCode = await import("qrcode");
     const qrDataUrl = await QRCode.toDataURL(JSON.stringify(qrPayload), {
-      errorCorrectionLevel: "M",
+      errorCorrectionLevel: "H",
       margin: 1,
       width: 128,
       color: { dark: "#000000", light: "#FFFFFF" },
@@ -614,7 +614,10 @@ export default function MonthlyAttendance() {
      // a very small roster (5 kids) doesn't give absurdly tall cells;
      // floor at 15px so a very large roster still fits on one page.
      // v3.0.6: min/max reduced by 2px per user request — tighter rows.
-    const rowH = Math.max(13, Math.min(23, Math.floor(TABLE_AVAIL_PX / (nRows + 1)) - 3));
+    // v3.2.0e: divisor now `nRows + 2` because the table has BOTH a top
+    // header row and a bottom footer row (repeated day-number header
+    // added as an OCR row-recovery anchor). Was `+ 1` for header-only.
+    const rowH = Math.max(13, Math.min(23, Math.floor(TABLE_AVAIL_PX / (nRows + 2)) - 3));
     const fontPx = rowH <= 17 ? 8 : rowH <= 20 ? 9 : 10;
     const nameFontPx = fontPx + 1;
     const padY = Math.max(1, Math.floor(rowH / 8));
@@ -642,7 +645,7 @@ export default function MonthlyAttendance() {
       if (closedByIso.get(iso)) return "day narrow";
       return "day wide";
     };
-    const rowsHtml = cells.map((c) => `
+    const rowsHtml = cells.map((c, idx) => `
       <tr${c.active ? "" : ' style="opacity:0.6"'}>
         <td class="name">${h(firstLast(c.student_name))}${c.active ? "" : ` <span style="font-style:italic;color:#6b7280">${h(inactiveLabel("student", c.withdrawn_at))}</span>`}</td>
         ${dayNums.map((d) => {
@@ -664,6 +667,7 @@ export default function MonthlyAttendance() {
           const content = "";
           return `<td${classes ? ` class="${classes}"` : ""}>${content}</td>`;
         }).join("")}
+        <td class="rownum">${idx + 1}</td>
       </tr>`).join("");
     const headerCells = dayNums.map((d) => {
       const weekBoundary = new Date(year, month - 1, d).getDay() === 0;
@@ -690,15 +694,11 @@ export default function MonthlyAttendance() {
            outside the table's left/right edges (~20mm inset) rather than
            the paper corners. Still safely clear of the QR (right: 20mm)
            and the title/legend text (indented 64.5px). */
-        .fid { position: fixed; width: 4mm; height: 4mm; background: #000; }
-        .fid.tl { top: 2mm; left: 15mm; }
-        .fid.tr { top: 2mm; right: 15mm; }
-        .fid.bl { bottom: 10mm; left: 15mm; }
-        .fid.br { bottom: 10mm; right: 15mm; }
         /* v3.2.0: self-identifying corner fiducial QR codes. Each encodes
            its own corner ID; the Rust OCR reads even one and reconstructs
-           the full sheet transform from known 10mm-QR geometry. Kept
-           alongside the plain .fid squares so old prints keep working. */
+           the full sheet transform from known 10mm-QR geometry. Replaces
+           the plain black squares entirely — QR error-correction handles
+           lighting/fade far better than bulk-fill detection. */
         .fid-qr {
           position: fixed;
           width: 10mm;
@@ -707,16 +707,18 @@ export default function MonthlyAttendance() {
           display: block;
         }
         .fid-qr img { width: 10mm; height: 10mm; display: block; }
-        .fid-qr.tl { top: 4mm; left: 4mm; }
-        .fid-qr.tr { top: 4mm; right: 4mm; }
-        .fid-qr.bl { bottom: 4mm; left: 4mm; }
-        .fid-qr.br { bottom: 4mm; right: 4mm; }
+        .fid-qr.tl { top: calc(4mm + 53px); left: calc(4mm + 6px); }
+        .fid-qr.tr { top: calc(4mm + 53px); right: calc(4mm + 6px); }
+        .fid-qr.bl { bottom: calc(4mm + 9px); left: calc(4mm + 6px); }
+        .fid-qr.br { bottom: calc(4mm + 9px); right: calc(4mm + 6px); }
         /* v3.0.5: title, meta, and legend indented 64.5px to align with
            the table's left edge (which is centered with 64.5px margin
            on each side per the width: calc(100% - 129px) rule).
            v3.1.1: daycare name centered so the TR fiducial has a clear
-           corner and the title reads as a proper page header. */
-        h1 { margin: 10px 0 2px 0; font-size: 14px; text-align: center; padding: 0 40mm; }
+           corner and the title reads as a proper page header.
+           v3.2.0b: header + table + top QRs shifted 50px down for
+           more visual breathing room above the title. */
+        h1 { margin: 60px 0 2px 0; font-size: 14px; text-align: center; padding: 0 40mm; }
         .meta { margin: 0; font-size: 10px; text-align: center; padding: 0 40mm; }
         .qr {
           /* v3.1.1: QR shifted from right: 3mm to right: 20mm so it no
@@ -724,8 +726,9 @@ export default function MonthlyAttendance() {
              right: 15mm to right: 19mm). Restores the original design
              intent — see the comment above .fid.
              v3.1.1b: nudged another 20px (~5mm) left → right: 25mm for
-             extra breathing room around the fiducial. */
-          position: absolute; top: 2.5mm; right: 25mm;
+             extra breathing room around the fiducial.
+             v3.2.0b: shifted 50px down with the rest of the top block. */
+          position: absolute; top: calc(2.5mm + 50px); right: 25mm;
           width: 14mm; height: 14mm;
           background: #fff; padding: 1mm; box-sizing: content-box;
           border: 1px solid #d1d5db; border-radius: 2px;
@@ -743,6 +746,13 @@ export default function MonthlyAttendance() {
         }
         /* Compact name column: longest first-last name + 10px slack. */
         col.name { width: calc(${maxNameChars}ch + 10px); }
+        /* v3.2.0e: right-edge row-index column. Symmetric to the name
+           column: gives OCR a right-side row anchor for grid-recovery. */
+        col.rownum { width: 3ch; }
+        td.rownum, th.rownum {
+          color: #6b7280; font-size: 9px; text-align: center;
+          font-variant-numeric: tabular-nums;
+        }
         /* Weekend / STAT / closed columns get a slimmer allotment — they
            carry a label, not handwriting. The reclaimed pixels go to the
            weekday columns where staff actually write. */
@@ -780,6 +790,7 @@ export default function MonthlyAttendance() {
           line-height: 1;
         }
         thead th { background: #f0f0f0; font-size: ${fontPx}px; }
+        tfoot th { background: #f0f0f0; font-size: ${fontPx}px; }
         .legend { margin: 4px 0 0 64.5px; font-size: 9px; color: #333; }
         .legend .sw {
           display: inline-block; width: 10px; height: 10px;
@@ -790,10 +801,6 @@ export default function MonthlyAttendance() {
         /* Belt-and-braces: never spill onto a 2nd page. */
         table, tr, td, th { page-break-inside: avoid; break-inside: avoid; }
       </style></head><body>
-      <div class="fid tl"></div>
-      <div class="fid tr"></div>
-      <div class="fid bl"></div>
-      <div class="fid br"></div>
       <div class="fid-qr tl"><img src="${fidQrTL}" alt="fid-tl" /></div>
       <div class="fid-qr tr"><img src="${fidQrTR}" alt="fid-tr" /></div>
       <div class="fid-qr bl"><img src="${fidQrBL}" alt="fid-bl" /></div>
@@ -805,9 +812,11 @@ export default function MonthlyAttendance() {
         <colgroup>
           <col class="name" />
           ${dayNums.map((d) => `<col class="${dayColClass(d)}" />`).join("")}
+          <col class="rownum" />
         </colgroup>
-        <thead><tr><th style="text-align:left;">Child</th>${headerCells}</tr></thead>
+        <thead><tr><th style="text-align:left;">Child</th>${headerCells}<th class="rownum">#</th></tr></thead>
         <tbody>${rowsHtml}</tbody>
+        <tfoot><tr><th style="text-align:left;">Child</th>${headerCells}<th class="rownum">#</th></tr></tfoot>
       </table>
       <p class="legend">
         Legend — <b>&#x2715;</b> = Present &middot; <b>&ndash;</b> = Absent

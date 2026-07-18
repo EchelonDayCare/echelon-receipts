@@ -611,7 +611,7 @@ pub async fn extract_month_attendance(args: ExtractMonthAttendanceArgs) -> Resul
                                         (2) 'A' = a single stroke roughly parallel to the row (dash '-', en-dash, hyphen, minus sign, underscore) OR a hand-written 'A'. Never emit 'A' for two crossing strokes.\n\
                                         (3) BLANK / EMPTY cell: OMIT this array entry entirely. Do NOT emit 'A' for a truly empty cell — the sheet is filled progressively and future days are legitimately blank. Emitting 'A' for a blank cell corrupts payroll and subsidy math.\n\
                                         (4) Cells inside a shaded/tinted grey weekend column, a yellow/tan STAT column, or any column labelled vertically 'STAT'/'Stat Holiday'/'Closed' are NOT data cells — OMIT them. Staff never write in these columns; if you see ink there you have drifted, recount columns from the header.\n\
-                                        (5) COLUMN ALIGNMENT: the top-of-sheet numeric labels are ground truth. This month has {n} day columns. On the Echelon printed sheet, weekend columns are visibly narrower but are still numbered — do NOT merge adjacent narrow columns (e.g. '4' and '5') into one. On the older Luxmi hand-drawn sheet, weekend days are inside wide 'Saturday & Sunday' bands with no per-day numbering; the numbered day columns pick up on the next weekday after each band. Count exactly {n} day columns before assigning marks; if you count fewer, you have merged something and must recount.\n\
+                                        (5) COLUMN ALIGNMENT: the top-of-sheet numeric labels are ground truth. This month has {n} day columns. On the Echelon printed sheet, weekend columns are visibly narrower but are still numbered — do NOT merge adjacent narrow columns (e.g. '4' and '5') into one. The RIGHTMOST body column of Variant A is a small light-gray row-index (1..N under a '#' header) — that is NOT day 32; skip it entirely. The BOTTOM row of the Variant A table repeats the day-number header — that row is NOT a student and must not be emitted. On the older Luxmi hand-drawn sheet, weekend days are inside wide 'Saturday & Sunday' bands with no per-day numbering; the numbered day columns pick up on the next weekday after each band. Count exactly {n} day columns before assigning marks; if you count fewer, you have merged something and must recount.\n\
                                         (6) When uncertain P vs A for a cell that clearly has ink, prefer 'A' (single-stroke is more common than accidental cross). When uncertain whether a cell has ink at all, prefer OMITTING (rule 3).", n = expected_days) }
                                 },
                                 "required": ["day", "mark"],
@@ -658,13 +658,15 @@ pub async fn extract_month_attendance(args: ExtractMonthAttendanceArgs) -> Resul
          SHEET LAYOUT — two variants are in circulation. Detect which one the photo matches, then apply the matching rules.\n\
          \n\
          Variant A: Echelon printed sheet (most common).\n\
-         - Landscape Letter. Four corner black squares (fiducials); a QR code sits top-right.\n\
+         - Landscape Letter. Four corner QR codes (self-identifying fiducials encoding TL/TR/BL/BR) plus a larger manifest QR at top-right.\n\
          - Title 'Echelon Daycare Society'. Subtitle 'Attendance report for month of {month}...'.\n\
-         - Table header lists 'Child' then EVERY day number 1..{expected_days} across the top. Exactly {expected_days} numbered day columns.\n\
+         - Table has a TOP header row: 'Child' then EVERY day number 1..{expected_days} then a '#' cell. Exactly {expected_days} numbered day columns between them.\n\
+         - Table has a REPEATED FOOTER header row (bottom row of the table): same 'Child' / 1..{expected_days} / '#' pattern as the top. This footer is an OCR grid-recovery anchor; it is NOT a student row. Do NOT emit it as a child named 'Child' or read its day numbers as marks.\n\
+         - RIGHTMOST body column is a light-gray row-index column showing 1, 2, 3, ..., {roster_size}. This is an OCR anchor, NOT day column 32. There are exactly {expected_days} day columns, no more. The '#' header sits above this column.\n\
+         - LEFTMOST body column is the child's name.\n\
          - Weekend columns (Sat & Sun) are grey-tinted and visibly NARROWER but ARE still numbered — do not merge '4' and '5' into '45'.\n\
          - STAT columns are yellow/tan tinted with a vertical 'STAT' label; also narrower.\n\
          - Thicker vertical dividers appear on Sundays (visual week boundary).\n\
-         - First column of the body table = child name (first + last).\n\
          \n\
          Variant B: Luxmi hand-drawn sheet (older, still accepted).\n\
          - Portrait or landscape hand-drawn grid on lined paper.\n\
@@ -692,8 +694,8 @@ pub async fn extract_month_attendance(args: ExtractMonthAttendanceArgs) -> Resul
          \n\
          HARD RULES\n\
          1. NEVER emit a mark for a cell that corresponds to a weekend day, a STAT holiday, or a centre-closed day per the ground truth above. Staff do not write in those cells. If you see ink there, you have drifted — recount columns from the leftmost day label '1' before emitting anything.\n\
-         2. Count exactly {expected_days} day columns (Variant A) or day numbers (Variant B) BEFORE you start reading marks. If your count is off, restart column detection using the numeric day labels as anchors.\n\
-         3. Every row you emit must match a roster name via first-name AND last-name (case-insensitive; ignore middle names). If a handwritten name does not clearly match any roster entry, emit the row anyway with the name as read — the downstream reviewer will resolve it.\n\
+         2. Count exactly {expected_days} day columns (Variant A) or day numbers (Variant B) BEFORE you start reading marks. If your count is off, restart column detection using the numeric day labels as anchors. On Variant A the RIGHTMOST body column is a light-gray row-index (1..{roster_size}) and its header cell is '#' — that column is NOT day 32; skip it entirely. The BOTTOM row of the table repeats the day-number header — that row is NOT a student; skip it entirely.\n\
+         3. Every row you emit must match a roster name via first-name AND last-name (case-insensitive; ignore middle names). If a handwritten name does not clearly match any roster entry, emit the row anyway with the name as read — the downstream reviewer will resolve it. On Variant A the small gray digit at the RIGHT edge of each body row corresponds to that row's position in the numbered roster above — treat it as a corroboration signal: row with right-edge '5' should map to roster entry 5.\n\
          4. BLANK cells (no visible ink) → OMIT the day entry from that row's marks array. Never emit 'A' for a blank cell. Never 'fill in' a blank between two marked cells to make the row look complete. Better to under-report than to invent absences.\n\
          5. Single horizontal stroke = 'A' (absent). Two crossing strokes = 'P' (present). No third category exists. If ink is present but the shape is unclear, prefer 'A'.\n\
          6. Preserve column alignment across corroboration: if the ground truth says day D is a weekend/STAT/closed but your read shows any mark at that position, you have almost certainly counted columns wrong — re-anchor on the day-number header and try again.\n\

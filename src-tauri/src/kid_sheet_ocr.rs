@@ -63,16 +63,27 @@ fn canonical_fiducial_targets() -> [(f64, f64); 4] {
 // at 4mm inset from each paper corner, so each QR CENTER sits 9mm from
 // the two paper edges it hugs.
 //   9 mm × (200 / 25.4) ≈ 70.87 px in canonical space.
-const QR_FID_CENTER_INSET_PX: f64 = 70.87;
+//   1 CSS px = 200 / 96 ≈ 2.0833 canonical px.
+// v3.2.0b: top QRs shifted 50 CSS px down for header breathing room.
+// v3.2.0c: all 4 QRs nudged 3 CSS px inward on both axes.
+// v3.2.0d: top QRs another 3 CSS px inward (X only, total 6 CSS px);
+//          bottom QRs 6 CSS px UP (Y toward paper bottom by 9 total) AND
+//          3 CSS px more inward (X, total 6 CSS px). Sheet is asymmetric.
+//   Top QR center Y (px from paper top):     9mm + 53 CSS px ≈ 70.87 + 110.42 = 181.30
+//   Bottom QR center Y (px from paper bot):  9mm +  9 CSS px ≈ 70.87 +  18.75 =  89.62
+//   Any QR center X (px from paper edge):    9mm +  6 CSS px ≈ 70.87 +  12.50 =  83.37
+const QR_FID_CENTER_INSET_X_PX: f64 = 83.37;      //  9 mm + 6 CSS px
+const QR_FID_CENTER_INSET_Y_TOP_PX: f64 = 181.30; // 22.229 mm + 3 CSS px
+const QR_FID_CENTER_INSET_Y_BOT_PX: f64 = 89.62;  //  9 mm + 9 CSS px
 
 fn canonical_qr_fiducial_targets() -> [(f64, f64); 4] {
     let w = CANONICAL_W as f64;
     let h = CANONICAL_H as f64;
     [
-        (QR_FID_CENTER_INSET_PX,      QR_FID_CENTER_INSET_PX),        // TL
-        (w - QR_FID_CENTER_INSET_PX,  QR_FID_CENTER_INSET_PX),        // TR
-        (QR_FID_CENTER_INSET_PX,      h - QR_FID_CENTER_INSET_PX),    // BL
-        (w - QR_FID_CENTER_INSET_PX,  h - QR_FID_CENTER_INSET_PX),    // BR
+        (QR_FID_CENTER_INSET_X_PX,      QR_FID_CENTER_INSET_Y_TOP_PX),      // TL
+        (w - QR_FID_CENTER_INSET_X_PX,  QR_FID_CENTER_INSET_Y_TOP_PX),      // TR
+        (QR_FID_CENTER_INSET_X_PX,      h - QR_FID_CENTER_INSET_Y_BOT_PX),  // BL
+        (w - QR_FID_CENTER_INSET_X_PX,  h - QR_FID_CENTER_INSET_Y_BOT_PX),  // BR
     ]
 }
 
@@ -1356,8 +1367,12 @@ fn detect_grid(warped: &GrayImage, roster_size: usize, target_month: &str) -> Re
     let col_xs = non_max_suppress_peaks(&v_proj, v_thr, 6);
 
     let expected_days = expected_days_in_month(target_month) as usize;
-    let expected_cols = expected_days + 1; // + name column
-    let expected_rows = roster_size + 1;   // + header
+    // v3.2.0e: sheet now has a right-edge row-index column and a footer
+    // row that duplicates the day-header. Both are OCR anchors, not
+    // data — we account for the extra grid lines here so tolerance stays
+    // tight, then skip them at classify time.
+    let expected_cols = expected_days + 2; // name col + day cols + rownum col
+    let expected_rows = roster_size + 2;   // top header + body + bottom footer
 
     // Tolerance: printed grid should give EXACTLY expected_cols vertical
     // lines and expected_rows horizontal lines. Accept ±2 to survive
@@ -1431,8 +1446,16 @@ fn classify_cells(
     // roster[i] is at body row i, between row_ys[i+1] and row_ys[i+2].
     // Day columns start after the name column: day d (1-based) is
     // between col_xs[d] and col_xs[d+1].
-    let n_rows = roster.len().min(grid.row_ys.len().saturating_sub(2));
-    let n_cols = grid.col_xs.len().saturating_sub(2); // subtract name col + last-line
+    // v3.2.0e: exclude the footer row (bottom-header duplicate) and the
+    // right-edge row-index column when computing body dimensions.
+    //   row_ys: [top, header_bot, body1_bot, ..., bodyN_bot, footer_bot]
+    //     → subtract 3 (top-of-header + top-of-footer + footer-bottom)
+    //       leaves N body-row segments.
+    //   col_xs: [left, name_r, day1_r, ..., day31_r, rownum_r, right]
+    //     → subtract 3 (name segment + trailing rownum + right-edge)
+    //       leaves 31 day-column segments.
+    let n_rows = roster.len().min(grid.row_ys.len().saturating_sub(3));
+    let n_cols = grid.col_xs.len().saturating_sub(3);
 
     let mut rows: Vec<ExtractedRow> = Vec::with_capacity(n_rows);
     let mut uncertain: Vec<UncertainCell> = Vec::new();
