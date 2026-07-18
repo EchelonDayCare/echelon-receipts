@@ -759,7 +759,10 @@ export default function MonthlyAttendance() {
         col.day.narrow { width: 1.6%; }
         col.day.wide { width: auto; }
         th, td {
-          border: 1px solid #333; padding: ${padY}px 1px;
+          /* Grid lines are 1.5px (not 1px) — thicker lines survive phone
+             camera + warp-downsample blur that pushes 1px lines below the
+             OCR grid-detector's projection threshold. */
+          border: 1.5px solid #111; padding: ${padY}px 1px;
           text-align: center; height: ${rowH}px;
           overflow: hidden;
         }

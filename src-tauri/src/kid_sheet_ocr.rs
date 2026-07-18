@@ -207,52 +207,81 @@ pub async fn extract_kid_attendance_local(
 // (0/90/180/270) so a sideways scan still finds them; returns the
 // rotation-applied gray image alongside so downstream warp uses it.
 fn detect_qr_fiducials(img: &image::DynamicImage) -> Option<(u32, [Option<(f64, f64)>; 4], GrayImage)> {
-    for deg in [0u32, 90, 180, 270] {
-        let rotated = match deg {
-            0 => img.clone(),
-            90 => image::DynamicImage::ImageRgba8(image::imageops::rotate90(&img.to_rgba8())),
-            180 => image::DynamicImage::ImageRgba8(image::imageops::rotate180(&img.to_rgba8())),
-            270 => image::DynamicImage::ImageRgba8(image::imageops::rotate270(&img.to_rgba8())),
-            _ => unreachable!(),
-        };
-        let gray = rotated.to_luma8();
-        let mut prep = rqrr::PreparedImage::prepare(gray.clone());
-        let grids = prep.detect_grids();
-        let mut found: [Option<(f64, f64)>; 4] = [None; 4];
-        for grid in grids.iter() {
-            let mut buf: Vec<u8> = Vec::new();
-            if grid.decode_to(&mut buf).is_err() {
-                continue;
+    // Try native scale first, then 2× upscale. Cheap phone photos are often
+    // 1500-2000px wide which puts a 10mm QR at ~55px — right at the rqrr
+    // decode floor. A 2× bilinear upscale gives the finder pattern enough
+    // pixel density (~110px) to decode reliably at the cost of one extra
+    // pass. The returned centers are always in NATIVE coordinates so the
+    // downstream synthesis sees the same pixel space regardless of scale.
+    // Track the best result across scales so a single decode at 2× doesn't
+    // starve us of a 4-decode at 3× or 4×. Stop early only when we have
+    // all 4 corners.
+    let mut best: Option<(u32, [Option<(f64, f64)>; 4], GrayImage, u32)> = None;
+    for scale in [1u32, 2u32] {
+        for deg in [0u32, 90, 180, 270] {
+            let rotated = match deg {
+                0 => img.clone(),
+                90 => image::DynamicImage::ImageRgba8(image::imageops::rotate90(&img.to_rgba8())),
+                180 => image::DynamicImage::ImageRgba8(image::imageops::rotate180(&img.to_rgba8())),
+                270 => image::DynamicImage::ImageRgba8(image::imageops::rotate270(&img.to_rgba8())),
+                _ => unreachable!(),
+            };
+            let gray_native = rotated.to_luma8();
+            let gray_for_rqrr = if scale == 1 {
+                gray_native.clone()
+            } else {
+                let (w, h) = gray_native.dimensions();
+                image::imageops::resize(&gray_native, w * scale, h * scale, image::imageops::FilterType::Triangle)
+            };
+            let mut prep = rqrr::PreparedImage::prepare(gray_for_rqrr);
+            let grids = prep.detect_grids();
+            let mut found: [Option<(f64, f64)>; 4] = [None; 4];
+            for grid in grids.iter() {
+                let mut buf: Vec<u8> = Vec::new();
+                if grid.decode_to(&mut buf).is_err() {
+                    continue;
+                }
+                let s = match std::str::from_utf8(&buf) {
+                    Ok(v) => v,
+                    Err(_) => continue,
+                };
+                let idx = match s {
+                    "ECHFID:TL" => 0,
+                    "ECHFID:TR" => 1,
+                    "ECHFID:BL" => 2,
+                    "ECHFID:BR" => 3,
+                    _ => continue,
+                };
+                let bounds = grid.bounds;
+                let cx = (bounds[0].x + bounds[1].x + bounds[2].x + bounds[3].x) as f64 / 4.0;
+                let cy = (bounds[0].y + bounds[1].y + bounds[2].y + bounds[3].y) as f64 / 4.0;
+                // Rescale back to native coordinates.
+                let (nx, ny) = (cx / scale as f64, cy / scale as f64);
+                found[idx] = Some((nx, ny));
             }
-            let s = match std::str::from_utf8(&buf) {
-                Ok(v) => v,
-                Err(_) => continue,
-            };
-            let idx = match s {
-                "ECHFID:TL" => 0,
-                "ECHFID:TR" => 1,
-                "ECHFID:BL" => 2,
-                "ECHFID:BR" => 3,
-                _ => continue,
-            };
-            let bounds = grid.bounds;
-            let cx = (bounds[0].x + bounds[1].x + bounds[2].x + bounds[3].x) as f64 / 4.0;
-            let cy = (bounds[0].y + bounds[1].y + bounds[2].y + bounds[3].y) as f64 / 4.0;
-            found[idx] = Some((cx, cy));
-        }
-        let n = found.iter().filter(|p| p.is_some()).count();
-        if n > 0 {
-            eprintln!("[kid-ocr-local] QR-fiducial rot {}°: {} decoded (TL={} TR={} BL={} BR={})",
-                deg, n,
-                if found[0].is_some() { "y" } else { "-" },
-                if found[1].is_some() { "y" } else { "-" },
-                if found[2].is_some() { "y" } else { "-" },
-                if found[3].is_some() { "y" } else { "-" },
-            );
-            return Some((deg, found, gray));
+            let n = found.iter().filter(|p| p.is_some()).count();
+            if n > 0 {
+                eprintln!("[kid-ocr-local] QR-fiducial rot {}° scale {}×: {} decoded (TL={} TR={} BL={} BR={})",
+                    deg, scale, n,
+                    if found[0].is_some() { "y" } else { "-" },
+                    if found[1].is_some() { "y" } else { "-" },
+                    if found[2].is_some() { "y" } else { "-" },
+                    if found[3].is_some() { "y" } else { "-" },
+                );
+                let is_better = match &best {
+                    None => true,
+                    Some((_, _, _, prev_n)) => n as u32 > *prev_n,
+                };
+                if is_better {
+                    best = Some((deg, found, gray_native.clone(), n as u32));
+                }
+                if n >= 4 {
+                    return best.map(|(d, f, g, _)| (d, f, g));
+                }
+            }
         }
     }
-    None
+    best.map(|(d, f, g, _)| (d, f, g))
 }
 
 // Given 1-4 decoded QR-fiducial centers, synthesise all 4 corner positions
@@ -372,37 +401,46 @@ fn run_pipeline(
     // to the plain-fiducial + page-quad chain when nothing decodes
     // (e.g. old prints, or the QRs are all off-frame / severely blurred).
     if let Some((rot_deg, qr_found, gray_qr)) = detect_qr_fiducials(&img) {
-        if let Some(qr_fids) = synthesise_from_qr_fiducials(&qr_found, gray_qr.width(), gray_qr.height()) {
-            let decoded = qr_found.iter().filter(|p| p.is_some()).count();
-            eprintln!(
-                "[kid-ocr-local] QR-fiducial anchor (rot {}°, {} decoded): TL=({:.0},{:.0}) TR=({:.0},{:.0}) BL=({:.0},{:.0}) BR=({:.0},{:.0})",
-                rot_deg, decoded,
-                qr_fids[0].0, qr_fids[0].1,
-                qr_fids[1].0, qr_fids[1].1,
-                qr_fids[2].0, qr_fids[2].1,
-                qr_fids[3].0, qr_fids[3].1,
-            );
-            let warped = perspective_warp(
-                &gray_qr, &qr_fids, &canonical_qr_fiducial_targets(),
-                CANONICAL_W, CANONICAL_H,
-            );
-            let grid = detect_grid(&warped, roster.len(), target_month)?;
-            let (rows, uncertain) = classify_cells(&warped, &grid, roster, weekend, stat, closed);
-            let raw_text = format!(
-                "[local ocr v3.2] rotation={}° anchor=qr-fid-{}decoded ({} rows × {} day cols), roster {}",
-                rot_deg, decoded,
-                grid.row_ys.len().saturating_sub(1),
-                grid.col_xs.len().saturating_sub(1),
-                roster.len(),
-            );
-            return Ok(ExtractLocalResult {
-                month: target_month.to_string(),
-                rows, raw_text,
-                uncertain_cells: uncertain,
-                providers: vec![],
-                consensus_action: "local_deterministic".to_string(),
-                days_centre_open: None,
-            });
+        let decoded = qr_found.iter().filter(|p| p.is_some()).count();
+        // Single-anchor synthesis is inherently unstable (rotation + scale
+        // undefined from one point); we've seen it produce off-image coords
+        // that break the whole pipeline. Require ≥2 decoded QRs before
+        // committing to the QR path, otherwise fall through to the visual
+        // detector chain which can use paper-quad + fiducial-blob signals.
+        if decoded >= 2 {
+            if let Some(qr_fids) = synthesise_from_qr_fiducials(&qr_found, gray_qr.width(), gray_qr.height()) {
+                eprintln!(
+                    "[kid-ocr-local] QR-fiducial anchor (rot {}°, {} decoded): TL=({:.0},{:.0}) TR=({:.0},{:.0}) BL=({:.0},{:.0}) BR=({:.0},{:.0})",
+                    rot_deg, decoded,
+                    qr_fids[0].0, qr_fids[0].1,
+                    qr_fids[1].0, qr_fids[1].1,
+                    qr_fids[2].0, qr_fids[2].1,
+                    qr_fids[3].0, qr_fids[3].1,
+                );
+                let warped = perspective_warp(
+                    &gray_qr, &qr_fids, &canonical_qr_fiducial_targets(),
+                    CANONICAL_W, CANONICAL_H,
+                );
+                let grid = detect_grid(&warped, roster.len(), target_month)?;
+                let (rows, uncertain) = classify_cells(&warped, &grid, roster, weekend, stat, closed);
+                let raw_text = format!(
+                    "[local ocr v3.2] rotation={}° anchor=qr-fid-{}decoded ({} rows × {} day cols), roster {}",
+                    rot_deg, decoded,
+                    grid.row_ys.len().saturating_sub(1),
+                    grid.col_xs.len().saturating_sub(1),
+                    roster.len(),
+                );
+                return Ok(ExtractLocalResult {
+                    month: target_month.to_string(),
+                    rows, raw_text,
+                    uncertain_cells: uncertain,
+                    providers: vec![],
+                    consensus_action: "local_deterministic".to_string(),
+                    days_centre_open: None,
+                });
+            }
+        } else {
+            eprintln!("[kid-ocr-local] only {} QR decoded — falling through to visual chain", decoded);
         }
     } else {
         eprintln!("[kid-ocr-local] no QR fiducials decoded — falling back to visual detector chain");
@@ -519,7 +557,22 @@ fn run_pipeline(
             CANONICAL_W, CANONICAL_H,
         );
         anchor_desc = format!("fiducials-{}confident", strong);
-    } else if let Some(page) = detect_page_quad(&gray) {
+    } else if let Some(page_raw) = detect_page_quad(&gray) {
+        // Auto-rotate corner assignment based on quad aspect. The printed
+        // sheet is always landscape (245×200mm). If the detected quad is
+        // taller than wide, the paper is rotated 90° in the photo — we
+        // must re-label corners so paper-TL maps to canonical(0,0). A
+        // portrait-in-image quad rotated 90° CW gives:
+        //   paper-TL = image-BL, paper-TR = image-TL,
+        //   paper-BR = image-TR, paper-BL = image-BR.
+        let qw = ((page_raw[1].0 - page_raw[0].0).abs() + (page_raw[3].0 - page_raw[2].0).abs()) / 2.0;
+        let qh = ((page_raw[2].1 - page_raw[0].1).abs() + (page_raw[3].1 - page_raw[1].1).abs()) / 2.0;
+        let page: [(f64, f64); 4] = if qh > qw * 1.05 {
+            eprintln!("[kid-ocr-local] page-quad: portrait-in-image (w={:.0} h={:.0}) — reassigning corners as 90° CW", qw, qh);
+            [page_raw[2], page_raw[0], page_raw[3], page_raw[1]]
+        } else {
+            page_raw
+        };
         eprintln!(
             "[kid-ocr-local] page-quad anchor (rot {}°, only {} confident fiducials): TL=({:.0},{:.0}) TR=({:.0},{:.0}) BL=({:.0},{:.0}) BR=({:.0},{:.0})",
             rotation_applied, strong,
@@ -1011,16 +1064,20 @@ fn detect_page_quad(gray: &GrayImage) -> Option<[(f64, f64); 4]> {
         return None;
     }
 
-    // Reject quads that touch the image border — the paper is off-frame,
-    // so we can't measure its true corner. Better to fall through to the
-    // fiducial-synthesis path than warp using the wrong quad.
-    let margin = (w.min(h) as f64) * 0.01;
-    let touches_border = quad.iter().any(|(x, y)| {
+    // Reject quads only when MULTIPLE corners touch the image border —
+    // one corner on the edge usually just means the photo was cropped
+    // tight, not that the paper is off-frame. Two or more corners on the
+    // edge implies real overflow.
+    let margin = (w.min(h) as f64) * 0.005;
+    let border_touches = quad.iter().filter(|(x, y)| {
         *x < margin || *y < margin || *x > w as f64 - margin || *y > h as f64 - margin
-    });
-    if touches_border {
-        eprintln!("[kid-ocr-local] page-quad: at least one corner touches image border — paper is off-frame");
+    }).count();
+    if border_touches >= 2 {
+        eprintln!("[kid-ocr-local] page-quad: {} corners touch image border — paper is off-frame", border_touches);
         return None;
+    }
+    if border_touches == 1 {
+        eprintln!("[kid-ocr-local] page-quad: 1 corner touches image border (tight crop, tolerated)");
     }
 
     Some(quad)
@@ -1339,8 +1396,10 @@ fn detect_grid(warped: &GrayImage, roster_size: usize, target_month: &str) -> Re
         }
         h_proj[y as usize] = c;
     }
-    // A horizontal grid line has ink density > 60% of the search width.
-    let h_thr = (x_len as f64 * 0.55) as u32;
+    // A horizontal grid line has ink density > threshold of search width.
+    // Loosened from 0.55 to 0.35 to survive bilinear-warp blur + JPEG
+    // compression from mobile photos.
+    let h_thr = (x_len as f64 * 0.35) as u32;
     let row_ys = non_max_suppress_peaks(&h_proj, h_thr, 8);
 
     // Vertical projection: same idea, in the column direction, using the
@@ -1363,7 +1422,8 @@ fn detect_grid(warped: &GrayImage, roster_size: usize, target_month: &str) -> Re
         }
         v_proj[x as usize] = c;
     }
-    let v_thr = ((y_bot - y_top) as f64 * 0.6) as u32;
+    // Same loosening for vertical lines (0.6 → 0.35).
+    let v_thr = ((y_bot - y_top) as f64 * 0.35) as u32;
     let col_xs = non_max_suppress_peaks(&v_proj, v_thr, 6);
 
     let expected_days = expected_days_in_month(target_month) as usize;
