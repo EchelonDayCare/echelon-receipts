@@ -537,6 +537,29 @@ fn run_pipeline(
     let warped: GrayImage;
     let anchor_desc: String;
 
+    // v3.2.2+: if the visual detector found 4 blobs whose fill ratios are
+    // in the QR-density band (0.30-0.65), those blobs are almost certainly
+    // the corner QR codes. Route them through the page-quad landscape-
+    // detection logic as approximate paper anchors (the ~9mm inset error
+    // is well within grid-detection tolerance).
+    let qr_density_picks: Option<[(f64, f64); 4]> = {
+        let all_present = picks.iter().all(|p| p.is_some());
+        let all_qr_fill = all_present && picks.iter().all(|p| {
+            let f = p.as_ref().unwrap().fill;
+            f >= 0.30 && f <= 0.65
+        });
+        if all_qr_fill {
+            Some([
+                picks[0].as_ref().unwrap().pos,
+                picks[1].as_ref().unwrap().pos,
+                picks[2].as_ref().unwrap().pos,
+                picks[3].as_ref().unwrap().pos,
+            ])
+        } else {
+            None
+        }
+    };
+
     if strong >= 3 {
         let fiducials = synthesize_fiducials(&picks, gray.width(), gray.height()).ok_or_else(|| {
             format!(
@@ -557,6 +580,32 @@ fn run_pipeline(
             CANONICAL_W, CANONICAL_H,
         );
         anchor_desc = format!("fiducials-{}confident", strong);
+    } else if let Some(qr_anchors) = qr_density_picks {
+        // 4 QR-density blobs found: treat as approximate paper corners
+        // (the ~9mm inset offset is absorbed by grid-detection tolerance).
+        // Apply the same landscape auto-rotate logic as page-quad.
+        let qw = ((qr_anchors[1].0 - qr_anchors[0].0).abs() + (qr_anchors[3].0 - qr_anchors[2].0).abs()) / 2.0;
+        let qh = ((qr_anchors[2].1 - qr_anchors[0].1).abs() + (qr_anchors[3].1 - qr_anchors[1].1).abs()) / 2.0;
+        let anchors: [(f64, f64); 4] = if qh > qw * 1.05 {
+            eprintln!("[kid-ocr-local] QR-density anchors: portrait-in-image (w={:.0} h={:.0}) — reassigning 90° CW", qw, qh);
+            [qr_anchors[2], qr_anchors[0], qr_anchors[3], qr_anchors[1]]
+        } else {
+            qr_anchors
+        };
+        eprintln!(
+            "[kid-ocr-local] QR-density visual anchor (rot {}°, 4 low-fill blobs): TL=({:.0},{:.0}) TR=({:.0},{:.0}) BL=({:.0},{:.0}) BR=({:.0},{:.0})",
+            rotation_applied,
+            anchors[0].0, anchors[0].1,
+            anchors[1].0, anchors[1].1,
+            anchors[2].0, anchors[2].1,
+            anchors[3].0, anchors[3].1,
+        );
+        // Map QR-corner blobs to their canonical QR positions (9mm+6px inset).
+        warped = perspective_warp(
+            &gray, &anchors, &canonical_qr_fiducial_targets(),
+            CANONICAL_W, CANONICAL_H,
+        );
+        anchor_desc = "qr-density-visual".to_string();
     } else if let Some(page_raw) = detect_page_quad(&gray) {
         // Auto-rotate corner assignment based on quad aspect. The printed
         // sheet is always landscape (245×200mm). If the detected quad is
