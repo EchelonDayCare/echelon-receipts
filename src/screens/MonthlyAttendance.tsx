@@ -272,50 +272,56 @@ export default function MonthlyAttendance() {
           closedDaysArr.push(d);
         }
       }
-      // v3.1.0: try local deterministic OCR first when enabled. Falls back
-      // to the Azure vision pipeline on any error (fiducials not found,
-      // grid detection failed, roster mismatch, etc). The local path uses
-      // the FILE PATH (oriented if rotated) so it can decode directly on
-      // the Rust side without a base64 round-trip.
+      // v3.2.4: three-way engine selector — "llm" (Azure only), "local"
+      // (Rust deterministic only, hard fail if it can't lock on), "both"
+      // (local first, LLM fallback). Legacy `fast_local_ocr_enabled === "1"`
+      // maps to "both" so existing installs don't regress.
       const settingsNow = await getSettings().catch(() => ({} as Record<string, string>));
-      const useLocalOcr = settingsNow.fast_local_ocr_enabled === "1";
+      const engine: "llm" | "local" | "both" = (() => {
+        const raw = settingsNow.attendance_ocr_engine;
+        if (raw === "llm" || raw === "local" || raw === "both") return raw;
+        return settingsNow.fast_local_ocr_enabled === "1" ? "both" : "llm";
+      })();
+      const llmCall = () => extractMonthAttendance({
+        imageBytes: bytes as Uint8Array,
+        mimeType: mime,
+        targetMonth,
+        knownStudentNames: knownNames,
+        weekendDays,
+        statDays: statDaysArr,
+        closedDays: closedDaysArr,
+      });
+      const localCall = () => extractKidAttendanceLocal({
+        imagePath: readPath,
+        targetMonth,
+        weekendDays,
+        statDays: statDaysArr,
+        closedDays: closedDaysArr,
+        roster: cells.map((c) => ({ student_id: c.student_id, student_name: c.student_name })),
+      });
       let res: Awaited<ReturnType<typeof extractMonthAttendance>>;
-      if (useLocalOcr) {
+      let engineUsed: "llm" | "local" = "llm";
+      if (engine === "local") {
+        console.info("[month-ocr] engine=local (no fallback)");
+        res = await localCall();
+        engineUsed = "local";
+      } else if (engine === "both") {
         try {
-          console.info("[month-ocr] trying local deterministic OCR first");
-          const localRes = await extractKidAttendanceLocal({
-            imagePath: readPath,
-            targetMonth,
-            weekendDays,
-            statDays: statDaysArr,
-            closedDays: closedDaysArr,
-            roster: cells.map((c) => ({ student_id: c.student_id, student_name: c.student_name })),
-          });
-          res = localRes;
+          console.info("[month-ocr] engine=both, trying local first");
+          res = await localCall();
+          engineUsed = "local";
         } catch (localErr) {
           console.warn("[month-ocr] local OCR failed, falling back to Azure vision:", localErr);
           show(`Fast local OCR couldn't lock onto the sheet (${String(localErr).slice(0, 60)}…). Falling back to Azure vision.`);
-          res = await extractMonthAttendance({
-            imageBytes: bytes as Uint8Array,
-            mimeType: mime,
-            targetMonth,
-            knownStudentNames: knownNames,
-            weekendDays,
-            statDays: statDaysArr,
-            closedDays: closedDaysArr,
-          });
+          res = await llmCall();
+          engineUsed = "llm";
         }
       } else {
-        res = await extractMonthAttendance({
-          imageBytes: bytes as Uint8Array,
-          mimeType: mime,
-          targetMonth,
-          knownStudentNames: knownNames,
-          weekendDays,
-          statDays: statDaysArr,
-          closedDays: closedDaysArr,
-        });
+        console.info("[month-ocr] engine=llm");
+        res = await llmCall();
+        engineUsed = "llm";
       }
+      console.info(`[month-ocr] engine used: ${engineUsed}`);
       const roster = cells.map((c) => ({ id: c.student_id, name: c.student_name }));
       // Bucket uncertain cells by child name for quick lookup while building review rows.
       const uncertainByChild = new Map<string, Set<string>>();

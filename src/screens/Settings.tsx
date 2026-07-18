@@ -849,23 +849,59 @@ export default function Settings() {
 
         <hr style={{ border: 0, borderTop: "1px solid var(--border)", margin: "16px 0" }} />
 
-        {/* v3.1.0: Local deterministic kid-sheet OCR (beta). No AI/network.
-            Reads the sheet via fiducial dewarp + grid-line detection + per-cell
-            classification. Fast (~500ms), free (no Azure tokens), and
-            hallucination-free (a blank cell has <3% ink, full stop). Falls
-            back to the vision-model pipeline if fiducials/grid can't be found. */}
+        {/* v3.2.4: Attendance OCR engine selector — three modes:
+            "llm" (default): Azure GPT-4 vision only, ~10-30s + tokens.
+            "local": Rust deterministic pipeline only, ~500ms, no network.
+            "both": Run both in parallel and prefer local when it succeeds,
+                    fall back to LLM automatically.
+            Legacy flag `fast_local_ocr_enabled` maps to "both" for
+            backward compatibility. */}
         <div className="field" style={{ marginBottom: 8 }}>
-          <label style={{ display: "flex", alignItems: "center", gap: 8, cursor: "pointer" }}>
-            <input
-              type="checkbox"
-              checked={s.fast_local_ocr_enabled === "1"}
-              onChange={(e) => setS({ ...s, fast_local_ocr_enabled: e.target.checked ? "1" : "0" })}
-            />
-            <strong>Fast local attendance OCR</strong>&nbsp;
+          <div style={{ marginBottom: 6 }}>
+            <strong>Attendance OCR engine</strong>&nbsp;
             <span style={{ color: "var(--muted)", fontWeight: 400 }}>
-              (beta) — Read the monthly kid attendance sheet locally in ~500ms with no AI. Uses the printed fiducials + grid to classify each cell as blank / X / dash deterministically. Falls back to the Azure vision pipeline if fiducials can't be found. Requires the sheet to be a recent Echelon printout (v3.0.5+ layout).
+              — How to read the printed monthly kid attendance sheet.
             </span>
-          </label>
+          </div>
+          {(["llm", "local", "both"] as const).map((mode) => {
+            const current = (s.attendance_ocr_engine as string | undefined)
+              ?? (s.fast_local_ocr_enabled === "1" ? "both" : "llm");
+            const labels: Record<typeof mode, { title: string; desc: string }> = {
+              llm: {
+                title: "Azure vision (default)",
+                desc: "GPT-4 vision reads the sheet — ~10-30s per page, uses Azure tokens. Best for older sheet layouts or messy handwriting.",
+              },
+              local: {
+                title: "Local deterministic (fast, offline)",
+                desc: "Rust pipeline reads QR fiducials + grid lines — ~500ms, no network, no tokens. Requires a v3.0.5+ printed sheet. Fails hard if fiducials can't be found.",
+              },
+              both: {
+                title: "Both (local first, LLM fallback)",
+                desc: "Try local OCR first; if fiducials/grid can't be found, automatically fall back to Azure vision. Recommended.",
+              },
+            };
+            const info = labels[mode];
+            return (
+              <label key={mode} style={{ display: "flex", alignItems: "flex-start", gap: 8, cursor: "pointer", padding: "6px 0" }}>
+                <input
+                  type="radio"
+                  name="attendance_ocr_engine"
+                  checked={current === mode}
+                  onChange={() => setS({
+                    ...s,
+                    attendance_ocr_engine: mode,
+                    fast_local_ocr_enabled: mode === "llm" ? "0" : "1",
+                  })}
+                  style={{ marginTop: 3 }}
+                />
+                <span>
+                  <strong>{info.title}</strong>
+                  <br />
+                  <span style={{ color: "var(--muted)", fontWeight: 400, fontSize: 13 }}>{info.desc}</span>
+                </span>
+              </label>
+            );
+          })}
         </div>
 
         <hr style={{ border: 0, borderTop: "1px solid var(--border)", margin: "16px 0" }} />

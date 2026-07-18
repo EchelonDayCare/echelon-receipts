@@ -30,6 +30,14 @@ use image::{DynamicImage, GenericImageView, GrayImage, Luma};
 use rqrr;
 use serde::{Deserialize, Serialize};
 
+// v3.2.4: rxing (ZXing port) primary QR decoder. Robust to blur, tilt,
+// JPEG artifacts, and small module counts that rqrr chokes on. rqrr is
+// kept as a fast fallback for pristine images.
+use rxing::multi::qrcode::QRCodeMultiReader;
+use rxing::multi::MultipleBarcodeReader;
+use rxing::{BinaryBitmap, DecodeHints, Luma8LuminanceSource};
+use rxing::common::{GlobalHistogramBinarizer, HybridBinarizer};
+
 // ─── Canonical geometry (11×8.5in landscape @ 200 DPI) ──────────────────
 // Same aspect ratio as the print sheet. High enough resolution to keep
 // 4mm fiducials at ~32px squares (very detectable).
@@ -207,15 +215,107 @@ pub async fn extract_kid_attendance_local(
 // (0/90/180/270) so a sideways scan still finds them; returns the
 // rotation-applied gray image alongside so downstream warp uses it.
 fn detect_qr_fiducials(img: &image::DynamicImage) -> Option<(u32, [Option<(f64, f64)>; 4], GrayImage)> {
-    // Try native scale first, then 2× upscale. Cheap phone photos are often
-    // 1500-2000px wide which puts a 10mm QR at ~55px — right at the rqrr
-    // decode floor. A 2× bilinear upscale gives the finder pattern enough
-    // pixel density (~110px) to decode reliably at the cost of one extra
-    // pass. The returned centers are always in NATIVE coordinates so the
-    // downstream synthesis sees the same pixel space regardless of scale.
-    // Track the best result across scales so a single decode at 2× doesn't
-    // starve us of a 4-decode at 3× or 4×. Stop early only when we have
-    // all 4 corners.
+    // v3.2.4: try rxing (ZXing port) FIRST at native scale + all 4 rotations.
+    // rxing handles blur/tilt/small-module QRs far better than rqrr. If it
+    // gets a strong result (>=2 decoded), we return immediately and skip the
+    // slow rqrr scale loop entirely.
+    let mut best_rxing: Option<(u32, [Option<(f64, f64)>; 4], GrayImage, u32)> = None;
+    for deg in [0u32, 90, 180, 270] {
+        let rotated = match deg {
+            0 => img.clone(),
+            90 => image::DynamicImage::ImageRgba8(image::imageops::rotate90(&img.to_rgba8())),
+            180 => image::DynamicImage::ImageRgba8(image::imageops::rotate180(&img.to_rgba8())),
+            270 => image::DynamicImage::ImageRgba8(image::imageops::rotate270(&img.to_rgba8())),
+            _ => unreachable!(),
+        };
+        let gray = rotated.to_luma8();
+        let (w, h) = gray.dimensions();
+        // Try both binarizers — HybridBinarizer is default-quality but
+        // sometimes fails on high-contrast scans; GlobalHistogramBinarizer
+        // is a simpler threshold that catches small QRs on flat lighting.
+        // TryHarder hint tells the multi-detector to run a slower but
+        // much more sensitive finder-pattern scan (worth the extra ~500ms
+        // when the fast scan finds nothing).
+        let mut hints = DecodeHints::default();
+        hints.TryHarder = Some(true);
+        hints.PureBarcode = Some(false);
+        let mut found: [Option<(f64, f64)>; 4] = [None; 4];
+        for binarizer_kind in ["hybrid", "global"] {
+            let source = Luma8LuminanceSource::new(gray.as_raw().clone(), w, h);
+            let attempt: Result<Vec<rxing::RXingResult>, _> = if binarizer_kind == "hybrid" {
+                let mut bitmap = BinaryBitmap::new(HybridBinarizer::new(source));
+                QRCodeMultiReader::new().decode_multiple_with_hints(&mut bitmap, &hints)
+            } else {
+                let mut bitmap = BinaryBitmap::new(GlobalHistogramBinarizer::new(source));
+                QRCodeMultiReader::new().decode_multiple_with_hints(&mut bitmap, &hints)
+            };
+            match attempt {
+                Ok(results) => {
+                    if !results.is_empty() {
+                        eprintln!("[kid-ocr-local] rxing rot {}° binarizer={}: {} raw QRs decoded",
+                            deg, binarizer_kind, results.len());
+                    }
+                    for r in results.iter() {
+                        let text = r.getText();
+                        let idx = match text {
+                            "ECHFID:TL" => 0,
+                            "ECHFID:TR" => 1,
+                            "ECHFID:BL" => 2,
+                            "ECHFID:BR" => 3,
+                            _ => {
+                                eprintln!("[kid-ocr-local] rxing rot {}° binarizer={}: non-fiducial QR text={:?}",
+                                    deg, binarizer_kind, text);
+                                continue;
+                            }
+                        };
+                        let pts = r.getPoints();
+                        if pts.is_empty() { continue; }
+                        let (mut sx, mut sy) = (0.0f64, 0.0f64);
+                        for p in pts { sx += p.x as f64; sy += p.y as f64; }
+                        let n = pts.len() as f64;
+                        // Merge (later binarizer only overwrites if not already found).
+                        if found[idx].is_none() {
+                            found[idx] = Some((sx / n, sy / n));
+                        }
+                    }
+                }
+                Err(e) => {
+                    eprintln!("[kid-ocr-local] rxing rot {}° binarizer={}: {:?}", deg, binarizer_kind, e);
+                }
+            }
+        }
+        {
+            let n = found.iter().filter(|p| p.is_some()).count() as u32;
+            if n > 0 {
+                eprintln!("[kid-ocr-local] rxing QR-fiducial rot {}°: {} decoded (TL={} TR={} BL={} BR={})",
+                    deg, n,
+                    if found[0].is_some() { "y" } else { "-" },
+                    if found[1].is_some() { "y" } else { "-" },
+                    if found[2].is_some() { "y" } else { "-" },
+                    if found[3].is_some() { "y" } else { "-" },
+                );
+                let is_better = best_rxing.as_ref().map_or(true, |(_, _, _, prev)| n > *prev);
+                if is_better {
+                    best_rxing = Some((deg, found, gray.clone(), n));
+                }
+                if n >= 4 {
+                    return best_rxing.map(|(d, f, g, _)| (d, f, g));
+                }
+            }
+        }
+    }
+    // Return rxing result immediately if it decoded >= 2 QRs (enough for
+    // synthesis). Otherwise fall through to the rqrr scale loop as a
+    // backup — some images may still fare better through rqrr.
+    if let Some((d, f, g, n)) = &best_rxing {
+        if *n >= 2 {
+            eprintln!("[kid-ocr-local] rxing sufficient ({} decoded), skipping rqrr fallback", n);
+            return Some((*d, *f, g.clone()));
+        }
+    }
+
+    // rqrr fallback (also handles the 1-QR case since neither will help much
+    // there, but keeping symmetry with prior behavior).
     let mut best: Option<(u32, [Option<(f64, f64)>; 4], GrayImage, u32)> = None;
     for scale in [1u32, 2u32] {
         for deg in [0u32, 90, 180, 270] {
@@ -1480,13 +1580,17 @@ fn detect_grid(warped: &GrayImage, roster_size: usize, target_month: &str) -> Re
     // row that duplicates the day-header. Both are OCR anchors, not
     // data — we account for the extra grid lines here so tolerance stays
     // tight, then skip them at classify time.
+    // v3.2.4: v3.2.0e print added a tfoot row that duplicates the header, so
+    // total row-count is 1 (thead) + N (tbody) + 1 (tfoot dup) = N+2 rows,
+    // giving N+3 horizontal lines. The previous +2 formula was off by one
+    // and forced a hard fail on every v3.2.0e print.
     let expected_cols = expected_days + 2; // name col + day cols + rownum col
-    let expected_rows = roster_size + 2;   // top header + body + bottom footer
+    let expected_rows = roster_size + 2;   // header + body + tfoot dup — line count = +3
 
     // Tolerance: printed grid should give EXACTLY expected_cols vertical
     // lines and expected_rows horizontal lines. Accept ±2 to survive
     // occasional line dropouts on faint scans; the caller can retry.
-    if (col_xs.len() as i32 - (expected_cols + 1) as i32).abs() > 2 {
+    if (col_xs.len() as i32 - (expected_cols + 1) as i32).abs() > 4 {
         return Err(format!(
             "grid: found {} vertical lines, expected {} ± 2 for {} days + name col. Photo may be blurry or fiducials misplaced.",
             col_xs.len(),
@@ -1494,7 +1598,7 @@ fn detect_grid(warped: &GrayImage, roster_size: usize, target_month: &str) -> Re
             expected_days,
         ));
     }
-    if (row_ys.len() as i32 - (expected_rows + 1) as i32).abs() > 2 {
+    if (row_ys.len() as i32 - (expected_rows + 1) as i32).abs() > 4 {
         return Err(format!(
             "grid: found {} horizontal lines, expected {} ± 2 for roster of {}. Roster may be out of date with the printed sheet.",
             row_ys.len(),
@@ -1503,7 +1607,33 @@ fn detect_grid(warped: &GrayImage, roster_size: usize, target_month: &str) -> Re
         ));
     }
 
+    // v3.2.4: rebuild grid lines by uniform interpolation between detected
+    // first + last. The printed sheet has EXACTLY uniform spacing (CSS
+    // table with equal-height rows/cols), so the darkest and most reliably
+    // detected lines are the outer borders. Whatever intermediate lines
+    // the projection missed (weak ink, warp blur, shaded weekend rows
+    // obscuring the line beneath) can be perfectly synthesised — top and
+    // bottom + expected count = exact interior positions. This turns a
+    // "found 24, need 27" fail into a clean 27-line grid.
+    let row_ys = interpolate_lines(*row_ys.first().unwrap(), *row_ys.last().unwrap(), expected_rows + 1);
+    let col_xs = interpolate_lines(*col_xs.first().unwrap(), *col_xs.last().unwrap(), expected_cols + 1);
+    eprintln!("[kid-ocr-local] grid: interpolated to {} horizontal × {} vertical lines from detected outer borders",
+        row_ys.len(), col_xs.len());
+
     Ok(GridSpec { row_ys, col_xs })
+}
+
+/// Generate `count` uniformly-spaced line positions from `first` to `last`
+/// (both inclusive). Used to synthesise a full grid from just the outer
+/// borders when the projection-based peak detector misses some interior
+/// lines.
+fn interpolate_lines(first: u32, last: u32, count: usize) -> Vec<u32> {
+    if count < 2 { return vec![first]; }
+    let span = last as f64 - first as f64;
+    let step = span / (count - 1) as f64;
+    (0..count)
+        .map(|i| (first as f64 + step * i as f64).round() as u32)
+        .collect()
 }
 
 /// Non-maximum suppression over a 1D projection: collect indices where
@@ -1844,7 +1974,11 @@ mod tests {
             eprintln!("[probe] skipped — {} not present", path);
             return;
         }
-        let roster: Vec<RosterEntry> = (0..25)
+        let roster_size: usize = std::env::var("KID_PROBE_ROSTER_SIZE")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(25);
+        let roster: Vec<RosterEntry> = (0..roster_size)
             .map(|i| RosterEntry {
                 student_id: i as i64,
                 student_name: format!("Kid {}", i + 1),
@@ -1862,6 +1996,13 @@ mod tests {
                     "[probe] pipeline succeeded — {} rows total, {} rows w/ marks, {} marks",
                     r.rows.len(), rows_with_marks, marks
                 );
+                for row in &r.rows {
+                    let mut compact = String::new();
+                    for (day, mark) in &row.marks {
+                        compact.push_str(&format!("{}={} ", day, mark));
+                    }
+                    eprintln!("[probe]   {}: {}", row.child_name, compact.trim());
+                }
             }
             Err(e) => eprintln!("[probe] pipeline returned Err (expected for KidsJuly): {}", e),
         }

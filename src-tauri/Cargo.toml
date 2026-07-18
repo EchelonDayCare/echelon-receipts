@@ -1,6 +1,6 @@
 [package]
 name = "echelon-receipts"
-version = "3.2.3"
+version = "3.2.4"
 description = "Echelon Daycare receipt generator"
 authors = ["Echelon Daycare Society"]
 edition = "2021"
@@ -38,6 +38,11 @@ chrono = "0.4"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "multipart"] }
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"] }
 rqrr = "0.7"
+# v3.2.4: rxing (pure-Rust ZXing port) — much more robust QR decoder than
+# rqrr. Handles small module counts, blur, tilt, and JPEG artifacts that
+# rqrr chokes on. Used as PRIMARY decoder in kid_sheet_ocr; rqrr kept as
+# fast fallback so scans that already decode cheap don't get slower.
+rxing = { version = "0.9", default-features = false, features = ["qrcode", "decoders", "multi_barcode_readers", "encoding_rs"] }
 zip = { version = "2", default-features = false, features = ["deflate"] }
 tokio = { version = "1", features = ["macros", "time", "rt-multi-thread"] }
 futures = "0.3"
