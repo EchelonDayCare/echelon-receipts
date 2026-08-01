@@ -171,22 +171,20 @@ pub fn build_filter_script(spec: &ReelSpec) -> String {
     let fps = spec.fps;
     let d = spec.avg_photo_sec;
     let x = spec.effective_transition();
-    let total_frames = (d * fps as f64).round().max(1.0) as u64;
 
     let mut out = String::with_capacity(n * 512);
 
-    // Per-photo Ken Burns chain: split → bg (blur+darken) + fg (fit)
-    // → overlay → zoompan → yuv420p.
+    // Per-photo static chain: split → bg (blur+darken) + fg (fit)
+    // → overlay → yuv420p.
     //
-    // v2.4.0 zoompan is `d=1:fps={fps}` (one output frame per input
-    // frame). This differs from the concat-demuxer pipeline where
-    // zoompan produced d=hold_frames output frames from a single input
-    // frame — with per-photo `-loop 1 -framerate fps -t D` inputs, each
-    // input already emits fps*D frames, so d>1 would multiply frames
-    // and blow up runtime by fps×. Zoom is now driven by the monotonic
-    // `on` (output-frame index) so it grows linearly from 1.0 to 1.10
-    // across each photo's total_frames span.
-    let zoom_expr = format!("min(1+0.1*on/{tf},1.10)", tf = total_frames.max(1));
+    // v3.4.0 removed the Ken Burns zoompan pan/zoom on user request.
+    // Each still is now shown static in-frame, letting photos read
+    // clearly without motion drift. Xfade transitions between photos
+    // are preserved.
+    //
+    // `_d` (per-photo hold) is unused in the graph itself — hold time
+    // is driven entirely by the `-loop 1 -t {D}` input at spawn time.
+    let _d = d;
     for i in 0..n {
         out.push_str(&format!(
             "[{i}:v]split[a{i}][b{i}];\
@@ -196,12 +194,8 @@ pub fn build_filter_script(spec: &ReelSpec) -> String {
              [b{i}]scale=w={w}:h={h}:force_original_aspect_ratio=decrease,\
                    setsar=1[fg{i}];\
              [bg{i}][fg{i}]overlay=(W-w)/2:(H-h)/2,\
-                   zoompan=z='{zoom}':\
-                          x='iw/2-(iw/zoom/2)':\
-                          y='ih/2-(ih/zoom/2)':\
-                          d=1:s={w}x{h}:fps={fps},\
-                   format=yuv420p[v{i}];",
-            i = i, w = w, h = h, fps = fps, zoom = zoom_expr,
+                   fps={fps},format=yuv420p[v{i}];",
+            i = i, w = w, h = h, fps = fps,
         ));
     }
 
@@ -508,9 +502,9 @@ mod tests {
     }
 
     #[test]
-    fn filter_script_has_per_photo_ken_burns() {
+    fn filter_script_builds_per_photo_static_chain() {
         let script = build_filter_script(&base_spec());
-        // Each of 3 photos gets its own bg/fg/overlay/zoompan chain.
+        // Each of 3 photos gets its own bg/fg/overlay chain.
         for i in 0..3 {
             assert!(script.contains(&format!("[{i}:v]split")),
                     "missing split for photo {i}: {script}");
@@ -525,9 +519,9 @@ mod tests {
         assert!(script.contains("force_original_aspect_ratio=increase"));
         assert!(script.contains("force_original_aspect_ratio=decrease"));
         assert!(script.contains("gblur=sigma=25"));
-        // Ken Burns zoompan.
-        assert!(script.contains("x='iw/2-(iw/zoom/2)'"));
-        assert!(script.contains("y='ih/2-(ih/zoom/2)'"));
+        // v3.4.0: Ken Burns removed. No zoompan.
+        assert!(!script.contains("zoompan"),
+                "Ken Burns zoompan should be gone in v3.4.0: {script}");
     }
 
     #[test]
@@ -614,20 +608,20 @@ mod tests {
     }
 
     #[test]
-    fn zoompan_frame_count_scales_with_hold() {
-        // v2.4.0: zoompan uses d=1:fps={fps} (1-in-1-out) with on-based
-        // linear zoom, since per-photo -loop inputs already emit fps*D
-        // frames. The zoom span factor should equal round(D*fps).
+    fn ken_burns_zoompan_is_removed() {
+        // v3.4.0: static-frame chain, no zoompan filter.
         let mut spec = base_spec();
         spec.avg_photo_sec = 2.5;
         spec.fps = 30;
         let script = build_filter_script(&spec);
-        // 2.5 * 30 = 75 — appears as the zoom denominator.
-        assert!(script.contains("on/75"),
-                "expected zoom span 75 for 2.5s @ 30fps: {script}");
-        // And d=1 (not d=75) so zoompan is 1-in-1-out.
-        assert!(script.contains("d=1:"),
-                "zoompan should use d=1 with per-photo inputs: {script}");
+        assert!(!script.contains("zoompan"),
+                "zoompan should be gone: {script}");
+        assert!(!script.contains("on/"),
+                "zoom span expression should be gone: {script}");
+        // Framerate normalization must still be present so xfade sees
+        // a consistent CFR upstream.
+        assert!(script.contains("fps=30,format=yuv420p"),
+                "expected fps=30 → yuv420p on overlay output: {script}");
     }
 
     /// Concat entries silence -Wunused-import on debug builds where the

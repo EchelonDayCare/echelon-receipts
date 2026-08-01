@@ -4,6 +4,59 @@ All notable changes shipped as a DMG. Only entries the owner has approved
 for release are listed here — "code-complete, awaiting ship approval" work
 lives in the session plan.md until it ships.
 
+## v3.5.0 — Name cards rendered in Rust (code-complete, awaiting ship approval)
+
+Fixes the macOS "No such filter: 'drawtext'" crash and makes name-card
+visuals identical across every OS.
+
+### Changed
+- **Name cards are now pre-rendered as PNGs in Rust** using `ab_glyph`
+  and a bundled Inter Variable font (SIL Open Font License v1.1).
+  - Eliminates the runtime dependency on the FFmpeg sidecar being built
+    with `libfreetype` (drawtext filter). macOS DMGs shipped without
+    libfreetype no longer crash mid-render.
+  - Deterministic visuals across macOS, Windows, and Linux — the same
+    Inter Bold-ish glyphs render on every OS.
+  - No more system-font resolution dance
+    (`resolve_system_font()` → removed).
+  - No more drawtext availability probe
+    (`preflight::ffmpeg_has_filter` → removed).
+- Long names auto-shrink to fit the card (≤85% of card width) before
+  running off-frame.
+- Bundled font file: `src-tauri/resources/fonts/Inter-Variable.ttf`
+  (embedded at compile time via `include_bytes!`, ~880 KB into binary).
+- Attribution added to `resources/NOTICE.txt`; OFL license copy at
+  `resources/fonts/Inter-OFL.txt`.
+
+### Removed
+- `preflight::required_filters()` no longer lists `drawtext`.
+
+## v3.4.0 — Static frames + user-selectable reel length (code-complete, awaiting ship approval)
+
+Two owner-requested changes to the Graduation reel pipeline.
+
+### Changed
+- **Ken Burns pan/zoom removed** on every reel (main reel, per-kid,
+  class reel). Photos are now shown static in-frame, letting each
+  still read clearly without motion drift. Xfade transitions between
+  photos are preserved. Backend: `zoompan` filter dropped from both
+  `engine.rs::build_filter_script` and `class_reel.rs::build_segment_filter`.
+
+### Added
+- **Reel length settings** (Graduation → Render section):
+  - "Main reel length (seconds)" — controls "Reel only" / "Render everything"
+    output. Default 900s (15 min), range 10s–1800s (30 min).
+  - "Per-child reel length (seconds)" — controls "Per-child only" output.
+    Default 120s (2 min), same range.
+  - Both persisted globally via settings (`grad_main_reel_sec`,
+    `grad_per_kid_reel_sec`).
+  - Progress bar denominator now uses the selected length so the bar
+    scales with actual render duration.
+
+### Notes
+- Class reel already had its own per-kid seconds knob (Class reel
+  settings → Seconds per kid) — unchanged.
+
 ## v3.3.0 — Class Reel (code-complete, awaiting ship approval)
 
 One-tap "class reel" from the Graduation module: combines every

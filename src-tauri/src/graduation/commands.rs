@@ -913,23 +913,16 @@ pub async fn graduation_render_class_reel(
     let heic_cache = cache_root.join("heic");
     let _ = paths::gc_cache(&heic_cache, 30, 2 * 1024 * 1024 * 1024);
 
-    // Resolve system font once; copied per-job into scratch dir so
-    // drawtext sees a bare filename (no path escaping). If no font
-    // resolves, segments render with a text-less colored breather.
-    let system_font = class_reel::resolve_system_font();
-    if system_font.is_none() {
-        let _ = app.emit(
-            "graduation://log",
-            LogPayload {
-                job_id: job_id.clone(),
-                level: "warn".into(),
-                message: "No system font found for name cards — segments will \
-                          render with a colored breather (no text). Install \
-                          Arial or DejaVu Sans for named cards."
-                    .into(),
-            },
-        );
-    }
+    // v3.5.0: name cards are pre-rendered PNGs via `render_name_card_png`
+    // (bundled Inter font, ab_glyph rasterization). This removes the
+    // dependence on:
+    //   - the FFmpeg sidecar being built with libfreetype (drawtext)
+    //   - a system font being installed at any known path
+    //   - platform-specific font lookup logic
+    // The PNG is emitted per-kid into that kid's segment scratch dir
+    // and referenced as FFmpeg input 0. If a name card cannot be
+    // rendered for any reason (should be impossible with the bundled
+    // font), the segment simply omits the card and starts on photos.
 
     // Resolve music track precedence: explicit > music_folder pick > bundled default.
     let explicit_music: Option<PathBuf> = req
@@ -961,11 +954,7 @@ pub async fn graduation_render_class_reel(
     let job_scratch = cache_root.join(format!("classreel-{}", job_id));
     std::fs::create_dir_all(&job_scratch)
         .map_err(|e| format!("mkdir classreel scratch: {e}"))?;
-    let font_alias_name = "namecard.ttf".to_string();
-    if let Some(font) = &system_font {
-        let dst = job_scratch.join(&font_alias_name);
-        std::fs::copy(font, &dst).map_err(|e| format!("copy font: {e}"))?;
-    }
+    let name_card_png_name = "namecard.png".to_string();
 
     let total_kids = req.segments.len();
     let start = std::time::Instant::now();
@@ -1050,12 +1039,48 @@ pub async fn graduation_render_class_reel(
         let seg_scratch = job_scratch.join(format!("seg-{human_idx:03}"));
         let sources: Vec<PathBuf> = curated.iter().map(|p| p.path.clone()).collect();
         let aliases = alias_photos(&sources, &seg_scratch)?;
-        // Copy font into seg scratch too so its cwd (seg_scratch) sees it.
-        if system_font.is_some() {
-            let src = job_scratch.join(&font_alias_name);
-            let dst = seg_scratch.join(&font_alias_name);
-            let _ = std::fs::copy(&src, &dst);
-        }
+        // v3.5.0: render this kid's name card as a PNG into the seg
+        // scratch dir. Failing to render (e.g. disk full) downgrades
+        // the segment to card-less start — never fatal.
+        let name_card_png = if req.name_card_sec > 0.0 {
+            let png_path = seg_scratch.join(&name_card_png_name);
+            match class_reel::render_name_card_png(
+                &seg_in.display_name,
+                req.width,
+                req.height,
+                &png_path,
+            ) {
+                Ok(()) => Some(PathBuf::from(&name_card_png_name)),
+                Err(e) => {
+                    let _ = app.emit(
+                        "graduation://log",
+                        LogPayload {
+                            job_id: job_id.clone(),
+                            level: "warn".into(),
+                            message: format!(
+                                "name-card render failed for {}: {e} — \
+                                 segment will start on first photo",
+                                seg_in.display_name
+                            ),
+                        },
+                    );
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
+        // v3.5.0 codex-review P2 fix: if the name card was requested but
+        // PNG render failed, reclaim the freed name-card seconds so the
+        // fallback segment isn't silently shorter than requested.
+        let card_render_failed = req.name_card_sec > 0.0 && name_card_png.is_none();
+        let effective_photo_sec = if card_render_failed {
+            let usable_no_card = req.seconds_per_kid.max(1.0);
+            (usable_no_card / n_photos as f64).clamp(PHOTO_SEC_MIN, PHOTO_SEC_MAX)
+        } else {
+            photo_sec
+        };
 
         let filter_script = seg_scratch.join("segment.filter");
         let seg_out_tmp = seg_scratch.join("segment.mp4");
@@ -1065,13 +1090,9 @@ pub async fn graduation_render_class_reel(
             photos: aliases,
             output: PathBuf::from("segment.mp4"),
             filter_script: PathBuf::from("segment.filter"),
-            name_card_sec: req.name_card_sec,
-            name_card_font: if system_font.is_some() {
-                Some(font_alias_name.clone())
-            } else {
-                None
-            },
-            photo_sec,
+            name_card_sec: if name_card_png.is_some() { req.name_card_sec } else { 0.0 },
+            name_card_png,
+            photo_sec: effective_photo_sec,
             transition_sec: class_reel::CLASS_REEL_XFADE_SEC,
             width: req.width,
             height: req.height,

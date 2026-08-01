@@ -40,10 +40,28 @@ type Layout = {
 };
 
 // Reel + per-child render defaults. Kept in sync with engine.rs.
-const REEL_DURATION_SEC = 15 * 60;
+// User-overridable via UI (persisted per year via settings).
+const REEL_DURATION_SEC_DEFAULT = 15 * 60; // main reel: 15 min
 const REEL_AVG_PHOTO_SEC = 3.0;
-const KID_DURATION_SEC = 2 * 60;
+const KID_DURATION_SEC_DEFAULT = 2 * 60;   // per-kid reel: 2 min
 const KID_AVG_PHOTO_SEC = 3.0;
+// Bounds — see PHOTO_SEC clamp in commands.rs (0.8–6.0). Reel length
+// must be long enough to hold at least a couple photos at min pace.
+const REEL_LEN_MIN_SEC = 10;
+const REEL_LEN_MAX_SEC = 30 * 60; // 30 min cap
+
+function clampReelSec(v: number): number {
+  if (!Number.isFinite(v)) return KID_DURATION_SEC_DEFAULT;
+  return Math.min(REEL_LEN_MAX_SEC, Math.max(REEL_LEN_MIN_SEC, Math.round(v)));
+}
+
+// Format seconds → "M:SS" for the reel-length label preview.
+function fmtMSS(sec: number): string {
+  const s = Math.max(0, Math.round(sec));
+  const m = Math.floor(s / 60);
+  const r = s % 60;
+  return `${m}:${r.toString().padStart(2, "0")}`;
+}
 // Class-reel defaults — overridable in Settings.
 const CLASS_REEL_DEFAULTS = {
   seconds_per_kid: 30,
@@ -70,6 +88,9 @@ export default function Graduation() {
   const [classPhotosPerKid, setClassPhotosPerKid] = useState<number>(CLASS_REEL_DEFAULTS.photos_per_kid);
   const [classNameCardSec, setClassNameCardSec] = useState<number>(CLASS_REEL_DEFAULTS.name_card_sec);
   const [classResolution, setClassResolution] = useState<"1080p" | "720p">("1080p");
+  // v3.4.0: user-selectable reel lengths (seconds). Persisted per year.
+  const [mainReelSec, setMainReelSec] = useState<number>(REEL_DURATION_SEC_DEFAULT);
+  const [perKidReelSec, setPerKidReelSec] = useState<number>(KID_DURATION_SEC_DEFAULT);
   // Per-kid ordering + inclusion for the class reel.
   //
   // classReelOrder holds student IDs in playback order. It's seeded
@@ -113,6 +134,8 @@ export default function Graduation() {
         setClassNameCardSec(Number(s.grad_class_name_card_sec));
       if (s.grad_class_resolution === "720p" || s.grad_class_resolution === "1080p")
         setClassResolution(s.grad_class_resolution);
+      if (s.grad_main_reel_sec) setMainReelSec(clampReelSec(Number(s.grad_main_reel_sec)));
+      if (s.grad_per_kid_reel_sec) setPerKidReelSec(clampReelSec(Number(s.grad_per_kid_reel_sec)));
       setStudents(await listStudents(undefined, false));
     })().catch((e) => appendLog(`error: ${e}`));
   }, []);
@@ -164,6 +187,15 @@ export default function Graduation() {
     if (!layout || hydratedYearRef.current !== year) return;
     setSetting(`grad_class_excluded_${year}`, JSON.stringify(classReelExcluded)).catch(() => {});
   }, [classReelExcluded, layout, year]);
+
+  // Persist user-selected reel lengths (global, not per-year — same
+  // pacing preference travels across graduations).
+  useEffect(() => {
+    setSetting("grad_main_reel_sec", String(mainReelSec)).catch(() => {});
+  }, [mainReelSec]);
+  useEffect(() => {
+    setSetting("grad_per_kid_reel_sec", String(perKidReelSec)).catch(() => {});
+  }, [perKidReelSec]);
 
   useEffect(() => {
     let un1: UnlistenFn | null = null;
@@ -271,7 +303,7 @@ export default function Graduation() {
             music_track: null,
             music_folder: layout.music,
             year: Number(year),
-            duration_sec: REEL_DURATION_SEC,
+            duration_sec: mainReelSec,
             avg_photo_sec: REEL_AVG_PHOTO_SEC,
             job_id: job,
           },
@@ -321,7 +353,7 @@ export default function Graduation() {
               year: Number(year),
               music_track: null,
               music_folder: layout.music,
-              duration_sec: KID_DURATION_SEC,
+              duration_sec: perKidReelSec,
               avg_photo_sec: KID_AVG_PHOTO_SEC,
               job_id: job,
             },
@@ -590,16 +622,16 @@ export default function Graduation() {
   }
 
   const isBusy = busy !== null;
-  // Progress % depends on the current stage: reel = 15 min, per-child
-  // = 2 min. The old code always divided by REEL_DURATION_SEC, capping
-  // per-child renders at ~13% of the bar.
+  // Progress % depends on the current stage. Uses the user-selected
+  // reel lengths (perKidReelSec, mainReelSec) so the bar scales with
+  // the actual render duration, not the old hardcoded 15-min ceiling.
   const progressUs = progress?.out_time_us ?? progress?.out_time_ms;
   const totalClassDurationSec = graduating.length * classSecondsPerKid;
   const stageDurationSec =
-    currentStage === "per-child" ? KID_DURATION_SEC
+    currentStage === "per-child" ? perKidReelSec
     : currentStage.startsWith("class-reel-seg-") ? classSecondsPerKid
     : currentStage === "class-reel-concat" ? totalClassDurationSec
-    : REEL_DURATION_SEC;
+    : mainReelSec;
   const timePct = progressUs
     ? Math.min(100, (progressUs / 1_000_000 / stageDurationSec) * 100)
     : 0;
@@ -800,6 +832,45 @@ export default function Graduation() {
               </button>
             )}
           </div>
+
+          {/* v3.4.0: reel length settings (main + per-kid). Persisted globally. */}
+          <details style={{ marginLeft: 40, marginTop: 16, color: "#475569" }}>
+            <summary style={{ cursor: "pointer", userSelect: "none", fontWeight: 600 }}>
+              Reel length settings
+            </summary>
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(240px, 1fr))", gap: 16, marginTop: 12, maxWidth: 640 }}>
+              <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                <span style={{ fontSize: 13, fontWeight: 500 }}>Main reel length (seconds)</span>
+                <input
+                  type="number"
+                  min={REEL_LEN_MIN_SEC}
+                  max={REEL_LEN_MAX_SEC}
+                  step={30}
+                  value={mainReelSec}
+                  onChange={(e) => setMainReelSec(clampReelSec(Number(e.target.value)))}
+                  style={{ padding: "6px 10px", borderRadius: 6, border: "1px solid #cbd5e1" }}
+                />
+                <span style={{ fontSize: 12, color: "#94a3b8" }}>
+                  ≈ {fmtMSS(mainReelSec)} (used by "Reel only" &amp; "Render everything")
+                </span>
+              </label>
+              <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                <span style={{ fontSize: 13, fontWeight: 500 }}>Per-child reel length (seconds)</span>
+                <input
+                  type="number"
+                  min={REEL_LEN_MIN_SEC}
+                  max={REEL_LEN_MAX_SEC}
+                  step={15}
+                  value={perKidReelSec}
+                  onChange={(e) => setPerKidReelSec(clampReelSec(Number(e.target.value)))}
+                  style={{ padding: "6px 10px", borderRadius: 6, border: "1px solid #cbd5e1" }}
+                />
+                <span style={{ fontSize: 12, color: "#94a3b8" }}>
+                  ≈ {fmtMSS(perKidReelSec)} per kid (used by "Per-child only")
+                </span>
+              </label>
+            </div>
+          </details>
 
           {/* Class reel settings (inline, collapsible feel via details/summary). */}
           <details style={{ marginLeft: 40, marginTop: 16, color: "#475569" }}>

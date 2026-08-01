@@ -8,6 +8,23 @@ here are used under the terms of their respective licences and are not
 part of Echelon Daycare's own source code.
 
 ────────────────────────────────────────────────────────────────────────
+Inter (v4.x variable font)
+────────────────────────────────────────────────────────────────────────
+
+  Component:       Inter typeface family (Inter-Variable.ttf)
+  Website:         https://rsms.me/inter
+  Licence:         SIL Open Font License v1.1 (OFL-1.1)
+  Licence text:    resources/fonts/Inter-OFL.txt (also bundled in DMG/NSIS)
+
+  How it is used:
+    Echelon Daycare embeds Inter-Variable at compile time (include_bytes!)
+    to rasterise per-kid name cards in the Graduation Class Reel and
+    Per-child reels. This decouples our text rendering from the bundled
+    FFmpeg sidecar's build-time optional dependencies (libfreetype /
+    drawtext filter) so name cards work identically on macOS, Windows,
+    and Linux regardless of the sidecar's feature set.
+
+────────────────────────────────────────────────────────────────────────
 FFmpeg (v2.3.0 sidecar)
 ────────────────────────────────────────────────────────────────────────
 

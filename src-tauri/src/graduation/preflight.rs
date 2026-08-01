@@ -46,8 +46,10 @@ pub fn required_filters() -> &'static [&'static str] {
     &[
         // Core resize / pixel format primitives.
         "scale", "format", "setsar", "crop",
-        // Motion + fades.
-        "zoompan", "xfade", "afade", "loudnorm",
+        // Motion + fades. (v3.4.0: `zoompan` removed — Ken Burns is off.
+        // v3.5.0: `drawtext` no longer required — name cards are
+        // pre-rendered PNGs in Rust via ab_glyph.)
+        "xfade", "afade", "loudnorm",
         // v2.3.1 blurred-backdrop composition.
         "split", "gblur", "hue", "lutyuv", "overlay",
     ]

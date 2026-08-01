@@ -1,6 +1,6 @@
 [package]
 name = "echelon-receipts"
-version = "3.3.0"
+version = "3.5.0"
 description = "Echelon Daycare receipt generator"
 authors = ["Echelon Daycare Society"]
 edition = "2021"
@@ -37,6 +37,10 @@ base64 = "0.22"
 chrono = "0.4"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "multipart"] }
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"] }
+# v3.5.0: ab_glyph rasterises name-card text server-side so we no longer
+# depend on the ffmpeg sidecar being built with libfreetype (drawtext).
+# Fixes macOS sidecars crashing with `No such filter: 'drawtext'`.
+ab_glyph = "0.2"
 rqrr = "0.7"
 # v3.2.4: rxing (pure-Rust ZXing port) — much more robust QR decoder than
 # rqrr. Handles small module counts, blur, tilt, and JPEG artifacts that
