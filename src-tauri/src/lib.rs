@@ -181,6 +181,7 @@ pub fn run() {
             graduation::commands::graduation_curate_photos,
             graduation::commands::graduation_render_reel,
             graduation::commands::graduation_render_child,
+            graduation::commands::graduation_render_class_reel,
             graduation::commands::graduation_cancel,
             graduation::commands::graduation_reset_cancel,
             graduation::commands::graduation_render_slides,

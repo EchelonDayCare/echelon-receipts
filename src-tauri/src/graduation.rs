@@ -49,6 +49,7 @@ impl StepReport {
     }
 }
 
+pub mod class_reel;
 pub mod commands;
 pub mod concat;
 pub mod curate;
@@ -58,3 +59,10 @@ pub mod paths;
 pub mod pptx;
 pub mod preflight;
 pub mod progress;
+
+/// Public accessor for the engine transition rotation used by
+/// [`class_reel::build_segment_filter`] to keep photo-to-photo
+/// transition kinds consistent with the per-kid reel.
+pub fn engine_transitions() -> &'static [&'static str] {
+    engine::TRANSITIONS
+}

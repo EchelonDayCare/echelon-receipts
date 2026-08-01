@@ -44,6 +44,14 @@ const REEL_DURATION_SEC = 15 * 60;
 const REEL_AVG_PHOTO_SEC = 3.0;
 const KID_DURATION_SEC = 2 * 60;
 const KID_AVG_PHOTO_SEC = 3.0;
+// Class-reel defaults — overridable in Settings.
+const CLASS_REEL_DEFAULTS = {
+  seconds_per_kid: 30,
+  photos_per_kid: 6,
+  name_card_sec: 1.5,
+  width: 1920,
+  height: 1080,
+};
 
 export default function Graduation() {
   const [year, setYear] = useState<string>(String(new Date().getFullYear()));
@@ -52,11 +60,39 @@ export default function Graduation() {
   const [showScaffoldModal, setShowScaffoldModal] = useState(false);
   const [students, setStudents] = useState<Student[]>([]);
   const [preflight, setPreflight] = useState<PreflightReport | null>(null);
-  const [busy, setBusy] = useState<null | "scaffold" | "preflight" | "reel" | "child" | "slides" | "all">(null);
+  const [busy, setBusy] = useState<null | "scaffold" | "preflight" | "reel" | "child" | "slides" | "class" | "all">(null);
   const [currentStage, setCurrentStage] = useState<string>("");
   const [progress, setProgress] = useState<ProgressTick | null>(null);
   const [log, setLog] = useState<string[]>([]);
   const [savedOk, setSavedOk] = useState(false);
+  // Class-reel settings (persisted via getSettings/setSetting).
+  const [classSecondsPerKid, setClassSecondsPerKid] = useState<number>(CLASS_REEL_DEFAULTS.seconds_per_kid);
+  const [classPhotosPerKid, setClassPhotosPerKid] = useState<number>(CLASS_REEL_DEFAULTS.photos_per_kid);
+  const [classNameCardSec, setClassNameCardSec] = useState<number>(CLASS_REEL_DEFAULTS.name_card_sec);
+  const [classResolution, setClassResolution] = useState<"1080p" | "720p">("1080p");
+  // Per-kid ordering + inclusion for the class reel.
+  //
+  // classReelOrder holds student IDs in playback order. It's seeded
+  // from `layout.child_folders` (alphabetical) on first render and
+  // persisted via `grad_class_order_<year>` so custom drag-drop order
+  // survives an app restart. When new graduating kids are added, they
+  // are appended to the end automatically.
+  //
+  // classReelExcluded is the set of student IDs the user has unchecked;
+  // excluded kids are skipped in the render. Persisted via
+  // `grad_class_excluded_<year>`.
+  const [classReelOrder, setClassReelOrder] = useState<number[]>([]);
+  const [classReelExcluded, setClassReelExcluded] = useState<number[]>([]);
+  const [dragIndex, setDragIndex] = useState<number | null>(null);
+  const [dragOverIndex, setDragOverIndex] = useState<number | null>(null);
+  // Guards the class-reel persistence useEffects against a year-switch
+  // race: when `year` changes, the persistence effects fire immediately
+  // with the previous year's order/excluded still in state, which would
+  // clobber the incoming year's saved data before the reconcile effect
+  // gets a chance to hydrate. We only allow writes once reconcile has
+  // finished loading the current year — signalled by the ref matching
+  // the current `year`.
+  const hydratedYearRef = useRef<string | null>(null);
   // Terminal batch summary — set when a render function fully completes
   // (not cancelled, no error). Rendered as a big green banner so the
   // user gets an unmissable "done" signal after long Windows encodes.
@@ -71,9 +107,63 @@ export default function Graduation() {
       const s = await getSettings();
       if (s.grad_year) setYear(s.grad_year);
       if (s.grad_base_folder) setBaseFolder(s.grad_base_folder);
+      if (s.grad_class_seconds_per_kid) setClassSecondsPerKid(Number(s.grad_class_seconds_per_kid));
+      if (s.grad_class_photos_per_kid) setClassPhotosPerKid(Number(s.grad_class_photos_per_kid));
+      if (s.grad_class_name_card_sec !== undefined && s.grad_class_name_card_sec !== null && s.grad_class_name_card_sec !== "")
+        setClassNameCardSec(Number(s.grad_class_name_card_sec));
+      if (s.grad_class_resolution === "720p" || s.grad_class_resolution === "1080p")
+        setClassResolution(s.grad_class_resolution);
       setStudents(await listStudents(undefined, false));
     })().catch((e) => appendLog(`error: ${e}`));
   }, []);
+
+  // Reconcile persisted class-reel order + excluded set whenever the
+  // layout or year changes: drop kids no longer in the class, append
+  // new kids to the tail, preserve the user's manual order otherwise.
+  useEffect(() => {
+    if (!layout) return;
+    (async () => {
+      const s = await getSettings();
+      const orderKey = `grad_class_order_${year}`;
+      const excludedKey = `grad_class_excluded_${year}`;
+      const savedOrderRaw = (s as Record<string, string | undefined>)[orderKey];
+      const savedExcludedRaw = (s as Record<string, string | undefined>)[excludedKey];
+      let savedOrder: number[] = [];
+      let savedExcluded: number[] = [];
+      try { if (savedOrderRaw) savedOrder = JSON.parse(savedOrderRaw); } catch { /* ignore corrupt */ }
+      try { if (savedExcludedRaw) savedExcluded = JSON.parse(savedExcludedRaw); } catch { /* ignore corrupt */ }
+      const currentIds = new Set(layout.child_folders.map((c) => c.student_id));
+      // Preserve saved order for kids still present, drop the rest.
+      const preserved = savedOrder.filter((id) => currentIds.has(id));
+      // Append newly-added kids to the tail, alphabetical within the
+      // new-kids group so they land in a predictable spot.
+      const newKids = layout.child_folders
+        .filter((c) => !preserved.includes(c.student_id))
+        .sort((a, b) => a.display_name.localeCompare(b.display_name, undefined, { sensitivity: "base" }))
+        .map((c) => c.student_id);
+      const merged = preserved.length > 0 ? [...preserved, ...newKids] : newKids;
+      setClassReelOrder(merged);
+      // Drop excluded IDs no longer in class.
+      setClassReelExcluded(savedExcluded.filter((id) => currentIds.has(id)));
+      // Mark this year as hydrated — persistence effects below now
+      // trust that state reflects this year's data.
+      hydratedYearRef.current = year;
+    })().catch(() => { /* non-fatal */ });
+  }, [layout, year]);
+
+  // Persist class-reel order + excluded set whenever the user changes them.
+  // Gated on hydratedYearRef so a stale (previous-year) order can't be
+  // written into the newly-selected year's settings key during a year
+  // switch. Reconcile updates the ref only after loading this year.
+  useEffect(() => {
+    if (!layout || hydratedYearRef.current !== year) return;
+    if (classReelOrder.length === 0) return;
+    setSetting(`grad_class_order_${year}`, JSON.stringify(classReelOrder)).catch(() => {});
+  }, [classReelOrder, layout, year]);
+  useEffect(() => {
+    if (!layout || hydratedYearRef.current !== year) return;
+    setSetting(`grad_class_excluded_${year}`, JSON.stringify(classReelExcluded)).catch(() => {});
+  }, [classReelExcluded, layout, year]);
 
   useEffect(() => {
     let un1: UnlistenFn | null = null;
@@ -261,6 +351,127 @@ export default function Graduation() {
     }
   }
 
+  // Reorder kids in the class-reel play order by moving `fromIdx` to
+  // `toIdx`. Called from the drag-drop UI in the settings panel.
+  function moveClassReelKid(fromIdx: number, toIdx: number) {
+    if (fromIdx === toIdx || fromIdx < 0 || toIdx < 0) return;
+    setClassReelOrder((prev) => {
+      if (fromIdx >= prev.length || toIdx >= prev.length) return prev;
+      const next = [...prev];
+      const [moved] = next.splice(fromIdx, 1);
+      next.splice(toIdx, 0, moved);
+      return next;
+    });
+  }
+
+  function toggleClassReelKid(studentId: number, included: boolean) {
+    setClassReelExcluded((prev) => {
+      const has = prev.includes(studentId);
+      if (included && has) return prev.filter((id) => id !== studentId);
+      if (!included && !has) return [...prev, studentId];
+      return prev;
+    });
+  }
+
+  function resetClassReelOrder() {
+    if (!layout) return;
+    const alpha = [...layout.child_folders]
+      .sort((a, b) => a.display_name.localeCompare(b.display_name, undefined, { sensitivity: "base" }))
+      .map((c) => c.student_id);
+    setClassReelOrder(alpha);
+    setClassReelExcluded([]);
+  }
+
+  async function renderClassReel() {
+    if (!layout) return;
+    if (graduating.length === 0) {
+      appendLog("No graduating students for " + year);
+      return;
+    }
+    // Persist current settings first so future runs pick up whatever
+    // the user tweaked in the inline controls.
+    await setSetting("grad_class_seconds_per_kid", String(classSecondsPerKid));
+    await setSetting("grad_class_photos_per_kid", String(classPhotosPerKid));
+    await setSetting("grad_class_name_card_sec", String(classNameCardSec));
+    await setSetting("grad_class_resolution", classResolution);
+
+    cancelledRef.current = false;
+    try { await invoke("graduation_reset_cancel"); } catch { /* ok */ }
+    setBusy("class");
+    setRunSummary(null);
+    runStartRef.current = Date.now();
+
+    // Segment order: user's custom drag-drop order (persisted per year).
+    // Falls back to alphabetical if the order state hasn't hydrated yet
+    // (e.g. classReelOrder is empty because the layout just changed).
+    // Excluded kids are filtered out.
+    const excluded = new Set(classReelExcluded);
+    const byId = new Map(layout.child_folders.map((c) => [c.student_id, c]));
+    const orderedIds = classReelOrder.length > 0
+      ? classReelOrder
+      : [...layout.child_folders]
+          .sort((a, b) => a.display_name.localeCompare(b.display_name, undefined, { sensitivity: "base" }))
+          .map((c) => c.student_id);
+    const orderedSegments = orderedIds
+      .filter((id) => !excluded.has(id))
+      .map((id) => byId.get(id))
+      .filter((c): c is ChildFolder => c !== undefined)
+      .map((c) => ({
+        student_id: c.student_id,
+        display_name: c.display_name,
+        source_folder: c.folder,
+      }));
+
+    if (orderedSegments.length === 0) {
+      appendLog("All kids are excluded — nothing to render. Check at least one kid.");
+      setBusy(null);
+      return;
+    }
+
+    const { width, height } = classResolution === "720p"
+      ? { width: 1280, height: 720 }
+      : { width: 1920, height: 1080 };
+
+    const job = `classreel-${Date.now()}`;
+    try {
+      const out = await invoke<{
+        output_path: string;
+        frames_encoded: number;
+        duration_ms: number;
+        segments_rendered: number;
+        skipped: string[];
+        music_used: string | null;
+      }>("graduation_render_class_reel", {
+        req: {
+          segments: orderedSegments,
+          output_folder: layout.output,
+          music_track: null,
+          music_folder: layout.music,
+          year: Number(year),
+          seconds_per_kid: classSecondsPerKid,
+          photos_per_kid: classPhotosPerKid,
+          name_card_sec: classNameCardSec,
+          width,
+          height,
+          job_id: job,
+        },
+      });
+      appendLog(`✓ Class reel done in ${(out.duration_ms / 1000).toFixed(1)}s → ${out.output_path}`);
+      if (out.skipped.length > 0) {
+        appendLog(`  skipped ${out.skipped.length} kid(s): ${out.skipped.join(", ")}`);
+      }
+      const skipNote = out.skipped.length > 0 ? ` · ${out.skipped.length} skipped` : "";
+      setRunSummary({
+        title: "✓ Class reel complete",
+        detail: `${out.segments_rendered} kids in ${fmtElapsed(Date.now() - runStartRef.current)}${skipNote} → ${out.output_path}`,
+      });
+    } catch (e) {
+      appendLog(`class reel error: ${e}`);
+    } finally {
+      setBusy(null);
+    }
+  }
+
   async function renderSlides(nested = false) {
     if (!layout) return;
     if (graduating.length === 0) {
@@ -383,8 +594,12 @@ export default function Graduation() {
   // = 2 min. The old code always divided by REEL_DURATION_SEC, capping
   // per-child renders at ~13% of the bar.
   const progressUs = progress?.out_time_us ?? progress?.out_time_ms;
+  const totalClassDurationSec = graduating.length * classSecondsPerKid;
   const stageDurationSec =
-    currentStage === "per-child" ? KID_DURATION_SEC : REEL_DURATION_SEC;
+    currentStage === "per-child" ? KID_DURATION_SEC
+    : currentStage.startsWith("class-reel-seg-") ? classSecondsPerKid
+    : currentStage === "class-reel-concat" ? totalClassDurationSec
+    : REEL_DURATION_SEC;
   const timePct = progressUs
     ? Math.min(100, (progressUs / 1_000_000 / stageDurationSec) * 100)
     : 0;
@@ -562,12 +777,266 @@ export default function Graduation() {
             <button className="btn" onClick={() => renderSlides()} disabled={isBusy || graduating.length === 0}>
               {busy === "slides" ? "Building deck..." : "Slides only"}
             </button>
+            <button
+              className="btn"
+              onClick={renderClassReel}
+              disabled={isBusy || graduating.length === 0}
+              title={`Combine every kid into one long video`}
+            >
+              {busy === "class"
+                ? "Rendering class reel..."
+                : (() => {
+                    const excludedSet = new Set(classReelExcluded);
+                    const included = classReelOrder.length > 0
+                      ? classReelOrder.filter((id) => !excludedSet.has(id)).length
+                      : graduating.length;
+                    const mins = Math.round(included * classSecondsPerKid / 60);
+                    return `Class reel (${included} kids × ${classSecondsPerKid}s ≈ ${mins} min)`;
+                  })()}
+            </button>
             {isBusy && (
               <button className="btn danger" onClick={cancel}>
                 Cancel
               </button>
             )}
           </div>
+
+          {/* Class reel settings (inline, collapsible feel via details/summary). */}
+          <details style={{ marginLeft: 40, marginTop: 16, color: "#475569" }}>
+            <summary style={{ cursor: "pointer", userSelect: "none", fontWeight: 600 }}>
+              Class reel settings
+            </summary>
+            <div
+              style={{
+                display: "grid",
+                gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))",
+                gap: 12,
+                marginTop: 12,
+                padding: 12,
+                background: "#f8fafc",
+                border: "1px solid #e2e8f0",
+                borderRadius: 6,
+              }}
+            >
+              <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                <span style={{ fontSize: 13, fontWeight: 500 }}>Seconds per kid</span>
+                <input
+                  type="number"
+                  min={10}
+                  max={120}
+                  step={1}
+                  value={classSecondsPerKid}
+                  onChange={(e) => setClassSecondsPerKid(Math.max(10, Math.min(120, Number(e.target.value) || 30)))}
+                  disabled={isBusy}
+                  style={{ padding: "6px 8px", borderRadius: 4, border: "1px solid #cbd5e1" }}
+                />
+                <span style={{ fontSize: 11, color: "#64748b" }}>
+                  {graduating.length} kids → ≈ {Math.round(graduating.length * classSecondsPerKid / 60)} min video
+                </span>
+              </label>
+
+              <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                <span style={{ fontSize: 13, fontWeight: 500 }}>Photos per kid</span>
+                <input
+                  type="number"
+                  min={1}
+                  max={30}
+                  step={1}
+                  value={classPhotosPerKid}
+                  onChange={(e) => setClassPhotosPerKid(Math.max(1, Math.min(30, Number(e.target.value) || 6)))}
+                  disabled={isBusy}
+                  style={{ padding: "6px 8px", borderRadius: 4, border: "1px solid #cbd5e1" }}
+                />
+                <span style={{ fontSize: 11, color: "#64748b" }}>
+                  ≈ {((classSecondsPerKid - classNameCardSec) / Math.max(1, classPhotosPerKid)).toFixed(1)}s per photo
+                </span>
+              </label>
+
+              <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                <span style={{ fontSize: 13, fontWeight: 500 }}>Name card (seconds)</span>
+                <input
+                  type="number"
+                  min={0}
+                  max={5}
+                  step={0.1}
+                  value={classNameCardSec}
+                  onChange={(e) => setClassNameCardSec(Math.max(0, Math.min(5, Number(e.target.value) || 0)))}
+                  disabled={isBusy}
+                  style={{ padding: "6px 8px", borderRadius: 4, border: "1px solid #cbd5e1" }}
+                />
+                <span style={{ fontSize: 11, color: "#64748b" }}>
+                  {classNameCardSec === 0 ? "Disabled" : "Shown before each kid's photos"}
+                </span>
+              </label>
+
+              <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                <span style={{ fontSize: 13, fontWeight: 500 }}>Resolution</span>
+                <select
+                  value={classResolution}
+                  onChange={(e) => setClassResolution((e.target.value === "720p" ? "720p" : "1080p"))}
+                  disabled={isBusy}
+                  style={{ padding: "6px 8px", borderRadius: 4, border: "1px solid #cbd5e1" }}
+                >
+                  <option value="1080p">1080p (1920×1080)</option>
+                  <option value="720p">720p (1280×720) — faster</option>
+                </select>
+                <span style={{ fontSize: 11, color: "#64748b" }}>
+                  Drag kids below to reorder
+                </span>
+              </label>
+            </div>
+
+            {/* Per-kid order + inclusion. Drag rows to reorder,
+                uncheck to exclude from the render. */}
+            {layout.child_folders.length > 0 && (() => {
+              const byId = new Map(layout.child_folders.map((c) => [c.student_id, c]));
+              const displayed = classReelOrder
+                .map((id) => byId.get(id))
+                .filter((c): c is ChildFolder => c !== undefined);
+              const excludedSet = new Set(classReelExcluded);
+              const includedCount = displayed.filter((c) => !excludedSet.has(c.student_id)).length;
+              return (
+                <div style={{ marginTop: 16 }}>
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 8 }}>
+                    <div style={{ fontSize: 13, fontWeight: 600, color: "#334155" }}>
+                      Play order ({includedCount} of {displayed.length} kids · ≈ {Math.round(includedCount * classSecondsPerKid / 60)} min)
+                    </div>
+                    <button
+                      type="button"
+                      className="btn"
+                      onClick={resetClassReelOrder}
+                      disabled={isBusy}
+                      style={{ fontSize: 12, padding: "4px 10px" }}
+                    >
+                      Reset to A-Z
+                    </button>
+                  </div>
+                  <ol
+                    style={{
+                      listStyle: "none",
+                      padding: 0,
+                      margin: 0,
+                      display: "flex",
+                      flexDirection: "column",
+                      gap: 4,
+                      maxHeight: 320,
+                      overflowY: "auto",
+                      border: "1px solid #e2e8f0",
+                      borderRadius: 6,
+                      background: "white",
+                    }}
+                  >
+                    {displayed.map((c, idx) => {
+                      const isDragging = dragIndex === idx;
+                      const isTarget = dragOverIndex === idx && dragIndex !== null && dragIndex !== idx;
+                      const included = !excludedSet.has(c.student_id);
+                      return (
+                        <li
+                          key={c.student_id}
+                          draggable={!isBusy}
+                          onDragStart={(e) => {
+                            if (isBusy) return;
+                            setDragIndex(idx);
+                            // Firefox needs a non-empty dataTransfer to start the drag.
+                            e.dataTransfer.effectAllowed = "move";
+                            try { e.dataTransfer.setData("text/plain", String(idx)); } catch { /* ignore */ }
+                          }}
+                          onDragOver={(e) => {
+                            if (dragIndex === null) return;
+                            e.preventDefault();
+                            e.dataTransfer.dropEffect = "move";
+                            if (dragOverIndex !== idx) setDragOverIndex(idx);
+                          }}
+                          onDragLeave={() => {
+                            if (dragOverIndex === idx) setDragOverIndex(null);
+                          }}
+                          onDrop={(e) => {
+                            e.preventDefault();
+                            if (dragIndex !== null) moveClassReelKid(dragIndex, idx);
+                            setDragIndex(null);
+                            setDragOverIndex(null);
+                          }}
+                          onDragEnd={() => {
+                            setDragIndex(null);
+                            setDragOverIndex(null);
+                          }}
+                          style={{
+                            display: "flex",
+                            alignItems: "center",
+                            gap: 10,
+                            padding: "8px 12px",
+                            borderBottom: idx < displayed.length - 1 ? "1px solid #f1f5f9" : "none",
+                            background: isTarget
+                              ? "#dbeafe"
+                              : isDragging
+                                ? "#f1f5f9"
+                                : included ? "white" : "#f8fafc",
+                            opacity: included ? 1 : 0.55,
+                            cursor: isBusy ? "not-allowed" : "grab",
+                            transition: "background 100ms ease-out",
+                          }}
+                          title="Drag to reorder"
+                        >
+                          <span
+                            aria-hidden="true"
+                            style={{ color: "#94a3b8", fontSize: 16, lineHeight: 1, userSelect: "none" }}
+                          >
+                            ⋮⋮
+                          </span>
+                          <span style={{
+                            fontSize: 12,
+                            color: "#64748b",
+                            width: 28,
+                            textAlign: "right",
+                            fontVariantNumeric: "tabular-nums",
+                          }}>
+                            {idx + 1}.
+                          </span>
+                          <input
+                            type="checkbox"
+                            checked={included}
+                            onChange={(e) => toggleClassReelKid(c.student_id, e.target.checked)}
+                            disabled={isBusy}
+                            aria-label={`Include ${c.display_name} in class reel`}
+                            style={{ cursor: isBusy ? "not-allowed" : "pointer" }}
+                          />
+                          <span style={{
+                            flex: 1,
+                            fontSize: 14,
+                            color: included ? "#0f172a" : "#94a3b8",
+                            textDecoration: included ? "none" : "line-through",
+                          }}>
+                            {c.display_name}
+                          </span>
+                          {/* Small nudge arrows for keyboard / non-drag users. */}
+                          <button
+                            type="button"
+                            className="btn"
+                            onClick={() => moveClassReelKid(idx, idx - 1)}
+                            disabled={isBusy || idx === 0}
+                            aria-label={`Move ${c.display_name} up`}
+                            style={{ padding: "2px 8px", fontSize: 12 }}
+                          >
+                            ↑
+                          </button>
+                          <button
+                            type="button"
+                            className="btn"
+                            onClick={() => moveClassReelKid(idx, idx + 1)}
+                            disabled={isBusy || idx === displayed.length - 1}
+                            aria-label={`Move ${c.display_name} down`}
+                            style={{ padding: "2px 8px", fontSize: 12 }}
+                          >
+                            ↓
+                          </button>
+                        </li>
+                      );
+                    })}
+                  </ol>
+                </div>
+              );
+            })()}
+          </details>
         </section>
       )}
 

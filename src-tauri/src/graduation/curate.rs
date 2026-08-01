@@ -21,6 +21,13 @@
 //!      with more edge energy. Resolution-normalised: works on any
 //!      camera aspect.
 //!   5. Rank by score, then curate down to the target count.
+//!   6. **Playback order:** after top-N selection, curated photos are
+//!      re-sorted by their source path using a **natural**,
+//!      case-insensitive comparison so the video plays them in the
+//!      order the user sees in Explorer/Finder (both Windows Explorer
+//!      and macOS Finder default to natural sort — `IMG_2` before
+//!      `IMG_10`). Sharpness governs which photos are chosen; filename
+//!      governs playback sequence.
 //!
 //! No score is a hard reject: this is a *ranking*, not a filter. Better
 //! to include a slightly-blurry photo of a real child than to blank the
@@ -132,21 +139,148 @@ pub fn scan_and_rank_cancellable(
 
 /// Curate a ranked list down to `target_count` items. If the input has
 /// fewer photos than target, returns everything (the caller shows a
-/// friendly "we could use more photos" warning). Uses even spacing
-/// through the sharpness-sorted list, which biases toward the sharper
-/// half but still keeps variety.
+/// friendly "we could use more photos" warning). Selection is by
+/// sharpness (top-N of the ranked input); the returned slice is then
+/// re-sorted for **playback order** using a natural, case-insensitive
+/// comparison on the full source path so the video plays photos in
+/// the order the user sees in Explorer/Finder.
+///
+/// The sort has three properties:
+/// 1. **Natural** — `IMG_2.jpg` < `IMG_10.jpg` (matches Windows Explorer
+///    and macOS Finder default; a plain lexical sort would swap them).
+/// 2. **Case-insensitive** — matches OS file-manager conventions.
+/// 3. **Deterministic on non-UTF-8 paths** — the primary comparison is
+///    a lossy Unicode conversion (correct for the 99.9% case); ties
+///    (including all invalid-UTF-8 collisions) fall through to a raw
+///    `OsStr` byte comparison so the total order is stable.
+///
+/// The full path (not just filename) is the sort key so photos in
+/// subfolders of the kid folder can't collide with same-named siblings.
 pub fn curate(photos: &[RankedPhoto], target_count: usize) -> Vec<RankedPhoto> {
     if photos.is_empty() {
         return Vec::new();
     }
-    if photos.len() <= target_count {
-        return photos.to_vec();
+    // Selection: keep the top-N by sharpness (input is sharpness-DESC).
+    let mut selected: Vec<RankedPhoto> = if photos.len() <= target_count {
+        photos.to_vec()
+    } else {
+        // Top-K gives noticeably better results in practice — a
+        // graduation reel wants photos that look nice, not a
+        // statistically-uniform sample of every candidate incl. blur.
+        photos.iter().take(target_count).cloned().collect()
+    };
+    // Playback order: natural, case-insensitive, on `source` (unmodified
+    // user path) so HEIC → JPEG cache filenames can't shuffle order.
+    selected.sort_by(|a, b| {
+        let a_lossy = a.source.to_string_lossy();
+        let b_lossy = b.source.to_string_lossy();
+        match natural_cmp_ignore_case(&a_lossy, &b_lossy) {
+            std::cmp::Ordering::Equal => {
+                // Tie-break on raw OsStr bytes so different non-UTF-8
+                // paths (both lossy-converted to U+FFFD) still order
+                // deterministically instead of collapsing together.
+                a.source.as_os_str().cmp(b.source.as_os_str())
+            }
+            other => other,
+        }
+    });
+    selected
+}
+
+/// Natural, case-insensitive comparison — treats runs of digits as
+/// numeric values so `"IMG_2"` sorts before `"IMG_10"`. Both Windows
+/// Explorer and macOS Finder use this convention by default; a plain
+/// lexical sort would order `IMG_10` before `IMG_2` which is exactly
+/// the "random-looking" behavior users complain about.
+///
+/// Case folding is done via full-string `to_lowercase()` up front
+/// (not per-char) so multi-codepoint lowercase mappings like Turkish
+/// `İ → i + combining dot` normalise correctly. Note this is Unicode's
+/// default *lowercase mapping*, not the stricter *case folding*
+/// operation — `ß` stays as `ß` (Rust std has no built-in `ß → ss`
+/// folding). For daycare filename ordering this is a non-issue in
+/// practice; documented for future reference.
+///
+/// Digit-run comparison works directly on the digit substring:
+/// leading zeros are stripped, then the significant lengths are
+/// compared (longer = larger), then digit-wise lexicographic compare
+/// on the significant part is exactly numeric order. This is
+/// **overflow-free** — arbitrarily long digit runs compare correctly
+/// without ever parsing to an integer.
+fn natural_cmp_ignore_case(a: &str, b: &str) -> std::cmp::Ordering {
+    // Full-string lowercase handles multi-codepoint case mappings that
+    // a per-char `.to_lowercase().next()` would truncate.
+    let a_lower = a.to_lowercase();
+    let b_lower = b.to_lowercase();
+    natural_cmp(&a_lower, &b_lower)
+}
+
+/// Position-by-position natural compare on already-normalised (e.g.
+/// lowercased) strings. Digit runs are treated as numeric values.
+fn natural_cmp(a: &str, b: &str) -> std::cmp::Ordering {
+    use std::cmp::Ordering;
+    let mut ai = a.chars().peekable();
+    let mut bi = b.chars().peekable();
+    loop {
+        match (ai.peek().copied(), bi.peek().copied()) {
+            (None, None) => return Ordering::Equal,
+            (None, Some(_)) => return Ordering::Less,
+            (Some(_), None) => return Ordering::Greater,
+            (Some(ac), Some(bc)) => {
+                if ac.is_ascii_digit() && bc.is_ascii_digit() {
+                    match cmp_digit_runs(&mut ai, &mut bi) {
+                        Ordering::Equal => continue,
+                        other => return other,
+                    }
+                } else {
+                    match ac.cmp(&bc) {
+                        Ordering::Equal => { ai.next(); bi.next(); }
+                        other => return other,
+                    }
+                }
+            }
+        }
     }
-    // Take the top target_count in the sharpness ranking. Even-spacing
-    // was tempting but "top-K" gives noticeably better results in
-    // practice — a graduation reel wants photos that look nice, not a
-    // statistically-uniform sample of every candidate including blur.
-    photos.iter().take(target_count).cloned().collect()
+}
+
+/// Compare two ASCII-digit runs at the head of each iterator as
+/// numeric values, consuming the digits from both. Works for
+/// arbitrarily long numbers (no integer parse, no overflow).
+///
+/// Algorithm:
+/// 1. Buffer both digit runs.
+/// 2. Strip leading zeros to get "significant" digits.
+/// 3. Longer significant length ⇒ larger number.
+/// 4. Same significant length ⇒ lex compare on significant digits is
+///    exactly numeric order (they represent numbers with the same
+///    magnitude).
+/// 5. Equal numeric value with different leading-zero counts ⇒
+///    shorter total run sorts first (so `1` < `01` < `001`), which is
+///    a deterministic and reasonable tie-break for filenames.
+fn cmp_digit_runs<I: Iterator<Item = char>>(
+    a: &mut std::iter::Peekable<I>,
+    b: &mut std::iter::Peekable<I>,
+) -> std::cmp::Ordering {
+    use std::cmp::Ordering;
+    let mut a_digits = String::new();
+    while let Some(&c) = a.peek() {
+        if c.is_ascii_digit() { a_digits.push(c); a.next(); } else { break; }
+    }
+    let mut b_digits = String::new();
+    while let Some(&c) = b.peek() {
+        if c.is_ascii_digit() { b_digits.push(c); b.next(); } else { break; }
+    }
+    let a_sig = a_digits.trim_start_matches('0');
+    let b_sig = b_digits.trim_start_matches('0');
+    match a_sig.len().cmp(&b_sig.len()) {
+        Ordering::Equal => match a_sig.cmp(b_sig) {
+            // Same numeric value: order by total run length (fewer
+            // leading zeros first).
+            Ordering::Equal => a_digits.len().cmp(&b_digits.len()),
+            other => other,
+        },
+        other => other,
+    }
 }
 
 pub struct ScanResult {
@@ -459,6 +593,181 @@ mod tests {
         }];
         let out = curate(&photos, 10);
         assert_eq!(out.len(), 1);
+    }
+
+    #[test]
+    fn curate_returns_selected_photos_in_filename_order() {
+        // Input is sharpness-DESC (as scan_and_rank produces).
+        // curate should select the top-3 by sharpness, then re-order
+        // them by original source filename so the reel plays them in
+        // the order the user sees them in Explorer/Finder.
+        let photos = vec![
+            RankedPhoto { path: "/c/IMG_003.jpg".into(), source: "/c/IMG_003.jpg".into(), sharpness: 9.0 },
+            RankedPhoto { path: "/c/IMG_001.jpg".into(), source: "/c/IMG_001.jpg".into(), sharpness: 8.0 },
+            RankedPhoto { path: "/c/IMG_005.jpg".into(), source: "/c/IMG_005.jpg".into(), sharpness: 7.0 },
+            RankedPhoto { path: "/c/IMG_002.jpg".into(), source: "/c/IMG_002.jpg".into(), sharpness: 3.0 },
+            RankedPhoto { path: "/c/IMG_004.jpg".into(), source: "/c/IMG_004.jpg".into(), sharpness: 2.0 },
+        ];
+        let out = curate(&photos, 3);
+        assert_eq!(out.len(), 3);
+        // Selection kept the top-3 by sharpness (9,8,7 → 003,001,005)
+        // then reordered by filename: 001, 003, 005.
+        let names: Vec<String> = out.iter()
+            .map(|p| p.source.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(names, vec!["IMG_001.jpg", "IMG_003.jpg", "IMG_005.jpg"]);
+    }
+
+    #[test]
+    fn curate_short_input_is_also_sorted_by_filename() {
+        // When input is shorter than target we still want playback
+        // order to be alphabetical, not sharpness order.
+        let photos = vec![
+            RankedPhoto { path: "/c/z.jpg".into(), source: "/c/z.jpg".into(), sharpness: 9.0 },
+            RankedPhoto { path: "/c/a.jpg".into(), source: "/c/a.jpg".into(), sharpness: 5.0 },
+            RankedPhoto { path: "/c/M.jpg".into(), source: "/c/M.jpg".into(), sharpness: 7.0 },
+        ];
+        let out = curate(&photos, 10);
+        let names: Vec<String> = out.iter()
+            .map(|p| p.source.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        // Case-insensitive: a < M < z.
+        assert_eq!(names, vec!["a.jpg", "M.jpg", "z.jpg"]);
+    }
+
+    #[test]
+    fn curate_uses_natural_sort_for_unpadded_numbers() {
+        // Windows Explorer and macOS Finder both use natural sort by
+        // default. A plain lexical sort would put IMG_10 before IMG_2
+        // — exactly the "random-looking" behavior users complain about.
+        let photos = vec![
+            RankedPhoto { path: "/c/IMG_10.jpg".into(), source: "/c/IMG_10.jpg".into(), sharpness: 9.0 },
+            RankedPhoto { path: "/c/IMG_2.jpg".into(),  source: "/c/IMG_2.jpg".into(),  sharpness: 8.0 },
+            RankedPhoto { path: "/c/IMG_1.jpg".into(),  source: "/c/IMG_1.jpg".into(),  sharpness: 7.0 },
+        ];
+        let out = curate(&photos, 10);
+        let names: Vec<String> = out.iter()
+            .map(|p| p.source.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(names, vec!["IMG_1.jpg", "IMG_2.jpg", "IMG_10.jpg"]);
+    }
+
+    #[test]
+    fn curate_handles_extensionless_files() {
+        let photos = vec![
+            RankedPhoto { path: "/c/photo3".into(), source: "/c/photo3".into(), sharpness: 9.0 },
+            RankedPhoto { path: "/c/photo1".into(), source: "/c/photo1".into(), sharpness: 8.0 },
+            RankedPhoto { path: "/c/photo2".into(), source: "/c/photo2".into(), sharpness: 7.0 },
+        ];
+        let out = curate(&photos, 10);
+        let names: Vec<String> = out.iter()
+            .map(|p| p.source.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(names, vec!["photo1", "photo2", "photo3"]);
+    }
+
+    #[test]
+    fn curate_disambiguates_same_filename_in_different_subfolders() {
+        // walk() recurses into subfolders. Two `001.jpg` files in
+        // different subdirs must not compare equal — comparing the
+        // full source path (not just the basename) handles this.
+        let photos = vec![
+            RankedPhoto { path: "/c/Sports/001.jpg".into(),  source: "/c/Sports/001.jpg".into(),  sharpness: 9.0 },
+            RankedPhoto { path: "/c/Casual/001.jpg".into(),  source: "/c/Casual/001.jpg".into(),  sharpness: 8.0 },
+            RankedPhoto { path: "/c/Sports/002.jpg".into(),  source: "/c/Sports/002.jpg".into(),  sharpness: 7.0 },
+        ];
+        let out = curate(&photos, 10);
+        let sources: Vec<String> = out.iter()
+            .map(|p| p.source.to_string_lossy().into_owned())
+            .collect();
+        // Casual < Sports (case-insensitive alpha on the parent dir),
+        // then within Sports 001 < 002 (natural numeric sort).
+        assert_eq!(sources, vec!["/c/Casual/001.jpg", "/c/Sports/001.jpg", "/c/Sports/002.jpg"]);
+    }
+
+    #[test]
+    fn curate_handles_unicode_filenames() {
+        // Latin-1 accented chars have codepoints > ASCII, so with our
+        // deterministic Unicode-code-point ordering, é (0xE9) sorts
+        // after b (0x62). Two of the three names are ASCII so they
+        // demonstrate case-insensitive alpha ordering; the third
+        // ensures accented chars don't panic and land where expected.
+        let photos = vec![
+            RankedPhoto { path: "/c/apple.jpg".into(),  source: "/c/apple.jpg".into(),  sharpness: 9.0 },
+            RankedPhoto { path: "/c/Banana.jpg".into(), source: "/c/Banana.jpg".into(), sharpness: 8.0 },
+            RankedPhoto { path: "/c/été.jpg".into(),    source: "/c/été.jpg".into(),    sharpness: 7.0 },
+        ];
+        let out = curate(&photos, 10);
+        let names: Vec<String> = out.iter()
+            .map(|p| p.source.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(names, vec!["apple.jpg", "Banana.jpg", "été.jpg"]);
+    }
+
+    #[test]
+    fn natural_cmp_handles_multi_char_case_folding() {
+        use std::cmp::Ordering;
+        // Turkish dotted-capital-I lowercases to i + combining dot
+        // (two codepoints). A naive `to_lowercase().next()` per-char
+        // would only see 'i' and drop the combining dot; full-string
+        // lowercasing preserves both codepoints so an İ-name compares
+        // against a pre-composed "i\u{0307}"-name as equal.
+        assert_eq!(natural_cmp_ignore_case("İ", "i\u{0307}"), Ordering::Equal);
+        // ASCII case-insensitivity still works after the multi-char
+        // pathway.
+        assert_eq!(natural_cmp_ignore_case("Apple", "apple"), Ordering::Equal);
+        assert_eq!(natural_cmp_ignore_case("APPLE", "banana"), Ordering::Less);
+    }
+
+    #[test]
+    fn natural_cmp_handles_arbitrarily_long_numbers() {
+        use std::cmp::Ordering;
+        // 40- and 41-digit numbers overflow u128. The old parsing
+        // implementation would collapse both to u128::MAX and compare
+        // equal; the new string-based compare handles it correctly.
+        let a = format!("a{}", "9".repeat(40));  // 40 nines
+        let b = format!("a{}", "1".repeat(41));  // 41 ones — larger
+        assert_eq!(natural_cmp_ignore_case(&a, &b), Ordering::Less);
+        // Leading zeros: equal numeric value, shorter total run first.
+        assert_eq!(natural_cmp_ignore_case("a1", "a01"), Ordering::Less);
+        assert_eq!(natural_cmp_ignore_case("a01", "a001"), Ordering::Less);
+        // Different numeric values with different leading-zero counts.
+        assert_eq!(natural_cmp_ignore_case("a09", "a10"), Ordering::Less);
+        // Zero vs anything.
+        assert_eq!(natural_cmp_ignore_case("a0", "a1"), Ordering::Less);
+    }
+
+    #[test]
+    fn curate_handles_empty_source_paths() {
+        // Degenerate edge case: paths with no filename (e.g. "" or "/")
+        // should not panic. They tie on the natural-cmp key but the
+        // OsStr tie-break still gives a stable total order.
+        let photos = vec![
+            RankedPhoto { path: "".into(),  source: "".into(),  sharpness: 9.0 },
+            RankedPhoto { path: "/".into(), source: "/".into(), sharpness: 8.0 },
+            RankedPhoto { path: "/a.jpg".into(), source: "/a.jpg".into(), sharpness: 7.0 },
+        ];
+        let out = curate(&photos, 10);
+        assert_eq!(out.len(), 3, "no photos dropped");
+    }
+
+    #[test]
+    fn natural_cmp_number_boundaries() {
+        use std::cmp::Ordering;
+        // Same prefix, different numbers.
+        assert_eq!(natural_cmp_ignore_case("a2", "a10"), Ordering::Less);
+        assert_eq!(natural_cmp_ignore_case("a10", "a2"), Ordering::Greater);
+        // Equal numbers, different suffixes.
+        assert_eq!(natural_cmp_ignore_case("a1b", "a1c"), Ordering::Less);
+        // Case-insensitive.
+        assert_eq!(natural_cmp_ignore_case("APPLE", "banana"), Ordering::Less);
+        assert_eq!(natural_cmp_ignore_case("apple", "APPLE"), Ordering::Equal);
+        // Number vs non-number at same position: char comparison.
+        // '0' (0x30) < 'a' (0x61) so numeric side sorts first.
+        assert_eq!(natural_cmp_ignore_case("a1", "aa"), Ordering::Less);
+        // Shorter string is Less at prefix equality.
+        assert_eq!(natural_cmp_ignore_case("a", "ab"), Ordering::Less);
+        assert_eq!(natural_cmp_ignore_case("", ""), Ordering::Equal);
     }
 
     #[test]

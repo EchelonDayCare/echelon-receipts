@@ -4,6 +4,43 @@ All notable changes shipped as a DMG. Only entries the owner has approved
 for release are listed here — "code-complete, awaiting ship approval" work
 lives in the session plan.md until it ships.
 
+## v3.3.0 — Class Reel (code-complete, awaiting ship approval)
+
+One-tap "class reel" from the Graduation module: combines every
+graduating kid's photos into a single 10–12 minute MP4 where each
+kid gets a name card + ~30 seconds of their photos, xfade-chained
+together with music underneath. Perfect for graduation ceremonies
+where you want a single hit-play video instead of clicking through
+each per-kid reel.
+
+### Added
+- **🎬 Class reel button** in the Graduation module. Renders a
+  `Class-Reel-<year>.mp4` alongside the per-kid reels.
+- **Two-pass render**: silent per-kid segment (name card + Ken Burns
+  photos) → concat with xfades + music, loudnorm-normalized and
+  faded out over the last 3 s.
+- **Inline settings panel**: seconds per kid (default 30), photos per
+  kid (default 6), name-card duration (default 1.5 s), resolution
+  (1080p / 720p).
+- **Custom playback order** via HTML5 native drag-and-drop with ↑↓
+  fallback buttons. Per-kid checkboxes to exclude any kid from the
+  reel. "Reset to A–Z" resets both. Order + exclusions persist per
+  graduating year.
+- **Progress bar** reports `class-reel-seg-N-of-M` and
+  `class-reel-concat` stages so the user sees which kid is currently
+  encoding.
+- **Skipped-kids list** in the result summary: any kid whose folder
+  is missing or empty is silently skipped and reported by name.
+- **System font auto-detection** for name cards: Arial Bold on
+  Windows, Helvetica on macOS, DejaVu Sans on Linux. Falls back to a
+  text-less colored breather with a warning if none is found.
+
+### Notes
+- FFmpeg 7.x sidecar required (uses `-/filter_complex` script syntax).
+- Class-reel FPS + xfade duration are locked at 30 fps / 0.6 s via
+  `class_reel::CLASS_REEL_FPS` + `CLASS_REEL_XFADE_SEC` — both passes
+  read from the same constants so they can't drift.
+
 ## v1.8.0 — Organizer Voice Capture (code-complete, awaiting ship approval)
 
 **Also in this batch (unreleased, awaiting same ship):**

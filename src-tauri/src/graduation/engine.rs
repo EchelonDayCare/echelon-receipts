@@ -60,12 +60,16 @@ impl HwEncoder {
         #[cfg(not(any(target_os = "macos", target_os = "windows")))] { HwEncoder::OpenH264 }
     }
 
-    fn ffmpeg_codec(self) -> &'static str {
+    pub fn ffmpeg_codec_name(self) -> &'static str {
         match self {
             HwEncoder::VideoToolbox => "h264_videotoolbox",
             HwEncoder::MediaFoundation => "h264_mf",
             HwEncoder::OpenH264 => "libopenh264",
         }
+    }
+
+    fn ffmpeg_codec(self) -> &'static str {
+        self.ffmpeg_codec_name()
     }
 }
 
@@ -73,7 +77,7 @@ impl HwEncoder {
 /// picks the next kind in this list (wrapping). Chosen for visual
 /// variety without being gimmicky — mostly slides/wipes, a couple of
 /// dissolves/circles/zooms for spice.
-const TRANSITIONS: &[&str] = &[
+pub const TRANSITIONS: &[&str] = &[
     "slideleft",
     "slideup",
     "wiperight",

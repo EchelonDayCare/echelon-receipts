@@ -22,7 +22,7 @@ use tauri::{AppHandle, Emitter, Manager, State};
 use tauri_plugin_shell::process::CommandChild;
 use tauri_plugin_shell::ShellExt;
 
-use crate::graduation::{curate, engine, paths, pptx, preflight, progress};
+use crate::graduation::{class_reel, curate, engine, paths, pptx, preflight, progress};
 use crate::db_gate::DbGate;
 
 /// Total reel duration accounting for xfade overlaps.
@@ -848,6 +848,371 @@ pub async fn graduation_render_slides(
     })
 }
 
+// ── Class-reel render ────────────────────────────────────────────────
+
+#[derive(Debug, Deserialize)]
+pub struct RenderClassReelRequest {
+    /// Kids in display order. Frontend is responsible for the ordering
+    /// choice (custom drag-drop → alphabetical fallback → scaffold
+    /// order). Backend renders in the order it receives.
+    pub segments: Vec<ClassReelSegmentIn>,
+    pub output_folder: String,
+    pub music_track: Option<String>,
+    pub music_folder: Option<String>,
+    pub year: u32,
+    /// Target seconds per kid. 30s default. Photo hold time is derived:
+    /// (seconds_per_kid - name_card_sec) / photos_per_kid.
+    pub seconds_per_kid: f64,
+    /// How many photos to include per kid. Curate picks the top-N by
+    /// sharpness from each folder. Set high (e.g. 999) for "all photos
+    /// auto-fit to duration".
+    pub photos_per_kid: usize,
+    /// Name-card duration in seconds. 0 disables the card entirely.
+    pub name_card_sec: f64,
+    /// Output resolution. 1920x1080 default; frontend may downshift
+    /// to 1280x720 for faster export on older hardware.
+    pub width: u32,
+    pub height: u32,
+    pub job_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ClassReelSegmentIn {
+    pub student_id: i64,
+    pub display_name: String,
+    pub source_folder: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct RenderClassReelResponse {
+    pub output_path: String,
+    pub frames_encoded: u64,
+    pub duration_ms: i64,
+    pub segments_rendered: usize,
+    /// Kids that couldn't render (empty photo folder / cancelled) and
+    /// were skipped. Surfaces to the UI so the user knows why the
+    /// output has fewer segments than requested.
+    pub skipped: Vec<String>,
+    pub music_used: Option<String>,
+}
+
+#[tauri::command]
+pub async fn graduation_render_class_reel(
+    app: AppHandle,
+    state: State<'_, RenderState>,
+    db_gate: State<'_, DbGate>,
+    req: RenderClassReelRequest,
+) -> Result<RenderClassReelResponse, String> {
+    if req.segments.is_empty() {
+        return Err("No kids provided for class reel".to_string());
+    }
+    let job_id = sanitize_job_id(&req.job_id)?;
+    reset_cancelled(&state);
+
+    let cache_root = paths::cache_dir(&app)?;
+    let heic_cache = cache_root.join("heic");
+    let _ = paths::gc_cache(&heic_cache, 30, 2 * 1024 * 1024 * 1024);
+
+    // Resolve system font once; copied per-job into scratch dir so
+    // drawtext sees a bare filename (no path escaping). If no font
+    // resolves, segments render with a text-less colored breather.
+    let system_font = class_reel::resolve_system_font();
+    if system_font.is_none() {
+        let _ = app.emit(
+            "graduation://log",
+            LogPayload {
+                job_id: job_id.clone(),
+                level: "warn".into(),
+                message: "No system font found for name cards — segments will \
+                          render with a colored breather (no text). Install \
+                          Arial or DejaVu Sans for named cards."
+                    .into(),
+            },
+        );
+    }
+
+    // Resolve music track precedence: explicit > music_folder pick > bundled default.
+    let explicit_music: Option<PathBuf> = req
+        .music_track
+        .as_ref()
+        .filter(|s| !s.is_empty())
+        .map(|s| paths::validate_file(s))
+        .transpose()?;
+    let auto_music: Option<PathBuf> = if explicit_music.is_none() {
+        req.music_folder
+            .as_ref()
+            .filter(|s| !s.is_empty())
+            .and_then(|f| paths::validate_folder(f).ok())
+            .and_then(|f| paths::pick_random_audio_in(&f))
+    } else {
+        None
+    };
+    let music_track: Option<PathBuf> = explicit_music
+        .or(auto_music)
+        .or_else(|| paths::default_music_track(&app));
+
+    let out_dir = paths::validate_writable_dir(&req.output_folder)?;
+    std::fs::create_dir_all(&out_dir).map_err(|e| format!("mkdir output: {e}"))?;
+    let final_path = out_dir.join(format!("Class-Reel-{}.mp4", req.year));
+    let tmp_path = out_dir.join(format!("Class-Reel-{}.mp4.tmp", req.year));
+
+    // Per-job cache tree: segments live here until the concat pass.
+    // Cleaned up at the end (success or failure).
+    let job_scratch = cache_root.join(format!("classreel-{}", job_id));
+    std::fs::create_dir_all(&job_scratch)
+        .map_err(|e| format!("mkdir classreel scratch: {e}"))?;
+    let font_alias_name = "namecard.ttf".to_string();
+    if let Some(font) = &system_font {
+        let dst = job_scratch.join(&font_alias_name);
+        std::fs::copy(font, &dst).map_err(|e| format!("copy font: {e}"))?;
+    }
+
+    let total_kids = req.segments.len();
+    let start = std::time::Instant::now();
+    let mut skipped: Vec<String> = Vec::new();
+    let mut segment_files: Vec<PathBuf> = Vec::new();
+    let mut segment_durations: Vec<f64> = Vec::new();
+    let mut total_frames: u64 = 0;
+
+    // Pass 1: render each kid's silent segment.
+    for (idx, seg_in) in req.segments.iter().enumerate() {
+        if is_cancelled(&state) {
+            let _ = std::fs::remove_dir_all(&job_scratch);
+            return Err("cancelled".into());
+        }
+        let human_idx = idx + 1;
+        let stage = format!("class-reel-seg-{human_idx}-of-{total_kids}");
+        let _ = app.emit(
+            "graduation://log",
+            LogPayload {
+                job_id: job_id.clone(),
+                level: "info".into(),
+                message: format!(
+                    "→ [{human_idx}/{total_kids}] Rendering {} …",
+                    seg_in.display_name,
+                ),
+            },
+        );
+
+        let source = match paths::validate_folder(&seg_in.source_folder) {
+            Ok(f) => f,
+            Err(e) => {
+                skipped.push(format!("{} (folder error: {e})", seg_in.display_name));
+                continue;
+            }
+        };
+        let scan = {
+            let src = source.clone();
+            let cache = heic_cache.clone();
+            let flag = Arc::clone(&state.cancel_flag);
+            tokio::task::spawn_blocking(move || {
+                curate::scan_and_rank_cancellable(&src, &cache, &|| {
+                    flag.load(Ordering::Relaxed)
+                })
+            })
+            .await
+            .map_err(|e| format!("curate join: {e}"))?
+        };
+        if is_cancelled(&state) {
+            let _ = std::fs::remove_dir_all(&job_scratch);
+            return Err("cancelled".into());
+        }
+        if scan.photos.is_empty() {
+            skipped.push(format!("{} (no photos)", seg_in.display_name));
+            let _ = app.emit(
+                "graduation://log",
+                LogPayload {
+                    job_id: job_id.clone(),
+                    level: "warn".into(),
+                    message: format!(
+                        "  ⚠ Skipping {} — no photos in {}",
+                        seg_in.display_name, seg_in.source_folder,
+                    ),
+                },
+            );
+            continue;
+        }
+        let curated = curate::curate(&scan.photos, req.photos_per_kid.max(1));
+        let n_photos = curated.len();
+        // Derive per-photo duration so total segment fits the budget.
+        // Cap the per-photo hold at 6s so a kid with only 1-2 photos
+        // doesn't get an interminable static frame — the segment is
+        // allowed to run shorter than seconds_per_kid in that case.
+        // The 0.8s floor prevents blink-and-miss holds when a kid has
+        // way more photos than the budget allows.
+        const PHOTO_SEC_MIN: f64 = 0.8;
+        const PHOTO_SEC_MAX: f64 = 6.0;
+        let usable = (req.seconds_per_kid - req.name_card_sec).max(1.0);
+        let photo_sec = (usable / n_photos as f64)
+            .clamp(PHOTO_SEC_MIN, PHOTO_SEC_MAX);
+
+        // Alias into per-segment scratch so filter graph refs stay short.
+        let seg_scratch = job_scratch.join(format!("seg-{human_idx:03}"));
+        let sources: Vec<PathBuf> = curated.iter().map(|p| p.path.clone()).collect();
+        let aliases = alias_photos(&sources, &seg_scratch)?;
+        // Copy font into seg scratch too so its cwd (seg_scratch) sees it.
+        if system_font.is_some() {
+            let src = job_scratch.join(&font_alias_name);
+            let dst = seg_scratch.join(&font_alias_name);
+            let _ = std::fs::copy(&src, &dst);
+        }
+
+        let filter_script = seg_scratch.join("segment.filter");
+        let seg_out_tmp = seg_scratch.join("segment.mp4");
+
+        let spec = class_reel::SegmentSpec {
+            display_name: seg_in.display_name.clone(),
+            photos: aliases,
+            output: PathBuf::from("segment.mp4"),
+            filter_script: PathBuf::from("segment.filter"),
+            name_card_sec: req.name_card_sec,
+            name_card_font: if system_font.is_some() {
+                Some(font_alias_name.clone())
+            } else {
+                None
+            },
+            photo_sec,
+            transition_sec: class_reel::CLASS_REEL_XFADE_SEC,
+            width: req.width,
+            height: req.height,
+            fps: class_reel::CLASS_REEL_FPS,
+            video_bitrate_kbps: if req.height >= 1080 { 5000 } else { 2500 },
+            encoder: engine::HwEncoder::for_current_os(),
+            emit_progress: true,
+        };
+        let filter_text = class_reel::build_segment_filter(&spec);
+        std::fs::write(&filter_script, &filter_text)
+            .map_err(|e| format!("write filter script: {e}"))?;
+        let args = class_reel::build_segment_cmd(&spec);
+
+        let outcome = match spawn_and_stream(
+            &app,
+            state.clone(),
+            &job_id,
+            &stage,
+            args,
+            Some(seg_scratch.clone()),
+        )
+        .await
+        {
+            Ok(o) => o,
+            Err(e) => {
+                let _ = std::fs::remove_dir_all(&job_scratch);
+                return Err(format!(
+                    "segment {human_idx}/{total_kids} ({}) failed: {e}",
+                    seg_in.display_name
+                ));
+            }
+        };
+        total_frames += outcome.frames;
+        segment_files.push(seg_out_tmp);
+        segment_durations.push(spec.computed_duration());
+        let _ = app.emit(
+            "graduation://log",
+            LogPayload {
+                job_id: job_id.clone(),
+                level: "info".into(),
+                message: format!(
+                    "  ✓ [{human_idx}/{total_kids}] {} — {} photos, {:.1}s",
+                    seg_in.display_name,
+                    n_photos,
+                    spec.computed_duration(),
+                ),
+            },
+        );
+    }
+
+    if segment_files.is_empty() {
+        let _ = std::fs::remove_dir_all(&job_scratch);
+        return Err(format!(
+            "No segments rendered — all {total_kids} kids were skipped. \
+             Add photos to each kid's folder and retry."
+        ));
+    }
+
+    // Pass 2: concat.
+    if is_cancelled(&state) {
+        let _ = std::fs::remove_dir_all(&job_scratch);
+        return Err("cancelled".into());
+    }
+    let _ = app.emit(
+        "graduation://log",
+        LogPayload {
+            job_id: job_id.clone(),
+            level: "info".into(),
+            message: format!(
+                "→ Combining {} segments{} …",
+                segment_files.len(),
+                if music_track.is_some() { " + music" } else { "" },
+            ),
+        },
+    );
+    let concat_filter_script = job_scratch.join("concat.filter");
+    let concat_spec = class_reel::ConcatSpec {
+        segments: segment_files.clone(),
+        segment_durations: segment_durations.clone(),
+        music_track: music_track.clone(),
+        output: tmp_path.clone(),
+        filter_script: concat_filter_script.clone(),
+        width: req.width,
+        height: req.height,
+        fps: class_reel::CLASS_REEL_FPS,
+        transition_sec: class_reel::CLASS_REEL_XFADE_SEC,
+        video_bitrate_kbps: if req.height >= 1080 { 6000 } else { 3000 },
+        encoder: engine::HwEncoder::for_current_os(),
+        emit_progress: true,
+    };
+    let concat_text = class_reel::build_concat_filter(&concat_spec);
+    std::fs::write(&concat_filter_script, &concat_text)
+        .map_err(|e| format!("write concat script: {e}"))?;
+    let concat_args = class_reel::build_concat_cmd(&concat_spec);
+
+    let concat_outcome = match spawn_and_stream(
+        &app,
+        state.clone(),
+        &job_id,
+        "class-reel-concat",
+        concat_args,
+        None,
+    )
+    .await
+    {
+        Ok(o) => o,
+        Err(e) => {
+            let _ = std::fs::remove_file(&tmp_path);
+            let _ = std::fs::remove_dir_all(&job_scratch);
+            return Err(format!("concat pass failed: {e}"));
+        }
+    };
+    total_frames += concat_outcome.frames;
+
+    let _ = std::fs::remove_dir_all(&job_scratch);
+    let published = paths::atomic_publish(&tmp_path, &final_path)?;
+    let output_path = published.to_string_lossy().into_owned();
+    let duration_ms = start.elapsed().as_millis() as i64;
+
+    record_render(
+        &db_gate,
+        "class_reel",
+        req.year as i64,
+        None,
+        &output_path,
+        Some(duration_ms),
+        Some(total_frames as i64),
+        None,
+    )
+    .await;
+
+    Ok(RenderClassReelResponse {
+        output_path,
+        frames_encoded: total_frames,
+        duration_ms,
+        segments_rendered: segment_files.len(),
+        skipped,
+        music_used: music_track.map(|p| p.to_string_lossy().into_owned()),
+    })
+}
+
 // ── Internals ─────────────────────────────────────────────────────────
 
 struct RenderOutcome {
@@ -859,7 +1224,7 @@ async fn spawn_and_stream(
     app: &AppHandle,
     state: State<'_, RenderState>,
     job_id: &str,
-    stage: &'static str,
+    stage: &str,
     args: Vec<String>,
     cwd: Option<PathBuf>,
 ) -> Result<RenderOutcome, String> {
