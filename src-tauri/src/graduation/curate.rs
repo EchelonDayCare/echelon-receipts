@@ -218,6 +218,70 @@ pub fn curate(photos: &[RankedPhoto], target_count: usize) -> Vec<RankedPhoto> {
     selected
 }
 
+/// Outcome of a [`hero_first`] reorder.
+#[derive(Debug, Clone)]
+pub struct HeroFirstResult {
+    /// Final photo path list in playback order.
+    pub photos: Vec<PathBuf>,
+    /// Number of hero photos successfully placed at the front.
+    pub hero_count: usize,
+    /// Number of hero_sources that were requested but not found in `scan`
+    /// (e.g. rename after cache, HEIC that failed to decode). Callers
+    /// SHOULD emit an operator-facing warning when this is non-zero so
+    /// the operator can diagnose why their named photo didn't play first.
+    pub missed_hero_count: usize,
+}
+
+/// Reorder photos so name-matched "hero" images play first.
+///
+/// `hero_sources` should be the output of [`paths::child_photos`] — i.e.
+/// original user file paths matching the child's display name, already
+/// sorted in tier priority order (full-name first, then first+last, then
+/// first-only).
+///
+/// Behaviour:
+/// - Any hero present in `scan` is emitted first, in the given tier order.
+///   This forces the hero into the reel even if [`curate`] dropped it for
+///   low sharpness — the whole point of a "hero" is that the user picked
+///   it, so we respect that choice over the sharpness heuristic.
+/// - Remaining `curated` photos follow in their original (natural sort)
+///   order, deduped against the hero set.
+/// - When `hero_sources` is empty (no name match found), the curated
+///   order is returned unchanged — zero regression on folders without a
+///   named photo.
+pub fn hero_first(
+    curated: &[RankedPhoto],
+    scan: &[RankedPhoto],
+    hero_sources: &[PathBuf],
+) -> HeroFirstResult {
+    if hero_sources.is_empty() {
+        return HeroFirstResult {
+            photos: curated.iter().map(|p| p.path.clone()).collect(),
+            hero_count: 0,
+            missed_hero_count: 0,
+        };
+    }
+    let hero_set: std::collections::HashSet<&PathBuf> = hero_sources.iter().collect();
+    let mut heroes: Vec<PathBuf> = Vec::with_capacity(hero_sources.len());
+    let mut missed = 0usize;
+    for h in hero_sources {
+        match scan.iter().find(|rp| rp.source == *h) {
+            Some(rp) => heroes.push(rp.path.clone()),
+            None => missed += 1,
+        }
+    }
+    let rest = curated
+        .iter()
+        .filter(|rp| !hero_set.contains(&rp.source))
+        .map(|rp| rp.path.clone());
+    let hero_count = heroes.len();
+    HeroFirstResult {
+        photos: heroes.into_iter().chain(rest).collect(),
+        hero_count,
+        missed_hero_count: missed,
+    }
+}
+
 /// Natural, case-insensitive comparison — treats runs of digits as
 /// numeric values so `"IMG_2"` sorts before `"IMG_10"`. Both Windows
 /// Explorer and macOS Finder use this convention by default; a plain
@@ -780,6 +844,119 @@ mod tests {
         ];
         let out = curate(&photos, 10);
         assert_eq!(out.len(), 3, "no photos dropped");
+    }
+
+    #[test]
+    fn hero_first_moves_named_photo_to_front_when_curated() {
+        let scan = vec![
+            RankedPhoto { path: "/c/b.jpg".into(),     source: "/c/b.jpg".into(),     sharpness: 5.0 },
+            RankedPhoto { path: "/c/hero.jpg".into(),  source: "/c/hero.jpg".into(),  sharpness: 9.0 },
+            RankedPhoto { path: "/c/z.jpg".into(),     source: "/c/z.jpg".into(),     sharpness: 3.0 },
+        ];
+        let curated = scan.clone();
+        let heroes = vec![PathBuf::from("/c/hero.jpg")];
+        let out = hero_first(&curated, &scan, &heroes);
+        assert_eq!(out.hero_count, 1);
+        assert_eq!(out.missed_hero_count, 0);
+        assert_eq!(out.photos, vec![
+            PathBuf::from("/c/hero.jpg"),
+            PathBuf::from("/c/b.jpg"),
+            PathBuf::from("/c/z.jpg"),
+        ]);
+    }
+
+    #[test]
+    fn hero_first_forces_hero_when_curate_dropped_it() {
+        // Hero has low sharpness so curate dropped it — but the user
+        // named it deliberately, so we still play it first.
+        let scan = vec![
+            RankedPhoto { path: "/c/hero.jpg".into(), source: "/c/hero.jpg".into(), sharpness: 0.5 },
+            RankedPhoto { path: "/c/a.jpg".into(),    source: "/c/a.jpg".into(),    sharpness: 9.0 },
+            RankedPhoto { path: "/c/b.jpg".into(),    source: "/c/b.jpg".into(),    sharpness: 8.0 },
+        ];
+        let curated = vec![
+            RankedPhoto { path: "/c/a.jpg".into(), source: "/c/a.jpg".into(), sharpness: 9.0 },
+            RankedPhoto { path: "/c/b.jpg".into(), source: "/c/b.jpg".into(), sharpness: 8.0 },
+        ];
+        let heroes = vec![PathBuf::from("/c/hero.jpg")];
+        let out = hero_first(&curated, &scan, &heroes);
+        assert_eq!(out.hero_count, 1);
+        assert_eq!(out.photos, vec![
+            PathBuf::from("/c/hero.jpg"),
+            PathBuf::from("/c/a.jpg"),
+            PathBuf::from("/c/b.jpg"),
+        ]);
+    }
+
+    #[test]
+    fn hero_first_reports_missed_hero_when_not_in_scan() {
+        // Operator renamed a file expecting it to be the hero, but the
+        // scan didn't include it (e.g. cache miss, unsupported format).
+        // The caller uses `missed_hero_count > 0` to warn the operator.
+        let scan = vec![
+            RankedPhoto { path: "/c/a.jpg".into(), source: "/c/a.jpg".into(), sharpness: 9.0 },
+        ];
+        let curated = scan.clone();
+        let heroes = vec![PathBuf::from("/c/ghost.jpg")];
+        let out = hero_first(&curated, &scan, &heroes);
+        assert_eq!(out.hero_count, 0);
+        assert_eq!(out.missed_hero_count, 1, "must flag missed heroes");
+        assert_eq!(out.photos, vec![PathBuf::from("/c/a.jpg")]);
+    }
+
+    #[test]
+    fn hero_first_preserves_curated_order_when_no_hero() {
+        let scan = vec![
+            RankedPhoto { path: "/c/a.jpg".into(), source: "/c/a.jpg".into(), sharpness: 9.0 },
+            RankedPhoto { path: "/c/b.jpg".into(), source: "/c/b.jpg".into(), sharpness: 8.0 },
+        ];
+        let curated = scan.clone();
+        let out = hero_first(&curated, &scan, &[]);
+        assert_eq!(out.hero_count, 0);
+        assert_eq!(out.missed_hero_count, 0);
+        assert_eq!(out.photos, vec![PathBuf::from("/c/a.jpg"), PathBuf::from("/c/b.jpg")]);
+    }
+
+    #[test]
+    fn hero_first_prefers_heic_cache_path_for_hero() {
+        // Real-world: hero file is a HEIC; scan converted it into a
+        // cache JPEG. hero_first must return the *converted* path
+        // (RankedPhoto.path), not the original .heic source.
+        let scan = vec![
+            RankedPhoto {
+                path: "/cache/heic-abc.jpg".into(),
+                source: "/c/Aarav.heic".into(),
+                sharpness: 5.0,
+            },
+            RankedPhoto { path: "/c/other.jpg".into(), source: "/c/other.jpg".into(), sharpness: 9.0 },
+        ];
+        let curated = scan.clone();
+        let heroes = vec![PathBuf::from("/c/Aarav.heic")];
+        let out = hero_first(&curated, &scan, &heroes);
+        assert_eq!(out.photos[0], PathBuf::from("/cache/heic-abc.jpg"));
+    }
+
+    #[test]
+    fn hero_first_multiple_heroes_preserve_tier_order() {
+        let scan = vec![
+            RankedPhoto { path: "/c/AaravSharma.jpg".into(), source: "/c/AaravSharma.jpg".into(), sharpness: 5.0 },
+            RankedPhoto { path: "/c/Aarav.jpg".into(),       source: "/c/Aarav.jpg".into(),       sharpness: 5.0 },
+            RankedPhoto { path: "/c/beach.jpg".into(),       source: "/c/beach.jpg".into(),       sharpness: 9.0 },
+        ];
+        let curated = scan.clone();
+        // Full-name (tier 0) first, first-only (tier 2) second — as
+        // returned by paths::child_photos.
+        let heroes = vec![
+            PathBuf::from("/c/AaravSharma.jpg"),
+            PathBuf::from("/c/Aarav.jpg"),
+        ];
+        let out = hero_first(&curated, &scan, &heroes);
+        assert_eq!(out.hero_count, 2);
+        assert_eq!(out.photos, vec![
+            PathBuf::from("/c/AaravSharma.jpg"),
+            PathBuf::from("/c/Aarav.jpg"),
+            PathBuf::from("/c/beach.jpg"),
+        ]);
     }
 
     #[test]

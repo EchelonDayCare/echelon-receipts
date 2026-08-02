@@ -4,6 +4,33 @@ All notable changes shipped as a DMG. Only entries the owner has approved
 for release are listed here — "code-complete, awaiting ship approval" work
 lives in the session plan.md until it ships.
 
+## v3.9.0 — Hero photo plays first in the reel
+
+If a photo in a kid's folder is named after them (e.g. `Aarav Sharma.jpg`,
+matching the same rule the PPTX slide uses), it now plays as the first
+picture in that kid's reel — right after the name card. This gives the
+slide and the reel a consistent "opening shot" and lets you pick the
+photo that best represents the child without renaming or renumbering.
+
+### Added
+- `curate::hero_first` — reorders the photo list so any name-matched
+  files (via `paths::child_photos`, same matcher as the graduation
+  slides) are emitted first, in tier priority order (full name → first
+  + last → first only). Applies to both the per-child reel and each
+  segment of the class reel.
+- Hero photos are forced in even if `curate` had dropped them for low
+  sharpness — the whole point of a hero is that the operator picked it,
+  so the sharpness heuristic yields.
+- Per-child render logs `Hero photo detected for <name> — playing first.`
+  when a hero is matched, so operators can confirm the wiring.
+
+### Behaviour
+- Zero regression when no hero is named: reels play in natural filename
+  order exactly as before.
+- HEIC heroes work correctly — the returned path points at the decoded
+  JPEG in the HEIC cache, not the raw `.heic`, so FFmpeg is happy on
+  every platform.
+
 ## v3.8.0 — Email graduation reels to parents (3-click flow)
 
 After per-child reels are rendered, the operator can email each kid's MP4

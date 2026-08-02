@@ -597,15 +597,52 @@ pub async fn graduation_render_child(
     let final_path = out_dir.join(format!("{folder_name}.mp4"));
     let tmp_path = out_dir.join(format!("{folder_name}.mp4.tmp"));
 
-    let mut source_photos: Vec<PathBuf> = curated.iter().map(|p| p.path.clone()).collect();
+    let hero_result = curate::hero_first(
+        &curated,
+        &scan.photos,
+        &paths::child_photos(&source, &req.display_name),
+    );
+    let mut source_photos = hero_result.photos;
+    if hero_result.hero_count > 0 {
+        let _ = app.emit(
+            "graduation://log",
+            LogPayload {
+                job_id: job_id.clone(),
+                level: "info".into(),
+                message: format!(
+                    "  Hero photo{} detected for {} — playing first.",
+                    if hero_result.hero_count == 1 { "".to_string() } else { format!("s ({})", hero_result.hero_count) },
+                    req.display_name,
+                ),
+            },
+        );
+    }
+    if hero_result.missed_hero_count > 0 {
+        let _ = app.emit(
+            "graduation://log",
+            LogPayload {
+                job_id: job_id.clone(),
+                level: "warn".into(),
+                message: format!(
+                    "  {} name-matched photo(s) for {} were not in the scan (unsupported format or read error). \
+                     They will NOT play first — check the file format/permissions.",
+                    hero_result.missed_hero_count, req.display_name,
+                ),
+            },
+        );
+    }
     // Prepend a name-card PNG so per-child reels open with the kid's
     // name (same visual language as the class reel). Rendered at the
     // per-child spec's 1280×720 so it composes cleanly into the xfade
     // chain as an ordinary "photo" slot. Failure is non-fatal — we
     // just skip the card and log a warning.
     let namecard_path = cache_root.join(format!("child-{}-namecard.png", job_id));
+    let mut name_card_rendered = false;
     match class_reel::render_name_card_png(&req.display_name, 1280, 720, &namecard_path) {
-        Ok(()) => source_photos.insert(0, namecard_path.clone()),
+        Ok(()) => {
+            source_photos.insert(0, namecard_path.clone());
+            name_card_rendered = true;
+        }
         Err(e) => {
             let _ = app.emit(
                 "graduation://log",
@@ -623,8 +660,16 @@ pub async fn graduation_render_child(
     // F4: hard-link → short alias to keep Windows argv under 32 KB.
     let alias_dir = cache_root.join(format!("child-{}-aliases", job_id));
     let photos = alias_photos(&source_photos, &alias_dir)?;
-    // Build the same ReelSpec build_per_child_cmd would produce so we
-    // can render its filter script deterministically before spawning.
+    // Recompute duration from the actual rendered photo count. When
+    // hero_first adds a photo that curate had dropped for low sharpness,
+    // the final reel has one more photo than `curated.len()`, and the
+    // audio fade-out placed via `total_duration_sec` would otherwise
+    // start too early (Codex-caught, v3.9.0).
+    let rendered_photo_count = if name_card_rendered {
+        photos.len().saturating_sub(1)
+    } else {
+        photos.len()
+    };
     let per_child_spec = engine::ReelSpec {
         photos: photos.clone(),
         music_track: music_track.clone(),
@@ -634,7 +679,7 @@ pub async fn graduation_render_child(
         height: 720,
         avg_photo_sec: req.avg_photo_sec,
         transition_sec: 0.6,
-        total_duration_sec: spec_total_duration(curated.len(), req.avg_photo_sec, 0.6),
+        total_duration_sec: spec_total_duration(rendered_photo_count.max(1), req.avg_photo_sec, 0.6),
         fps: 30,
         video_bitrate_kbps: 2000,
         encoder: engine::HwEncoder::for_current_os(),
@@ -1053,7 +1098,44 @@ pub async fn graduation_render_class_reel(
             continue;
         }
         let curated = curate::curate(&scan.photos, req.photos_per_kid.max(1));
-        let n_photos = curated.len();
+        // Hero-first must be computed BEFORE the per-photo duration math
+        // because it can add a photo that curate dropped for low sharpness
+        // (Codex-caught, v3.9.0). If we still used curated.len() the
+        // segment would overrun its per-kid budget by one photo_sec.
+        let hero_result = curate::hero_first(
+            &curated,
+            &scan.photos,
+            &paths::child_photos(&source, &seg_in.display_name),
+        );
+        if hero_result.hero_count > 0 {
+            let _ = app.emit(
+                "graduation://log",
+                LogPayload {
+                    job_id: job_id.clone(),
+                    level: "info".into(),
+                    message: format!(
+                        "  Hero photo{} detected for {} — playing first.",
+                        if hero_result.hero_count == 1 { "".to_string() } else { format!("s ({})", hero_result.hero_count) },
+                        seg_in.display_name,
+                    ),
+                },
+            );
+        }
+        if hero_result.missed_hero_count > 0 {
+            let _ = app.emit(
+                "graduation://log",
+                LogPayload {
+                    job_id: job_id.clone(),
+                    level: "warn".into(),
+                    message: format!(
+                        "  {} name-matched photo(s) for {} were not in the scan — check file format/permissions.",
+                        hero_result.missed_hero_count, seg_in.display_name,
+                    ),
+                },
+            );
+        }
+        let sources = hero_result.photos;
+        let n_photos = sources.len();
         // Derive per-photo duration so total segment fits the budget.
         // Cap the per-photo hold at 6s so a kid with only 1-2 photos
         // doesn't get an interminable static frame — the segment is
@@ -1063,12 +1145,11 @@ pub async fn graduation_render_class_reel(
         const PHOTO_SEC_MIN: f64 = 0.8;
         const PHOTO_SEC_MAX: f64 = 6.0;
         let usable = (req.seconds_per_kid - req.name_card_sec).max(1.0);
-        let photo_sec = (usable / n_photos as f64)
+        let photo_sec = (usable / n_photos.max(1) as f64)
             .clamp(PHOTO_SEC_MIN, PHOTO_SEC_MAX);
 
         // Alias into per-segment scratch so filter graph refs stay short.
         let seg_scratch = job_scratch.join(format!("seg-{human_idx:03}"));
-        let sources: Vec<PathBuf> = curated.iter().map(|p| p.path.clone()).collect();
         let aliases = alias_photos(&sources, &seg_scratch)?;
         // v3.5.0: render this kid's name card as a PNG into the seg
         // scratch dir. Failing to render (e.g. disk full) downgrades
