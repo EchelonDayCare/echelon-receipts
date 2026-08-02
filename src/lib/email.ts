@@ -129,7 +129,7 @@ async function renderReceiptPdfBytes(r: Receipt, s: SettingsMap): Promise<Uint8A
   }
 }
 
-function bytesToBase64(bytes: Uint8Array): string {
+export function bytesToBase64(bytes: Uint8Array): string {
   let s = "";
   for (let i = 0; i < bytes.length; i += 8192) {
     s += String.fromCharCode(...bytes.subarray(i, i + 8192));

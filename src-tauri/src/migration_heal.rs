@@ -32,7 +32,7 @@ use tauri::Manager;
 /// Kept in lockstep with the Migration list in lib.rs — a mismatch here would
 /// mean we forgot to update the heal after adding a migration.
 fn expected_checksums() -> Vec<(i64, Vec<u8>)> {
-    let files: [(i64, &str); 12] = [
+    let files: [(i64, &str); 13] = [
         (1, include_str!("../migrations/001_initial.sql")),
         (2, include_str!("../migrations/002_pdf_folder.sql")),
         (3, include_str!("../migrations/003_email.sql")),
@@ -45,6 +45,7 @@ fn expected_checksums() -> Vec<(i64, Vec<u8>)> {
         (10, include_str!("../migrations/010_child_attendance.sql")),
         (11, include_str!("../migrations/011_no_lunch.sql")),
         (12, include_str!("../migrations/012_graduation_renders.sql")),
+        (13, include_str!("../migrations/013_grad_email.sql")),
     ];
     files
         .iter()
@@ -208,11 +209,11 @@ mod tests {
     #[test]
     fn expected_matches_committed_files() {
         // Every migration in the constant list must exist and be readable.
-        // Regenerating expected_checksums() must succeed and produce 12 rows.
+        // Regenerating expected_checksums() must succeed and produce 13 rows.
         let ck = expected_checksums();
-        assert_eq!(ck.len(), 12);
+        assert_eq!(ck.len(), 13);
         for (v, h) in &ck {
-            assert!(*v >= 1 && *v <= 12);
+            assert!(*v >= 1 && *v <= 13);
             assert_eq!(h.len(), 48, "sha384 must be 48 bytes for v{v}");
         }
     }

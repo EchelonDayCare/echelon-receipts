@@ -3,12 +3,15 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
 import { openPath } from "@tauri-apps/plugin-opener";
+import { readDir, exists, stat } from "@tauri-apps/plugin-fs";
 import {
   getSettings,
   setSetting,
   listStudents,
   upsertStudent,
 } from "../lib/db";
+import { sendGradReelEmail } from "../lib/gradEmail";
+import { parseRecipients } from "../lib/email";
 import type { Student } from "../types";
 
 // Payloads mirrored from src-tauri/src/graduation/commands.rs
@@ -28,6 +31,22 @@ type PreflightReport = {
 };
 
 type ChildFolder = { student_id: number; display_name: string; folder: string };
+// v3.8.0: one row in the "Email reels to parents" modal. Each row maps
+// a discovered MP4 in the output folder to the matching student in the
+// current grad year. Rows with `include=false` are skipped on send;
+// rows where `emails` is empty are automatically excluded and shown
+// grayed with a "no email on file" note.
+type EmailRow = {
+  student_id: number;
+  student_name: string;
+  parent_name: string;
+  emails: string[];       // parsed from students.email
+  email_field_raw: string;
+  video_path: string;
+  video_filename: string;
+  video_size_bytes: number;
+  include: boolean;
+};
 type Layout = {
   root: string;
   reel_photos: string;
@@ -128,6 +147,26 @@ export default function Graduation() {
   // resolved) and flicker the bar. We only accept progress events
   // whose job_id is in `activeJobsRef`.
   const activeJobsRef = useRef<Set<string>>(new Set());
+  // v3.8.0: Email-reels-to-parents flow. `emailModal` is null when the
+  // modal is closed. When open, it holds the enumerated per-child reels
+  // discovered on disk in the output folder (only kids whose MP4 has
+  // been rendered actually appear — no "email a non-existent file").
+  const [emailModal, setEmailModal] = useState<null | {
+    rows: EmailRow[];
+    subject: string;
+    body: string;
+    sending: boolean;
+    log: string[];
+    // v3.8.0 review-fix: track whether templates have been edited so
+    // we can persist them on Close (not only on Send). This preserves
+    // draft template changes across modal open/close cycles.
+    templateDirty: boolean;
+  }>(null);
+  // v3.8.0 review-fix (Sonnet finding #3): allow the operator to
+  // interrupt a batch send that's stuck on a slow SMTP handshake. This
+  // ref is watched between iterations of the send loop — it can't
+  // abort an in-flight lettre call, but it stops queueing new work.
+  const emailCancelRef = useRef(false);
 
   useEffect(() => {
     (async () => {
@@ -647,6 +686,232 @@ export default function Graduation() {
     }
   }
 
+  // v3.8.0: enumerate rendered per-child MP4s in the output folder and
+  // build a per-student send list. The filename convention is
+  // `{padded_student_id}-{sanitized_name}.mp4` (see
+  // student_folder_name in graduation/paths.rs). We match by the
+  // leading numeric id — stripping leading zeros so 5+ digit ids still
+  // work (student_folder_name uses `{:04}` which is MINIMUM 4 digits,
+  // not a fixed width). Kids present in the `graduating` list but
+  // with no MP4 on disk are silently skipped (they haven't been
+  // rendered yet). Kids present on disk but not currently in
+  // `graduating` are also skipped.
+  async function openEmailModal() {
+    if (!layout) return;
+    // v3.8.0 review-fix (Sonnet #2): normalise the output folder path
+    // to strip any trailing separator so we don't produce
+    // `C:\...\output\\1234-alice.mp4` when the picker returned a path
+    // ending in `\`. Rust plugin-fs canonicalisation isn't reliable
+    // enough to lean on here.
+    const outDir = layout.output.replace(/[\\/]+$/, "");
+    const sep = outDir.includes("\\") ? "\\" : "/";
+    let entries: { name: string }[];
+    try {
+      const raw = await readDir(outDir);
+      entries = raw
+        .filter((e) => !e.isDirectory && /\.mp4$/i.test(e.name))
+        .map((e) => ({ name: e.name }));
+    } catch (e) {
+      appendLog(`Could not read output folder: ${e}`);
+      return;
+    }
+    // v3.8.0 review-fix (Sonnet #10): tighten the filename regex to
+    // match the FULL per-child pattern `NNNN-<sanitized>.mp4`. A
+    // manually placed file like `1234-vacation-clip.mp4` still passes
+    // this shape but the risk is intrinsic to filename matching; at
+    // minimum we exclude class reel and year reel outputs (which
+    // don't begin with digits).
+    const perChildRe = /^(\d+)-.+\.mp4$/i;
+    const byId: Map<string, string> = new Map();
+    for (const e of entries) {
+      const m = perChildRe.exec(e.name);
+      if (!m) continue;
+      // Strip leading zeros so `0007-Ann.mp4` maps to id "7".
+      const id = m[1].replace(/^0+/, "") || "0";
+      byId.set(id, e.name);
+    }
+    const rows: EmailRow[] = [];
+    for (const s of graduating) {
+      const filename = byId.get(String(s.id));
+      if (!filename) continue;
+      const emails = parseRecipients(s.email);
+      // v3.8.0 review-fix (Sonnet #7): if both parents have names on
+      // file, greet both ("Mike & Sarah"). This is a per-family
+      // salutation, not per-address — one email still goes to both
+      // addresses on the To: line.
+      const firstNames = [s.father_name, s.mother_name]
+        .filter((n): n is string => !!n && typeof n === "string" && n.trim().length > 0)
+        .map((n) => n.trim().split(/\s+/)[0]);
+      const parentName = firstNames.join(" & ");
+      rows.push({
+        student_id: s.id,
+        student_name: s.name,
+        parent_name: parentName,
+        emails,
+        email_field_raw: s.email || "",
+        video_path: `${outDir}${sep}${filename}`,
+        video_filename: filename,
+        video_size_bytes: 0,
+        include: emails.length > 0,
+      });
+    }
+    // Populate video sizes so the UI can show them and we can pre-flag
+    // any file over the ~25 MB SMTP ceiling. `stat` is best-effort —
+    // any row we can't stat is left at size 0 and treated as unknown
+    // (still allowed to send; SMTP will surface the real error).
+    await Promise.all(
+      rows.map(async (r) => {
+        try {
+          const info = await stat(r.video_path);
+          r.video_size_bytes = Number(info.size ?? 0);
+          if (r.video_size_bytes === 0) {
+            // Empty or vanished file — exclude by default.
+            r.include = false;
+          }
+        } catch {
+          try {
+            const ok = await exists(r.video_path);
+            if (!ok) r.include = false;
+          } catch {}
+        }
+      }),
+    );
+    // Load templates from settings. If no rows survived, still open
+    // the modal with an empty-state message rather than silently
+    // returning — the user needs feedback that the click did something.
+    const settings = await getSettings();
+    const subjectTpl =
+      settings.grad_reel_email_subject ||
+      "A little graduation memory from Echelon — {{student}} ({{year}})";
+    const bodyTpl =
+      settings.grad_reel_email_body ||
+      "Hi {{parent_name}},\n\nCongratulations to {{student}} on graduating!\n\nWarmly,\nEchelon Daycare";
+    const initialLog: string[] =
+      rows.length === 0
+        ? [
+            "No per-child MP4s found for graduating students yet.",
+            "Render each child's reel first, then come back here.",
+          ]
+        : [];
+    emailCancelRef.current = false;
+    setEmailModal({
+      rows,
+      subject: subjectTpl,
+      body: bodyTpl,
+      sending: false,
+      log: initialLog,
+      templateDirty: false,
+    });
+  }
+
+  async function persistEmailTemplates(subject: string, body: string) {
+    try {
+      await setSetting("grad_reel_email_subject", subject);
+      await setSetting("grad_reel_email_body", body);
+    } catch {
+      // Non-critical — user can re-edit next time.
+    }
+  }
+
+  async function closeEmailModal() {
+    if (!emailModal || emailModal.sending) return;
+    // v3.8.0 review-fix (Sonnet #6): persist template edits on Close
+    // too, not only on Send. Otherwise the operator loses a hand-typed
+    // note if they close the modal to fix something else.
+    if (emailModal.templateDirty) {
+      await persistEmailTemplates(emailModal.subject, emailModal.body);
+    }
+    setEmailModal(null);
+  }
+
+  function cancelEmailBatch() {
+    emailCancelRef.current = true;
+    setEmailModal((prev) => prev && ({
+      ...prev,
+      log: [...prev.log, "↳ Cancelling after current send..."],
+    }));
+  }
+
+  async function sendReelEmails() {
+    if (!emailModal || !layout) return;
+    if (emailModal.sending) return;
+    emailCancelRef.current = false;
+    setEmailModal({ ...emailModal, sending: true, log: ["→ Preparing..."] });
+    const settings = await getSettings();
+    const toSend = emailModal.rows.filter((r) => r.include && r.emails.length > 0);
+    if (toSend.length === 0) {
+      setEmailModal((prev) => prev && ({
+        ...prev,
+        sending: false,
+        log: [...prev.log, "Nothing selected to send."],
+      }));
+      return;
+    }
+    setEmailModal((prev) => prev && ({
+      ...prev,
+      sending: true,
+      log: [`→ Sending ${toSend.length} emails...`],
+    }));
+    let ok = 0, fail = 0, skipped = 0;
+    const startedAt = Date.now();
+    // Serial send: SMTP servers rate-limit hard, and each attachment
+    // opens a fresh TLS connection through lettre. A batch of 20 kids
+    // completes in ~30 s serially and stays well below Hotmail/Gmail
+    // per-minute thresholds. Parallel sends here would trip the rate
+    // limiter and get half the batch bounced.
+    for (let i = 0; i < toSend.length; i++) {
+      const r = toSend[i];
+      if (emailCancelRef.current) {
+        skipped = toSend.length - i;
+        setEmailModal((prev) => prev && ({
+          ...prev,
+          log: [...prev.log, `↳ Cancelled — ${skipped} not sent`],
+        }));
+        break;
+      }
+      try {
+        const recipients = await sendGradReelEmail({
+          recipient: {
+            student_id: r.student_id,
+            student_name: r.student_name,
+            parent_name: r.parent_name,
+            email_field: r.email_field_raw,
+            video_path: r.video_path,
+            video_filename: r.video_filename,
+          },
+          year,
+          subjectTpl: emailModal.subject,
+          bodyTpl: emailModal.body,
+          settings,
+        });
+        ok++;
+        setEmailModal((prev) => prev && ({
+          ...prev,
+          log: [...prev.log, `  ✓ [${i + 1}/${toSend.length}] ${r.student_name} → ${recipients.join(", ")}`],
+        }));
+      } catch (e: any) {
+        fail++;
+        setEmailModal((prev) => prev && ({
+          ...prev,
+          log: [...prev.log, `  ✗ [${i + 1}/${toSend.length}] ${r.student_name}: ${e?.message || e}`],
+        }));
+      }
+    }
+    const took = ((Date.now() - startedAt) / 1000).toFixed(1);
+    const summary = skipped > 0
+      ? `Done — ${ok} sent, ${fail} failed, ${skipped} skipped, ${took}s`
+      : `Done — ${ok} sent, ${fail} failed, ${took}s`;
+    setEmailModal((prev) => prev && ({
+      ...prev,
+      sending: false,
+      log: [...prev.log, summary],
+    }));
+    // Persist any template edits so next time they open the modal,
+    // their tweaked wording is remembered.
+    await persistEmailTemplates(emailModal.subject, emailModal.body);
+    setEmailModal((prev) => prev && ({ ...prev, templateDirty: false }));
+  }
+
   async function saveStudentNote(s: Student, note: string) {
     await upsertStudent({ ...s, graduation_note: note });
     setStudents((prev) => prev.map((x) => (x.id === s.id ? { ...x, graduation_note: note } : x)));
@@ -864,6 +1129,17 @@ export default function Graduation() {
             </button>
             <button className="btn primary" onClick={renderAll} disabled={isBusy || graduating.length === 0}>
               {busy === "all" ? "Rendering everything..." : "Render everything"}
+            </button>
+            {/* v3.8.0: send each rendered per-child MP4 to that child's
+                parents in a single flow. Only enabled once a scaffold
+                exists and the user isn't mid-render. */}
+            <button
+              className="btn"
+              onClick={openEmailModal}
+              disabled={isBusy || graduating.length === 0}
+              title="Email each child's reel to their parents"
+            >
+              📧 Email reels to parents
             </button>
             {isBusy && (
               <button className="btn danger" onClick={cancel}>
@@ -1293,6 +1569,167 @@ export default function Graduation() {
               </button>
               <button className="btn primary" onClick={() => setShowScaffoldModal(false)}>
                 Got it
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+      {/* v3.8.0: Email-reels-to-parents modal */}
+      {emailModal && layout && (
+        <div
+          onClick={() => { void closeEmailModal(); }}
+          style={{
+            position: "fixed", inset: 0, background: "rgba(15, 23, 42, 0.55)",
+            display: "flex", alignItems: "center", justifyContent: "center", zIndex: 100,
+          }}
+        >
+          <div
+            onClick={(e) => e.stopPropagation()}
+            style={{
+              background: "white", borderRadius: 12, maxWidth: 820, width: "94%",
+              maxHeight: "90vh", overflowY: "auto",
+              padding: 28, boxShadow: "0 25px 50px -12px rgba(0,0,0,0.25)",
+            }}
+          >
+            <h2 style={{ marginTop: 0, marginBottom: 4 }}>📧 Email reels to parents</h2>
+            <p style={{ marginTop: 0, color: "#64748b", fontSize: 13 }}>
+              Each selected child's reel is attached to a separate email and sent to
+              the email address(es) on file. Templates use{" "}
+              <code>{"{{student}}"}</code>, <code>{"{{year}}"}</code>,{" "}
+              <code>{"{{parent_name}}"}</code>, <code>{"{{contact_email}}"}</code>,
+              <code>{"{{contact_phone}}"}</code>.
+            </p>
+
+            <label style={{ display: "block", marginTop: 12, fontSize: 13, fontWeight: 500 }}>
+              Subject
+            </label>
+            <input
+              type="text"
+              value={emailModal.subject}
+              disabled={emailModal.sending}
+              onChange={(e) => setEmailModal({ ...emailModal, subject: e.target.value, templateDirty: true })}
+              style={{
+                width: "100%", padding: "8px 10px", borderRadius: 6,
+                border: "1px solid #cbd5e1", fontSize: 14, marginTop: 4,
+              }}
+            />
+
+            <label style={{ display: "block", marginTop: 12, fontSize: 13, fontWeight: 500 }}>
+              Body
+            </label>
+            <textarea
+              value={emailModal.body}
+              disabled={emailModal.sending}
+              onChange={(e) => setEmailModal({ ...emailModal, body: e.target.value, templateDirty: true })}
+              rows={8}
+              style={{
+                width: "100%", padding: "8px 10px", borderRadius: 6,
+                border: "1px solid #cbd5e1", fontSize: 13, marginTop: 4,
+                fontFamily: "inherit", resize: "vertical",
+              }}
+            />
+
+            {emailModal.rows.length === 0 ? (
+              <div style={{ marginTop: 16, padding: 20, background: "#fef3c7", border: "1px solid #fde68a", borderRadius: 8, color: "#92400e", fontSize: 13 }}>
+                <strong>No per-child MP4s found in the output folder yet.</strong>
+                <div style={{ marginTop: 6 }}>
+                  Render each child's reel first (Step 4 → <em>Per-child only</em>{" "}
+                  or <em>Render everything</em>), then reopen this dialog.
+                </div>
+              </div>
+            ) : (
+              <div style={{ marginTop: 16, border: "1px solid #e2e8f0", borderRadius: 8, overflow: "hidden" }}>
+                <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
+                  <thead style={{ background: "#f8fafc" }}>
+                    <tr>
+                      <th style={{ padding: "8px 10px", textAlign: "left", width: 40 }}>Send</th>
+                      <th style={{ padding: "8px 10px", textAlign: "left" }}>Child</th>
+                      <th style={{ padding: "8px 10px", textAlign: "left" }}>Parent email(s)</th>
+                      <th style={{ padding: "8px 10px", textAlign: "left" }}>Reel file</th>
+                      <th style={{ padding: "8px 10px", textAlign: "right", width: 80 }}>Size</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {emailModal.rows.map((r, i) => {
+                      const noEmail = r.emails.length === 0;
+                      const sizeMb = r.video_size_bytes > 0 ? r.video_size_bytes / (1024 * 1024) : 0;
+                      const oversize = sizeMb > 24;
+                      return (
+                        <tr key={r.student_id} style={{ borderTop: "1px solid #e2e8f0", opacity: noEmail ? 0.55 : 1 }}>
+                          <td style={{ padding: "6px 10px" }}>
+                            <input
+                              type="checkbox"
+                              checked={r.include && !noEmail}
+                              disabled={noEmail || emailModal.sending}
+                              onChange={(e) => {
+                                const rows = [...emailModal.rows];
+                                rows[i] = { ...rows[i], include: e.target.checked };
+                                setEmailModal({ ...emailModal, rows });
+                              }}
+                            />
+                          </td>
+                          <td style={{ padding: "6px 10px" }}>{r.student_name}</td>
+                          <td style={{ padding: "6px 10px", color: noEmail ? "#dc2626" : "#0f172a" }}>
+                            {noEmail ? "no email on file" : r.emails.join(", ")}
+                          </td>
+                          <td style={{ padding: "6px 10px", color: "#64748b", fontFamily: "ui-monospace, SFMono-Regular, monospace", fontSize: 12 }}>
+                            {r.video_filename}
+                          </td>
+                          <td style={{ padding: "6px 10px", textAlign: "right", color: oversize ? "#dc2626" : "#64748b", fontVariantNumeric: "tabular-nums" }}>
+                            {sizeMb > 0
+                              ? `${sizeMb.toFixed(1)} MB${oversize ? " ⚠" : ""}`
+                              : "—"}
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            )}
+            {emailModal.rows.some((r) => r.video_size_bytes / (1024 * 1024) > 24) && (
+              <div style={{ marginTop: 8, fontSize: 12, color: "#dc2626" }}>
+                ⚠ Files over 24 MB may be rejected by SMTP. Consider uncheck­ing
+                them or sharing via a cloud link instead.
+              </div>
+            )}
+
+            {emailModal.log.length > 0 && (
+              <pre
+                style={{
+                  marginTop: 12, background: "#0f172a", color: "#e2e8f0",
+                  padding: 12, borderRadius: 8, maxHeight: 180, overflowY: "auto",
+                  fontSize: 12, fontFamily: "ui-monospace, SFMono-Regular, monospace",
+                }}
+              >
+                {emailModal.log.join("\n")}
+              </pre>
+            )}
+
+            <div style={{ display: "flex", gap: 8, justifyContent: "flex-end", marginTop: 16 }}>
+              {emailModal.sending && (
+                <button className="btn danger" onClick={cancelEmailBatch}>
+                  Cancel send
+                </button>
+              )}
+              <button
+                className="btn"
+                onClick={() => { void closeEmailModal(); }}
+                disabled={emailModal.sending}
+              >
+                Close
+              </button>
+              <button
+                className="btn primary"
+                onClick={sendReelEmails}
+                disabled={
+                  emailModal.sending ||
+                  emailModal.rows.filter((r) => r.include && r.emails.length > 0).length === 0
+                }
+              >
+                {emailModal.sending
+                  ? "Sending..."
+                  : `Send ${emailModal.rows.filter((r) => r.include && r.emails.length > 0).length} emails`}
               </button>
             </div>
           </div>

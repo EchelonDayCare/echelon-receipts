@@ -4,6 +4,34 @@ All notable changes shipped as a DMG. Only entries the owner has approved
 for release are listed here — "code-complete, awaiting ship approval" work
 lives in the session plan.md until it ships.
 
+## v3.8.0 — Email graduation reels to parents (3-click flow)
+
+After per-child reels are rendered, the operator can email each kid's MP4
+directly to their parents in a single guided modal. Templates are seeded
+with a warm default ("A little graduation memory from Echelon"), fully
+editable, and remembered across sessions.
+
+### Added
+- **📧 Email reels to parents** button on Grad Step 4. Opens a modal
+  listing each rendered per-child MP4 next to that student's parent
+  email(s), reel file size, and a per-row send checkbox. Kids without
+  an email on file are shown grayed with a "no email on file" note.
+- Subject / body templates persisted in settings, editable inline,
+  saved on Send **and** on Close (so drafts survive a mid-flow
+  navigation).
+- Two-parent-family greetings ("Hi Mike & Sarah,") when both parents
+  are named on the student record.
+- Pre-flight 25 MB SMTP attachment size guard so oversized reels fail
+  fast with a clear "share via cloud link instead" message rather than
+  a raw SMTP 552.
+- Cancel-during-send button in the modal so the operator can stop the
+  batch if SMTP hangs, without losing already-sent progress.
+
+### Changed
+- `send_email` audit log now records `grad_reel` sends alongside
+  receipts and annual receipts — both success and failure paths are
+  written to the communications history.
+
 ## v3.7.0 — Concurrent per-child renders on macOS (grad perf pass, Round 2)
 
 The per-child render batch used to encode students strictly one at a
