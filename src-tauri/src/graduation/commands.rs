@@ -592,7 +592,29 @@ pub async fn graduation_render_child(
     let final_path = out_dir.join(format!("{folder_name}.mp4"));
     let tmp_path = out_dir.join(format!("{folder_name}.mp4.tmp"));
 
-    let source_photos: Vec<PathBuf> = curated.iter().map(|p| p.path.clone()).collect();
+    let mut source_photos: Vec<PathBuf> = curated.iter().map(|p| p.path.clone()).collect();
+    // Prepend a name-card PNG so per-child reels open with the kid's
+    // name (same visual language as the class reel). Rendered at the
+    // per-child spec's 1280×720 so it composes cleanly into the xfade
+    // chain as an ordinary "photo" slot. Failure is non-fatal — we
+    // just skip the card and log a warning.
+    let namecard_path = cache_root.join(format!("child-{}-namecard.png", job_id));
+    match class_reel::render_name_card_png(&req.display_name, 1280, 720, &namecard_path) {
+        Ok(()) => source_photos.insert(0, namecard_path.clone()),
+        Err(e) => {
+            let _ = app.emit(
+                "graduation://log",
+                LogPayload {
+                    job_id: job_id.clone(),
+                    level: "warn".into(),
+                    message: format!(
+                        "Name card render failed for {}: {e}. Continuing without title card.",
+                        req.display_name
+                    ),
+                },
+            );
+        }
+    }
     // F4: hard-link → short alias to keep Windows argv under 32 KB.
     let alias_dir = cache_root.join(format!("child-{}-aliases", job_id));
     let photos = alias_photos(&source_photos, &alias_dir)?;
@@ -624,11 +646,13 @@ pub async fn graduation_render_child(
             let _ = std::fs::remove_file(&tmp_path);
             let _ = std::fs::remove_file(&filter_script);
             let _ = std::fs::remove_dir_all(&alias_dir);
+            let _ = std::fs::remove_file(&namecard_path);
             return Err(e);
         }
     };
     let _ = std::fs::remove_file(&filter_script);
     let _ = std::fs::remove_dir_all(&alias_dir);
+    let _ = std::fs::remove_file(&namecard_path);
     let published = paths::atomic_publish(&tmp_path, &final_path)?;
     let output_path = published.to_string_lossy().into_owned();
     record_render(

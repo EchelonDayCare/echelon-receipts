@@ -794,20 +794,14 @@ export default function Graduation() {
             their folders; if empty the bundled defaults are used.
           </p>
           <div style={{ display: "flex", gap: 12, flexWrap: "wrap", marginLeft: 40 }}>
-            <button className="btn primary" onClick={renderAll} disabled={isBusy || graduating.length === 0}>
-              {busy === "all" ? "Rendering everything..." : "Render everything"}
-            </button>
             <button className="btn" onClick={runPreflight} disabled={isBusy}>
               {busy === "preflight" ? "Checking..." : "Run preflight"}
             </button>
-            <button className="btn" onClick={() => renderReel()} disabled={isBusy}>
-              {busy === "reel" ? "Rendering reel..." : "Reel only"}
+            <button className="btn" onClick={() => renderSlides()} disabled={isBusy || graduating.length === 0}>
+              {busy === "slides" ? "Building deck..." : "Slides only"}
             </button>
             <button className="btn" onClick={() => renderPerChild()} disabled={isBusy || graduating.length === 0}>
               {busy === "child" ? "Rendering..." : `Per-child only (${graduating.length})`}
-            </button>
-            <button className="btn" onClick={() => renderSlides()} disabled={isBusy || graduating.length === 0}>
-              {busy === "slides" ? "Building deck..." : "Slides only"}
             </button>
             <button
               className="btn"
@@ -825,6 +819,12 @@ export default function Graduation() {
                     const mins = Math.round(included * classSecondsPerKid / 60);
                     return `Class reel (${included} kids × ${classSecondsPerKid}s ≈ ${mins} min)`;
                   })()}
+            </button>
+            <button className="btn" onClick={() => renderReel()} disabled={isBusy}>
+              {busy === "reel" ? "Rendering reel..." : "Reel only"}
+            </button>
+            <button className="btn primary" onClick={renderAll} disabled={isBusy || graduating.length === 0}>
+              {busy === "all" ? "Rendering everything..." : "Render everything"}
             </button>
             {isBusy && (
               <button className="btn danger" onClick={cancel}>

@@ -4,7 +4,20 @@ All notable changes shipped as a DMG. Only entries the owner has approved
 for release are listed here — "code-complete, awaiting ship approval" work
 lives in the session plan.md until it ships.
 
-## v3.5.0 — Name cards rendered in Rust (code-complete, awaiting ship approval)
+## v3.5.1 — Per-child name cards + button reorder
+
+### Added
+- **Per-child reels now open with a name card** (same PNG renderer as
+  Class reel — Inter font, slate-blue card, drop shadow). Rendered at
+  1280×720, xfaded into the first photo. Falls back gracefully to
+  no-card if the PNG renderer fails.
+
+### Changed
+- **Step 4 button order** reflows to workflow order: Run preflight →
+  Slides only → Per-child only → Class reel → Reel only → Render
+  everything (primary, right-most).
+
+## v3.5.0 — Name cards rendered in Rust
 
 Fixes the macOS "No such filter: 'drawtext'" crash and makes name-card
 visuals identical across every OS.
@@ -31,7 +44,7 @@ visuals identical across every OS.
 ### Removed
 - `preflight::required_filters()` no longer lists `drawtext`.
 
-## v3.4.0 — Static frames + user-selectable reel length (code-complete, awaiting ship approval)
+## v3.4.0 — Static frames + user-selectable reel length
 
 Two owner-requested changes to the Graduation reel pipeline.
 
