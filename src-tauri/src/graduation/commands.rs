@@ -156,11 +156,13 @@ pub struct RenderState {
 
 #[derive(Default)]
 pub struct RenderInner {
-    /// (invocation-id, child). Only the owning spawn_and_stream may
-    /// clear this slot on Terminate/Error — matching by id prevents an
-    /// earlier render's cleanup from wiping a newer render's handle
-    /// after the older process was killed and replaced.
-    pub current_child: Option<(u64, CommandChild)>,
+    /// Active FFmpeg children, keyed by invocation id. v3.7.0: was
+    /// `Option<(u64, CommandChild)>` — a single slot — which forced
+    /// concurrent renders to kill each other. Now a HashMap so a
+    /// batched per-kid render can run 2+ children in parallel on
+    /// hardware that supports it (Apple Silicon VideoToolbox).
+    /// Cancel iterates and kills every entry.
+    pub children: std::collections::HashMap<u64, CommandChild>,
     pub cancelled: bool,
     /// Monotonic invocation counter. Each spawn_and_stream call
     /// grabs the next id under the mutex.
@@ -533,12 +535,15 @@ pub async fn graduation_render_child(
 ) -> Result<RenderReelResponse, String> {
     // F6: reject a hostile job_id before it lands in cache paths.
     let job_id = sanitize_job_id(&req.job_id)?;
-    // F9: reset the backend cancel flag on every render entrypoint. The
-    // frontend batch loop's own `cancelledRef` decides whether to
-    // iterate; the backend flag is only meaningful for "kill the
-    // currently-running child". Leaving it sticky between calls made
-    // standalone per-child runs abort instantly after any prior cancel.
-    reset_cancelled(&state);
+    // v3.7.0: reset_cancelled REMOVED. Previously every render
+    // entrypoint reset the cancel flag on entry so a stale cancel from
+    // an earlier batch couldn't kill a fresh render. That works for
+    // strictly-serial invocation but breaks concurrent per-kid batches:
+    // if 2 renders start together, the second's reset clobbers the
+    // first's cancel signal. Frontend is now responsible for calling
+    // `graduation_reset_cancel` once at the start of each batch — the
+    // existing behaviour of `renderAll` / `renderReel` already does
+    // this; `renderPerChild` was updated to do the same.
     let cache_root = paths::cache_dir(&app)?;
     let heic_cache = cache_root.join("heic");
     let source = paths::validate_folder(&req.source_folder)?;
@@ -692,11 +697,13 @@ pub fn graduation_cancel(state: State<'_, RenderState>) -> Result<(), String> {
     // mutex. Set AFTER the bool so any observer that sees the atomic
     // set will also see the bool set on next lock acquisition.
     state.cancel_flag.store(true, Ordering::SeqCst);
-    if let Some((_id, child)) = inner.current_child.take() {
-        // Release the lock before kill() so we don't hold it across a
-        // potentially-blocking OS call.
-        drop(inner);
-        child.kill().map_err(|e| format!("kill: {e}"))?;
+    // v3.7.0: drain every active child. A batched per-kid render may
+    // have multiple FFmpeg processes in flight; cancel-all must reach
+    // all of them.
+    let victims: Vec<(u64, CommandChild)> = inner.children.drain().collect();
+    drop(inner);
+    for (_id, child) in victims {
+        let _ = child.kill();
     }
     Ok(())
 }
@@ -1291,24 +1298,20 @@ async fn spawn_and_stream(
 
     let my_id = {
         let mut inner = state.inner.lock().map_err(|e| format!("lock: {e}"))?;
-        // Kill any previous child before overwriting. `CommandChild`'s
-        // Drop does NOT kill the process — dropping just closes our
-        // side of the pipes, leaving a zombie FFmpeg that fills its
-        // stderr buffer, blocks, and idles until app exit.
-        if let Some((_prev_id, prev)) = inner.current_child.take() {
-            let _ = prev.kill();
-        }
         // Cancel race guard: if the user pressed Cancel between the
         // photo scan finishing and this point, the cancel signal
-        // arrived while current_child was None. Check the flag now
-        // that we hold the same lock cancel uses.
+        // arrived while our child was not yet registered. Check the
+        // flag now that we hold the same lock cancel uses.
         if inner.cancelled {
             let _ = child.kill();
             return Err("cancelled".into());
         }
         inner.next_child_id = inner.next_child_id.wrapping_add(1);
         let id = inner.next_child_id;
-        inner.current_child = Some((id, child));
+        // v3.7.0: register into the map instead of overwriting a single
+        // slot. Concurrent spawn_and_stream calls (from the batched
+        // per-kid render) each get their own entry.
+        inner.children.insert(id, child);
         id
     };
 
@@ -1381,14 +1384,10 @@ async fn spawn_and_stream(
 
 fn clear_child(state: &State<'_, RenderState>, my_id: u64) -> Result<(), String> {
     let mut inner = state.inner.lock().map_err(|e| format!("lock: {e}"))?;
-    // Only clear if we still own the slot. If a newer render replaced
-    // us (and killed our process to do so), leave the newer child in
-    // place — otherwise its cancel handle would be lost.
-    if let Some((cur_id, _)) = &inner.current_child {
-        if *cur_id == my_id {
-            inner.current_child = None;
-        }
-    }
+    // v3.7.0: remove from the map by id. HashMap::remove is a no-op
+    // when the entry is already gone (e.g. cancel drained the map
+    // moments earlier), so this is safe under race with cancel.
+    inner.children.remove(&my_id);
     Ok(())
 }
 

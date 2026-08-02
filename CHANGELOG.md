@@ -4,6 +4,32 @@ All notable changes shipped as a DMG. Only entries the owner has approved
 for release are listed here — "code-complete, awaiting ship approval" work
 lives in the session plan.md until it ships.
 
+## v3.7.0 — Concurrent per-child renders on macOS (grad perf pass, Round 2)
+
+The per-child render batch used to encode students strictly one at a
+time. On macOS, VideoToolbox has multiple hardware encoder engines and
+can comfortably run two 720p reels in parallel. This release runs
+2 concurrent renders on Mac (1 on Windows, where the `h264_mf` MFT is
+single-instance and serialises at the driver level anyway). A class of
+20 kids finishes ~1.7-1.9× faster on Mac Silicon.
+
+### Changed
+- **Per-child render batch now runs 2 concurrent renders on macOS**
+  (1 on Windows). Uses a shared queue + N worker promises, so a slow
+  student never blocks fast ones from finishing.
+- Backend `RenderState` refactored from a single `current_child` slot
+  to a `HashMap<job_id, CommandChild>`. `graduation_cancel` drains and
+  kills every in-flight FFmpeg — so pressing Cancel mid-batch stops
+  both workers cleanly.
+- Frontend `renderPerChild` batch entrypoint now resets the backend
+  cancel flag once at the top, instead of every per-kid render
+  self-resetting. (Self-reset by render N would clobber a user's cancel
+  signal already flipped for render N-1.)
+
+### Notes
+- Windows behaviour unchanged (still serial). No visual change to any
+  output; only wall-clock time on Mac batches.
+
 ## v3.6.0 — Parallel photo curation + parallel slide encoding (grad perf pass)
 
 Every render mode starts with a photo scan + sharpness rank + HEIC

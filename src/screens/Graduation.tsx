@@ -122,6 +122,12 @@ export default function Graduation() {
   // Tracks a user-initiated cancel so a batch loop bails between
   // renders instead of continuing after killing the current FFmpeg.
   const cancelledRef = useRef(false);
+  // v3.7.0: with concurrent per-child renders on macOS, the progress
+  // listener can otherwise receive events from a job that already
+  // completed (in-flight event delivered after the awaited invoke
+  // resolved) and flicker the bar. We only accept progress events
+  // whose job_id is in `activeJobsRef`.
+  const activeJobsRef = useRef<Set<string>>(new Set());
 
   useEffect(() => {
     (async () => {
@@ -202,6 +208,13 @@ export default function Graduation() {
     let un2: UnlistenFn | null = null;
     (async () => {
       un1 = await listen<ProgressPayload>("graduation://progress", (evt) => {
+        // v3.7.0: with 2 concurrent per-child jobs on macOS, only
+        // reflect progress from a job still in the active set. Stale
+        // events from a completed sibling would otherwise reset the
+        // bar mid-render.
+        if (activeJobsRef.current.size > 0 && !activeJobsRef.current.has(evt.payload.job_id)) {
+          return;
+        }
         setCurrentStage(evt.payload.stage);
         setProgress(evt.payload.tick);
         if (evt.payload.tick.done) {
@@ -329,48 +342,74 @@ export default function Graduation() {
       return;
     }
     if (!nested) { setBusy("child"); setRunSummary(null); runStartRef.current = Date.now(); }
+    // Local non-null capture for closures inside workers.
+    const layoutRef = layout;
+    // v3.7.0: batch entrypoint must reset the backend cancel flag once,
+    // BEFORE spawning any concurrent renders. Individual render commands
+    // no longer self-reset (a self-reset by render N+1 would clobber
+    // render N's cancel signal in a parallel batch).
+    if (!nested) {
+      cancelledRef.current = false;
+      try { await invoke("graduation_reset_cancel"); } catch { /* ok */ }
+    }
     let successCount = 0;
     let failCount = 0;
-    for (const c of layout.child_folders) {
-      if (cancelledRef.current) {
-        appendLog("↳ Cancelled — skipping remaining students");
-        break;
-      }
-      const student = graduating.find((s) => s.id === c.student_id);
-      if (!student) continue;
-      const job = `child-${c.student_id}-${Date.now()}`;
-      setProgress(null);
-      appendLog(`→ Rendering ${c.display_name}...`);
-      try {
-        const out = await invoke<{ output_path: string; frames_encoded: number; duration_ms: number }>(
-          "graduation_render_child",
-          {
-            req: {
-              source_folder: c.folder,
-              output_folder: layout.output,
-              student_id: c.student_id,
-              display_name: c.display_name,
-              year: Number(year),
-              music_track: null,
-              music_folder: layout.music,
-              duration_sec: perKidReelSec,
-              avg_photo_sec: KID_AVG_PHOTO_SEC,
-              job_id: job,
+    // v3.7.0: bounded concurrency. macOS VideoToolbox has multiple HW
+    // encoder engines and comfortably runs 2 concurrent 720p encodes;
+    // Windows h264_mf is a single-instance MFT so parallel encodes
+    // serialise at the driver level (no gain, occasional flakes).
+    const isMac = typeof navigator !== "undefined"
+      && /Macintosh|Mac OS X/i.test(navigator.userAgent);
+    const concurrency = isMac ? 2 : 1;
+    // Copy the list so we can shift() safely. Kids are already in
+    // alphabetical order from layout.child_folders.
+    const queue = [...layoutRef.child_folders];
+    async function worker() {
+      while (true) {
+        if (cancelledRef.current) return;
+        const c = queue.shift();
+        if (!c) return;
+        // v3.7.0: recheck cancel after shift — otherwise a cancel
+        // that fires between the guard and the invoke lands us in
+        // spawn_and_stream's cancel branch and prints a misleading
+        // "✗ name: cancelled" as if it were a per-kid failure.
+        if (cancelledRef.current) return;
+        const student = graduating.find((s) => s.id === c.student_id);
+        if (!student) continue;
+        const job = `child-${c.student_id}-${Date.now()}`;
+        activeJobsRef.current.add(job);
+        appendLog(`→ Rendering ${c.display_name}...`);
+        try {
+          const out = await invoke<{ output_path: string; frames_encoded: number; duration_ms: number }>(
+            "graduation_render_child",
+            {
+              req: {
+                  source_folder: c.folder,
+                  output_folder: layoutRef.output,
+                  student_id: c.student_id,
+                  display_name: c.display_name,
+                  year: Number(year),
+                  music_track: null,
+                  music_folder: layoutRef.music,
+                  duration_sec: perKidReelSec,
+                  avg_photo_sec: KID_AVG_PHOTO_SEC,
+                  job_id: job,
+              },
             },
-          },
-        );
-        successCount++;
-        appendLog(`  ✓ ${c.display_name} in ${(out.duration_ms / 1000).toFixed(1)}s → ${out.output_path}`);
-      } catch (e) {
-        failCount++;
-        appendLog(`  ✗ ${c.display_name}: ${e}`);
-        // Distinguish user cancel from per-child failure. On cancel,
-        // stop the batch immediately; on plain failure, continue with
-        // the next child (a single missing folder shouldn't tank the
-        // whole class's slideshows).
-        if (cancelledRef.current) break;
+          );
+          successCount++;
+          appendLog(`  ✓ ${c.display_name} in ${(out.duration_ms / 1000).toFixed(1)}s → ${out.output_path}`);
+        } catch (e) {
+          failCount++;
+          appendLog(`  ✗ ${c.display_name}: ${e}`);
+          if (cancelledRef.current) { activeJobsRef.current.delete(job); return; }
+        }
+        activeJobsRef.current.delete(job);
       }
     }
+    // Fire N workers in parallel; each pulls from the shared queue
+    // until empty or cancelled.
+    await Promise.all(Array.from({ length: concurrency }, () => worker()));
     if (!nested) {
       setBusy(null);
       if (!cancelledRef.current) {
