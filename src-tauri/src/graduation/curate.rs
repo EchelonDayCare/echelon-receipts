@@ -77,16 +77,28 @@ pub fn scan_and_rank(source_folder: &Path, heic_cache_dir: &Path) -> ScanResult 
 pub fn scan_and_rank_cancellable(
     source_folder: &Path,
     heic_cache_dir: &Path,
-    is_cancelled: &dyn Fn() -> bool,
+    is_cancelled: &(dyn Fn() -> bool + Sync),
 ) -> ScanResult {
-    let mut kept: Vec<RankedPhoto> = Vec::new();
-    let mut errors: Vec<String> = Vec::new();
-    let mut heic_count = 0usize;
+    use rayon::prelude::*;
+    use std::sync::atomic::{AtomicUsize, Ordering as AOrdering};
 
     let walker = walk(source_folder);
-    for path in walker {
+    let heic_count_atomic = AtomicUsize::new(0);
+
+    // Per-file work: classify, decode/orient, score. Each file is
+    // independent — no shared state beyond the atomic HEIC counter and
+    // the cancel predicate. We short-circuit inside the closure so
+    // cancellation is honoured within one file's worth of latency
+    // (matches the pre-parallel behaviour, which broke out of the loop
+    // between files).
+    //
+    // Return type is (Option<RankedPhoto>, Option<String>) — Ok
+    // photos and error strings are collected in parallel then merged.
+    // Using Options (not Result) so a file can produce neither (skipped
+    // ext, cancelled) without inventing a synthetic error.
+    let per_file = |path: PathBuf| -> (Option<RankedPhoto>, Option<String>) {
         if is_cancelled() {
-            break;
+            return (None, None);
         }
         let ext = path
             .extension()
@@ -94,45 +106,64 @@ pub fn scan_and_rank_cancellable(
             .map(|s| s.to_ascii_lowercase())
             .unwrap_or_default();
 
-        let (usable_path, is_heic) = if HEIC_EXTS.contains(&ext.as_str()) {
-            heic_count += 1;
+        let usable_path = if HEIC_EXTS.contains(&ext.as_str()) {
+            heic_count_atomic.fetch_add(1, AOrdering::Relaxed);
             match heic::convert_heic_to_jpeg_cancellable(&path, heic_cache_dir, is_cancelled) {
-                Ok(p) => (p, true),
-                Err(e) => {
-                    errors.push(format!("HEIC decode {}: {e}", path.display()));
-                    continue;
-                }
+                Ok(p) => p,
+                Err(e) => return (None, Some(format!("HEIC decode {}: {e}", path.display()))),
             }
         } else if IMAGE_EXTS.contains(&ext.as_str()) {
             match ensure_upright(&path, heic_cache_dir) {
-                Ok(p) => (p, false),
-                Err(e) => {
-                    errors.push(format!("orient {}: {e}", path.display()));
-                    continue;
-                }
+                Ok(p) => p,
+                Err(e) => return (None, Some(format!("orient {}: {e}", path.display()))),
             }
         } else {
-            continue;
+            return (None, None);
         };
 
         match score_image(&usable_path) {
-            Ok(score) => kept.push(RankedPhoto {
-                path: usable_path,
-                source: path,
-                sharpness: score,
-            }),
-            Err(e) => {
-                let _ = is_heic;
-                errors.push(format!("score {}: {e}", path.display()));
-            }
+            Ok(score) => (
+                Some(RankedPhoto {
+                    path: usable_path,
+                    source: path,
+                    sharpness: score,
+                }),
+                None,
+            ),
+            Err(e) => (None, Some(format!("score {}: {e}", path.display()))),
+        }
+    };
+
+    // Parallel map + collect. rayon uses its global thread pool
+    // (defaults to number of CPUs). We collect into a Vec of tuples
+    // then unzip so we don't hold two locks in the hot path.
+    let results: Vec<(Option<RankedPhoto>, Option<String>)> =
+        walker.into_par_iter().map(per_file).collect();
+
+    let mut kept: Vec<RankedPhoto> = Vec::with_capacity(results.len());
+    let mut errors: Vec<String> = Vec::new();
+    for (photo, err) in results {
+        if let Some(p) = photo {
+            kept.push(p);
+        }
+        if let Some(e) = err {
+            errors.push(e);
         }
     }
 
-    kept.sort_by(|a, b| b.sharpness.partial_cmp(&a.sharpness).unwrap_or(std::cmp::Ordering::Equal));
+    // Sharpness-DESC. Sort is deterministic on (score, source path)
+    // so equal-score photos have a stable order regardless of the
+    // rayon completion order.
+    kept.sort_by(|a, b| {
+        b.sharpness
+            .partial_cmp(&a.sharpness)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.source.as_os_str().cmp(b.source.as_os_str()))
+    });
 
     ScanResult {
         photos: kept,
-        heic_count,
+        heic_count: heic_count_atomic.load(AOrdering::Relaxed),
         errors,
     }
 }

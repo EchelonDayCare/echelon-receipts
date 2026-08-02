@@ -99,7 +99,7 @@ pub fn render_slides_cancellable(
     template_pptx: &Path,
     output_pptx: &Path,
     ctx: &TemplateContext,
-    is_cancelled: &dyn Fn() -> bool,
+    is_cancelled: &(dyn Fn() -> bool + Sync),
 ) -> Result<RenderReport, String> {
     let mut report = RenderReport::default();
     let meta = std::fs::metadata(template_pptx)
@@ -359,6 +359,46 @@ pub fn render_slides_cancellable(
         );
     }
 
+    // v3.6.0 Round 3: parallel pre-encode of every student photo.
+    //
+    // Previously this loop encoded each student's JPEG serially inside
+    // the slide-writing loop. On a 30-kid class that's 30 sequential
+    // decode → flatten → crop → downscale → JPEG-encode passes, all
+    // CPU-bound. Pre-encoding in parallel via rayon parallelises the
+    // heavy work across cores while keeping the slide-writing loop
+    // strictly serial (slide numbers, `new_entries.push` order, and
+    // `report.children` order must all be preserved).
+    //
+    // Result vec is indexed by student position. Value is:
+    //   - Some(Ok(bytes))  → encode succeeded
+    //   - Some(Err(msg))   → encode failed, use placeholder + warn
+    //   - None             → no encode attempted (no photos, no swap_rid)
+    let target_aspect_hoisted: Option<f32> = swap_rid
+        .as_deref()
+        .map(|rid| compute_target_aspect(&String::from_utf8_lossy(&marker_slide_bytes), rid));
+    let mut student_jpegs: Vec<Option<Result<Vec<u8>, String>>> = {
+        use rayon::prelude::*;
+        ctx.students
+            .par_iter()
+            .map(|student| -> Option<Result<Vec<u8>, String>> {
+                if is_cancelled() {
+                    return Some(Err("cancelled".into()));
+                }
+                let (Some(ta), Some(_rid)) = (target_aspect_hoisted, swap_rid.as_deref()) else {
+                    return None;
+                };
+                match student.photos.as_slice() {
+                    [] => None,
+                    [one] => Some(encode_as_jpeg_cancellable(one, ta, &|| is_cancelled())),
+                    many => Some(composite_photos_as_jpeg_cancellable(many, ta, &|| is_cancelled())),
+                }
+            })
+            .collect()
+    };
+    if is_cancelled() {
+        return Err("cancelled".into());
+    }
+
     for (i, student) in ctx.students.iter().enumerate() {
         if is_cancelled() {
             return Err("cancelled".into());
@@ -385,11 +425,24 @@ pub fn render_slides_cancellable(
                     "No matching photo found — using placeholder.".to_string(),
                 ),
                 (Some(rid), photos) => {
-                    let target_aspect = compute_target_aspect(&String::from_utf8_lossy(&marker_slide_bytes), rid);
-                    let encoded = if photos.len() == 1 {
-                        encode_as_jpeg_cancellable(&photos[0], target_aspect, is_cancelled)
-                    } else {
-                        composite_photos_as_jpeg_cancellable(photos, target_aspect, is_cancelled)
+                    // v3.6.0: encode was pre-computed in parallel above.
+                    // `take()` moves the pre-encoded bytes out of the
+                    // vec so we don't hold two copies (parallel encode
+                    // could produce 60+ MB across a 30-kid deck).
+                    // Fall back to inline encode only if the pre-encode
+                    // vec is missing an entry (shouldn't happen — index
+                    // matches student position — belt-and-braces so a
+                    // future refactor can't silently drop encodes).
+                    let target_aspect = target_aspect_hoisted.unwrap_or_else(|| {
+                        compute_target_aspect(&String::from_utf8_lossy(&marker_slide_bytes), rid)
+                    });
+                    let encoded = match student_jpegs.get_mut(i).and_then(|o| o.take()) {
+                        Some(r) => r,
+                        None => if photos.len() == 1 {
+                            encode_as_jpeg_cancellable(&photos[0], target_aspect, is_cancelled)
+                        } else {
+                            composite_photos_as_jpeg_cancellable(photos, target_aspect, is_cancelled)
+                        },
                     };
                     match encoded {
                         Ok(jpeg_bytes) => {

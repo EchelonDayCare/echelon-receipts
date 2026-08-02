@@ -4,6 +4,43 @@ All notable changes shipped as a DMG. Only entries the owner has approved
 for release are listed here — "code-complete, awaiting ship approval" work
 lives in the session plan.md until it ships.
 
+## v3.6.0 — Parallel photo curation + parallel slide encoding (grad perf pass)
+
+Every render mode starts with a photo scan + sharpness rank + HEIC
+decode pass. That pass was single-threaded and often slower than the
+FFmpeg encode itself. Similarly, slide-deck generation encoded each
+student's photo serially. On a modern 8-core Mac both phases now run
+4-8× faster.
+
+### Changed
+- **Round 1: Photo curation runs in parallel across all CPU cores**
+  using `rayon`. HEIC decode, EXIF orientation correction, and
+  sharpness scoring all parallelise per-file. Applies to every render
+  mode (per-child, class reel, main reel, slides).
+- **Round 3: PowerPoint slide photo encoding parallelised.** Per-kid
+  JPEG decode → flatten → crop → downscale → JPEG re-encode is now a
+  parallel pre-pass; the serial slide-writing loop consumes
+  pre-encoded bytes via `Option::take()` (no double buffering). Slide
+  order and warning behaviour identical to before.
+- Sharpness tie-break is now deterministic (source path ASC) so
+  equal-score photos have a stable playback order regardless of which
+  worker finishes first.
+- Added dep: `rayon = "1.10"`.
+
+### Reviewed by
+- Codex (gpt-5.3-codex): Round 1 clean. Round 3 flagged clone-based
+  memory doubling → fixed via `.take()`.
+- Sonnet 4.6 rubber-duck: Round 1 clean (1 nit fixed, 1 pre-existing
+  bug filed). Round 3 flagged same memory concern → fixed. Cancellation
+  concern verified not-a-regression (return Err before serial loop).
+
+### Deferred to v3.7.0
+- Round 2 (parallel per-kid renders) — needs batched backend command
+  + tokio semaphore + coordinated cancel; too much refactor surface
+  for one release.
+- Round 4b (skip aliasing on Mac) — savings too small to justify
+  the callsite churn.
+
 ## v3.5.1 — Per-child name cards + button reorder
 
 ### Added
