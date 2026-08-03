@@ -186,6 +186,7 @@ pub fn run() {
             graduation::commands::graduation_cancel,
             graduation::commands::graduation_reset_cancel,
             graduation::commands::graduation_render_slides,
+            graduation::commands::graduation_export_slide_images,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

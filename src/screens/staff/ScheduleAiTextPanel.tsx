@@ -10,9 +10,10 @@
 
 import { useMemo, useState } from "react";
 import { parseStaffShifts, type ParsedShift, type ParsedShiftKind } from "../../lib/voice";
-import { createShift, cancelShift, restoreShift, getShift, listLiveShiftsOnDates, type ShiftStatus, absenceLabel } from "../../repo/scheduleRepo";
+import { createShift, cancelShift, restoreShift, getShift, listLiveShiftsOnDates, listShiftsInRange, type ShiftStatus, type StaffShift, absenceLabel } from "../../repo/scheduleRepo";
 import { closedDayReasonsForRange } from "../../lib/centreCalendar";
 import { showAlert } from "../../lib/dialogs";
+import { parseDeleteIntent, type DeleteScope } from "../../lib/scheduleDeleteIntent";
 
 type Row = ParsedShift & { include: boolean; err?: string };
 
@@ -21,6 +22,7 @@ const EXAMPLES = [
   "Sarah closing 2-6 Wed and Thu",
   "Judy on vacation this week",
   "Alex was sick yesterday, Priya covered",
+  "Delete all shifts this week",
 ];
 
 // Map a ParsedShift.kind to the ShiftStatus we persist. "shift" → planned;
@@ -67,6 +69,12 @@ export default function ScheduleAiTextPanel({
   const [busy, setBusy] = useState<"idle" | "parsing" | "saving">("idle");
   const [err, setErr] = useState<string | null>(null);
   const [rows, setRows] = useState<Row[] | null>(null);
+  // Bulk-delete preview. When set, the shift-creation UI is hidden
+  // and the panel renders the delete-confirmation block instead.
+  // Cleared on "Back to text" or after a successful cancel run.
+  const [deletePreview, setDeletePreview] = useState<
+    { scope: DeleteScope; shifts: StaffShift[]; staffIds: string[] } | null
+  >(null);
 
   const rosterById = useMemo(() => {
     const m = new Map<string, string>();
@@ -78,7 +86,30 @@ export default function ScheduleAiTextPanel({
     const t = text.trim();
     if (!t) { setErr("Type something first."); return; }
     if (roster.length === 0) { setErr("No active staff yet — add staff on the Staff page first."); return; }
-    setErr(null); setBusy("parsing"); setRows(null);
+    setErr(null); setBusy("parsing"); setRows(null); setDeletePreview(null);
+
+    // Deterministic bulk-delete pre-parse. Runs before the LLM path
+    // so "delete all shifts this week"-style commands skip the model
+    // entirely and route straight to a preview + confirm flow.
+    const intent = parseDeleteIntent(t, roster);
+    if (intent) {
+      try {
+        const all = await listShiftsInRange(intent.scope.startIso, intent.scope.endIso);
+        // Optional staff filter: when the prompt named specific
+        // staff members ("delete Judy's shifts this week"), keep
+        // only their shifts. Empty = everyone in scope.
+        const filtered = intent.staffIds.length === 0
+          ? all
+          : all.filter((s) => intent.staffIds.includes(s.staffId));
+        setDeletePreview({ scope: intent.scope, shifts: filtered, staffIds: intent.staffIds });
+        setBusy("idle");
+      } catch (e: any) {
+        setErr(String(e?.message ?? e));
+        setBusy("idle");
+      }
+      return;
+    }
+
     try {
       const res = await parseStaffShifts({ text: t, weekStartIso, roster, closedDays });
       if (res.shifts.length === 0) {
@@ -353,6 +384,51 @@ export default function ScheduleAiTextPanel({
     setRows((prev) => prev ? prev.map((r, ix) => ix === i ? { ...r, ...patch } : r) : prev);
   }
 
+  // Execute the bulk-delete preview: cancel every shift the preview
+  // is holding, in order. Each cancel goes through `cancelShift`, so
+  // the audit log records who/why and the "Recently cancelled" strip
+  // in the Schedule tab picks them up automatically — that's the
+  // undo path if the user changes their mind.
+  async function confirmDelete() {
+    if (!deletePreview) return;
+    setBusy("saving"); setErr(null);
+    const label = deletePreview.scope.label;
+    const staffPhrase = deletePreview.staffIds.length === 0
+      ? ""
+      : ` for ${deletePreview.staffIds
+          .map((id) => rosterById.get(id))
+          .filter(Boolean)
+          .join(", ")}`;
+    let ok = 0;
+    const failed: string[] = [];
+    for (const s of deletePreview.shifts) {
+      try {
+        await cancelShift(s.id, s.version, `Bulk delete (${label}${staffPhrase}) via AI panel`);
+        ok++;
+      } catch (e: any) {
+        failed.push(`${s.shiftDate} ${s.startTime}: ${String(e?.message ?? e)}`);
+      }
+    }
+    setBusy("idle");
+    setDeletePreview(null);
+    setText("");
+    onSaved();
+    if (failed.length > 0) {
+      setErr(
+        `Cancelled ${ok}. Failed ${failed.length}:\n• ${failed.slice(0, 5).join("\n• ")}` +
+        `${failed.length > 5 ? `\n…and ${failed.length - 5} more.` : ""}`,
+      );
+    } else {
+      window.setTimeout(
+        () => void showAlert(
+          `Cancelled ${ok} shift${ok === 1 ? "" : "s"}${staffPhrase} for ${label}.\n\n` +
+          `You can undo any of these from the "Recently cancelled" panel in the Schedule tab.`,
+        ),
+        50,
+      );
+    }
+  }
+
   return (
     <div style={styles.card}>
       <div style={styles.header}>
@@ -360,7 +436,7 @@ export default function ScheduleAiTextPanel({
       </div>
       <div style={styles.weekLabel}>Currently viewing week of {weekStartIso} — but you can schedule any future date (e.g. "next Monday", "July 20", "every Mon for 4 weeks").</div>
 
-      {!rows && (
+      {!rows && !deletePreview && (
         <>
           <textarea
             style={styles.textarea}
@@ -386,6 +462,69 @@ export default function ScheduleAiTextPanel({
           </div>
         </>
       )}
+
+      {deletePreview && (() => {
+        const staffPhrase = deletePreview.staffIds.length === 0
+          ? ""
+          : ` for ${deletePreview.staffIds
+              .map((id) => rosterById.get(id))
+              .filter(Boolean)
+              .join(", ")}`;
+        const rangePhrase = `${deletePreview.scope.startIso}${
+          deletePreview.scope.startIso === deletePreview.scope.endIso
+            ? ""
+            : ` → ${deletePreview.scope.endIso}`
+        }`;
+        return (
+        <div>
+          <div style={styles.reviewHeader}>
+            {deletePreview.shifts.length === 0
+              ? `No shifts to delete${staffPhrase} for ${deletePreview.scope.label} (${rangePhrase}).`
+              : `About to cancel ${deletePreview.shifts.length} shift${deletePreview.shifts.length === 1 ? "" : "s"}${staffPhrase} ` +
+                `for ${deletePreview.scope.label} (${rangePhrase}). ` +
+                `Each cancelled shift stays recoverable from the "Recently cancelled" strip in the Schedule tab for 7 days.`}
+          </div>
+          {deletePreview.shifts.length > 0 && (
+            <div style={{ ...styles.rowsWrap, maxHeight: 300, overflowY: "auto" }}>
+              {deletePreview.shifts.map((s) => {
+                const staffName = rosterById.get(s.staffId) ?? "(unknown staff)";
+                const absence = absenceLabel(s.status);
+                return (
+                  <div key={s.id} style={{ ...styles.row, background: "#fef2f2" }}>
+                    <span style={{ minWidth: 130, fontWeight: 600 }}>{staffName}</span>
+                    <span style={{ minWidth: 110 }}>{s.shiftDate}</span>
+                    <span style={{ minWidth: 130, color: "#555" }}>
+                      {absence ?? `${s.startTime}–${s.endTime}`}
+                    </span>
+                    {s.room && <span style={{ color: "#888" }}>· {s.room}</span>}
+                  </div>
+                );
+              })}
+            </div>
+          )}
+          <div style={styles.actions}>
+            {deletePreview.shifts.length > 0 ? (
+              <button
+                style={{ ...styles.primaryBtn, background: "#dc2626" }}
+                onClick={confirmDelete}
+                disabled={busy === "saving"}
+              >
+                {busy === "saving"
+                  ? "Cancelling…"
+                  : `✕ Cancel ${deletePreview.shifts.length} shift${deletePreview.shifts.length === 1 ? "" : "s"}`}
+              </button>
+            ) : null}
+            <button
+              style={styles.linkBtn}
+              onClick={() => { setDeletePreview(null); setErr(null); }}
+              disabled={busy === "saving"}
+            >
+              Back to text
+            </button>
+          </div>
+        </div>
+        );
+      })()}
 
       {rows && (
         <div>

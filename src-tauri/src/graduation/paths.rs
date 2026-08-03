@@ -231,6 +231,11 @@ pub struct GraduationLayout {
     pub music: PathBuf,
     pub template: PathBuf,
     pub output: PathBuf,
+    /// v3.17.0: destination for one-click "export slides as images".
+    /// Each slide in the rendered deck lands here as `slide-01.png`,
+    /// `slide-02.png`, …. Kept adjacent to `5-Output/` so parents can
+    /// grab individual images without opening PowerPoint / Keynote.
+    pub slide_images: PathBuf,
     pub child_folders: Vec<ChildFolder>,
     pub readme: PathBuf,
 }
@@ -262,6 +267,7 @@ pub fn layout(base: &Path, year: u32, students: &[(i64, String)]) -> GraduationL
         music: root.join("3-Music-Optional"),
         template: root.join("4-Slide-Template-Optional"),
         output: root.join("5-Output"),
+        slide_images: root.join("6-Slide-Images"),
         readme: root.join("README.txt"),
         child_folders,
         root,
@@ -280,6 +286,7 @@ pub fn scaffold_year(base: &Path, year: u32, students: &[(i64, String)]) -> Resu
         &layout.music,
         &layout.template,
         &layout.output,
+        &layout.slide_images,
     ] {
         std::fs::create_dir_all(dir)
             .map_err(|e| format!("mkdir {}: {e}", dir.display()))?;
@@ -360,6 +367,15 @@ photos and per-child photos.
 
   5-Output/
       Rendered videos and the final .pptx deck are saved here.
+
+  6-Slide-Images/
+      One-click "Export slides as images" saves each slide of the
+      deck as its own PNG (or JPEG) into this folder — e.g.
+      `slide-01.png`, `slide-02.png`, …. Requires LibreOffice to be
+      installed (free download from libreoffice.org); we use its
+      PPTX renderer + bundled PDF library to guarantee the images
+      match what parents would see if you opened the deck in
+      PowerPoint / Keynote.
 
 Tips:
   • Photo formats supported: JPG, PNG, WebP, HEIC (iPhone). Extensionless

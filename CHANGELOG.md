@@ -4,6 +4,23 @@ All notable changes shipped as a DMG. Only entries the owner has approved
 for release are listed here — "code-complete, awaiting ship approval" work
 lives in the session plan.md until it ships.
 
+## v3.17.0 — Export slides as images (PNG / JPEG)
+
+One-click export of every rendered graduation slide as its own image
+file. Adds a new `6-Slide-Images/` folder to the scaffold layout and a
+new **🖼 Export slides as PNG** (or JPEG) button beside "Slides only" in
+step 4. Handy for owners who want to share individual slides on the
+class WhatsApp group or print handouts without cracking open PowerPoint
+or Keynote.
+
+Under the hood, we require LibreOffice on the machine (free download
+from libreoffice.org, no license) so what parents receive is bit-for-bit
+identical to what PowerPoint would render — including your custom
+template's fonts, backgrounds, and photo placements. The app renders one
+slide per invocation, so a 30-kid deck ≈ 45 seconds end-to-end. If
+LibreOffice isn't installed we show a modal explaining what to install
+instead of a mystery crash.
+
 ## v3.16.1 — Skip AppleDouble sidecars in template auto-detect
 
 Fixes a Mac-only crash (`open pptx zip: invalid Zip archive: Could not

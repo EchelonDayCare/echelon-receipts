@@ -12,6 +12,7 @@ import {
 } from "../lib/db";
 import { sendGradReelEmail } from "../lib/gradEmail";
 import { parseRecipients } from "../lib/email";
+import { showAlert } from "../lib/dialogs";
 import type { Student } from "../types";
 
 // Payloads mirrored from src-tauri/src/graduation/commands.rs
@@ -54,6 +55,7 @@ type Layout = {
   music: string;
   template: string;
   output: string;
+  slide_images: string;
   readme: string;
   child_folders: ChildFolder[];
 };
@@ -97,7 +99,9 @@ export default function Graduation() {
   const [showScaffoldModal, setShowScaffoldModal] = useState(false);
   const [students, setStudents] = useState<Student[]>([]);
   const [preflight, setPreflight] = useState<PreflightReport | null>(null);
-  const [busy, setBusy] = useState<null | "scaffold" | "preflight" | "reel" | "child" | "slides" | "class" | "all">(null);
+  const [busy, setBusy] = useState<null | "scaffold" | "preflight" | "reel" | "child" | "slides" | "class" | "all" | "images">(null);
+  // v3.17.0: PNG vs JPEG for the "Export slides as images" button.
+  const [slideImageFormat, setSlideImageFormat] = useState<"png" | "jpeg">("png");
   const [currentStage, setCurrentStage] = useState<string>("");
   const [progress, setProgress] = useState<ProgressTick | null>(null);
   const [log, setLog] = useState<string[]>([]);
@@ -631,9 +635,53 @@ export default function Graduation() {
     }
   }
 
+  // v3.17.0: one-click export of every slide of the rendered deck as
+  // its own PNG or JPEG into `6-Slide-Images/`. Handy for owners who
+  // want to share slides individually on WhatsApp / print handouts
+  // without cracking open PowerPoint. Under the hood: LibreOffice's
+  // `soffice --headless` renders one slide per invocation (see
+  // `slide_images.rs`), so we surface a clear "Install LibreOffice"
+  // message if the binary isn't present.
+  async function exportSlideImages() {
+    if (!layout) return;
+    const pptxPath = `${layout.output}${layout.output.endsWith("/") || layout.output.endsWith("\\") ? "" : (/\\/.test(layout.output) ? "\\" : "/")}Graduation-Slides-${year}.pptx`;
+    setBusy("images");
+    setRunSummary(null);
+    runStartRef.current = Date.now();
+    try {
+      const rep = await invoke<{
+        images_written: number;
+        output_dir: string;
+        soffice_path: string;
+        warnings: string[];
+      }>("graduation_export_slide_images", {
+        req: {
+          pptx_path: pptxPath,
+          output_folder: layout.slide_images,
+          format: slideImageFormat,
+        },
+      });
+      appendLog(`✓ Slide images: ${rep.images_written} × ${slideImageFormat.toUpperCase()} → ${rep.output_dir}`);
+      if (rep.warnings.length > 0) rep.warnings.forEach((w) => appendLog(`  ⚠ ${w}`));
+      setRunSummary({
+        title: "✓ Slide images exported",
+        detail: `${rep.images_written} ${slideImageFormat.toUpperCase()}s in ${fmtElapsed(Date.now() - runStartRef.current)} → ${rep.output_dir}`,
+      });
+    } catch (e) {
+      appendLog(`slide images error: ${e}`);
+      const msg = String(e);
+      if (/LibreOffice/i.test(msg)) {
+        showAlert(
+          "Exporting slides as images uses LibreOffice under the hood so the images look identical to what parents would see in PowerPoint / Keynote.\n\nInstall the free download from libreoffice.org, then click Export again.",
+          { title: "LibreOffice required", kind: "warning" },
+        );
+      }
+    } finally {
+      setBusy(null);
+    }
+  }
+
   async function renderAll() {
-    // Clear any prior cancel flag on both sides before starting a new
-    // batch so a stale cancel doesn't abort us instantly.
     cancelledRef.current = false;
     try { await invoke("graduation_reset_cancel"); } catch { /* ok */ }
     setBusy("all");
@@ -1112,6 +1160,44 @@ export default function Graduation() {
             <button className="btn" onClick={() => renderSlides()} disabled={isBusy || graduating.length === 0}>
               {busy === "slides" ? "Building deck..." : "Slides only"}
             </button>
+            {/* v3.17.0: one-click export every slide as PNG/JPEG into
+                6-Slide-Images/. Requires LibreOffice; we show a modal
+                nudge on the first missing-binary error. */}
+            <span
+              style={{
+                display: "inline-flex",
+                alignItems: "stretch",
+                border: "1px solid var(--border, #cbd5e1)",
+                borderRadius: 6,
+                overflow: "hidden",
+              }}
+            >
+              <button
+                className="btn"
+                onClick={exportSlideImages}
+                disabled={isBusy || graduating.length === 0}
+                title="Renders each slide as its own image into 6-Slide-Images/. Requires LibreOffice."
+                style={{ borderRadius: 0, border: "none" }}
+              >
+                {busy === "images" ? "Exporting slides..." : `🖼 Export slides as ${slideImageFormat.toUpperCase()}`}
+              </button>
+              <select
+                value={slideImageFormat}
+                onChange={(e) => setSlideImageFormat(e.target.value as "png" | "jpeg")}
+                disabled={isBusy}
+                style={{
+                  border: "none",
+                  borderLeft: "1px solid var(--border, #cbd5e1)",
+                  padding: "0 8px",
+                  background: "#f8fafc",
+                  cursor: "pointer",
+                }}
+                aria-label="Image format"
+              >
+                <option value="png">PNG</option>
+                <option value="jpeg">JPEG</option>
+              </select>
+            </span>
             <button className="btn" onClick={() => renderPerChild()} disabled={isBusy || graduating.length === 0}>
               {busy === "child" ? "Rendering..." : `Per-child only (${graduating.length})`}
             </button>

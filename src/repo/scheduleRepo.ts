@@ -229,6 +229,26 @@ export async function getShift(id: string): Promise<StaffShift | null> {
 }
 
 /**
+ * Live (not soft-deleted, not cancelled) shifts inside `[startIso,
+ * endIso]` inclusive. Used by the AI Schedule Builder's bulk-delete
+ * flow to preview what would be cancelled for scopes like "today",
+ * "this week", or "last month" before the owner confirms.
+ */
+export async function listShiftsInRange(startIso: string, endIso: string): Promise<StaffShift[]> {
+  const d = await db();
+  const rows = await d.select<ShiftRow[]>(
+    `SELECT * FROM staff_shifts
+      WHERE deleted_at IS NULL
+        AND status != 'cancelled'
+        AND shift_date >= ?
+        AND shift_date <= ?
+      ORDER BY shift_date, start_time`,
+    [startIso, endIso],
+  );
+  return rows.map(rowToShift);
+}
+
+/**
  * True if a live (not cancelled, not soft-deleted) shift already exists
  * for this staff member on this date. Optionally exclude a specific shift
  * id — used by updateShift when a date change would otherwise collide

@@ -22,7 +22,7 @@ use tauri::{AppHandle, Emitter, Manager, State};
 use tauri_plugin_shell::process::CommandChild;
 use tauri_plugin_shell::ShellExt;
 
-use crate::graduation::{class_reel, curate, engine, paths, pptx, preflight, progress};
+use crate::graduation::{class_reel, curate, engine, paths, pptx, preflight, progress, slide_images};
 use crate::db_gate::DbGate;
 
 /// Total reel duration accounting for xfade overlaps.
@@ -946,6 +946,40 @@ pub async fn graduation_render_slides(
             })
             .collect(),
     })
+}
+
+// ── Slide image export (v3.17.0) ─────────────────────────────────────
+
+#[derive(Debug, Deserialize)]
+pub struct ExportSlideImagesRequest {
+    /// Path to the rendered .pptx deck (usually
+    /// `5-Output/Graduation-Slides-YEAR.pptx`).
+    pub pptx_path: String,
+    /// Destination folder for the images. Frontend passes
+    /// `layout.slide_images` (`6-Slide-Images/`).
+    pub output_folder: String,
+    pub format: slide_images::ImageFormat,
+}
+
+/// One-click "Export slides as images". Renders each slide of the
+/// deck as its own PNG or JPEG using LibreOffice under the hood.
+/// Requires LibreOffice on the user's machine; a clear install
+/// hint is returned in the error string if missing.
+#[tauri::command]
+pub async fn graduation_export_slide_images(
+    req: ExportSlideImagesRequest,
+) -> Result<slide_images::ExportSlideImagesReport, String> {
+    let pptx = paths::validate_file(&req.pptx_path)?;
+    let out_dir = paths::validate_writable_dir(&req.output_folder)?;
+    // Push to a blocking thread — soffice is a heavy subprocess that
+    // takes 1-2s per slide; blocking the tokio runtime for 30+ seconds
+    // starves every other Tauri command.
+    let fmt = req.format;
+    tokio::task::spawn_blocking(move || {
+        slide_images::export_all(&pptx, &out_dir, fmt)
+    })
+    .await
+    .map_err(|e| format!("export task join: {e}"))?
 }
 
 // ── Class-reel render ────────────────────────────────────────────────

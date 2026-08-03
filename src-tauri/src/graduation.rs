@@ -60,6 +60,7 @@ pub mod pptx;
 pub mod preflight;
 pub mod progress;
 pub mod score_cache;
+pub mod slide_images;
 
 /// Public accessor for the engine transition rotation used by
 /// [`class_reel::build_segment_filter`] to keep photo-to-photo
