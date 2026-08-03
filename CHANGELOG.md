@@ -4,6 +4,18 @@ All notable changes shipped as a DMG. Only entries the owner has approved
 for release are listed here — "code-complete, awaiting ship approval" work
 lives in the session plan.md until it ships.
 
+## v3.16.0 — Fixed z-order on the bundled graduation template
+
+Ships the owner-approved 2-slide certificate template as the new bundled
+default. The `{{Year}}`, `{{Name}}`, and `{{Note}}` text placeholders on
+the marker slide have been re-stacked so they render **on top of** the
+certificate background picture. In prior versions the placeholders lived
+at the bottom of the group's z-order, so PowerPoint/LibreOffice painted
+the certificate PNG over them — the substituted text was present in the
+output XML but visually hidden. Fresh installs (and existing users
+without a custom `template.pptx`) now get names/years/notes visible on
+every kid slide out of the box.
+
 ## v3.15.0 — Rounded corners on the photo tile
 
 Reverts the v3.14.0 layout changes (slide dim / text / mask edits went
