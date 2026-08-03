@@ -10,36 +10,47 @@
 //!
 //! We do NOT bundle a PDF or PPTX renderer with the app. Instead we
 //! require LibreOffice to be installed on the user's machine (free at
-//! libreoffice.org, ~350 MB one-time) and invoke `soffice --headless`
-//! once per slide with the standard `impress_png_Export` filter and a
-//! `PageRange` filter option so each invocation writes exactly one
-//! slide as PNG. Cross-platform, no compile-time deps.
+//! libreoffice.org, ~350 MB one-time) and invoke `soffice --headless
+//! --convert-to png` once per slide.
+//!
+//! ## Why we don't use `PageRange`
+//!
+//! LibreOffice's `impress_png_Export` filter accepts a `PageRange`
+//! filter option in theory, but in practice the option is silently
+//! ignored across every LO version we tested — every invocation ends
+//! up exporting slide 1 no matter what page range is passed. Rather
+//! than fight that, we **rewrite the deck's `sldIdLst`** to contain
+//! exactly the target slide before each soffice call. LibreOffice
+//! always exports slide 1 of what it's handed; if the only entry in
+//! `sldIdLst` is slide N of the original deck, "slide 1" IS slide N.
+//! Every soffice invocation gets a purpose-built single-slide temp
+//! pptx and the resulting PNG is renamed into place.
 //!
 //! LibreOffice's PowerPoint renderer matches PowerPoint's output for
 //! all the shape / text / picture features graduation templates use.
 //! Fidelity to the actual `.pptx` (fonts, backgrounds, positioning)
 //! is preserved because we're literally handing LibreOffice the same
-//! file that PowerPoint / Keynote would open.
+//! file that PowerPoint / Keynote would open, just with one slide
+//! isolated in the presentation part.
 //!
 //! # Trade-offs
 //!
 //! - One soffice startup per slide (~1-2s on a modern Mac; 30 kids
-//!   ≈ 45 seconds end-to-end). We accept the overhead in exchange for
-//!   zero pptx zip surgery.
+//!   ≈ 45 seconds end-to-end). Acceptable for a manual "export" click.
 //! - JPEG output is achieved by decoding the PNG that LibreOffice
-//!   emits and re-encoding via the `image` crate; there is no
-//!   built-in JPEG export filter equivalent in `soffice`.
+//!   emits and re-encoding via the `image` crate.
 //! - If LibreOffice is missing we return a structured error the
 //!   frontend surfaces as an "Install LibreOffice" callout instead of
 //!   a mystery stack trace.
 
-use std::io::{Cursor, Read};
+use std::io::{Cursor, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use image::{ImageEncoder, ImageReader};
 use serde::{Deserialize, Serialize};
-use zip::ZipArchive;
+use zip::write::SimpleFileOptions;
+use zip::{CompressionMethod, ZipArchive, ZipWriter};
 
 /// Image format the user picks in the dropdown.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -69,9 +80,6 @@ pub struct ExportSlideImagesReport {
 
 /// Public entry point. Renders every slide of `pptx_path` into
 /// `output_dir` as `slide-01.<ext>`, `slide-02.<ext>`, ….
-///
-/// Errors bubble up as user-facing strings; every LibreOffice-missing
-/// case returns a hint pointing at libreoffice.org.
 pub fn export_all(
     pptx_path: &Path,
     output_dir: &Path,
@@ -84,7 +92,13 @@ pub fn export_all(
              (no license needed) then click Export again.".to_string()
         })?;
 
-    let slide_count = count_slides(pptx_path)?;
+    // Slurp original pptx once — every per-slide temp file is a
+    // rewrite of these bytes, so re-reading from disk N times would
+    // be pointless I/O.
+    let src_bytes = std::fs::read(pptx_path)
+        .map_err(|e| format!("read {}: {e}", pptx_path.display()))?;
+    let sld_ids = extract_sld_ids(&src_bytes)?;
+    let slide_count = sld_ids.len();
     if slide_count == 0 {
         return Err("Deck has no slides to export".into());
     }
@@ -92,9 +106,6 @@ pub fn export_all(
     std::fs::create_dir_all(output_dir)
         .map_err(|e| format!("mkdir {}: {e}", output_dir.display()))?;
 
-    // soffice needs its own scratch dir so we can safely rename its
-    // fixed-name output (`Graduation-Slides-2026.png`) into
-    // `slide-NN.<ext>` without a race between invocations.
     let scratch = output_dir.join(".soffice-tmp");
     let _ = std::fs::remove_dir_all(&scratch);
     std::fs::create_dir_all(&scratch)
@@ -103,68 +114,67 @@ pub fn export_all(
     let mut warnings: Vec<String> = Vec::new();
     let mut written = 0usize;
 
-    // Padding width = ceil(log10(count+1)); keeps filenames
-    // lexicographically sortable even for 100+ slide decks.
     let pad_width = digit_width(slide_count);
 
-    for i in 1..=slide_count {
-        // `impress_png_Export` supports a `PageRange` filter option; the
-        // json is a UNO PropertyValue array. Value MUST be a string
-        // ("1" not 1) — LibreOffice rejects integer types silently and
-        // just exports slide 1 for every call.
-        let filter = format!(
-            "png:impress_png_Export:{{\"PageRange\":{{\"type\":\"string\",\"value\":\"{i}\"}}}}"
-        );
+    for (i, sld_id_line) in sld_ids.iter().enumerate() {
+        let slide_num = i + 1;
+        // Build a temp pptx with only this slide listed in sldIdLst.
+        // All other zip entries pass through verbatim so slideMasters,
+        // theme, media, and the untouched slide XML files travel with
+        // the temp file. LibreOffice renders whatever is in sldIdLst
+        // as slide 1 → we get exactly this slide out.
+        let temp_pptx = scratch.join(format!("slice-{slide_num}.pptx"));
+        write_single_slide_pptx(&src_bytes, sld_id_line, &temp_pptx)
+            .map_err(|e| format!("build single-slide pptx for slide {slide_num}: {e}"))?;
+
         let status = Command::new(&soffice)
             .arg("--headless")
             .arg("--norestore")
             .arg("--nologo")
             .arg("--nolockcheck")
             .arg("--convert-to")
-            .arg(&filter)
+            .arg("png")
             .arg("--outdir")
             .arg(&scratch)
-            .arg(pptx_path)
+            .arg(&temp_pptx)
             .status()
             .map_err(|e| format!("spawn soffice: {e}"))?;
         if !status.success() {
             return Err(format!(
-                "soffice failed on slide {i} (exit {:?}); pptx: {}",
+                "soffice failed on slide {slide_num} (exit {:?}); source deck: {}",
                 status.code(),
                 pptx_path.display()
             ));
         }
 
-        // soffice writes `<pptx-stem>.png` into the scratch dir every
-        // time. Move + rename to `slide-NN.<ext>` (converting to
-        // JPEG on the fly if that's what the user picked).
-        let stem = pptx_path
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .ok_or_else(|| "pptx path has no stem".to_string())?;
-        let src = scratch.join(format!("{stem}.png"));
-        if !src.exists() {
-            warnings.push(format!("soffice produced no output for slide {i}"));
+        // soffice writes `<temp-stem>.png` — i.e. `slice-N.png` —
+        // into the scratch dir. Move + rename to `slide-NN.<ext>`.
+        let src_png = scratch.join(format!("slice-{slide_num}.png"));
+        if !src_png.exists() {
+            warnings.push(format!("soffice produced no output for slide {slide_num}"));
+            // Sweep the temp pptx even on this soft-fail path.
+            let _ = std::fs::remove_file(&temp_pptx);
             continue;
         }
         let dst = output_dir.join(format!(
             "slide-{:0width$}.{ext}",
-            i,
+            slide_num,
             width = pad_width,
             ext = format.ext()
         ));
         match format {
             ImageFormat::Png => {
-                // Atomic rename inside the same folder — never fails
-                // across filesystems here.
-                std::fs::rename(&src, &dst)
-                    .map_err(|e| format!("move {}: {e}", src.display()))?;
+                std::fs::rename(&src_png, &dst)
+                    .map_err(|e| format!("move {}: {e}", src_png.display()))?;
             }
             ImageFormat::Jpeg => {
-                transcode_png_to_jpeg(&src, &dst)?;
-                let _ = std::fs::remove_file(&src);
+                transcode_png_to_jpeg(&src_png, &dst)?;
+                let _ = std::fs::remove_file(&src_png);
             }
         }
+        // Clean the temp pptx immediately so scratch doesn't hold
+        // 30× the deck size mid-run on a big grad batch.
+        let _ = std::fs::remove_file(&temp_pptx);
         written += 1;
     }
 
@@ -188,22 +198,132 @@ fn digit_width(n: usize) -> usize {
     w.max(2)
 }
 
-/// Count `<p:sldId ` occurrences in the deck's `ppt/presentation.xml`.
-/// That's the authoritative slide count — the file-count of
-/// `ppt/slides/slideN.xml` can be higher when a template leaves
-/// orphan slides in the zip that aren't referenced by the sldIdLst.
-fn count_slides(pptx_path: &Path) -> Result<usize, String> {
-    let bytes = std::fs::read(pptx_path)
-        .map_err(|e| format!("read {}: {e}", pptx_path.display()))?;
-    let mut zip = ZipArchive::new(Cursor::new(bytes))
-        .map_err(|e| format!("open {}: {e}", pptx_path.display()))?;
-    let mut file = zip
-        .by_name("ppt/presentation.xml")
-        .map_err(|e| format!("presentation.xml: {e}"))?;
-    let mut xml = String::new();
-    file.read_to_string(&mut xml)
-        .map_err(|e| format!("read presentation.xml: {e}"))?;
-    Ok(xml.matches("<p:sldId ").count())
+/// Extract every `<p:sldId ... />` element from the deck's
+/// `ppt/presentation.xml`, in document order. Each returned string is
+/// the full self-closing tag verbatim (e.g.
+/// `<p:sldId id="256" r:id="rId2"/>`) so it can be spliced back into a
+/// rewritten `sldIdLst` untouched, preserving whatever `id` /
+/// namespaced attributes the template author used.
+fn extract_sld_ids(src_bytes: &[u8]) -> Result<Vec<String>, String> {
+    let xml = read_zip_entry_as_string(src_bytes, "ppt/presentation.xml")?;
+    let (lst_start, lst_end) = sld_id_lst_bounds(&xml).ok_or_else(|| {
+        "ppt/presentation.xml is missing <p:sldIdLst>...</p:sldIdLst>".to_string()
+    })?;
+    let inner = &xml[lst_start..lst_end];
+    let mut out = Vec::new();
+    let mut cursor = 0usize;
+    while let Some(rel) = inner[cursor..].find("<p:sldId") {
+        let start = cursor + rel;
+        // Self-closing: find the "/>" that terminates this tag.
+        let after = start + "<p:sldId".len();
+        let Some(rel_close) = inner[after..].find("/>") else {
+            break;
+        };
+        let end = after + rel_close + "/>".len();
+        out.push(inner[start..end].to_string());
+        cursor = end;
+    }
+    Ok(out)
+}
+
+/// Locate the byte range (inner content) of `<p:sldIdLst>` inside the
+/// presentation part. Returns `(start_of_inner, end_of_inner)`.
+fn sld_id_lst_bounds(xml: &str) -> Option<(usize, usize)> {
+    let open = xml.find("<p:sldIdLst")?;
+    // Skip over any attributes to the actual `>` that closes the
+    // opening tag.
+    let open_end = xml[open..].find('>')? + open + 1;
+    let close = xml[open_end..].find("</p:sldIdLst>")? + open_end;
+    Some((open_end, close))
+}
+
+/// Serialize a temp pptx containing every zip entry from `src_bytes`
+/// verbatim, except `ppt/presentation.xml` which is rewritten so its
+/// `<p:sldIdLst>` contains only `keep_sld_id_line`. LibreOffice always
+/// renders "slide 1" of whatever it's handed — with only one entry in
+/// the list, "slide 1" is the target slide.
+fn write_single_slide_pptx(
+    src_bytes: &[u8],
+    keep_sld_id_line: &str,
+    dest: &Path,
+) -> Result<(), String> {
+    let mut archive =
+        ZipArchive::new(Cursor::new(src_bytes)).map_err(|e| format!("open src zip: {e}"))?;
+    let out = std::fs::File::create(dest)
+        .map_err(|e| format!("create {}: {e}", dest.display()))?;
+    let mut writer = ZipWriter::new(out);
+    let stored = SimpleFileOptions::default().compression_method(CompressionMethod::Stored);
+    let deflated = SimpleFileOptions::default().compression_method(CompressionMethod::Deflated);
+
+    for i in 0..archive.len() {
+        let mut file = archive
+            .by_index(i)
+            .map_err(|e| format!("read src entry {i}: {e}"))?;
+        if file.is_dir() {
+            continue;
+        }
+        let name = file.name().to_string();
+        let mut buf = Vec::with_capacity(file.size() as usize);
+        file.read_to_end(&mut buf)
+            .map_err(|e| format!("read {name}: {e}"))?;
+
+        if name == "ppt/presentation.xml" {
+            buf = rewrite_presentation_xml(&buf, keep_sld_id_line)
+                .map_err(|e| format!("rewrite presentation.xml: {e}"))?;
+        }
+
+        let opts = if is_precompressed_media(&name) { stored } else { deflated };
+        writer
+            .start_file(&name, opts)
+            .map_err(|e| format!("start_file {name}: {e}"))?;
+        writer
+            .write_all(&buf)
+            .map_err(|e| format!("write {name}: {e}"))?;
+    }
+    writer.finish().map_err(|e| format!("finish zip: {e}"))?;
+    Ok(())
+}
+
+/// Replace the entire body of `<p:sldIdLst>...</p:sldIdLst>` with the
+/// single `<p:sldId .../>` element in `keep_line`. The rest of the
+/// file is preserved byte-for-byte.
+fn rewrite_presentation_xml(
+    original: &[u8],
+    keep_line: &str,
+) -> Result<Vec<u8>, String> {
+    let xml = std::str::from_utf8(original)
+        .map_err(|e| format!("presentation.xml is not utf-8: {e}"))?;
+    let (start, end) = sld_id_lst_bounds(xml)
+        .ok_or_else(|| "presentation.xml is missing <p:sldIdLst>".to_string())?;
+    let mut out = String::with_capacity(xml.len());
+    out.push_str(&xml[..start]);
+    out.push_str(keep_line);
+    out.push_str(&xml[end..]);
+    Ok(out.into_bytes())
+}
+
+fn read_zip_entry_as_string(src_bytes: &[u8], name: &str) -> Result<String, String> {
+    let mut archive =
+        ZipArchive::new(Cursor::new(src_bytes)).map_err(|e| format!("open zip: {e}"))?;
+    let mut file = archive
+        .by_name(name)
+        .map_err(|e| format!("read {name}: {e}"))?;
+    let mut s = String::new();
+    file.read_to_string(&mut s)
+        .map_err(|e| format!("decode {name}: {e}"))?;
+    Ok(s)
+}
+
+fn is_precompressed_media(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    lower.ends_with(".jpg")
+        || lower.ends_with(".jpeg")
+        || lower.ends_with(".png")
+        || lower.ends_with(".mp4")
+        || lower.ends_with(".webp")
+        || lower.ends_with(".heic")
+        || lower.ends_with(".heif")
+        || lower.ends_with(".gif")
 }
 
 /// Locate LibreOffice's `soffice` binary. Checks the standard install
@@ -229,9 +349,6 @@ fn locate_soffice() -> Option<PathBuf> {
             }
         }
     }
-    // PATH fallback — resolve via `where`/`which` so the returned
-    // path is absolute (soffice sometimes misbehaves when spawned as
-    // a bare name via std::process::Command on macOS bundles).
     let which_bin = if cfg!(target_os = "windows") { "where" } else { "which" };
     let exe = if cfg!(target_os = "windows") { "soffice.exe" } else { "soffice" };
     let out = Command::new(which_bin).arg(exe).output().ok()?;
@@ -248,9 +365,7 @@ fn locate_soffice() -> Option<PathBuf> {
 }
 
 /// Decode `src` (a PNG written by LibreOffice) and re-encode as JPEG
-/// at quality 90 into `dst`. Quality 90 keeps parent-facing JPEGs
-/// visually indistinguishable from the source PNG while cutting file
-/// size roughly 10× on photo-heavy graduation slides.
+/// at quality 90 into `dst`.
 fn transcode_png_to_jpeg(src: &Path, dst: &Path) -> Result<(), String> {
     let img = ImageReader::open(src)
         .map_err(|e| format!("open {}: {e}", src.display()))?
@@ -277,9 +392,6 @@ fn transcode_png_to_jpeg(src: &Path, dst: &Path) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Write;
-    use zip::write::SimpleFileOptions;
-    use zip::CompressionMethod;
 
     #[test]
     fn image_format_extensions() {
@@ -298,18 +410,18 @@ mod tests {
         assert_eq!(digit_width(1000), 4);
     }
 
-    fn make_fake_pptx(dir: &Path, sld_id_count: usize) -> PathBuf {
+    fn make_fake_pptx(dir: &Path, sld_ids: &[(u32, u32)]) -> PathBuf {
         let path = dir.join("fake.pptx");
         let file = std::fs::File::create(&path).unwrap();
         let mut zip = zip::ZipWriter::new(file);
         let opts = SimpleFileOptions::default().compression_method(CompressionMethod::Stored);
         zip.start_file("ppt/presentation.xml", opts).unwrap();
-        let mut xml = String::from("<p:presentation><p:sldIdLst>");
-        for i in 0..sld_id_count {
+        let mut xml = String::from(
+            r#"<?xml version="1.0"?><p:presentation xmlns:p="a" xmlns:r="b"><p:sldIdLst>"#,
+        );
+        for (id, rid) in sld_ids {
             xml.push_str(&format!(
-                "<p:sldId id=\"{}\" r:id=\"rId{}\"/>",
-                256 + i,
-                i + 2
+                r#"<p:sldId id="{id}" r:id="rId{rid}"/>"#
             ));
         }
         xml.push_str("</p:sldIdLst></p:presentation>");
@@ -319,26 +431,76 @@ mod tests {
     }
 
     #[test]
-    fn count_slides_reads_sld_id_list() {
+    fn extract_sld_ids_preserves_verbatim_tags() {
         let dir = tempfile::tempdir().unwrap();
-        let pptx = make_fake_pptx(dir.path(), 7);
-        assert_eq!(count_slides(&pptx).unwrap(), 7);
+        let pptx = make_fake_pptx(dir.path(), &[(256, 2), (257, 3), (258, 4)]);
+        let bytes = std::fs::read(&pptx).unwrap();
+        let ids = extract_sld_ids(&bytes).unwrap();
+        assert_eq!(ids.len(), 3);
+        assert_eq!(ids[0], r#"<p:sldId id="256" r:id="rId2"/>"#);
+        assert_eq!(ids[1], r#"<p:sldId id="257" r:id="rId3"/>"#);
+        assert_eq!(ids[2], r#"<p:sldId id="258" r:id="rId4"/>"#);
     }
 
     #[test]
-    fn count_slides_rejects_missing_presentation_xml() {
+    fn extract_sld_ids_errors_when_lst_missing() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("empty.pptx");
+        let path = dir.path().join("bad.pptx");
         let file = std::fs::File::create(&path).unwrap();
         let mut zip = zip::ZipWriter::new(file);
+        let opts = SimpleFileOptions::default().compression_method(CompressionMethod::Stored);
+        zip.start_file("ppt/presentation.xml", opts).unwrap();
+        zip.write_all(b"<p:presentation/>").unwrap();
         zip.finish().unwrap();
-        assert!(count_slides(&path).is_err());
+        let bytes = std::fs::read(&path).unwrap();
+        assert!(extract_sld_ids(&bytes).is_err());
+    }
+
+    #[test]
+    fn rewrite_presentation_xml_replaces_only_sld_id_lst() {
+        let original =
+            br#"<p:presentation><p:sldSz cx="1"/><p:sldIdLst><p:sldId id="256" r:id="rId2"/><p:sldId id="257" r:id="rId3"/></p:sldIdLst><p:notesSz cx="2"/></p:presentation>"#;
+        let out = rewrite_presentation_xml(
+            original,
+            r#"<p:sldId id="257" r:id="rId3"/>"#,
+        )
+        .unwrap();
+        let s = std::str::from_utf8(&out).unwrap();
+        assert!(s.contains(r#"<p:sldSz cx="1"/>"#));
+        assert!(s.contains(r#"<p:notesSz cx="2"/>"#));
+        assert!(s.contains(
+            r#"<p:sldIdLst><p:sldId id="257" r:id="rId3"/></p:sldIdLst>"#
+        ));
+        assert!(!s.contains(r#"id="256""#));
+    }
+
+    #[test]
+    fn write_single_slide_pptx_produces_readable_zip_with_one_sld_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = make_fake_pptx(dir.path(), &[(256, 2), (257, 3), (258, 4)]);
+        let src_bytes = std::fs::read(&src).unwrap();
+        let dst = dir.path().join("slice.pptx");
+        write_single_slide_pptx(
+            &src_bytes,
+            r#"<p:sldId id="257" r:id="rId3"/>"#,
+            &dst,
+        )
+        .unwrap();
+        let out_bytes = std::fs::read(&dst).unwrap();
+        let mut zip = ZipArchive::new(Cursor::new(&out_bytes)).unwrap();
+        let mut xml = String::new();
+        zip.by_name("ppt/presentation.xml")
+            .unwrap()
+            .read_to_string(&mut xml)
+            .unwrap();
+        assert!(xml.contains(r#"id="257""#));
+        assert!(!xml.contains(r#"id="256""#));
+        assert!(!xml.contains(r#"id="258""#));
     }
 
     #[test]
     fn transcode_png_to_jpeg_produces_valid_jpeg() {
         let dir = tempfile::tempdir().unwrap();
-        // 8x8 red PNG
         let img = image::RgbImage::from_pixel(8, 8, image::Rgb([200, 30, 30]));
         let png_path = dir.path().join("in.png");
         img.save(&png_path).unwrap();

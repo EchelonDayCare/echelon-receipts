@@ -4,6 +4,20 @@ All notable changes shipped as a DMG. Only entries the owner has approved
 for release are listed here — "code-complete, awaiting ship approval" work
 lives in the session plan.md until it ships.
 
+## v3.17.1 — Fix "Export slides as images" only writing the cover
+
+v3.17.0 relied on LibreOffice's `impress_png_Export` `PageRange` filter
+option to select which slide each `soffice --convert-to png` invocation
+should render. That option turns out to be silently ignored across every
+LO version — every call ended up writing slide 1 (the cover) regardless
+of the requested page, so a 30-kid deck exported as 30 identical copies
+of the "Class of 2026" cover. Fixed by rewriting the temp deck's
+`sldIdLst` in `ppt/presentation.xml` to contain only the target slide
+before each soffice call. LibreOffice always renders slide 1 of what
+it's handed — with only one entry left in the list, "slide 1" IS the
+requested slide. All other zip entries (masters, theme, media) pass
+through byte-for-byte. Adds 4 new tests around the pptx slice logic.
+
 ## v3.17.0 — Export slides as images (PNG / JPEG)
 
 One-click export of every rendered graduation slide as its own image
