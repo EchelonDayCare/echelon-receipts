@@ -406,6 +406,20 @@ fn files_with_ext(dir: &Path, exts: &[&str]) -> Vec<PathBuf> {
         .map(|e| e.path())
         .filter(|p| p.is_file())
         .filter(|p| {
+            // Skip AppleDouble sidecars (macOS `._name`), dotfiles
+            // (`.DS_Store`, etc.), and Office lock files (`~$name`).
+            // These commonly appear in user template folders on Mac
+            // and Windows and are never real Office documents; if we
+            // pick one up as the "first pptx", ZipArchive fails with
+            // "Could not find EOCD" and slide render crashes.
+            match p.file_name().and_then(|n| n.to_str()) {
+                Some(n) if n.starts_with("._")
+                    || n.starts_with('.')
+                    || n.starts_with("~$") => false,
+                _ => true,
+            }
+        })
+        .filter(|p| {
             p.extension()
                 .and_then(|e| e.to_str())
                 .map(|e| exts.iter().any(|x| e.eq_ignore_ascii_case(x)))

@@ -4,6 +4,18 @@ All notable changes shipped as a DMG. Only entries the owner has approved
 for release are listed here — "code-complete, awaiting ship approval" work
 lives in the session plan.md until it ships.
 
+## v3.16.1 — Skip AppleDouble sidecars in template auto-detect
+
+Fixes a Mac-only crash (`open pptx zip: invalid Zip archive: Could not
+find EOCD`) when `4-Slide-Template-Optional/` contains a hidden
+AppleDouble sidecar like `._template.pptx`. macOS leaves these behind
+when files are copied via Finder, even after the real file is deleted
+— `first_pptx_in` sorted the sidecar before the real template and
+picked it as the "first pptx". Now dotfiles, AppleDouble sidecars
+(`._name`), and Office lock files (`~$name`) are filtered out of every
+`files_with_ext` result. The zip-open error now also names the path
+it tried to open, so future issues are easier to diagnose.
+
 ## v3.16.0 — Fixed z-order on the bundled graduation template
 
 Ships the owner-approved 2-slide certificate template as the new bundled

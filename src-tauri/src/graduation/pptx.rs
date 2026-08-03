@@ -125,7 +125,12 @@ pub fn render_slides_cancellable(
     let template_bytes =
         std::fs::read(template_pptx).map_err(|e| format!("read template: {e}"))?;
     let mut archive =
-        ZipArchive::new(Cursor::new(&template_bytes)).map_err(|e| format!("open pptx zip: {e}"))?;
+        ZipArchive::new(Cursor::new(&template_bytes)).map_err(|e| {
+            format!(
+                "open pptx zip: {e} (path: {})",
+                template_pptx.display()
+            )
+        })?;
 
     // Slurp every entry into memory so we can freely rewrite. Bound the
     // total uncompressed size so a malicious template can't OOM us.
