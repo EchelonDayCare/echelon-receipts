@@ -2148,15 +2148,15 @@ mod tests {
         assert!(!all_slides.contains("{{Name}}"), "unsubstituted Name token");
         assert!(!all_slides.contains("{{Year}}"), "unsubstituted Year token");
         assert!(all_slides.contains("2027"), "Year token not substituted");
-        // v3.14.0: bundled template ships with a hand-crafted intro
-        // slide + per-student marker. The intro's "Class of {year}"
-        // heading is authored directly into the pptx at build time
-        // (currently hardcoded to 2026 — daycare admins can retext
-        // yearly). This assertion verifies the intro passed through
-        // untouched into the output deck.
+        // v3.13.0: bundled template now ships with a hand-crafted
+        // intro slide (2 slides total) instead of the 1-slide marker
+        // that used to trigger the auto-generated cover. The intro's
+        // "Class of {year}" copy is authored in the pptx directly, so
+        // this test just verifies the intro passed through with its
+        // daycare branding intact.
         assert!(
-            all_slides.contains("Class of 2026"),
-            "intro slide missing hand-crafted 'Class of 2026' heading"
+            all_slides.contains("Echelon Daycare"),
+            "intro slide missing daycare name"
         );
     }
 

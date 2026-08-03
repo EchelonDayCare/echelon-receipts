@@ -4,6 +4,14 @@ All notable changes shipped as a DMG. Only entries the owner has approved
 for release are listed here — "code-complete, awaiting ship approval" work
 lives in the session plan.md until it ships.
 
+## v3.15.0 — Rounded corners on the photo tile
+
+Reverts the v3.14.0 layout changes (slide dim / text / mask edits went
+beyond what was requested) and applies **only** the one requested
+change: the `{{Photo}}` picture placeholder now has rounded corners
+(`prstGeom prst="roundRect"`, adj 25%). All other bundled-template
+positioning, sizing, and copy is restored to v3.13.0.
+
 ## v3.14.0 — Bundled template layout refinements
 
 Follow-up to v3.13.0. The bundled certificate template is now positioned
