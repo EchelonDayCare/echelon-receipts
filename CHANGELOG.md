@@ -4,6 +4,29 @@ All notable changes shipped as a DMG. Only entries the owner has approved
 for release are listed here — "code-complete, awaiting ship approval" work
 lives in the session plan.md until it ships.
 
+## v3.11.0 — Photo curation score cache
+
+Small change with a big effect on **re-run** speed for grad-reel work.
+
+### Changed
+- **Sharpness scores are now cached to disk.** Every grad-reel run
+  previously re-decoded and re-scored every photo (JPEG decode →
+  resize to 500px → 3x3 Laplacian variance). For a 100-photo class,
+  that's ~5-20s of CPU each run. HEIC decode was already cached; now
+  the sharpness score is too, keyed by content fingerprint
+  (`sha256(path|mtime|size)[..16]`). Re-runs against the same folder
+  skip scoring entirely — typical repeat run drops by ~4-15s
+  wall-clock on class-of-100 sets.
+- Storage: tiny 8-byte sidecar files under `{graduation-cache}/scores/`,
+  written atomically per-photo so concurrent rayon threads never
+  contend on a shared map or lock.
+
+### Behaviour preserved
+- Cache misses on any edit (mtime bump or size change), so replacing
+  a photo with a same-named one always rescores. Corrupt or
+  non-finite sidecar values fall back to a fresh score. Failed writes
+  are logged and swallowed — a broken cache never fails a render.
+
 ## v3.10.0 — Backend performance: SMTP pool reuse + faster PPTX writes
 
 Two surgical backend improvements that don't touch a single UI pixel or

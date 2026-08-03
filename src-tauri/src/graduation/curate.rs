@@ -39,6 +39,7 @@ use std::path::{Path, PathBuf};
 use image::{imageops::FilterType, GenericImageView};
 
 use crate::graduation::heic;
+use crate::graduation::score_cache;
 
 const HEIC_EXTS: &[&str] = &["heic", "heif"];
 const IMAGE_EXTS: &[&str] = &["jpg", "jpeg", "png", "webp", "bmp", "tif", "tiff"];
@@ -121,16 +122,31 @@ pub fn scan_and_rank_cancellable(
             return (None, None);
         };
 
-        match score_image(&usable_path) {
-            Ok(score) => (
+        match score_cache::read(heic_cache_dir, &usable_path) {
+            Some(cached) => (
                 Some(RankedPhoto {
                     path: usable_path,
                     source: path,
-                    sharpness: score,
+                    sharpness: cached,
                 }),
                 None,
             ),
-            Err(e) => (None, Some(format!("score {}: {e}", path.display()))),
+            None => match score_image(&usable_path) {
+                Ok(score) => {
+                    // Best-effort sidecar write — a failed cache write
+                    // must never break the render.
+                    score_cache::write(heic_cache_dir, &usable_path, score);
+                    (
+                        Some(RankedPhoto {
+                            path: usable_path,
+                            source: path,
+                            sharpness: score,
+                        }),
+                        None,
+                    )
+                }
+                Err(e) => (None, Some(format!("score {}: {e}", path.display()))),
+            },
         }
     };
 
