@@ -4,6 +4,36 @@ All notable changes shipped as a DMG. Only entries the owner has approved
 for release are listed here — "code-complete, awaiting ship approval" work
 lives in the session plan.md until it ships.
 
+## v3.13.0 — Bundled certificate-style default template
+
+The old bundled default (`graduation-template.pptx`) was a bare marker
+slide that triggered the v3.12.0 auto-cover. Replaced with a proper
+2-slide branded template so out-of-the-box decks look like a graduation
+ceremony, not a form.
+
+### Changed
+- **Default template is now 2 slides**:
+  * **Slide 1 (intro)** — full-bleed watercolor "Certificate of
+    Graduation" background with owls, bunting, mortarboard, diploma,
+    and daycare seal. Overlays: "Class of 2026", "Echelon Daycare",
+    "Graduation Ceremony".
+  * **Slide 2 (per-student marker)** — same certificate background
+    with `{{Name}}`, `{{Year}}`, `{{Note}}` text tokens and a small
+    `{{Photo}}`-tagged picture placeholder in the lower-left area.
+- **Photo placeholder is a distinct image file** (not the certificate
+  background) so per-child photo swap replaces only the small tile,
+  never the beautiful certificate background.
+- Because the default now has 2 slides, the v3.12.0 auto-cover code
+  path no longer triggers for the bundled default — the hand-crafted
+  intro is used as-is.
+
+### Notes
+- Custom user templates continue to work unchanged. A 1-slide user
+  template still gets the v3.12.0 auto-generated branded cover.
+- The intro slide's "Class of 2026" text is authored directly in the
+  pptx — daycare admins can edit it in PowerPoint / Keynote each
+  year, or replace the whole template with their own.
+
 ## v3.12.0 — Clean auto-generated cover slide (daycare branding)
 
 The auto-generated cover slide for grad decks previously cloned the

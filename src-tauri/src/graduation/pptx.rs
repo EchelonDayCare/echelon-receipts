@@ -2139,7 +2139,7 @@ mod tests {
             slide_count += 1;
             f.read_to_string(&mut all_slides).unwrap();
         }
-        assert_eq!(slide_count, 3, "expected 3 output slides (cover + 2 students), got {slide_count}");
+        assert_eq!(slide_count, 3, "expected 3 output slides (intro + 2 students), got {slide_count}");
         assert!(all_slides.contains("Emma"), "output missing Emma");
         assert!(
             all_slides.contains("Liam O&apos;Neil"),
@@ -2148,7 +2148,16 @@ mod tests {
         assert!(!all_slides.contains("{{Name}}"), "unsubstituted Name token");
         assert!(!all_slides.contains("{{Year}}"), "unsubstituted Year token");
         assert!(all_slides.contains("2027"), "Year token not substituted");
-        assert!(all_slides.contains("Class of 2027"), "output missing auto-generated cover title");
+        // v3.13.0: bundled template now ships with a hand-crafted
+        // intro slide (2 slides total) instead of the 1-slide marker
+        // that used to trigger the auto-generated cover. The intro's
+        // "Class of {year}" copy is authored in the pptx directly, so
+        // this test just verifies the intro passed through with its
+        // daycare branding intact.
+        assert!(
+            all_slides.contains("Echelon Daycare"),
+            "intro slide missing daycare name"
+        );
     }
 
     #[test]
