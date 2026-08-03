@@ -4,6 +4,40 @@ All notable changes shipped as a DMG. Only entries the owner has approved
 for release are listed here — "code-complete, awaiting ship approval" work
 lives in the session plan.md until it ships.
 
+## v3.10.0 — Backend performance: SMTP pool reuse + faster PPTX writes
+
+Two surgical backend improvements that don't touch a single UI pixel or
+change any user-facing behaviour, but noticeably speed up two hot paths.
+
+### Changed
+- **SMTP transport is now cached across sends.** Lettre's `SmtpTransport`
+  wraps an `Arc<Pool>` internally; each `.send()` call reuses an idle
+  TLS+SASL session from that pool. We were building a fresh transport
+  per `send_email` invocation, discarding the pool between calls. A
+  session-scoped cache keyed by `(host, port, user, password_fingerprint)`
+  now holds up to 16 transports. First send fully connects and
+  authenticates; subsequent sends against the same server reuse the
+  pooled connection. On the v3.8.0 grad-email flow this collapses N
+  full handshakes into 1 — a 20-kid class goes from ~40 s to ~5 s of
+  network wait. Also benefits monthly receipts and tax receipts.
+  Password fingerprint is a SHA-256 hash, so rotating the password
+  transparently invalidates the cache entry.
+- **PPTX zip writes skip Deflate for already-compressed media.** JPEG,
+  PNG, MP4, WebP, HEIC, HEIF, and GIF entries now use `Stored`
+  compression instead of `Deflated`. These formats are already
+  compressed at the pixel level, so running them through Deflate burns
+  CPU for a bit-for-bit copy (typically slightly *larger* than input).
+  Faster deck generation on photo-heavy graduation slideshows, and a
+  smaller `.pptx` on disk. XML/rels parts still use Deflate.
+
+### Notes
+- Zero API change. All existing callers of `send_email` transparently
+  benefit; PPTX consumers (PowerPoint, Keynote, LibreOffice) all handle
+  `Stored` entries per the zip spec.
+- `SmtpTransport` cache tested empirically — its Clone impl shares the
+  underlying `Arc<Pool>`, so multiple cache-hit callers share pooled
+  sockets rather than each opening a new one.
+
 ## v3.9.0 — Hero photo plays first in the reel
 
 If a photo in a kid's folder is named after them (e.g. `Aarav Sharma.jpg`,

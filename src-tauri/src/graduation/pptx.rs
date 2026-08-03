@@ -538,7 +538,14 @@ pub fn render_slides_cancellable(
     let out_file =
         std::fs::File::create(output_pptx).map_err(|e| format!("create output pptx: {e}"))?;
     let mut writer = ZipWriter::new(out_file);
-    let opts = SimpleFileOptions::default().compression_method(CompressionMethod::Deflated);
+    let deflated_opts = SimpleFileOptions::default().compression_method(CompressionMethod::Deflated);
+    // v3.10.0: pre-compressed media (JPEG / PNG / MP4) shouldn't be
+    // re-deflated — zip's deflate produces a bit-for-bit copy for these
+    // formats but burns CPU + emits a slightly larger stream than the
+    // input. `Stored` (no compression) is both faster to write and
+    // yields a smaller `.pptx` for photo-heavy decks. PowerPoint,
+    // Keynote and LibreOffice all handle `Stored` entries correctly.
+    let stored_opts = SimpleFileOptions::default().compression_method(CompressionMethod::Stored);
 
     let mut written: HashMap<String, ()> = HashMap::new();
     for (name, bytes) in entries.iter().chain(new_entries.iter()) {
@@ -548,6 +555,7 @@ pub fn render_slides_cancellable(
         if written.contains_key(name) {
             continue;
         }
+        let opts = if is_precompressed_media(name) { stored_opts } else { deflated_opts };
         writer
             .start_file(name, opts)
             .map_err(|e| format!("start_file {name}: {e}"))?;
@@ -556,6 +564,32 @@ pub fn render_slides_cancellable(
     }
     writer.finish().map_err(|e| format!("finish zip: {e}"))?;
     Ok(report)
+}
+
+/// Return true when `name` is a pptx zip entry whose payload is already
+/// compressed (JPEG, PNG, MP4, WebP, HEIC, GIF). These should be stored
+/// uncompressed in the zip — running them through Deflate is wasted CPU
+/// and typically produces a slightly larger stream than the input.
+///
+/// Note (Sonnet review #5): PNG and GIF are on this list because in the
+/// daycare grad-deck workload the vast majority of PNGs are already
+/// well-compressed photo exports or composited photo tiles, not tiny
+/// synthetic icons with runs of solid color. For synthetic assets the
+/// PNG DEFLATE stream can sometimes be recompressed 5-15% smaller — but
+/// we ship photo-heavy decks, so the CPU savings on multi-MB PNGs +
+/// consistent behavior across image types wins here. HEIC / HEIF are
+/// listed for completeness (external Ken-Burns-style tooling might emit
+/// them), even though PowerPoint 2019+/365 is required to render them.
+fn is_precompressed_media(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    lower.ends_with(".jpg")
+        || lower.ends_with(".jpeg")
+        || lower.ends_with(".png")
+        || lower.ends_with(".mp4")
+        || lower.ends_with(".webp")
+        || lower.ends_with(".heic")
+        || lower.ends_with(".heif")
+        || lower.ends_with(".gif")
 }
 
 fn is_slide_path(name: &str) -> bool {
@@ -1491,6 +1525,36 @@ mod tests {
         assert_eq!(slide_number("ppt/slides/slide7.xml"), Some(7));
         assert_eq!(slide_number("ppt/slides/_rels/slide12.xml.rels"), Some(12));
         assert_eq!(slide_number("ppt/theme/theme1.xml"), None);
+    }
+
+    #[test]
+    fn is_precompressed_media_matches_expected_extensions() {
+        // Already-compressed media that must NOT be re-deflated.
+        for name in [
+            "ppt/media/child-3-alice.jpg",
+            "ppt/media/child-3-alice.JPG",
+            "ppt/media/hero.jpeg",
+            "ppt/media/bg.png",
+            "ppt/media/promo.MP4",
+            "ppt/media/thumb.webp",
+            "ppt/media/photo.heic",
+            "ppt/media/photo.heif",
+            "ppt/media/sticker.gif",
+        ] {
+            assert!(is_precompressed_media(name), "should be Stored: {name}");
+        }
+        // Compressible XML/rels parts must stay Deflated.
+        for name in [
+            "ppt/slides/slide1.xml",
+            "ppt/slides/_rels/slide1.xml.rels",
+            "[Content_Types].xml",
+            "_rels/.rels",
+            "ppt/theme/theme1.xml",
+            "ppt/media/notes.txt",
+            "docProps/core.xml",
+        ] {
+            assert!(!is_precompressed_media(name), "should be Deflated: {name}");
+        }
     }
 
     #[test]

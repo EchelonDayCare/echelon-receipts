@@ -162,22 +162,188 @@ pub async fn send_email(args: SendEmailArgs) -> Result<(), String> {
             }
         }
 
-        let creds = Credentials::new(args.smtp_user, smtp_password.clone());
-        let pw = smtp_password;
+        let pw = smtp_password.clone();
         let redact = |s: String| if pw.is_empty() { s } else { s.replace(&pw, "***") };
-        let mailer = SmtpTransport::starttls_relay(&args.smtp_host)
-            .map_err(|e| redact(format!("starttls: {e}")))?
-            .port(args.smtp_port)
-            .credentials(creds)
-            .build();
-        mailer.send(&email).map_err(|e| redact(format!("send: {e}")))?;
-        Ok(())
+        // v3.10.0: fetch a cached SmtpTransport (or build + cache one).
+        // Lettre's built-in r2d2 pool means subsequent `.send()` calls
+        // against the same transport reuse an idle TLS+auth session,
+        // eliminating the per-send handshake tax for batched flows
+        // (grad emails, monthly receipts).
+        let (mailer, cache_key) = get_or_build_transport(
+            &args.smtp_host,
+            args.smtp_port,
+            &args.smtp_user,
+            &smtp_password,
+        )
+        .map_err(&redact)?;
+        match mailer.send(&email) {
+            Ok(_) => Ok(()),
+            Err(e) => {
+                // Sonnet review #1: a cached transport that starts failing
+                // (server reboot, TLS rotation, network moved) would
+                // otherwise poison the rest of a batch. Evict on error so
+                // the next attempt rebuilds fresh.
+                cache_evict(&cache_key);
+                Err(redact(format!("send: {e}")))
+            }
+        }
     })
     .await
     .map_err(|e| e.to_string())?
 }
 
 const KEYRING_SERVICE: &str = "org.echelondaycare.receipts";
+
+// ----------------------------------------------------------------------
+// v3.10.0 — SmtpTransport cache (connection pool reuse across sends)
+// ----------------------------------------------------------------------
+//
+// The one-off `send_email` command previously built a fresh
+// `SmtpTransport` on every invocation, which discarded lettre's internal
+// r2d2 connection pool between calls. For the v3.8.0 grad-email flow —
+// which serially fires `send_email` once per parent — that means 20
+// full TLS handshakes + 20 SASL AUTH exchanges for a 20-kid class.
+//
+// Lettre already implements pooling: repeated `.send()` calls on the
+// SAME `SmtpTransport` instance reuse an idle connection from the pool
+// (default idle timeout 60s, more than enough for our per-row cadence).
+// We therefore cache `SmtpTransport` values keyed by the identity of
+// the SMTP connection so the pool sticks across the whole batch. This
+// keeps the frontend's per-row streaming UX (log lines still appear
+// after each parent) while collapsing the network overhead into a
+// single handshake.
+//
+// Cache key: (host, port, user, password_fingerprint). Password is not
+// stored in the key — only a SHA-256 fingerprint — so no plaintext
+// secret is retained in memory beyond the transport object itself
+// (which lettre already holds via `Credentials`). Rotating the SMTP
+// password invalidates the cache entry safely: the new key won't hit
+// the old entry, a fresh transport is built, and the stale one drops
+// its pooled sockets on eviction (below).
+//
+// Cache lifetime: bounded (16 entries max). Older entries are evicted
+// LRU-style when a new distinct connection is inserted. This prevents
+// runaway memory in the unlikely event that host/user rotates in the
+// same session.
+
+fn transport_cache() -> &'static std::sync::Mutex<
+    std::collections::VecDeque<(TransportKey, std::sync::Arc<SmtpTransport>)>,
+> {
+    use std::sync::{Mutex, OnceLock};
+    static CACHE: OnceLock<Mutex<std::collections::VecDeque<(TransportKey, std::sync::Arc<SmtpTransport>)>>> =
+        OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(std::collections::VecDeque::new()))
+}
+
+#[derive(PartialEq, Eq, Clone)]
+struct TransportKey {
+    host: String,
+    port: u16,
+    user: String,
+    pw_fingerprint: [u8; 32],
+}
+
+fn password_fingerprint(pw: &str) -> [u8; 32] {
+    use sha2::{Digest, Sha256};
+    let mut h = Sha256::new();
+    h.update(pw.as_bytes());
+    let out = h.finalize();
+    let mut arr = [0u8; 32];
+    arr.copy_from_slice(&out);
+    arr
+}
+
+const TRANSPORT_CACHE_MAX: usize = 16;
+
+/// Return a cached `SmtpTransport` for the given identity, or `None`
+/// if none is cached. Extracted from `get_or_build_transport` so the
+/// mutex is held only for the O(N) lookup, NOT across DNS resolution
+/// inside `SmtpTransport::build()`. Concurrent senders against
+/// different keys therefore don't block each other during a slow DNS
+/// or TLS handshake (Sonnet #4).
+fn cached_transport(key: &TransportKey) -> Option<std::sync::Arc<SmtpTransport>> {
+    let mut cache = transport_cache().lock().ok()?;
+    let pos = cache.iter().position(|(k, _)| k == key)?;
+    let (k, t) = cache.remove(pos).unwrap();
+    let clone = std::sync::Arc::clone(&t);
+    // Move to the back so it's now MRU.
+    cache.push_back((k, t));
+    Some(clone)
+}
+
+/// Insert a freshly-built transport into the cache, evicting the
+/// oldest entry on overflow. If another sender raced ahead and already
+/// inserted a transport for the same key, prefer the existing entry
+/// (its pool may already have a warm connection) — accept the "wasted"
+/// build on our side rather than double-inserting.
+fn cache_insert(
+    key: TransportKey,
+    transport: std::sync::Arc<SmtpTransport>,
+) -> std::sync::Arc<SmtpTransport> {
+    let Ok(mut cache) = transport_cache().lock() else {
+        return transport; // lock poisoned — just return without caching
+    };
+    if let Some(pos) = cache.iter().position(|(k, _)| k == &key) {
+        // A concurrent build won the race — use theirs, drop ours.
+        return std::sync::Arc::clone(&cache[pos].1);
+    }
+    if cache.len() >= TRANSPORT_CACHE_MAX {
+        cache.pop_front();
+    }
+    cache.push_back((key, std::sync::Arc::clone(&transport)));
+    transport
+}
+
+/// Evict any cached entry matching `key`. Called when a `send()` fails
+/// against a cached transport — the next attempt then rebuilds fresh
+/// rather than re-hitting a poisoned pool (Sonnet #1 — the "one hiccup
+/// kills the rest of the batch" trap).
+fn cache_evict(key: &TransportKey) {
+    if let Ok(mut cache) = transport_cache().lock() {
+        cache.retain(|(k, _)| k != key);
+    }
+}
+
+/// Return a `SmtpTransport` for the given connection identity, reusing
+/// a cached instance whose internal pool may already hold a warm
+/// connection. Building lettre's `SmtpTransport` is cheap; the win
+/// comes from `.send()` reusing the pooled TCP+TLS+auth session on
+/// subsequent invocations against the same key.
+///
+/// Returns the built `Arc<SmtpTransport>` alongside its cache key so
+/// the caller can `cache_evict(&key)` on a send error. Wrapping in
+/// `Arc` is defensive: today `SmtpTransport::clone()` shares
+/// `Arc<Pool>` internally (lettre 0.11), so cloning already shares the
+/// pool. The explicit outer `Arc` documents this intent and stays
+/// correct even if lettre's internals change in a future release
+/// (Sonnet #2).
+fn get_or_build_transport(
+    host: &str,
+    port: u16,
+    user: &str,
+    password: &str,
+) -> Result<(std::sync::Arc<SmtpTransport>, TransportKey), String> {
+    let key = TransportKey {
+        host: host.to_string(),
+        port,
+        user: user.to_string(),
+        pw_fingerprint: password_fingerprint(password),
+    };
+    if let Some(t) = cached_transport(&key) {
+        return Ok((t, key));
+    }
+    // Build OUTSIDE the mutex — starttls_relay + build() perform DNS
+    // resolution and are potentially blocking.
+    let creds = Credentials::new(user.to_string(), password.to_string());
+    let transport = SmtpTransport::starttls_relay(host)
+        .map_err(|e| format!("starttls: {e}"))?
+        .port(port)
+        .credentials(creds)
+        .build();
+    let arc = std::sync::Arc::new(transport);
+    let stored = cache_insert(key.clone(), arc);
+    Ok((stored, key))
+}
 
 #[tauri::command]
 pub fn keychain_set(key: String, value: String) -> Result<(), String> {
