@@ -4,6 +4,27 @@ All notable changes shipped as a DMG. Only entries the owner has approved
 for release are listed here — "code-complete, awaiting ship approval" work
 lives in the session plan.md until it ships.
 
+## v3.14.0 — Bundled template layout refinements
+
+Follow-up to v3.13.0. The bundled certificate template is now positioned
+to match a professional certificate reference (photo + name row on the
+same axis, no overlap with the underlying certificate art).
+
+### Changed
+- **Slide size switched to 4:3** — matches the certificate PNG's native
+  aspect. Full-bleed background no longer stretches horizontally.
+- **Photo tile: rounded rectangle**, positioned left of the recipient
+  block, sized ~21%×30% of the slide (matches the reference design).
+- **`{{Year}}` mask** — solid cream fill behind the token so the
+  hardcoded "2025" in the certificate art doesn't bleed through.
+- **`{{Name}}`** — moved onto the natural recipient blank line, right
+  of the photo.
+- **`{{Note}}`** — small italic under the recognition paragraph.
+- **Intro slide simplified** — single "Class of {year}" overlay in the
+  recipient blank instead of the earlier 3-line stack (which collided
+  with the baked-in certificate paragraph). Year mask matches the
+  marker slide.
+
 ## v3.13.0 — Bundled certificate-style default template
 
 The old bundled default (`graduation-template.pptx`) was a bare marker
