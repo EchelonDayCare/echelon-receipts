@@ -7,7 +7,7 @@ import { useSearchParams } from "react-router-dom";
 import { open } from "@tauri-apps/plugin-dialog";
 import { readFile } from "@tauri-apps/plugin-fs";
 import { invoke } from "@tauri-apps/api/core";
-import { getSettings, listYears } from "../lib/db";
+import { getSettings, listYears, listStudents } from "../lib/db";
 import { matchStudentByName } from "../lib/attendance";
 import {
   monthGrid, setMark, calendarForMonth, seedWeekends, seedBcHolidays,
@@ -16,6 +16,7 @@ import {
 } from "../lib/monthAttendance";
 import { extractMonthAttendance, extractKidAttendanceLocal, fileToMime } from "../lib/ai";
 import { h } from "../lib/html";
+import { DEFAULT_LOGO_DATA_URL } from "../lib/defaults";
 import { showConfirm, showPrompt } from "../lib/dialogs";
 import { inactiveLabel } from "../lib/inactiveLabel";
 import { isBcHolidaysEnabled, getDisabledBcHolidayIds } from "../lib/centreCalendar";
@@ -61,8 +62,18 @@ export default function MonthlyAttendance() {
   const [cells, setCells] = useState<MonthCell[]>([]);
   const [calendar, setCalendar] = useState<CalendarDay[]>([]);
   const [daycareName, setDaycareName] = useState("");
+  const [daycareAddress, setDaycareAddress] = useState("");
+  const [contactPhone, setContactPhone] = useState("");
+  const [contactEmail, setContactEmail] = useState("");
+  const [logoDataUrl, setLogoDataUrl] = useState<string>("");
   const [dataYears, setDataYears] = useState<number[]>([]);
   const [toast, setToast] = useState<{ msg: string; tone: "ok" | "err" } | null>(null);
+  // v3.18.0: date the daily kid sign-in sheet will be dated for. Defaults
+  // to today; user picks any date via the inline date input.
+  const [signInDate, setSignInDate] = useState<string>(() => {
+    const t = new Date();
+    return `${t.getFullYear()}-${String(t.getMonth() + 1).padStart(2, "0")}-${String(t.getDate()).padStart(2, "0")}`;
+  });
 
   // OCR state
   const [ocrBusy, setOcrBusy] = useState(false);
@@ -100,6 +111,13 @@ export default function MonthlyAttendance() {
     setCells(g);
     setCalendar(cal);
     setDaycareName(s.daycare_name || "");
+    setDaycareAddress(s.daycare_address || "");
+    setContactPhone(s.contact_phone || "");
+    // Sign-in sheet header shows the SMTP sender email (what parents
+    // actually reply to when we email them), falling back to the
+    // generic contact_email for centres that don't use SMTP.
+    setContactEmail(s.sender_email || s.contact_email || "");
+    setLogoDataUrl(s.logo_data_url || "");
   }
   useEffect(() => { refresh();   }, [year, month]);
   useEffect(() => { listYears().then(setDataYears).catch(() => {}); }, []);
@@ -715,8 +733,8 @@ export default function MonthlyAttendance() {
         .fid-qr img { width: 10mm; height: 10mm; display: block; }
         .fid-qr.tl { top: calc(4mm + 53px); left: calc(4mm + 6px); }
         .fid-qr.tr { top: calc(4mm + 53px); right: calc(4mm + 6px); }
-        .fid-qr.bl { bottom: calc(4mm + 9px); left: calc(4mm + 6px); }
-        .fid-qr.br { bottom: calc(4mm + 9px); right: calc(4mm + 6px); }
+        .fid-qr.bl { bottom: calc(4mm + 19px); left: calc(4mm + 6px); }
+        .fid-qr.br { bottom: calc(4mm + 19px); right: calc(4mm + 6px); }
         /* v3.0.5: title, meta, and legend indented 64.5px to align with
            the table's left edge (which is centered with 64.5px margin
            on each side per the width: calc(100% - 129px) rule).
@@ -724,7 +742,7 @@ export default function MonthlyAttendance() {
            corner and the title reads as a proper page header.
            v3.2.0b: header + table + top QRs shifted 50px down for
            more visual breathing room above the title. */
-        h1 { margin: 60px 0 2px 0; font-size: 14px; text-align: center; padding: 0 40mm; }
+        h1 { margin: 35px 0 2px 0; font-size: 14px; text-align: center; padding: 0 40mm; }
         .meta { margin: 0; font-size: 10px; text-align: center; padding: 0 40mm; }
         .qr {
           /* v3.1.1: QR shifted from right: 3mm to right: 20mm so it no
@@ -734,7 +752,7 @@ export default function MonthlyAttendance() {
              v3.1.1b: nudged another 20px (~5mm) left → right: 25mm for
              extra breathing room around the fiducial.
              v3.2.0b: shifted 50px down with the rest of the top block. */
-          position: absolute; top: calc(2.5mm + 50px); right: 25mm;
+          position: absolute; top: calc(2.5mm + 25px); right: 25mm;
           width: 14mm; height: 14mm;
           background: #fff; padding: 1mm; box-sizing: content-box;
           border: 1px solid #d1d5db; border-radius: 2px;
@@ -836,6 +854,260 @@ export default function MonthlyAttendance() {
     await printHtmlDocument(html);
   }
 
+  // ── v3.18.0: Daily kid sign-in sheet ────────────────────────────────
+  //
+  // Mirrors the paper "Echelon Daycare Teachers Association" sign-in
+  // sheet Luxmi keeps on the wall each day: header block with centre
+  // info + day/date field, one row per currently-active kid with
+  // Time-In (sign) / Time-Out (sign) / Comments columns, footer
+  // "Playground Checked". Rendered as an HTML page and piped through
+  // the same `printHtmlDocument` helper we already use for the monthly
+  // sheet — no jsPDF layout math needed, the browser's print dialog
+  // handles paper sizing.
+  //
+  // Currently-active kids only (`listStudents(_, activeOnly=true)`),
+  // sorted first-name alphabetical to match the paper roster order.
+  function printSignInSheet(dateIso: string) {
+    void _printSignInSheet(dateIso).catch(
+      (e) => show("Print failed: " + (e as Error).message, "err"),
+    );
+  }
+  async function _printSignInSheet(dateIso: string) {
+    const roster = (await listStudents(undefined, true))
+      .filter((s) => (s.name ?? "").trim().length > 0)
+      .sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: "base" }));
+    if (roster.length === 0) {
+      show("No active students in the roster.", "err");
+      return;
+    }
+
+    // Format the date as "Monday · 04 Aug 2026" — matches the paper
+    // sheet's day-of-week + date layout.
+    const [yy, mm, dd] = dateIso.split("-").map(Number);
+    const d = new Date(yy, (mm ?? 1) - 1, dd ?? 1);
+    const WEEKDAYS = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
+    const dow = WEEKDAYS[d.getDay()];
+    const dateLabel = `${dow} · ${String(dd).padStart(2, "0")} ${MONTH_NAMES[(mm ?? 1) - 1]} ${yy}`;
+
+    // Portrait Letter, ~9mm margins → usable ≈ 192mm × 260mm.
+    // Reserve ~28mm for header + date-line and ~9mm for footer, so the
+    // table has ~223mm ≈ 843px for (roster + header) rows.
+    const nRows = roster.length;
+    const TABLE_AVAIL_PX = 843;
+    const rowH = Math.max(20, Math.min(40, Math.floor(TABLE_AVAIL_PX / (nRows + 1))));
+    const fontPx = rowH <= 22 ? 10.5 : rowH <= 26 ? 11.5 : rowH <= 32 ? 12.5 : 13.5;
+
+    const centre = daycareName || "Echelon Daycare Teachers Association";
+    const logo = logoDataUrl || DEFAULT_LOGO_DATA_URL;
+    // Contact line: address · phone · email — separators only appear
+    // between non-empty parts, so a missing phone doesn't leave a
+    // dangling "  ·  ·".
+    const contactParts = [daycareAddress, contactPhone, contactEmail]
+      .map((p) => (p ?? "").trim())
+      .filter((p) => p.length > 0);
+    const contactLine = contactParts.map(h).join(' <span class="dot">&middot;</span> ');
+    const rowsHtml = roster
+      .map(
+        (s, i) => `
+          <tr>
+            <td class="idx">${String(i + 1).padStart(2, "0")}</td>
+            <td class="name">${h(s.name)}</td>
+            <td class="sig"></td>
+            <td class="sig"></td>
+            <td class="comment"></td>
+          </tr>`,
+      )
+      .join("");
+
+    const html = `<!doctype html>
+<html><head><meta charset="utf-8"/><title>Sign-in sheet — ${h(dateLabel)}</title>
+<style>
+  @page { size: Letter portrait; margin: 9mm 9mm 8mm 9mm; }
+  html, body {
+    margin: 0; padding: 0;
+    font-family: "Segoe UI", -apple-system, "SF Pro Text", Helvetica, Arial, sans-serif;
+    color: #1c1917;
+    -webkit-print-color-adjust: exact; print-color-adjust: exact;
+  }
+  .sheet { width: 100%; }
+
+  /* ---------- Header: editorial, not dashboard ---------- */
+  .header {
+    display: grid;
+    grid-template-columns: 62px 1fr auto;
+    gap: 14px; align-items: center;
+    padding-bottom: 10px; margin-bottom: 10px;
+    border-bottom: 1px solid #1c1917;
+    position: relative;
+  }
+  .header::after {
+    content: ""; position: absolute; left: 0; right: 0; bottom: -4px;
+    border-bottom: 1px solid #1c1917;
+  }
+  .header .logo {
+    width: 62px; height: 62px; border-radius: 50%;
+    object-fit: cover; border: 1px solid #d6d3d1; background: #fff;
+  }
+  .header .title h1 {
+    margin: 0 0 3px; font-size: 22px; font-weight: 700;
+    letter-spacing: -0.015em; line-height: 1.15;
+    font-family: Georgia, "Times New Roman", "Iowan Old Style", serif;
+    text-wrap: balance;
+  }
+  .header .title .sub {
+    font-size: 10px; letter-spacing: 0.14em; text-transform: uppercase;
+    color: #57534e; font-weight: 600;
+  }
+  .header .title .contact {
+    font-size: 10.5px; color: #57534e; margin-top: 3px;
+    line-height: 1.4;
+  }
+  .header .title .contact .dot {
+    color: #a8a29e; margin: 0 2px;
+  }
+  .header .meta {
+    text-align: right; font-size: 9.5px; color: #78716c;
+    line-height: 1.5;
+  }
+  .header .meta .roster {
+    display: inline-block; margin-top: 4px; padding: 2px 8px;
+    border: 1px solid #d6d3d1; border-radius: 999px;
+    font-weight: 600; color: #1c1917; font-size: 10px;
+  }
+
+  /* ---------- Date banner ---------- */
+  .date-line {
+    display: flex; align-items: baseline; gap: 12px;
+    margin: 0 0 10px; padding: 6px 10px;
+    background: #fafaf9; border: 1px solid #e7e5e4; border-radius: 4px;
+  }
+  .date-line .label {
+    font-size: 9px; letter-spacing: 0.16em; text-transform: uppercase;
+    color: #78716c; font-weight: 700;
+  }
+  .date-line .value {
+    font-size: 15px; font-weight: 700; color: #1c1917;
+    letter-spacing: -0.005em;
+    font-family: Georgia, "Times New Roman", serif;
+  }
+
+  /* ---------- Table ---------- */
+  table {
+    width: 100%; border-collapse: collapse; table-layout: fixed;
+    border: 1px solid #1c1917;
+  }
+  thead th {
+    padding: 5px 8px;
+    font-size: 9.5px; letter-spacing: 0.14em; text-transform: uppercase;
+    text-align: left; font-weight: 700; color: #1c1917;
+    border-bottom: 1.5px solid #1c1917;
+    border-right: 1px solid #78716c;
+    background: #f5f5f4;
+  }
+  thead th:last-child { border-right: none; }
+  thead th.center { text-align: center; }
+  tbody td {
+    height: ${rowH}px;
+    padding: 0 8px; font-size: ${fontPx}px; vertical-align: middle;
+    border-bottom: 1px solid #d6d3d1;
+    border-right: 1px solid #d6d3d1;
+  }
+  tbody td:last-child { border-right: none; }
+  tbody tr:last-child td { border-bottom: none; }
+  tbody td.idx {
+    text-align: center;
+    color: #a8a29e; font-weight: 500;
+    font-variant-numeric: tabular-nums; font-size: ${fontPx - 1.5}px;
+    letter-spacing: 0.02em;
+  }
+  tbody td.name {
+    font-weight: 600; color: #1c1917;
+    padding-left: 4px;
+  }
+  tbody td.sig { }
+  tbody td.comment { }
+
+  /* Alternating row wash — subtle warm cream, not blue */
+  tbody tr:nth-child(even) td { background: #fdfcfb; }
+
+  /* ---------- Footer ---------- */
+  .footer {
+    display: flex; align-items: center; justify-content: space-between;
+    gap: 12px; margin-top: 10px; padding-top: 8px;
+    border-top: 1px solid #e7e5e4;
+    font-size: 10px; color: #57534e;
+  }
+  .footer .check {
+    display: inline-flex; align-items: center; gap: 8px;
+    font-weight: 700; color: #1c1917;
+    font-size: 11px;
+    flex: 1; min-width: 0;
+  }
+  .footer .check .box {
+    width: 13px; height: 13px; border: 1.5px solid #1c1917;
+    display: inline-block; flex: 0 0 auto;
+  }
+  .footer .check .remark {
+    flex: 1; border-bottom: 1px solid #78716c;
+    height: 1.2em; margin-left: 4px; min-width: 120px;
+  }
+  .footer .sig-line {
+    display: inline-flex; align-items: baseline; gap: 8px;
+    color: #78716c;
+  }
+  .footer .sig-line .rule {
+    display: inline-block; width: 180px;
+    border-bottom: 1px solid #1c1917;
+    height: 1em;
+  }
+</style></head>
+<body onload="setTimeout(function(){window.print();},250)">
+  <div class="sheet">
+    <div class="header">
+      <img class="logo" src="${logo}" alt=""/>
+      <div class="title">
+        <h1>${h(centre)}</h1>
+        <div class="sub">Daily child sign-in &middot; sign-out</div>
+        ${contactLine ? `<div class="contact">${contactLine}</div>` : ""}
+      </div>
+      <div class="meta">
+        Printed ${h(new Date().toLocaleDateString())}<br/>
+        <span class="roster">${roster.length} ${roster.length === 1 ? "child" : "children"}</span>
+      </div>
+    </div>
+
+    <div class="date-line">
+      <span class="label">Day &amp; date</span>
+      <span class="value">${h(dateLabel)}</span>
+    </div>
+
+    <table>
+      <colgroup>
+        <col style="width:6%"/>
+        <col style="width:22.6%"/>
+        <col style="width:20.8%"/>
+        <col style="width:20.8%"/>
+        <col style="width:29.8%"/>
+      </colgroup>
+      <thead><tr>
+        <th class="center">#</th>
+        <th>Child</th>
+        <th>Time In &middot; Sign</th>
+        <th>Time Out &middot; Sign</th>
+        <th>Comments</th>
+      </tr></thead>
+      <tbody>${rowsHtml}</tbody>
+    </table>
+
+    <div class="footer">
+      <span class="check"><span class="box"></span> Playground checked: <span class="remark"></span></span>
+      <span class="sig-line">Staff on duty <span class="rule"></span></span>
+    </div>
+  </div>
+</body></html>`;
+    await printHtmlDocument(html);
+  }
+
   const monthLabel = `${MONTH_NAMES[month-1]} ${year}`;
 
   return (
@@ -899,6 +1171,40 @@ export default function MonthlyAttendance() {
           Clear This Month
         </button>
         <button className="btn secondary" onClick={printBlank} disabled={cells.length === 0}>Print Blank Template</button>
+        {/* v3.18.0: Daily kid sign-in sheet. Independent of the monthly
+            grid — uses currently-active students, not month cells, so
+            it works even on a fresh month with no attendance history. */}
+        <span
+          style={{
+            display: "inline-flex",
+            alignItems: "stretch",
+            border: "1px solid var(--border, #cbd5e1)",
+            borderRadius: 6,
+            overflow: "hidden",
+          }}
+          title="Daily kid sign-in sheet — active roster with time in / out / comments columns"
+        >
+          <input
+            type="date"
+            value={signInDate}
+            onChange={(e) => setSignInDate(e.target.value)}
+            style={{
+              border: "none",
+              borderRight: "1px solid var(--border, #cbd5e1)",
+              padding: "0 10px",
+              background: "#fff",
+              fontSize: 13,
+            }}
+            aria-label="Sign-in sheet date"
+          />
+          <button
+            className="btn secondary"
+            style={{ borderRadius: 0, border: "none" }}
+            onClick={() => printSignInSheet(signInDate)}
+          >
+            🖨 Daily sign-in sheet
+          </button>
+        </span>
       </div>
 
       <div className="kpi" style={{ gridTemplateColumns: "repeat(4, minmax(0, 1fr))" }}>

@@ -4,6 +4,27 @@ All notable changes shipped as a DMG. Only entries the owner has approved
 for release are listed here — "code-complete, awaiting ship approval" work
 lives in the session plan.md until it ships.
 
+## v3.18.0 — Daily kid sign-in / sign-out sheet
+
+New one-click printable daily sign-in sheet lives on the **Monthly
+Attendance** screen, next to "Print Blank Template". Pick a date and hit
+**Daily sign-in sheet** — the app builds a portrait-Letter sheet with:
+
+- The centre's logo and full letterhead (name, address, phone, and the
+  SMTP sender email so what parents see on emails matches what's on the
+  sign-in sheet at drop-off).
+- Serif editorial header, subtle warm-neutral palette, no dashboard-navy
+  slab.
+- Auto-scaled table sized to fill a single page: `#`, Child, Time In ·
+  Sign, Time Out · Sign, Comments. Row heights auto-scale 20–40 px so
+  rosters from 15 to 40+ kids stay on one page.
+- Active roster only (`activeOnly=true`), sorted first-name alphabetical.
+- Footer: `☐ Playground checked: ______` remark line + `Staff on duty
+  ______` signature line.
+
+Prints straight through the existing browser-print pipeline — no new
+PDF backend, no jsPDF layout math.
+
 ## v3.17.1 — Fix "Export slides as images" only writing the cover
 
 v3.17.0 relied on LibreOffice's `impress_png_Export` `PageRange` filter
