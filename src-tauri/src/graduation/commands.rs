@@ -775,6 +775,18 @@ pub struct RenderSlidesRequest {
     pub output_folder: String,
     pub year: u32,
     pub students: Vec<SlideStudentIn>,
+    /// v3.12.0: daycare name for the auto-generated cover slide.
+    /// Frontend pulls this from the settings table (`daycare_name`).
+    /// When missing, the cover falls back to a name-less title.
+    #[serde(default)]
+    pub daycare_name: Option<String>,
+    /// v3.12.0: daycare logo as a data URL
+    /// (`data:image/png;base64,...` or `data:image/jpeg;base64,...`).
+    /// Frontend pulls this from settings (`logo_data_url`). When
+    /// missing or unparseable, the cover renders text-only. Anything
+    /// other than png/jpeg is rejected server-side.
+    #[serde(default)]
+    pub daycare_logo_data_url: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -837,8 +849,20 @@ pub async fn graduation_render_slides(
     let final_path = out_dir.join(format!("Graduation-Slides-{}.pptx", req.year));
     let tmp_path = out_dir.join(format!("Graduation-Slides-{}.pptx.tmp", req.year));
 
+    // v3.12.0: decode daycare logo data URL to raw bytes + extension.
+    // Accept only png/jpg/jpeg — anything else is dropped silently
+    // (cover renders text-only). Malformed base64 is also a silent
+    // drop — the render must not fail because branding is broken.
+    let (logo_bytes, logo_ext) = decode_daycare_logo(req.daycare_logo_data_url.as_deref());
+
     let ctx = pptx::TemplateContext {
         year: req.year,
+        daycare_name: req
+            .daycare_name
+            .clone()
+            .filter(|s| !s.trim().is_empty()),
+        logo_bytes,
+        logo_ext,
         students: req
             .students
             .iter()
@@ -1597,6 +1621,59 @@ mod tests {
         for (i, a) in aliases.iter().enumerate() {
             let bytes = std::fs::read(scratch.path().join(a)).unwrap();
             assert_eq!(bytes, format!("photo-{i}").as_bytes());
+        }
+    }
+}
+
+/// v3.12.0: decode a `data:image/png;base64,...` or
+/// `data:image/jpeg;base64,...` URL into `(bytes, extension)` for the
+/// PPTX cover slide.
+///
+/// Returns `(None, None)` when:
+/// * input is None or empty
+/// * MIME isn't image/png or image/jpeg (frontend restricts to these,
+///   but the backend guards defensively)
+/// * base64 decode fails
+///
+/// The render must NEVER fail because a logo is malformed — a
+/// text-only cover slide is always preferable to a broken build.
+fn decode_daycare_logo(data_url: Option<&str>) -> (Option<Vec<u8>>, Option<String>) {
+    use base64::{engine::general_purpose::STANDARD, Engine as _};
+
+    let Some(url) = data_url.filter(|s| !s.is_empty()) else {
+        return (None, None);
+    };
+    // Expected prefix: `data:image/<subtype>;base64,<payload>`.
+    let Some(rest) = url.strip_prefix("data:") else {
+        eprintln!("[graduation] cover logo: unrecognised data URL prefix — skipping");
+        return (None, None);
+    };
+    let Some((meta, payload)) = rest.split_once(',') else {
+        eprintln!("[graduation] cover logo: no comma in data URL — skipping");
+        return (None, None);
+    };
+    if !meta.contains(";base64") {
+        eprintln!("[graduation] cover logo: expected base64 encoding — skipping");
+        return (None, None);
+    }
+    let mime = meta.split(';').next().unwrap_or("");
+    let ext = match mime {
+        "image/png" => "png",
+        "image/jpeg" | "image/jpg" => "jpg",
+        other => {
+            eprintln!("[graduation] cover logo: unsupported MIME {other} — skipping");
+            return (None, None);
+        }
+    };
+    match STANDARD.decode(payload) {
+        Ok(bytes) if !bytes.is_empty() => (Some(bytes), Some(ext.to_string())),
+        Ok(_) => {
+            eprintln!("[graduation] cover logo: decoded to zero bytes — skipping");
+            (None, None)
+        }
+        Err(e) => {
+            eprintln!("[graduation] cover logo: base64 decode failed: {e} — skipping");
+            (None, None)
         }
     }
 }

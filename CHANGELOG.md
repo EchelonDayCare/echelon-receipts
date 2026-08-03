@@ -4,6 +4,36 @@ All notable changes shipped as a DMG. Only entries the owner has approved
 for release are listed here — "code-complete, awaiting ship approval" work
 lives in the session plan.md until it ships.
 
+## v3.12.0 — Clean auto-generated cover slide (daycare branding)
+
+The auto-generated cover slide for grad decks previously cloned the
+per-student marker slide, which unfortunately dragged the marker's
+**photo placeholder silhouette** onto the cover (a big beige person
+icon next to "Class of 2026"). Fixed.
+
+### Changed
+- **Custom cover slide.** When the template has no explicit title
+  slide, we now build a clean centred cover from scratch instead of
+  cloning the marker. Layout:
+  * daycare logo at the top (when configured in Settings)
+  * daycare name below the logo (when configured)
+  * "Class of {year}" as the display heading
+  * "Graduation Ceremony" subtitle
+- **No photo placeholder on the cover.** The `<p:pic>` element is no
+  longer present on the auto-generated cover — no more beige
+  silhouette.
+- Cover inherits the template's `slideLayout` reference so theme
+  colours and master styles carry through the entire deck.
+- Logo is embedded as `ppt/media/cover_logo.{png|jpg}` inside the
+  pptx zip with a proper `Content-Types` override.
+
+### Preserved
+- Templates that already ship an explicit title/cover slide are still
+  left untouched — we only fill in the missing cover.
+- Non-png/jpg logos, missing settings, or malformed data URLs all
+  degrade cleanly to a text-only cover — the render never fails
+  because branding is unavailable.
+
 ## v3.11.0 — Photo curation score cache
 
 Small change with a big effect on **re-run** speed for grad-reel work.

@@ -61,6 +61,17 @@ struct ImageRel {
 pub struct TemplateContext {
     pub year: u32,
     pub students: Vec<SlideRow>,
+    /// Daycare name to render on the auto-generated cover slide.
+    /// When None, the cover falls back to just "Class of {year}".
+    /// v3.12.0.
+    pub daycare_name: Option<String>,
+    /// Optional daycare logo for the cover slide. `logo_ext` is the
+    /// file extension without a leading dot (`png`, `jpg`, `jpeg`)
+    /// — used as the media entry's extension inside the PPTX zip and
+    /// to derive the Content-Types override MIME. When None, the
+    /// cover renders without a logo. v3.12.0.
+    pub logo_bytes: Option<Vec<u8>>,
+    pub logo_ext: Option<String>,
 }
 
 /// Report returned by [`render_slides`]. `warnings` bubbles up
@@ -287,51 +298,99 @@ pub fn render_slides_cancellable(
     // Auto-generate a cover slide when the template contains ONLY the
     // marker (i.e. the author didn't include a separate title slide).
     // Without this the deck opens directly on the first child, which
-    // reads more like a report page than a graduation deck. When the
-    // author has already provided one or more non-marker slides they
-    // remain untouched — we only fill the gap; we never override.
+    // reads more like a report page than a graduation deck.
     //
-    // The cover is built by cloning the marker slide's XML + rels, then
-    // substituting `{{Name}}` → "Class of {year}" and `{{Note}}` → a
-    // short subtitle. Trailing possessive text ("{{Name}}'s ...") in
-    // the template — a common pattern that reads badly on a cover — is
-    // scrubbed after substitution.
+    // v3.12.0: this used to clone the marker slide and swap `{{Name}}`
+    // → "Class of {year}", which unfortunately also dragged the
+    // marker's *photo placeholder silhouette* onto the cover (a big
+    // beige person icon next to the title). We now build a custom
+    // cover from scratch — daycare logo + name + year + subtitle in a
+    // centred column — with no photo placeholder at all. See
+    // `build_cover_slide_xml`.
     let template_slide_count = entries.iter().filter(|(n, _)| is_slide_path(n)).count();
     if template_slide_count == 1 {
         let cover_num = max_slide_num + 1;
         max_slide_num = cover_num;
 
-        let cover_title = format!("Class of {}", ctx.year);
-        let cover_subtitle = "Graduation Ceremony";
-        let mut cover_xml = String::from_utf8_lossy(&marker_slide_bytes).into_owned();
-        cover_xml = coalesce_split_runs(&cover_xml);
-        cover_xml = cover_xml
-            .replace("{{Name}}", &escape_xml(&cover_title))
-            .replace("{{Note}}", &escape_xml(cover_subtitle))
-            .replace("{{Year}}", &ctx.year.to_string());
-        // Scrub possessive suffixes glued to the substituted title
-        // (`Class of 2026's ...` reads awkwardly on a cover slide).
-        // Both straight and curly apostrophes.
-        let title_esc = escape_xml(&cover_title);
-        for suffix in [
-            format!("{title_esc}'s "),
-            format!("{title_esc}\u{2019}s "),
-            format!("{title_esc}'s<"),
-            format!("{title_esc}\u{2019}s<"),
-        ] {
-            let replacement = if suffix.ends_with('<') {
-                format!("{title_esc}<")
-            } else {
-                format!("{title_esc} ")
-            };
-            cover_xml = cover_xml.replace(&suffix, &replacement);
-        }
+        // v3.12.0: pick a stable rId for the embedded logo image. This
+        // is scoped to the cover slide's own rels file so it can be
+        // anything unique within that file — `rId100` is well outside
+        // any range PowerPoint would auto-assign at template creation.
+        let logo_rid = "rId100";
+        let has_logo = ctx.logo_bytes.is_some() && ctx.logo_ext.is_some();
+
+        // Reuse the marker slide's slideLayout so the cover inherits
+        // theme colours and master styles. Fall back to slideLayout1
+        // if the marker's rels didn't declare one.
+        let (layout_rid, layout_target) = if let Some(rels) = &marker_rels_bytes {
+            let s = String::from_utf8_lossy(rels);
+            (
+                extract_layout_rid(&s).unwrap_or_else(|| "rId1".to_string()),
+                extract_layout_target(&s).unwrap_or_else(|| "../slideLayouts/slideLayout1.xml".to_string()),
+            )
+        } else {
+            ("rId1".to_string(), "../slideLayouts/slideLayout1.xml".to_string())
+        };
+
+        let (logo_target_in_zip, logo_rel_target) = if has_logo {
+            let ext = ctx.logo_ext.as_deref().unwrap_or("png");
+            (
+                format!("ppt/media/cover_logo.{ext}"),
+                format!("../media/cover_logo.{ext}"),
+            )
+        } else {
+            (String::new(), String::new())
+        };
+
+        let cover_xml = build_cover_slide_xml(
+            ctx.year,
+            ctx.daycare_name.as_deref(),
+            has_logo,
+            logo_rid,
+        );
+        let cover_rels_xml = build_cover_rels_xml(
+            Some(&layout_rid),
+            Some(&layout_target),
+            if has_logo { Some(logo_rid) } else { None },
+            if has_logo { Some(&logo_rel_target) } else { None },
+        );
 
         let cover_slide_path = format!("ppt/slides/slide{cover_num}.xml");
         new_entries.push((cover_slide_path, cover_xml.into_bytes()));
-        if let Some(rels) = &marker_rels_bytes {
-            let cover_rels_path = format!("ppt/slides/_rels/slide{cover_num}.xml.rels");
-            new_entries.push((cover_rels_path, rels.clone()));
+        let cover_rels_path = format!("ppt/slides/_rels/slide{cover_num}.xml.rels");
+        new_entries.push((cover_rels_path, cover_rels_xml.into_bytes()));
+
+        // v3.12.0: embed the logo bytes in the pptx media directory so
+        // the cover's rels reference resolves. Skipped when no logo is
+        // configured (the cover renders text-only in that case).
+        if has_logo {
+            new_entries.push((
+                logo_target_in_zip,
+                ctx.logo_bytes.clone().unwrap_or_default(),
+            ));
+            // Content-Types override for the logo image so PowerPoint
+            // knows how to demux it. jpg/jpeg both use image/jpeg.
+            let ext = ctx.logo_ext.as_deref().unwrap_or("png");
+            let mime = match ext.to_ascii_lowercase().as_str() {
+                "png" => "image/png",
+                "jpg" | "jpeg" => "image/jpeg",
+                other => {
+                    // Fallback — should not happen; frontend restricts
+                    // logo picks to png/jpg. Best-effort mime.
+                    let _ = other;
+                    "application/octet-stream"
+                }
+            };
+            let logo_override = format!(
+                r#"<Override PartName="/ppt/media/cover_logo.{ext}" ContentType="{mime}"/>"#
+            );
+            // Only add the Override if this extension isn't already
+            // declared by the template (idempotent). PPTX also allows
+            // <Default Extension="..."/> which we'd inherit — but an
+            // explicit override never hurts and is unambiguous.
+            if !ct_xml.contains(&format!("/ppt/media/cover_logo.{ext}")) {
+                ct_xml = insert_before_strict(&ct_xml, "</Types>", &logo_override)?;
+            }
         }
 
         let cover_r_id = next_r_id;
@@ -753,6 +812,257 @@ fn escape_xml(v: &str) -> String {
         .replace('"', "&quot;")
         .replace('\'', "&apos;")
 }
+
+/// v3.12.0: build a **custom** cover-slide XML for the auto-generated
+/// title page, replacing the previous "clone the marker slide + swap
+/// text" trick.
+///
+/// The clone-and-swap approach dragged the marker's *photo placeholder*
+/// silhouette onto the cover, which looked unfinished — a big beige
+/// person icon next to "Class of 2026" (Aug 2026 UX bug). This builder
+/// produces a clean, centred cover with:
+/// * daycare logo at the top (when provided)
+/// * daycare name below the logo (when provided)
+/// * "Class of {year}" as the display heading
+/// * a friendly subtitle line
+///
+/// Layout is a single centred column, so the cover reads well even
+/// when logo or daycare name are missing (each element collapses out
+/// of the flow rather than leaving an awkward gap).
+///
+/// **Coordinates.** PowerPoint uses English Metric Units (EMU): 914400
+/// EMU = 1 inch. A standard 16:9 widescreen slide is 12192000 × 6858000
+/// EMU (13.333" × 7.5"). All positions/sizes below are in EMU.
+///
+/// **Font sizes.** DrawingML `sz` attribute is in 1/100 pt units — so
+/// `sz="9600"` = 96 pt.
+///
+/// The `layout_rid` argument is the relationship ID for the slideLayout
+/// this cover targets (typically the same layout used by the marker
+/// slide so the theme colours/master carry through).
+fn build_cover_slide_xml(
+    year: u32,
+    daycare_name: Option<&str>,
+    has_logo: bool,
+    logo_rid: &str,
+) -> String {
+    // Vertical layout is content-aware: with a logo we start photos
+    // at y≈600k and let text follow. Without a logo we push text up
+    // and centre it vertically for balance.
+    let (logo_block, name_y, class_y, msg_y) = if has_logo {
+        let logo_xml = format!(
+            r#"<p:pic>
+      <p:nvPicPr>
+        <p:cNvPr id="10" name="DaycareLogo"/>
+        <p:cNvPicPr><a:picLocks noChangeAspect="1"/></p:cNvPicPr>
+        <p:nvPr/>
+      </p:nvPicPr>
+      <p:blipFill>
+        <a:blip r:embed="{logo_rid}"/>
+        <a:stretch><a:fillRect/></a:stretch>
+      </p:blipFill>
+      <p:spPr>
+        <a:xfrm>
+          <a:off x="5334000" y="600000"/>
+          <a:ext cx="1524000" cy="1524000"/>
+        </a:xfrm>
+        <a:prstGeom prst="rect"><a:avLst/></a:prstGeom>
+      </p:spPr>
+    </p:pic>"#
+        );
+        (logo_xml, 2300000i64, 3050000i64, 4900000i64)
+    } else {
+        (String::new(), 1600000i64, 2600000i64, 4900000i64)
+    };
+
+    let daycare_block = match daycare_name {
+        Some(name) if !name.trim().is_empty() => format!(
+            r##"<p:sp>
+      <p:nvSpPr>
+        <p:cNvPr id="20" name="DaycareName"/>
+        <p:cNvSpPr txBox="1"/>
+        <p:nvPr/>
+      </p:nvSpPr>
+      <p:spPr>
+        <a:xfrm><a:off x="600000" y="{name_y}"/><a:ext cx="10992000" cy="600000"/></a:xfrm>
+        <a:prstGeom prst="rect"><a:avLst/></a:prstGeom>
+        <a:noFill/>
+      </p:spPr>
+      <p:txBody>
+        <a:bodyPr wrap="square" anchor="ctr"/>
+        <a:lstStyle/>
+        <a:p>
+          <a:pPr algn="ctr"/>
+          <a:r>
+            <a:rPr lang="en-US" sz="3200" b="0">
+              <a:solidFill><a:srgbClr val="4A3A2A"/></a:solidFill>
+              <a:latin typeface="+mn-lt"/>
+            </a:rPr>
+            <a:t>{name_esc}</a:t>
+          </a:r>
+        </a:p>
+      </p:txBody>
+    </p:sp>"##,
+            name_y = name_y,
+            name_esc = escape_xml(name.trim()),
+        ),
+        _ => String::new(),
+    };
+
+    let class_line = format!("Class of {year}");
+    let subtitle = "Graduation Ceremony";
+
+    format!(
+        r##"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<p:sld xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main">
+  <p:cSld>
+    <p:spTree>
+      <p:nvGrpSpPr>
+        <p:cNvPr id="1" name=""/>
+        <p:cNvGrpSpPr/>
+        <p:nvPr/>
+      </p:nvGrpSpPr>
+      <p:grpSpPr>
+        <a:xfrm>
+          <a:off x="0" y="0"/><a:ext cx="0" cy="0"/>
+          <a:chOff x="0" y="0"/><a:chExt cx="0" cy="0"/>
+        </a:xfrm>
+      </p:grpSpPr>
+      {logo_block}
+      {daycare_block}
+      <p:sp>
+        <p:nvSpPr>
+          <p:cNvPr id="30" name="ClassOfYear"/>
+          <p:cNvSpPr txBox="1"/>
+          <p:nvPr/>
+        </p:nvSpPr>
+        <p:spPr>
+          <a:xfrm><a:off x="600000" y="{class_y}"/><a:ext cx="10992000" cy="1600000"/></a:xfrm>
+          <a:prstGeom prst="rect"><a:avLst/></a:prstGeom>
+          <a:noFill/>
+        </p:spPr>
+        <p:txBody>
+          <a:bodyPr wrap="square" anchor="ctr"/>
+          <a:lstStyle/>
+          <a:p>
+            <a:pPr algn="ctr"/>
+            <a:r>
+              <a:rPr lang="en-US" sz="9600" b="1">
+                <a:solidFill><a:srgbClr val="1A1210"/></a:solidFill>
+                <a:latin typeface="+mj-lt"/>
+              </a:rPr>
+              <a:t>{class_line_esc}</a:t>
+            </a:r>
+          </a:p>
+        </p:txBody>
+      </p:sp>
+      <p:sp>
+        <p:nvSpPr>
+          <p:cNvPr id="40" name="CoverSubtitle"/>
+          <p:cNvSpPr txBox="1"/>
+          <p:nvPr/>
+        </p:nvSpPr>
+        <p:spPr>
+          <a:xfrm><a:off x="600000" y="{msg_y}"/><a:ext cx="10992000" cy="500000"/></a:xfrm>
+          <a:prstGeom prst="rect"><a:avLst/></a:prstGeom>
+          <a:noFill/>
+        </p:spPr>
+        <p:txBody>
+          <a:bodyPr wrap="square" anchor="ctr"/>
+          <a:lstStyle/>
+          <a:p>
+            <a:pPr algn="ctr"/>
+            <a:r>
+              <a:rPr lang="en-US" sz="2000" i="1">
+                <a:solidFill><a:srgbClr val="8A7B60"/></a:solidFill>
+                <a:latin typeface="+mn-lt"/>
+              </a:rPr>
+              <a:t>{subtitle_esc}</a:t>
+            </a:r>
+          </a:p>
+        </p:txBody>
+      </p:sp>
+    </p:spTree>
+  </p:cSld>
+  <p:clrMapOvr><a:masterClrMapping/></p:clrMapOvr>
+</p:sld>
+"##,
+        logo_block = logo_block,
+        daycare_block = daycare_block,
+        class_y = class_y,
+        msg_y = msg_y,
+        class_line_esc = escape_xml(&class_line),
+        subtitle_esc = escape_xml(subtitle),
+    )
+}
+
+/// v3.12.0: extract the slideLayout relationship ID from a marker
+/// slide's rels file so the auto-generated cover targets the same
+/// layout (and thus inherits theme colours + master styles).
+/// Returns None if the rels file doesn't declare a slideLayout — the
+/// cover will still render, PowerPoint will fall back to slideLayout1.
+fn extract_layout_rid(rels_xml: &str) -> Option<String> {
+    // Find `<Relationship ... Type=".../slideLayout" ... Id="rIdN".../>`.
+    // Attribute order is not fixed, so search each Relationship element.
+    let marker = "slideLayout";
+    for chunk in rels_xml.split("<Relationship") {
+        if !chunk.contains(marker) {
+            continue;
+        }
+        // Look for Id="..."
+        if let Some(id_start) = chunk.find("Id=\"") {
+            let after = &chunk[id_start + 4..];
+            if let Some(id_end) = after.find('"') {
+                return Some(after[..id_end].to_string());
+            }
+        }
+    }
+    None
+}
+
+/// v3.12.0: build a minimal rels file for the auto-generated cover
+/// slide. Always includes the slideLayout ref (so the cover uses the
+/// same theme as the rest of the deck); optionally includes the logo
+/// image ref.
+fn build_cover_rels_xml(
+    layout_rid: Option<&str>,
+    layout_target: Option<&str>,
+    logo_rid: Option<&str>,
+    logo_target: Option<&str>,
+) -> String {
+    let mut inner = String::new();
+    if let (Some(rid), Some(target)) = (layout_rid, layout_target) {
+        inner.push_str(&format!(
+            r#"<Relationship Id="{rid}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideLayout" Target="{target}"/>"#
+        ));
+    }
+    if let (Some(rid), Some(target)) = (logo_rid, logo_target) {
+        inner.push_str(&format!(
+            r#"<Relationship Id="{rid}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="{target}"/>"#
+        ));
+    }
+    format!(
+        r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">{inner}</Relationships>"#
+    )
+}
+
+/// v3.12.0: extract the slideLayout Target path from a marker's rels
+/// so the auto-cover can point at the same layout file.
+fn extract_layout_target(rels_xml: &str) -> Option<String> {
+    for chunk in rels_xml.split("<Relationship") {
+        if !chunk.contains("slideLayout") {
+            continue;
+        }
+        if let Some(t_start) = chunk.find("Target=\"") {
+            let after = &chunk[t_start + 8..];
+            if let Some(t_end) = after.find('"') {
+                return Some(after[..t_end].to_string());
+            }
+        }
+    }
+    None
+}
+
 
 fn insert_before(hay: &str, needle: &str, ins: &str) -> String {
     match hay.find(needle) {
@@ -1810,6 +2120,9 @@ mod tests {
                 SlideRow { name: "Emma".into(), note: "Kind & curious.".into(), photos: vec![] },
                 SlideRow { name: "Liam O'Neil".into(), note: "Loves trucks & <blocks>.".into(), photos: vec![] },
             ],
+            daycare_name: None,
+            logo_bytes: None,
+            logo_ext: None,
         };
         render_slides(&tpl, &out, &ctx).expect("render should succeed");
         assert!(out.exists(), "output not created");
@@ -1836,6 +2149,208 @@ mod tests {
         assert!(!all_slides.contains("{{Year}}"), "unsubstituted Year token");
         assert!(all_slides.contains("2027"), "Year token not substituted");
         assert!(all_slides.contains("Class of 2027"), "output missing auto-generated cover title");
+    }
+
+    #[test]
+    fn cover_slide_uses_custom_layout_when_daycare_name_provided() {
+        // v3.12.0: the auto-generated cover slide must be a clean
+        // custom layout — daycare name, "Class of {year}", subtitle —
+        // and MUST NOT clone the marker slide's photo placeholder.
+        let tmp = tempfile::tempdir().unwrap();
+        let tpl = tmp.path().join("template.pptx");
+        write_marker_only_template(&tpl);
+        let out_dir = tmp.path().join("out");
+        std::fs::create_dir_all(&out_dir).unwrap();
+        let out = out_dir.join("out.pptx");
+
+        let ctx = TemplateContext {
+            year: 2028,
+            students: vec![
+                SlideRow { name: "Emma".into(), note: "".into(), photos: vec![] },
+            ],
+            daycare_name: Some("Echelon Daycare".into()),
+            logo_bytes: None,
+            logo_ext: None,
+        };
+        render_slides(&tpl, &out, &ctx).expect("render should succeed");
+        assert!(out.exists());
+        let bytes = std::fs::read(&out).unwrap();
+        let mut zip = ZipArchive::new(Cursor::new(&bytes)).unwrap();
+
+        // The auto-cover is inserted as the LAST slide in the source
+        // template's slide numbering (before `strip_sld_id_for_target`
+        // moves it in the presentation.xml sldIdLst) — enumerate all
+        // slides and find one containing "Class of 2028".
+        let mut cover_xml: Option<String> = None;
+        for i in 0..zip.len() {
+            let mut file = zip.by_index(i).unwrap();
+            let name = file.name().to_string();
+            if !name.starts_with("ppt/slides/slide") || !name.ends_with(".xml") { continue; }
+            let mut s = String::new();
+            std::io::Read::read_to_string(&mut file, &mut s).unwrap();
+            if s.contains("Class of 2028") { cover_xml = Some(s); break; }
+        }
+        let cover = cover_xml.expect("cover slide with 'Class of 2028' not found");
+
+        // Cover content — daycare name and subtitle both present.
+        assert!(cover.contains("Echelon Daycare"),
+            "cover missing daycare name; got:\n{cover}");
+        assert!(cover.contains("Graduation Ceremony"),
+            "cover missing subtitle");
+        // NO photo placeholder — the whole point of v3.12.0. The
+        // marker slide's `<p:pic>` element must not appear on the
+        // cover.
+        assert!(!cover.contains("<p:pic>"),
+            "cover unexpectedly contains a <p:pic> element (photo placeholder leaked in)");
+    }
+
+    #[test]
+    fn cover_slide_embeds_logo_when_bytes_provided() {
+        // v3.12.0: when logo bytes are provided, the cover's rels
+        // file references a media image and the media entry lives in
+        // ppt/media/cover_logo.<ext>.
+        let tmp = tempfile::tempdir().unwrap();
+        let tpl = tmp.path().join("template.pptx");
+        write_marker_only_template(&tpl);
+        let out_dir = tmp.path().join("out");
+        std::fs::create_dir_all(&out_dir).unwrap();
+        let out = out_dir.join("out.pptx");
+
+        // Minimal 1x1 PNG for the logo bytes. Content is not
+        // rendered by our code — we only need it to be non-empty.
+        let png_1x1: Vec<u8> = vec![
+            0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A,
+            0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44, 0x52,
+            0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01,
+            0x08, 0x02, 0x00, 0x00, 0x00, 0x90, 0x77, 0x53,
+            0xDE, 0x00, 0x00, 0x00, 0x0C, 0x49, 0x44, 0x41,
+            0x54, 0x08, 0x99, 0x63, 0x60, 0x00, 0x00, 0x00,
+            0x04, 0x00, 0x01, 0x27, 0xC7, 0x8C, 0x8F, 0x00,
+            0x00, 0x00, 0x00, 0x49, 0x45, 0x4E, 0x44, 0xAE,
+            0x42, 0x60, 0x82,
+        ];
+
+        let ctx = TemplateContext {
+            year: 2029,
+            students: vec![
+                SlideRow { name: "Emma".into(), note: "".into(), photos: vec![] },
+            ],
+            daycare_name: Some("Echelon Daycare".into()),
+            logo_bytes: Some(png_1x1.clone()),
+            logo_ext: Some("png".into()),
+        };
+        render_slides(&tpl, &out, &ctx).expect("render should succeed");
+
+        let bytes = std::fs::read(&out).unwrap();
+        let mut zip = ZipArchive::new(Cursor::new(&bytes)).unwrap();
+
+        let mut has_media = false;
+        let mut has_ct_override = false;
+        let mut rels_with_image: Option<String> = None;
+        for i in 0..zip.len() {
+            let mut file = zip.by_index(i).unwrap();
+            let name = file.name().to_string();
+            if name == "ppt/media/cover_logo.png" {
+                has_media = true;
+                let mut buf = Vec::new();
+                std::io::Read::read_to_end(&mut file, &mut buf).unwrap();
+                assert_eq!(buf, png_1x1, "media bytes don't match");
+                continue;
+            }
+            if name == "[Content_Types].xml" {
+                let mut s = String::new();
+                std::io::Read::read_to_string(&mut file, &mut s).unwrap();
+                if s.contains("/ppt/media/cover_logo.png") && s.contains("image/png") {
+                    has_ct_override = true;
+                }
+                continue;
+            }
+            if name.starts_with("ppt/slides/_rels/") && name.ends_with(".xml.rels") {
+                let mut s = String::new();
+                std::io::Read::read_to_string(&mut file, &mut s).unwrap();
+                if s.contains("cover_logo.png") {
+                    rels_with_image = Some(s);
+                }
+            }
+        }
+        assert!(has_media, "ppt/media/cover_logo.png missing from output zip");
+        assert!(has_ct_override, "Content-Types missing image/png override for cover logo");
+        assert!(rels_with_image.is_some(), "no slide rels file references cover_logo.png");
+    }
+
+    fn write_marker_only_template(path: &std::path::Path) {
+        use std::io::Write;
+        let file = std::fs::File::create(path).unwrap();
+        let mut zip = zip::ZipWriter::new(file);
+        let opts = SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+        // Minimal viable pptx — one marker slide, rels chain,
+        // presentation.xml, content types. Reuses the helpers from
+        // end_to_end_renders_sample_template for consistency.
+        zip.start_file("[Content_Types].xml", opts).unwrap();
+        zip.write_all(concat!(
+            r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>"#,
+            r#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">"#,
+            r#"<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>"#,
+            r#"<Default Extension="xml" ContentType="application/xml"/>"#,
+            r#"<Default Extension="png" ContentType="image/png"/>"#,
+            r#"<Override PartName="/ppt/presentation.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.presentation.main+xml"/>"#,
+            r#"<Override PartName="/ppt/slides/slide1.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.slide+xml"/>"#,
+            r#"</Types>"#,
+        ).as_bytes()).unwrap();
+
+        zip.start_file("_rels/.rels", opts).unwrap();
+        zip.write_all(concat!(
+            r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>"#,
+            r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">"#,
+            r#"<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="ppt/presentation.xml"/>"#,
+            r#"</Relationships>"#,
+        ).as_bytes()).unwrap();
+
+        zip.start_file("ppt/presentation.xml", opts).unwrap();
+        zip.write_all(concat!(
+            r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>"#,
+            r#"<p:presentation xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main">"#,
+            r#"<p:sldIdLst><p:sldId id="256" r:id="rId2"/></p:sldIdLst>"#,
+            r#"</p:presentation>"#,
+        ).as_bytes()).unwrap();
+
+        zip.start_file("ppt/_rels/presentation.xml.rels", opts).unwrap();
+        zip.write_all(concat!(
+            r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>"#,
+            r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">"#,
+            r#"<Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide" Target="slides/slide1.xml"/>"#,
+            r#"</Relationships>"#,
+        ).as_bytes()).unwrap();
+
+        zip.start_file("ppt/slides/slide1.xml", opts).unwrap();
+        zip.write_all(concat!(
+            r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>"#,
+            r#"<p:sld xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main">"#,
+            r#"<p:cSld><p:spTree>"#,
+            r#"<p:nvGrpSpPr><p:cNvPr id="1" name=""/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr>"#,
+            r#"<p:grpSpPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="0" cy="0"/><a:chOff x="0" y="0"/><a:chExt cx="0" cy="0"/></a:xfrm></p:grpSpPr>"#,
+            // Marker name text
+            r#"<p:sp><p:nvSpPr><p:cNvPr id="2" name="Title"/><p:cNvSpPr txBox="1"/><p:nvPr/></p:nvSpPr>"#,
+            r#"<p:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="1000" cy="1000"/></a:xfrm></p:spPr>"#,
+            r#"<p:txBody><a:bodyPr/><a:lstStyle/><a:p><a:r><a:t>{{Name}}</a:t></a:r></a:p></p:txBody></p:sp>"#,
+            // Marker photo placeholder — this is the silhouette we
+            // must NOT drag onto the cover.
+            r#"<p:pic><p:nvPicPr><p:cNvPr id="3" name="PhotoPlaceholder"/><p:cNvPicPr/><p:nvPr/></p:nvPicPr>"#,
+            r#"<p:blipFill><a:blip r:embed="rIdImg"/></p:blipFill>"#,
+            r#"<p:spPr><a:xfrm><a:off x="2000" y="0"/><a:ext cx="1000" cy="1000"/></a:xfrm></p:spPr></p:pic>"#,
+            r#"</p:spTree></p:cSld></p:sld>"#,
+        ).as_bytes()).unwrap();
+
+        zip.start_file("ppt/slides/_rels/slide1.xml.rels", opts).unwrap();
+        zip.write_all(concat!(
+            r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>"#,
+            r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">"#,
+            r#"<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideLayout" Target="../slideLayouts/slideLayout1.xml"/>"#,
+            r#"<Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="../media/placeholder.png"/>"#,
+            r#"</Relationships>"#,
+        ).as_bytes()).unwrap();
+
+        zip.finish().unwrap();
     }
 
     #[test]
@@ -1994,6 +2509,9 @@ mod tests {
                 note: "Great kid".into(),
                 photos: vec![photo_path],
             }],
+            daycare_name: None,
+            logo_bytes: None,
+            logo_ext: None,
         };
 
         render_slides(&tpl_path, &out_path, &ctx).expect("render should succeed");

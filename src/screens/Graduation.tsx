@@ -589,6 +589,12 @@ export default function Graduation() {
       return;
     }
     if (!nested) { setBusy("slides"); setRunSummary(null); runStartRef.current = Date.now(); }
+    // v3.12.0: pull daycare name + logo from settings so the
+    // auto-generated cover slide can render clean branding instead of
+    // the marker slide's photo silhouette.
+    const brandingSettings = await getSettings().catch(() => ({} as Record<string, string>));
+    const daycareName = (brandingSettings["daycare_name"] as string | undefined)?.trim() || null;
+    const daycareLogo = (brandingSettings["logo_data_url"] as string | undefined) || null;
     try {
       const out = await invoke<{ output_path: string; slides_written: number; template_used: string }>(
         "graduation_render_slides",
@@ -598,6 +604,8 @@ export default function Graduation() {
             template_folder: layout.template,
             output_folder: layout.output,
             year: Number(year),
+            daycare_name: daycareName,
+            daycare_logo_data_url: daycareLogo,
             students: graduating.map((s) => {
               const childFolder = layout.child_folders.find((c) => c.student_id === s.id);
               return {
