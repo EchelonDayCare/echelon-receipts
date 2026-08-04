@@ -65,6 +65,7 @@ export default function MonthlyAttendance() {
   const [daycareAddress, setDaycareAddress] = useState("");
   const [contactPhone, setContactPhone] = useState("");
   const [contactEmail, setContactEmail] = useState("");
+  const [contactEmailAlt, setContactEmailAlt] = useState("");
   const [logoDataUrl, setLogoDataUrl] = useState<string>("");
   const [dataYears, setDataYears] = useState<number[]>([]);
   const [toast, setToast] = useState<{ msg: string; tone: "ok" | "err" } | null>(null);
@@ -114,9 +115,16 @@ export default function MonthlyAttendance() {
     setDaycareAddress(s.daycare_address || "");
     setContactPhone(s.contact_phone || "");
     // Sign-in sheet header shows the SMTP sender email (what parents
-    // actually reply to when we email them), falling back to the
-    // generic contact_email for centres that don't use SMTP.
+    // actually reply to when we email them) AND the generic
+    // contact_email side-by-side when both are set and distinct.
+    // Both are lowercased on render — settings may hold uppercase
+    // legacy values.
     setContactEmail(s.sender_email || s.contact_email || "");
+    setContactEmailAlt(
+      s.sender_email && s.contact_email && s.sender_email.trim().toLowerCase() !== s.contact_email.trim().toLowerCase()
+        ? s.contact_email
+        : "",
+    );
     setLogoDataUrl(s.logo_data_url || "");
   }
   useEffect(() => { refresh();   }, [year, month]);
@@ -914,7 +922,12 @@ export default function MonthlyAttendance() {
 
     const centre = daycareName || "Echelon Daycare Teachers Association";
     const logo = sanitizeImageDataUrl(logoDataUrl) || DEFAULT_LOGO_DATA_URL;
-    const contactParts = [daycareAddress, contactPhone, contactEmail]
+    const contactParts = [
+      daycareAddress,
+      contactPhone,
+      contactEmail ? contactEmail.trim().toLowerCase() : "",
+      contactEmailAlt ? contactEmailAlt.trim().toLowerCase() : "",
+    ]
       .map((p) => (p ?? "").trim())
       .filter((p) => p.length > 0);
     const contactLine = contactParts.map(h).join(' <span class="dot">&middot;</span> ');
