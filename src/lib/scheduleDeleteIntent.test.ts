@@ -121,18 +121,24 @@ describe("parseDeleteIntent", () => {
     const r = parseDeleteIntent("Delete all shifts of Judy for this week", ROSTER, TODAY);
     expect(r).not.toBeNull();
     expect(r!.staffIds).toEqual(["s2"]);
+    expect(r!.people).toHaveLength(1);
+    expect(r!.people[0].status).toBe("unique");
+    expect(r!.people[0].staffId).toBe("s2");
   });
 
   it("matches roster staff by full name", () => {
     const r = parseDeleteIntent("Delete all shifts of Judy Chen for this week", ROSTER, TODAY);
     expect(r).not.toBeNull();
     expect(r!.staffIds).toEqual(["s2"]);
+    expect(r!.people).toHaveLength(1);
+    expect(r!.people[0].status).toBe("unique");
   });
 
   it("matches multiple named staff", () => {
     const r = parseDeleteIntent("Delete Chloe and Judy shifts this week", ROSTER, TODAY);
     expect(r).not.toBeNull();
     expect(r!.staffIds.sort()).toEqual(["s1", "s2"]);
+    expect(r!.people.every((p) => p.status === "unique")).toBe(true);
   });
 
   it("tolerates the 'shifty' typo (still hits the object-hint regex)", () => {
@@ -142,9 +148,73 @@ describe("parseDeleteIntent", () => {
     expect(r!.scope.startIso).toBe("2026-08-03");
   });
 
-  it("returns empty staffIds when no roster names are mentioned", () => {
+  it("returns empty people/staffIds when no roster names are mentioned", () => {
     const r = parseDeleteIntent("delete all shifts this week", ROSTER, TODAY);
     expect(r!.staffIds).toEqual([]);
+    expect(r!.people).toEqual([]);
+  });
+
+  // v3.19.0 P1 regression suite —————————————————————————————————
+  it("flags an ambiguous first name when the roster has two matches", () => {
+    const dupRoster = [
+      { id: "s1", name: "Judy Chen" },
+      { id: "s2", name: "Judy Patel" },
+      { id: "s3", name: "Kiran" },
+    ];
+    const r = parseDeleteIntent("Delete Judy shifts this week", dupRoster, TODAY);
+    expect(r).not.toBeNull();
+    expect(r!.people).toHaveLength(1);
+    expect(r!.people[0].status).toBe("ambiguous");
+    expect(r!.people[0].candidates).toEqual(["Judy Chen", "Judy Patel"]);
+    expect(r!.staffIds).toEqual([]);
+  });
+
+  it("resolves ambiguity when the user types a full name (Judy Chen wins over bare Judy)", () => {
+    const dupRoster = [
+      { id: "s1", name: "Judy Chen" },
+      { id: "s2", name: "Judy Patel" },
+    ];
+    const r = parseDeleteIntent("Delete Judy Chen shifts this week", dupRoster, TODAY);
+    expect(r).not.toBeNull();
+    expect(r!.people).toHaveLength(1);
+    expect(r!.people[0].status).toBe("unique");
+    expect(r!.people[0].staffId).toBe("s1");
+    expect(r!.staffIds).toEqual(["s1"]);
+  });
+
+  it("flags a typo as unresolved (does NOT fall back to everyone)", () => {
+    const r = parseDeleteIntent("Delete Chlio shifts this week", ROSTER, TODAY);
+    expect(r).not.toBeNull();
+    expect(r!.people).toHaveLength(1);
+    expect(r!.people[0].status).toBe("unresolved");
+    expect(r!.people[0].token).toBe("Chlio");
+    expect(r!.staffIds).toEqual([]);
+  });
+
+  it("mixed resolution: one unique + one unresolved", () => {
+    const r = parseDeleteIntent("Delete Chloe and Chlio shifts this week", ROSTER, TODAY);
+    expect(r).not.toBeNull();
+    expect(r!.people).toHaveLength(2);
+    const chloe = r!.people.find((p) => p.token.toLowerCase() === "chloe");
+    const typo = r!.people.find((p) => p.token === "Chlio");
+    expect(chloe?.status).toBe("unique");
+    expect(typo?.status).toBe("unresolved");
+    expect(r!.staffIds).toEqual(["s1"]);
+  });
+
+  it("ignores capitalized month names when scanning for person tokens", () => {
+    const r = parseDeleteIntent("Delete August shifts this week", ROSTER, TODAY);
+    expect(r).not.toBeNull();
+    expect(r!.people).toEqual([]);
+    expect(r!.staffIds).toEqual([]);
+  });
+
+  it("does not double-resolve when both a full and first name are present", () => {
+    const r = parseDeleteIntent("Delete Judy Chen and Judy shifts this week", ROSTER, TODAY);
+    expect(r).not.toBeNull();
+    expect(r!.staffIds).toEqual(["s2"]);
+    expect(r!.people).toHaveLength(1);
+    expect(r!.people[0].status).toBe("unique");
   });
 });
 

@@ -93,11 +93,32 @@ export default function ScheduleAiTextPanel({
     // entirely and route straight to a preview + confirm flow.
     const intent = parseDeleteIntent(t, roster);
     if (intent) {
+      // v3.19.0 P1: if the user named specific people, every name
+      // token MUST resolve uniquely. Ambiguous first names ("Judy"
+      // when the roster has two Judys) or typos ("Chlio") used to
+      // silently reduce to an empty staff filter, which then fell
+      // back to "delete everyone in scope" — the opposite of what
+      // the user asked for. Now we hard-stop and surface the
+      // problem so they can rephrase.
+      const bad = intent.people.filter((p) => p.status !== "unique");
+      if (bad.length > 0) {
+        const parts = bad.map((p) => {
+          if (p.status === "ambiguous") {
+            const cands = (p.candidates || []).join(", ");
+            return `"${p.token}" matches multiple staff (${cands}) — use full names`;
+          }
+          return `"${p.token}" doesn't match any active staff member`;
+        });
+        setErr(`Can't delete safely: ${parts.join("; ")}.`);
+        setBusy("idle");
+        return;
+      }
       try {
         const all = await listShiftsInRange(intent.scope.startIso, intent.scope.endIso);
-        // Optional staff filter: when the prompt named specific
-        // staff members ("delete Judy's shifts this week"), keep
-        // only their shifts. Empty = everyone in scope.
+        // Empty staffIds is only reached here when the prompt named
+        // NO ONE (people.length === 0). In that case an all-staff
+        // delete in scope is intended; the confirm modal still
+        // requires an explicit click.
         const filtered = intent.staffIds.length === 0
           ? all
           : all.filter((s) => intent.staffIds.includes(s.staffId));

@@ -32,13 +32,33 @@ export interface DeleteScope {
   label: string;
 }
 
+export type PersonResolutionStatus = "unique" | "ambiguous" | "unresolved";
+
+export interface PersonResolution {
+  /** Token as typed by the user (original case). */
+  token: string;
+  status: PersonResolutionStatus;
+  /** Roster id when `status === "unique"`. */
+  staffId?: string;
+  /** Names of the ambiguous candidates (only for `status === "ambiguous"`). */
+  candidates?: string[];
+}
+
 export interface DeleteIntent {
   scope: DeleteScope;
   /**
-   * Staff filter matched against the roster. When empty the delete
-   * covers everyone in scope; when non-empty only these staff ids
-   * are cancelled. Matching is case-insensitive on either the full
-   * name or the first token ("Judy" matches "Judy Chen").
+   * Per-token resolution of any person names the user typed. Empty
+   * array means the prompt named no one → an all-staff delete in
+   * scope (still requires explicit confirmation in the UI). Any
+   * `status !== "unique"` entry must hard-stop execution; the old
+   * behaviour of silently dropping typos into "delete everyone" is
+   * the bug this refactor fixes (v3.19.0 P1).
+   */
+  people: PersonResolution[];
+  /**
+   * Convenience: staff ids for the unique resolutions only. Present
+   * for the safe path (all `people[].status === "unique"`); callers
+   * MUST still check `people` for non-unique entries before using.
    */
   staffIds: string[];
   /** Original raw text the user typed. Kept for logging / debugging. */
@@ -130,25 +150,123 @@ function escapeRegex(s: string): string {
 }
 
 /**
- * Match roster names against `text` (case-insensitive) using either
- * the full name or the first name token. Returns staff ids of the
- * hits, preserving roster order.
+ * Words we ignore when scanning for capitalized person tokens. These
+ * are the verbs, objects, scope markers, and common English glue
+ * that appear in normal delete prompts and would otherwise be
+ * misread as first names.
  */
-function matchStaff(text: string, roster: Array<{ id: string; name: string }>): string[] {
-  const hits: string[] = [];
-  for (const s of roster) {
-    const trimmed = s.name.trim();
-    if (!trimmed) continue;
-    const first = trimmed.split(/\s+/)[0];
-    const patterns = [
-      new RegExp(`\\b${escapeRegex(trimmed)}\\b`, "i"),
-      new RegExp(`\\b${escapeRegex(first)}\\b`, "i"),
-    ];
-    if (patterns.some((p) => p.test(text))) {
-      hits.push(s.id);
-    }
+const NAME_STOP_WORDS = new Set<string>([
+  "delete", "clear", "remove", "cancel", "wipe", "purge",
+  "shift", "shifts", "shifty", "schedule", "schedules", "everything", "all",
+  "today", "yesterday", "tomorrow", "this", "next", "last", "week", "month",
+  "of", "for", "the", "and", "a", "an", "from", "to", "in", "on", "at", "with",
+  "please", "s",
+  // month names — someone typing "delete August shifts" isn't naming a person
+  "january", "february", "march", "april", "may", "june", "july",
+  "august", "september", "october", "november", "december",
+]);
+
+/**
+ * Extract candidate person-name tokens from the user's prompt. A
+ * candidate is any capitalized alphabetic word that isn't a known
+ * verb / scope / month. Users who type the whole prompt in lower
+ * case get no person tokens — that's fine, "delete all shifts this
+ * week" is genuinely all-staff. The regex-based first-name scanner
+ * used to be roster-driven; now it's prompt-driven so a typo like
+ * "delete Chlio's shifts today" surfaces as `unresolved` instead of
+ * silently emptying the staff filter (P1 bug in v3.18.0).
+ */
+function extractPersonTokens(text: string): string[] {
+  const out: string[] = [];
+  for (const raw of text.split(/[\s,;.!?]+/)) {
+    if (!raw) continue;
+    // Strip possessive suffixes and any non-letter chrome.
+    const cleaned = raw
+      .replace(/['\u2019]s\b/i, "")
+      .replace(/^[^A-Za-z]+|[^A-Za-z]+$/g, "");
+    if (!cleaned) continue;
+    if (NAME_STOP_WORDS.has(cleaned.toLowerCase())) continue;
+    // Must start with an uppercase letter in the original text.
+    if (!/^[A-Z]/.test(cleaned)) continue;
+    out.push(cleaned);
   }
-  return hits;
+  return out;
+}
+
+/**
+ * Token-level roster resolution. For each capitalized token the
+ * user typed we return exactly one `PersonResolution`:
+ *   - unique     → matches one staff member (full name or unique first name)
+ *   - ambiguous  → first name matches multiple staff members
+ *   - unresolved → no roster match (typo, unknown name)
+ *
+ * Multi-word full-name matches are checked first so "Delete Judy
+ * Chen" beats a bare "Judy" ambiguity when the roster contains a
+ * second Judy. Tokens that are already consumed by a matched full
+ * name (e.g. "Judy" and "Chen" for a "Judy Chen" match) are
+ * skipped, so we don't double-count and don't emit spurious
+ * "unresolved" for surnames.
+ */
+function resolvePeople(
+  text: string,
+  roster: Array<{ id: string; name: string }>,
+): PersonResolution[] {
+  const results: PersonResolution[] = [];
+  const seenStaffIds = new Set<string>();
+  const consumedTokens = new Set<string>();
+
+  // Pass 1: multi-word full-name matches (case-insensitive, whole-word).
+  for (const s of roster) {
+    const full = s.name.trim();
+    if (!full || !full.includes(" ")) continue;
+    const re = new RegExp(`\\b${escapeRegex(full)}\\b`, "i");
+    if (!re.test(text)) continue;
+    if (!seenStaffIds.has(s.id)) {
+      results.push({ token: full, status: "unique", staffId: s.id });
+      seenStaffIds.add(s.id);
+    }
+    for (const w of full.split(/\s+/)) consumedTokens.add(w.toLowerCase());
+  }
+
+  // Pass 2: single-token candidates.
+  for (const tok of extractPersonTokens(text)) {
+    const lower = tok.toLowerCase();
+    if (consumedTokens.has(lower)) continue;
+    consumedTokens.add(lower);
+
+    // Exact full-name match on a single-word roster entry.
+    const fullMatches = roster.filter((s) => s.name.trim().toLowerCase() === lower);
+    if (fullMatches.length === 1) {
+      if (!seenStaffIds.has(fullMatches[0].id)) {
+        results.push({ token: tok, status: "unique", staffId: fullMatches[0].id });
+        seenStaffIds.add(fullMatches[0].id);
+      }
+      continue;
+    }
+
+    // First-name resolution.
+    const firstMatches = roster.filter((s) => {
+      const first = s.name.trim().split(/\s+/)[0];
+      return first && first.toLowerCase() === lower;
+    });
+    if (firstMatches.length === 1) {
+      if (!seenStaffIds.has(firstMatches[0].id)) {
+        results.push({ token: tok, status: "unique", staffId: firstMatches[0].id });
+        seenStaffIds.add(firstMatches[0].id);
+      }
+      continue;
+    }
+    if (firstMatches.length > 1) {
+      results.push({
+        token: tok,
+        status: "ambiguous",
+        candidates: firstMatches.map((s) => s.name),
+      });
+      continue;
+    }
+    results.push({ token: tok, status: "unresolved" });
+  }
+  return results;
 }
 
 /**
@@ -181,9 +299,14 @@ export function parseDeleteIntent(
 
   for (const rule of RULES) {
     if (rule.match.test(raw)) {
+      const people = resolvePeople(raw, roster);
+      const staffIds = people
+        .filter((p) => p.status === "unique" && p.staffId)
+        .map((p) => p.staffId as string);
       return {
         scope: rule.build(today),
-        staffIds: matchStaff(raw, roster),
+        people,
+        staffIds,
         raw,
       };
     }
