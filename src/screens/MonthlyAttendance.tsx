@@ -1094,7 +1094,8 @@ export default function MonthlyAttendance() {
     height: 1.2em; margin-left: 4px; min-width: 120px;
   }
   .footer .sig-line {
-    display: inline-flex; align-items: baseline; gap: 8px; color: #78716c;
+    display: inline-flex; align-items: baseline; gap: 8px; color: #1c1917;
+    font-weight: 700;
   }
   .footer .sig-line .rule {
     display: inline-block; width: 180px;
