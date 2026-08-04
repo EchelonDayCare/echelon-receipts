@@ -1,6 +1,6 @@
 [package]
 name = "echelon-receipts"
-version = "3.18.0"
+version = "3.19.0"
 description = "Echelon Daycare receipt generator"
 authors = ["Echelon Daycare Society"]
 edition = "2021"
@@ -70,12 +70,12 @@ subtle = "2.5"
 libheif-rs = "2.2"
 quick-xml = "0.36"
 unicode-normalization = "0.1"
+tempfile = "3"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
 [dev-dependencies]
-tempfile = "3"
 
 [profile.release]
 # opt-level = 3 (runtime speed) — was "z" (size). Binary grows modestly

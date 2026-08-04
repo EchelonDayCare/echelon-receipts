@@ -1337,7 +1337,24 @@ export default function StaffScreen() {
               <input type="time" value={manualDraft.out_time} onChange={(e) => setManualDraft({ ...manualDraft, out_time: e.target.value })} />
             </div>
           </div>
-          <button className="btn" onClick={addManualHour} disabled={!manualDraft.staff_id} style={{ width: "100%" }}>Add to {MONTHS[month - 1]} {year}</button>
+          {(() => {
+            // v3.19.0: derive the label from the *picked date*, not the
+            // top-of-screen month picker. Bug was showing "Add to August"
+            // even when the user picked 29 Jul → row was saved to July
+            // (addManualHour uses manualDraft.work_date), so the label was
+            // just misleading, not the write.
+            const wd = manualDraft.work_date;
+            let btnLabel = `Add to ${MONTHS[month - 1]} ${year}`;
+            if (wd && /^\d{4}-\d{2}-\d{2}$/.test(wd)) {
+              const [yy, mm] = wd.split("-").map(Number);
+              if (yy && mm && mm >= 1 && mm <= 12) {
+                btnLabel = `Add to ${MONTHS[mm - 1]} ${yy}`;
+              }
+            }
+            return (
+              <button className="btn" onClick={addManualHour} disabled={!manualDraft.staff_id} style={{ width: "100%" }}>{btnLabel}</button>
+            );
+          })()}
         </section>
       </div>
 

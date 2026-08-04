@@ -4,6 +4,58 @@ All notable changes shipped as a DMG. Only entries the owner has approved
 for release are listed here — "code-complete, awaiting ship approval" work
 lives in the session plan.md until it ships.
 
+## v3.19.0 — Sign-in sheet whole-month print · code-review hardening
+
+Two owner-visible upgrades and four internal quality fixes surfaced by
+the v3.10.0..v3.18.0 code review.
+
+**Owner-visible:**
+
+- **Whole-month sign-in sheets.** The Monthly Attendance screen now has
+  a "📅 Whole month · <month>" button next to the daily sign-in
+  button. One click prints a sign-in sheet for every open day of the
+  selected month (weekends and stat closures dropped automatically),
+  ready to slip into the front-desk binder at the start of each month.
+- **Sign-in sheet layout polish.** Dropped the DAILY CHILD SIGN-IN
+  kicker, the "25 children" pill on the top-right, and the
+  "Printed on …" strip at the top. Month names now render in full
+  (August, not Aug). Blank-template header block sits 25 px higher;
+  the two footer QR codes sit 10 px higher.
+- **Quick add hours label.** On the Staff screen the "Add to <month>"
+  button in the Quick add hours card now reflects the *picked date*,
+  not the top-of-screen month picker. Rows were already saved to the
+  correct month; only the label was lying.
+
+**Internal quality (code-review v3.10.0..v3.18.0):**
+
+- **P0 — Sanitize image data URLs before printing.** The centre logo
+  and staff signature were being interpolated raw into `<img src="…">`
+  across four print templates (daily/annual/subsidy receipts, sign-in
+  sheet). A tainted `logo_data_url` could have executed HTML from the
+  print DOM. Added `sanitizeImageDataUrl()` which whitelists
+  `data:image/(png|jpeg|gif|webp|svg+xml);base64,…` under 2 MB and
+  rejects anything else. All four sinks route through it and the
+  attribute is also wrapped in `h(...)` belt-and-suspenders.
+- **P1 — Bulk-delete parser: token-level person resolution.** The
+  previous roster-driven scanner silently combined ambiguous first
+  names ("Judy" when two Judys exist) and dropped typos ("Chlio") to
+  an empty staff filter, which then fell back to "delete every shift
+  in scope" — the exact opposite of intent. The parser now scans the
+  prompt for capitalized person tokens, resolves each independently,
+  and returns `unique | ambiguous | unresolved` per token. The
+  Schedule AI panel hard-stops on any non-unique resolution and
+  surfaces which token is the problem.
+- **P2a — Per-run scratch directory for slide export.** Replaced the
+  fixed `.soffice-tmp` folder (which two concurrent grad-slide
+  exports used to `remove_dir_all` on each other) with a unique
+  `tempfile::Builder::tempdir_in(output_dir)` per run.
+- **P2b — Atomic-ish promote for slide export.** All `slide-NN.<ext>`
+  files are now written into the tempdir first and only renamed into
+  `output_dir` after the whole deck renders successfully. A failed
+  soffice call, network blip, or process kill mid-run can no longer
+  leave the owner with an empty output folder — the previous run's
+  images stay intact.
+
 ## v3.18.0 — Daily kid sign-in / sign-out sheet
 
 New one-click printable daily sign-in sheet lives on the **Monthly
