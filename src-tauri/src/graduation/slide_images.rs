@@ -106,13 +106,37 @@ pub fn export_all(
     std::fs::create_dir_all(output_dir)
         .map_err(|e| format!("mkdir {}: {e}", output_dir.display()))?;
 
-    let scratch = output_dir.join(".soffice-tmp");
-    let _ = std::fs::remove_dir_all(&scratch);
-    std::fs::create_dir_all(&scratch)
-        .map_err(|e| format!("mkdir scratch: {e}"))?;
+    // v3.19.0 P2a — per-run tempdir instead of a fixed `.soffice-tmp`
+    // inside the output folder. Two concurrent exports (e.g. two
+    // grad batches on the same machine, or a re-click before the
+    // first run finishes) used to `remove_dir_all` each other's
+    // scratch. `tempfile::Builder::tempdir_in(output_dir)` gives us
+    // a unique dir with automatic cleanup on drop (including error
+    // paths and panics) — no manual sweep needed.
+    //
+    // v3.19.0 P2b — every `slide-NN.<ext>` is written into this
+    // same tempdir first (as a staging area). We only touch
+    // `output_dir` once, at the very end, after the whole deck has
+    // rendered successfully. If soffice fails or the process is
+    // killed mid-run, `output_dir` still holds the previous run's
+    // images intact (staged files vanish with the tempdir). This
+    // replaces the old pre-delete of `slide-*` which would empty
+    // the folder before a run that then failed.
+    let scratch_guard = tempfile::Builder::new()
+        .prefix("soffice-")
+        .tempdir_in(output_dir)
+        .map_err(|e| format!("mkdir scratch in {}: {e}", output_dir.display()))?;
+    let scratch = scratch_guard.path().to_path_buf();
 
     let mut warnings: Vec<String> = Vec::new();
     let mut written = 0usize;
+    // Staged final outputs live in `scratch/staged/` so soffice's
+    // temp `slice-N.png` outputs and our final `slide-NN.<ext>`
+    // outputs don't collide inside the same directory.
+    let staged_dir = scratch.join("staged");
+    std::fs::create_dir_all(&staged_dir)
+        .map_err(|e| format!("mkdir staged: {e}"))?;
+    let mut staged_files: Vec<PathBuf> = Vec::new();
 
     let pad_width = digit_width(slide_count);
 
@@ -156,7 +180,7 @@ pub fn export_all(
             let _ = std::fs::remove_file(&temp_pptx);
             continue;
         }
-        let dst = output_dir.join(format!(
+        let dst = staged_dir.join(format!(
             "slide-{:0width$}.{ext}",
             slide_num,
             width = pad_width,
@@ -172,13 +196,35 @@ pub fn export_all(
                 let _ = std::fs::remove_file(&src_png);
             }
         }
+        staged_files.push(dst);
         // Clean the temp pptx immediately so scratch doesn't hold
         // 30× the deck size mid-run on a big grad batch.
         let _ = std::fs::remove_file(&temp_pptx);
         written += 1;
     }
 
-    let _ = std::fs::remove_dir_all(&scratch);
+    // v3.19.0 P2b — atomic-ish promote. All slides rendered
+    // successfully; now sweep any stale `slide-*` from prior runs
+    // in `output_dir` and rename the staged files into place. Any
+    // failure above short-circuits with `?` and the tempdir cleans
+    // itself up, leaving `output_dir` untouched.
+    let removed = cleanup_slide_outputs(output_dir)
+        .map_err(|e| format!("sweep stale slide-* in {}: {e}", output_dir.display()))?;
+    if removed > 0 {
+        warnings.push(format!(
+            "Replaced {removed} slide image(s) from a previous export."
+        ));
+    }
+    for staged in &staged_files {
+        let final_path = output_dir.join(
+            staged.file_name().expect("staged file always has a name"),
+        );
+        std::fs::rename(staged, &final_path)
+            .map_err(|e| format!("promote {}: {e}", staged.display()))?;
+    }
+
+    // scratch_guard drops here → tempdir removed automatically.
+    drop(scratch_guard);
 
     Ok(ExportSlideImagesReport {
         images_written: written,
@@ -186,6 +232,52 @@ pub fn export_all(
         soffice_path: soffice.to_string_lossy().into_owned(),
         warnings,
     })
+}
+
+/// Sweep files matching `^slide-\d+\.(png|jpg|jpeg)$` (case-insensitive
+/// extension) from `dir`. Returns the count of files removed. Used by
+/// the atomic-promote path in `export_all`: we only sweep AFTER the
+/// new deck has rendered successfully into a tempdir, so a failed
+/// export can't leave the user with an empty output folder.
+///
+/// Non-slide files (owner's own PDFs, screenshots, `.DS_Store`) are
+/// untouched — the anchored digits-then-known-extension match keeps
+/// the sweep narrow.
+fn cleanup_slide_outputs(dir: &Path) -> std::io::Result<usize> {
+    let read = match std::fs::read_dir(dir) {
+        Ok(r) => r,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+        Err(e) => return Err(e),
+    };
+    let mut removed = 0usize;
+    for entry in read {
+        let entry = entry?;
+        if !entry.file_type()?.is_file() {
+            continue;
+        }
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else { continue };
+        if !is_slide_output_name(name) {
+            continue;
+        }
+        std::fs::remove_file(entry.path())?;
+        removed += 1;
+    }
+    Ok(removed)
+}
+
+fn is_slide_output_name(name: &str) -> bool {
+    let Some(rest) = name.strip_prefix("slide-") else { return false };
+    let dot = match rest.find('.') {
+        Some(i) => i,
+        None => return false,
+    };
+    let (digits, ext_with_dot) = rest.split_at(dot);
+    if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
+        return false;
+    }
+    let ext = ext_with_dot.trim_start_matches('.').to_ascii_lowercase();
+    matches!(ext.as_str(), "png" | "jpg" | "jpeg")
 }
 
 fn digit_width(n: usize) -> usize {
@@ -508,5 +600,85 @@ mod tests {
         transcode_png_to_jpeg(&png_path, &jpg_path).unwrap();
         let decoded = image::open(&jpg_path).unwrap().to_rgb8();
         assert_eq!(decoded.dimensions(), (8, 8));
+    }
+
+    // v3.19.0 P2b regression tests —————————————————————————————
+    #[test]
+    fn is_slide_output_name_accepts_known_shapes() {
+        assert!(is_slide_output_name("slide-01.png"));
+        assert!(is_slide_output_name("slide-99.jpg"));
+        assert!(is_slide_output_name("slide-100.jpeg"));
+        assert!(is_slide_output_name("slide-1.PNG"));
+        assert!(is_slide_output_name("slide-007.JPG"));
+    }
+
+    #[test]
+    fn is_slide_output_name_rejects_everything_else() {
+        assert!(!is_slide_output_name("slide-.png"));
+        assert!(!is_slide_output_name("slide-abc.png"));
+        assert!(!is_slide_output_name("slide-01.gif"));
+        assert!(!is_slide_output_name("slide-01"));
+        assert!(!is_slide_output_name("slide-01.png.bak"));
+        assert!(!is_slide_output_name("class-01.png"));
+        assert!(!is_slide_output_name("MySlide-01.png"));
+        assert!(!is_slide_output_name(".DS_Store"));
+        assert!(!is_slide_output_name("random.txt"));
+        // subfolders / paths shouldn't be considered — we only ever
+        // pass DirEntry file names.
+        assert!(!is_slide_output_name("sub/slide-01.png"));
+    }
+
+    #[test]
+    fn cleanup_slide_outputs_removes_only_matching_files() {
+        let dir = tempfile::tempdir().unwrap();
+        // Seed with a mix of hits and non-hits.
+        for name in [
+            "slide-01.png",
+            "slide-02.png",
+            "slide-99.jpg",
+            "slide-100.jpeg",
+            "slide-1.PNG",
+        ] {
+            std::fs::write(dir.path().join(name), b"x").unwrap();
+        }
+        for name in [
+            "slide-.png",
+            "slide-abc.png",
+            "class-01.png",
+            "random.txt",
+            "notes.pdf",
+            ".DS_Store",
+        ] {
+            std::fs::write(dir.path().join(name), b"x").unwrap();
+        }
+        // Also seed a subdirectory that should be ignored entirely.
+        std::fs::create_dir(dir.path().join("sub")).unwrap();
+        std::fs::write(dir.path().join("sub").join("slide-01.png"), b"x").unwrap();
+
+        let removed = cleanup_slide_outputs(dir.path()).unwrap();
+        assert_eq!(removed, 5);
+
+        // Survivors:
+        for name in [
+            "slide-.png",
+            "slide-abc.png",
+            "class-01.png",
+            "random.txt",
+            "notes.pdf",
+            ".DS_Store",
+        ] {
+            assert!(
+                dir.path().join(name).exists(),
+                "expected non-slide file to survive: {name}"
+            );
+        }
+        assert!(dir.path().join("sub").join("slide-01.png").exists());
+    }
+
+    #[test]
+    fn cleanup_slide_outputs_handles_missing_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("does-not-exist");
+        assert_eq!(cleanup_slide_outputs(&missing).unwrap(), 0);
     }
 }
