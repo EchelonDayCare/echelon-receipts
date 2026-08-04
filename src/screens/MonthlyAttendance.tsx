@@ -977,7 +977,7 @@ export default function MonthlyAttendance() {
     </table>
     <div class="footer">
       <span class="check"><span class="box"></span> Playground checked: <span class="remark"></span></span>
-      <span class="sig-line">Staff on duty <span class="rule"></span></span>
+      <span class="sig-line">By: <span class="rule"></span></span>
     </div>
   </section>`;
       })
