@@ -1067,7 +1067,7 @@ export default function MonthlyAttendance() {
   tbody tr:last-child td { border-bottom: none; }
   tbody td.idx {
     text-align: center;
-    color: #a8a29e; font-weight: 500;
+    color: #1c1917; font-weight: 700;
     font-variant-numeric: tabular-nums; font-size: ${fontPx - 1.5}px;
     letter-spacing: 0.02em;
   }
