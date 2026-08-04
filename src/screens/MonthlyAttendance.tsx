@@ -15,7 +15,7 @@ import {
   type MonthMark, type MonthCell, type CalendarDay,
 } from "../lib/monthAttendance";
 import { extractMonthAttendance, extractKidAttendanceLocal, fileToMime } from "../lib/ai";
-import { h } from "../lib/html";
+import { h, sanitizeImageDataUrl } from "../lib/html";
 import { DEFAULT_LOGO_DATA_URL } from "../lib/defaults";
 import { showConfirm, showPrompt } from "../lib/dialogs";
 import { inactiveLabel } from "../lib/inactiveLabel";
@@ -868,11 +868,35 @@ export default function MonthlyAttendance() {
   // Currently-active kids only (`listStudents(_, activeOnly=true)`),
   // sorted first-name alphabetical to match the paper roster order.
   function printSignInSheet(dateIso: string) {
-    void _printSignInSheet(dateIso).catch(
+    void _printSignInSheets([dateIso]).catch(
       (e) => show("Print failed: " + (e as Error).message, "err"),
     );
   }
-  async function _printSignInSheet(dateIso: string) {
+  // v3.19.0: Whole-month print. Iterates the currently-selected
+  // year/month's calendar and prints one sheet per open day, skipping
+  // weekends and stat holidays (is_open=false rows). All sheets go
+  // into one browser print job — the OS dialog handles duplex, tray,
+  // etc. across the whole batch.
+  function printSignInSheetMonth() {
+    // The centre_calendar table only stores CLOSED days (weekends, stat
+    // holidays), so "open days" = every day of the month that isn't in
+    // the closed set. This matches `daysOpenInMonth()` in monthAttendance.ts.
+    const closedSet = new Set(calendar.filter((c) => !c.is_open).map((c) => c.day));
+    const daysInMonth = new Date(year, month, 0).getDate();
+    const openDays: string[] = [];
+    for (let d = 1; d <= daysInMonth; d++) {
+      const iso = `${year}-${String(month).padStart(2, "0")}-${String(d).padStart(2, "0")}`;
+      if (!closedSet.has(iso)) openDays.push(iso);
+    }
+    if (openDays.length === 0) {
+      show("No open days in this month — check the centre calendar.", "err");
+      return;
+    }
+    void _printSignInSheets(openDays).catch(
+      (e) => show("Print failed: " + (e as Error).message, "err"),
+    );
+  }
+  async function _printSignInSheets(dateIsos: string[]) {
     const roster = (await listStudents(undefined, true))
       .filter((s) => (s.name ?? "").trim().length > 0)
       .sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: "base" }));
@@ -881,31 +905,24 @@ export default function MonthlyAttendance() {
       return;
     }
 
-    // Format the date as "Monday · 04 Aug 2026" — matches the paper
-    // sheet's day-of-week + date layout.
-    const [yy, mm, dd] = dateIso.split("-").map(Number);
-    const d = new Date(yy, (mm ?? 1) - 1, dd ?? 1);
-    const WEEKDAYS = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
-    const dow = WEEKDAYS[d.getDay()];
-    const dateLabel = `${dow} · ${String(dd).padStart(2, "0")} ${MONTH_NAMES[(mm ?? 1) - 1]} ${yy}`;
-
-    // Portrait Letter, ~9mm margins → usable ≈ 192mm × 260mm.
-    // Reserve ~28mm for header + date-line and ~9mm for footer, so the
-    // table has ~223mm ≈ 843px for (roster + header) rows.
+    // Row heights + font sizes depend only on roster size, so we compute
+    // them once and reuse across every page in the batch.
     const nRows = roster.length;
     const TABLE_AVAIL_PX = 843;
     const rowH = Math.max(20, Math.min(40, Math.floor(TABLE_AVAIL_PX / (nRows + 1))));
     const fontPx = rowH <= 22 ? 10.5 : rowH <= 26 ? 11.5 : rowH <= 32 ? 12.5 : 13.5;
 
     const centre = daycareName || "Echelon Daycare Teachers Association";
-    const logo = logoDataUrl || DEFAULT_LOGO_DATA_URL;
-    // Contact line: address · phone · email — separators only appear
-    // between non-empty parts, so a missing phone doesn't leave a
-    // dangling "  ·  ·".
+    const logo = sanitizeImageDataUrl(logoDataUrl) || DEFAULT_LOGO_DATA_URL;
     const contactParts = [daycareAddress, contactPhone, contactEmail]
       .map((p) => (p ?? "").trim())
       .filter((p) => p.length > 0);
     const contactLine = contactParts.map(h).join(' <span class="dot">&middot;</span> ');
+
+    const WEEKDAYS = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
+    const MONTH_FULL = ["January","February","March","April","May","June","July","August","September","October","November","December"];
+
+    // Body rows are identical across every page — same roster.
     const rowsHtml = roster
       .map(
         (s, i) => `
@@ -919,8 +936,59 @@ export default function MonthlyAttendance() {
       )
       .join("");
 
+    // Build one <section class="sheet page"> per date. `page-break-after`
+    // sends every-but-last onto its own printed page.
+    const pagesHtml = dateIsos
+      .map((dateIso, idx) => {
+        const [yy, mm, dd] = dateIso.split("-").map(Number);
+        const d = new Date(yy, (mm ?? 1) - 1, dd ?? 1);
+        const dow = WEEKDAYS[d.getDay()];
+        const dateLabel = `${dow} · ${String(dd).padStart(2, "0")} ${MONTH_FULL[(mm ?? 1) - 1]} ${yy}`;
+        const isLast = idx === dateIsos.length - 1;
+        return `
+  <section class="sheet${isLast ? "" : " page-break"}">
+    <div class="header">
+      <img class="logo" src="${h(logo)}" alt=""/>
+      <div class="title">
+        <h1>${h(centre)}</h1>
+        ${contactLine ? `<div class="contact">${contactLine}</div>` : ""}
+      </div>
+    </div>
+    <div class="date-line">
+      <span class="label">Day &amp; date</span>
+      <span class="value">${h(dateLabel)}</span>
+    </div>
+    <table>
+      <colgroup>
+        <col style="width:6%"/>
+        <col style="width:22.6%"/>
+        <col style="width:20.8%"/>
+        <col style="width:20.8%"/>
+        <col style="width:29.8%"/>
+      </colgroup>
+      <thead><tr>
+        <th class="center">#</th>
+        <th>Child</th>
+        <th>Time In &middot; Sign</th>
+        <th>Time Out &middot; Sign</th>
+        <th>Comments</th>
+      </tr></thead>
+      <tbody>${rowsHtml}</tbody>
+    </table>
+    <div class="footer">
+      <span class="check"><span class="box"></span> Playground checked: <span class="remark"></span></span>
+      <span class="sig-line">Staff on duty <span class="rule"></span></span>
+    </div>
+  </section>`;
+      })
+      .join("");
+
+    const title = dateIsos.length === 1
+      ? `Sign-in sheet — ${dateIsos[0]}`
+      : `Sign-in sheets — ${dateIsos.length} days`;
+
     const html = `<!doctype html>
-<html><head><meta charset="utf-8"/><title>Sign-in sheet — ${h(dateLabel)}</title>
+<html><head><meta charset="utf-8"/><title>${h(title)}</title>
 <style>
   @page { size: Letter portrait; margin: 9mm 9mm 8mm 9mm; }
   html, body {
@@ -930,11 +998,11 @@ export default function MonthlyAttendance() {
     -webkit-print-color-adjust: exact; print-color-adjust: exact;
   }
   .sheet { width: 100%; }
+  .sheet.page-break { page-break-after: always; break-after: page; }
 
-  /* ---------- Header: editorial, not dashboard ---------- */
   .header {
     display: grid;
-    grid-template-columns: 62px 1fr auto;
+    grid-template-columns: 62px 1fr;
     gap: 14px; align-items: center;
     padding-bottom: 10px; margin-bottom: 10px;
     border-bottom: 1px solid #1c1917;
@@ -954,28 +1022,12 @@ export default function MonthlyAttendance() {
     font-family: Georgia, "Times New Roman", "Iowan Old Style", serif;
     text-wrap: balance;
   }
-  .header .title .sub {
-    font-size: 10px; letter-spacing: 0.14em; text-transform: uppercase;
-    color: #57534e; font-weight: 600;
-  }
   .header .title .contact {
     font-size: 10.5px; color: #57534e; margin-top: 3px;
     line-height: 1.4;
   }
-  .header .title .contact .dot {
-    color: #a8a29e; margin: 0 2px;
-  }
-  .header .meta {
-    text-align: right; font-size: 9.5px; color: #78716c;
-    line-height: 1.5;
-  }
-  .header .meta .roster {
-    display: inline-block; margin-top: 4px; padding: 2px 8px;
-    border: 1px solid #d6d3d1; border-radius: 999px;
-    font-weight: 600; color: #1c1917; font-size: 10px;
-  }
+  .header .title .contact .dot { color: #a8a29e; margin: 0 2px; }
 
-  /* ---------- Date banner ---------- */
   .date-line {
     display: flex; align-items: baseline; gap: 12px;
     margin: 0 0 10px; padding: 6px 10px;
@@ -991,7 +1043,6 @@ export default function MonthlyAttendance() {
     font-family: Georgia, "Times New Roman", serif;
   }
 
-  /* ---------- Table ---------- */
   table {
     width: 100%; border-collapse: collapse; table-layout: fixed;
     border: 1px solid #1c1917;
@@ -1020,17 +1071,9 @@ export default function MonthlyAttendance() {
     font-variant-numeric: tabular-nums; font-size: ${fontPx - 1.5}px;
     letter-spacing: 0.02em;
   }
-  tbody td.name {
-    font-weight: 600; color: #1c1917;
-    padding-left: 4px;
-  }
-  tbody td.sig { }
-  tbody td.comment { }
-
-  /* Alternating row wash — subtle warm cream, not blue */
+  tbody td.name { font-weight: 600; color: #1c1917; padding-left: 4px; }
   tbody tr:nth-child(even) td { background: #fdfcfb; }
 
-  /* ---------- Footer ---------- */
   .footer {
     display: flex; align-items: center; justify-content: space-between;
     gap: 12px; margin-top: 10px; padding-top: 8px;
@@ -1039,8 +1082,7 @@ export default function MonthlyAttendance() {
   }
   .footer .check {
     display: inline-flex; align-items: center; gap: 8px;
-    font-weight: 700; color: #1c1917;
-    font-size: 11px;
+    font-weight: 700; color: #1c1917; font-size: 11px;
     flex: 1; min-width: 0;
   }
   .footer .check .box {
@@ -1052,62 +1094,18 @@ export default function MonthlyAttendance() {
     height: 1.2em; margin-left: 4px; min-width: 120px;
   }
   .footer .sig-line {
-    display: inline-flex; align-items: baseline; gap: 8px;
-    color: #78716c;
+    display: inline-flex; align-items: baseline; gap: 8px; color: #78716c;
   }
   .footer .sig-line .rule {
     display: inline-block; width: 180px;
-    border-bottom: 1px solid #1c1917;
-    height: 1em;
+    border-bottom: 1px solid #1c1917; height: 1em;
   }
 </style></head>
 <body onload="setTimeout(function(){window.print();},250)">
-  <div class="sheet">
-    <div class="header">
-      <img class="logo" src="${logo}" alt=""/>
-      <div class="title">
-        <h1>${h(centre)}</h1>
-        <div class="sub">Daily child sign-in &middot; sign-out</div>
-        ${contactLine ? `<div class="contact">${contactLine}</div>` : ""}
-      </div>
-      <div class="meta">
-        Printed ${h(new Date().toLocaleDateString())}<br/>
-        <span class="roster">${roster.length} ${roster.length === 1 ? "child" : "children"}</span>
-      </div>
-    </div>
-
-    <div class="date-line">
-      <span class="label">Day &amp; date</span>
-      <span class="value">${h(dateLabel)}</span>
-    </div>
-
-    <table>
-      <colgroup>
-        <col style="width:6%"/>
-        <col style="width:22.6%"/>
-        <col style="width:20.8%"/>
-        <col style="width:20.8%"/>
-        <col style="width:29.8%"/>
-      </colgroup>
-      <thead><tr>
-        <th class="center">#</th>
-        <th>Child</th>
-        <th>Time In &middot; Sign</th>
-        <th>Time Out &middot; Sign</th>
-        <th>Comments</th>
-      </tr></thead>
-      <tbody>${rowsHtml}</tbody>
-    </table>
-
-    <div class="footer">
-      <span class="check"><span class="box"></span> Playground checked: <span class="remark"></span></span>
-      <span class="sig-line">Staff on duty <span class="rule"></span></span>
-    </div>
-  </div>
+${pagesHtml}
 </body></html>`;
     await printHtmlDocument(html);
   }
-
   const monthLabel = `${MONTH_NAMES[month-1]} ${year}`;
 
   return (
@@ -1205,6 +1203,13 @@ export default function MonthlyAttendance() {
             🖨 Daily sign-in sheet
           </button>
         </span>
+        <button
+          className="btn secondary"
+          onClick={printSignInSheetMonth}
+          title={`Print one sign-in sheet per open day in ${MONTH_NAMES[month-1]} ${year} — skips weekends and stat holidays`}
+        >
+          📅 Whole month · {MONTH_NAMES[month-1]}
+        </button>
       </div>
 
       <div className="kpi" style={{ gridTemplateColumns: "repeat(4, minmax(0, 1fr))" }}>

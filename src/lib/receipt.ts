@@ -4,7 +4,7 @@ import { mkdir, writeFile, exists } from "@tauri-apps/plugin-fs";
 import { DEFAULT_LOGO_DATA_URL, DEFAULT_SIGNATURE_DATA_URL } from "./defaults";
 import { loadHtml2Pdf } from "./lazy";
 import { issuerViewFor } from "./db";
-import { h } from "./html";
+import { h, sanitizeImageDataUrl } from "./html";
 import { printHtmlDocument } from "./print";
 
 function fmtDate(iso: string): string {
@@ -23,8 +23,8 @@ export function buildReceiptHtml(r: Receipt, settings: SettingsMap): string {
   // Prefer the issuer snapshot taken at receipt-issue time so historical PDFs
   // stay consistent even if the daycare's address / signer / BN changed later.
   const s = issuerViewFor(r, settings);
-  const logo = s.logo_data_url || DEFAULT_LOGO_DATA_URL;
-  const sig = s.signature_data_url || DEFAULT_SIGNATURE_DATA_URL;
+  const logo = sanitizeImageDataUrl(s.logo_data_url) || DEFAULT_LOGO_DATA_URL;
+  const sig = sanitizeImageDataUrl(s.signature_data_url) || DEFAULT_SIGNATURE_DATA_URL;
   const hasBreakdown =
     r.gross_amount != null && r.gross_amount > 0 &&
     ((r.ccfri_amount ?? 0) > 0 || (r.accb_amount ?? 0) > 0);
@@ -79,7 +79,7 @@ export function buildReceiptHtml(r: Receipt, settings: SettingsMap): string {
 </style></head>
 <body><div class="sheet">
   <div class="head">
-    ${logo ? `<img class="logo" src="${logo}"/>` : `<div class="logo"></div>`}
+    ${logo ? `<img class="logo" src="${h(logo)}"/>` : `<div class="logo"></div>`}
     <div>
       <p class="title">${h(s.daycare_name || "Echelon Daycare Society")}</p>
       <p class="addr">${h(s.daycare_address || "")}</p>
@@ -122,7 +122,7 @@ export function buildReceiptHtml(r: Receipt, settings: SettingsMap): string {
   <div class="recvd">
     <span class="lbl">${r.is_refund ? "Refunded by:" : "Received by:"}</span>
     <span class="sigblock">
-      ${sig ? `<img class="sig" src="${sig}"/>` : `<span style="border-bottom:1px solid #000;display:inline-block;width:220px;height:36px"></span>`}
+      ${sig ? `<img class="sig" src="${h(sig)}"/>` : `<span style="border-bottom:1px solid #000;display:inline-block;width:220px;height:36px"></span>`}
       ${s.director_name ? `<span class="sigName">${h(s.director_name)}</span>` : ""}
       ${s.director_title ? `<span class="sigTitle">${h(s.director_title)}</span>` : ""}
       ${s.daycare_name ? `<span class="sigOrg">${h(s.daycare_name)}</span>` : ""}

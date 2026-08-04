@@ -26,3 +26,30 @@ export function emailHeaderSafe(s: unknown): string {
   if (s === null || s === undefined) return "";
   return String(s).replace(/[\r\n\t]+/g, " ").trim();
 }
+
+// v3.19.0 (P0 security): whitelist an image src for use inside `<img src="...">`
+// attributes in HTML that we later hand to `insertAdjacentHTML` via
+// printHtmlDocument. Only base64 data URLs for image MIME types are accepted;
+// anything else (HTTP, javascript:, malformed, oversize) returns "" so the
+// caller can fall back to the bundled default.
+//
+// This is a whitelist, not a filter: no attempt to "clean" bad input. If the
+// producer of `logo_data_url` / `signature_data_url` is compromised (Settings
+// screen accepts any picked file → converted to data URL locally), we still
+// refuse to render a payload like  x" onerror="alert(1)  as an active handler.
+//
+// Callers should ALSO wrap the return with h(...) when interpolating into the
+// attribute, as belt-and-suspenders defence.
+const IMAGE_DATA_URL_RE =
+  /^data:image\/(png|jpe?g|gif|webp|svg\+xml);base64,[A-Za-z0-9+/=]+$/;
+
+// ~2 MB base64-encoded max — realistic centre logos are < 300 kB. Larger
+// values are almost certainly a paste accident or an attack.
+const MAX_IMAGE_DATA_URL_LEN = 2 * 1024 * 1024;
+
+export function sanitizeImageDataUrl(input: unknown): string {
+  if (input === null || input === undefined) return "";
+  const s = String(input).trim();
+  if (s.length === 0 || s.length > MAX_IMAGE_DATA_URL_LEN) return "";
+  return IMAGE_DATA_URL_RE.test(s) ? s : "";
+}

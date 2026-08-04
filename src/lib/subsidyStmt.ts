@@ -6,7 +6,7 @@ import type { Receipt, SettingsMap } from "../types";
 import { mkdir, writeFile, exists } from "@tauri-apps/plugin-fs";
 import { DEFAULT_LOGO_DATA_URL } from "./defaults";
 import { loadHtml2Pdf } from "./lazy";
-import { h } from "./html";
+import { h, sanitizeImageDataUrl } from "./html";
 
 const MONTHS = ["January","February","March","April","May","June","July","August","September","October","November","December"];
 
@@ -22,7 +22,7 @@ export function monthLabelFromDate(iso: string): { year: number; month: number; 
 }
 
 export function buildSubsidyStatementHtml(r: Receipt, s: SettingsMap): string {
-  const logo = s.logo_data_url || DEFAULT_LOGO_DATA_URL;
+  const logo = sanitizeImageDataUrl(s.logo_data_url) || DEFAULT_LOGO_DATA_URL;
   const { year, label } = monthLabelFromDate(r.date);
   const gross = r.gross_amount ?? 0;
   const ccfri = r.ccfri_amount ?? 0;
@@ -52,7 +52,7 @@ export function buildSubsidyStatementHtml(r: Receipt, s: SettingsMap): string {
 </style></head>
 <body><div class="sheet">
   <div class="head">
-    ${logo ? `<img class="logo" src="${logo}"/>` : `<div class="logo"></div>`}
+    ${logo ? `<img class="logo" src="${h(logo)}"/>` : `<div class="logo"></div>`}
     <div>
       <h1>${h(s.daycare_name || "Echelon Daycare Society")}</h1>
       <p class="addr">${h(s.daycare_address || "")}</p>

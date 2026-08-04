@@ -3,7 +3,7 @@ import type { AnnualGroup } from "./db";
 import { mkdir, writeFile, exists } from "@tauri-apps/plugin-fs";
 import { DEFAULT_LOGO_DATA_URL, DEFAULT_SIGNATURE_DATA_URL } from "./defaults";
 import { loadHtml2Pdf } from "./lazy";
-import { h } from "./html";
+import { h, sanitizeImageDataUrl } from "./html";
 
 function fmtDate(iso: string): string {
   const [y, m, d] = iso.split("-");
@@ -37,8 +37,8 @@ export function buildAnnualReceiptHtml(opts: {
     try { s = { ...opts.settings, ...JSON.parse(opts.issuerSnapshotJson) }; } catch { /* ignore */ }
   }
   const issuedOn = opts.issuedOn || todayIso();
-  const logo = s.logo_data_url || DEFAULT_LOGO_DATA_URL;
-  const sig = s.signature_data_url || DEFAULT_SIGNATURE_DATA_URL;
+  const logo = sanitizeImageDataUrl(s.logo_data_url) || DEFAULT_LOGO_DATA_URL;
+  const sig = sanitizeImageDataUrl(s.signature_data_url) || DEFAULT_SIGNATURE_DATA_URL;
   const directorName = s.director_name || "";
   const directorTitle = s.director_title || "Managing Director";
   const bn = s.business_number || "";
@@ -86,7 +86,7 @@ export function buildAnnualReceiptHtml(opts: {
 <body><div class="sheet">
 
   <div class="head">
-    <img class="logo" src="${logo}"/>
+    <img class="logo" src="${h(logo)}"/>
     <div>
       <p class="title">${h(s.daycare_name || "Echelon Daycare Society")}</p>
       <p class="addr">${h(s.daycare_address || "")}</p>
@@ -122,7 +122,7 @@ export function buildAnnualReceiptHtml(opts: {
   <div class="sigRow">
     <div class="sigDetail">
       <div>Issued by:</div>
-      <img class="sig" src="${sig}"/>
+      <img class="sig" src="${h(sig)}"/>
       ${directorName ? `<div class="sigName">${h(directorName)}</div>` : ""}
       ${directorTitle ? `<div class="sigTitle">${h(directorTitle)}</div>` : ""}
       ${s.daycare_name ? `<div class="sigOrg">${h(s.daycare_name)}</div>` : ""}
