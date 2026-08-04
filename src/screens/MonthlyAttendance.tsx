@@ -1060,8 +1060,8 @@ export default function MonthlyAttendance() {
   tbody td {
     height: ${rowH}px;
     padding: 0 8px; font-size: ${fontPx}px; vertical-align: middle;
-    border-bottom: 1px solid #d6d3d1;
-    border-right: 1px solid #d6d3d1;
+    border-bottom: 1px solid #78716c;
+    border-right: 1px solid #78716c;
   }
   tbody td:last-child { border-right: none; }
   tbody tr:last-child td { border-bottom: none; }
