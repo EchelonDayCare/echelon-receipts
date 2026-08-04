@@ -955,7 +955,6 @@ export default function MonthlyAttendance() {
       </div>
     </div>
     <div class="date-line">
-      <span class="label">Day &amp; date</span>
       <span class="value">${h(dateLabel)}</span>
     </div>
     <table>
