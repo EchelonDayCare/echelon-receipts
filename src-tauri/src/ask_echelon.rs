@@ -345,6 +345,16 @@ fn is_howto_question(q: &str) -> bool {
 
 // Static navigation map — kept in one place so we can keep it in sync
 // with App.tsx routes. If you add a top-level feature, add a bullet here.
+//
+// LAST AUDITED: v3.19.0 (2026-08-04). Ground-truth sources:
+//   - src/App.tsx routes list (all top-level nav paths)
+//   - src/screens/Settings.tsx TABS array (config subtabs)
+//   - CHANGELOG.md v3.3.0..v3.19.0 (recent shipped features)
+// Any new top-level screen, route, or user-visible button MUST land
+// here in the same PR — Ask Echelon's "how do I…" answers are only as
+// good as this constant. The system prompt tells the model NEVER to
+// invent screens outside this map; missing entries → "not in the app
+// map" replies, which is worse than a hallucination for the owner.
 const UI_NAV_MAP: &str = "\
 Top-level nav (left sidebar):\n\
   Students → Today / This Month / New Receipt / Attendance / History / Roster / Reports / Aging / Annual Receipts / Deposits\n\
@@ -353,8 +363,8 @@ Top-level nav (left sidebar):\n\
   Reports → Overview / Monthly / Aging / Subsidy / Enrollment / Attendance / Credentials / Drills / AGM\n\
   Communications → Compose / Templates / History / Directory / Scheduled\n\
   Waitlist → Overview / List / Enrolled / Archived\n\
-  Vault (document library), Organizer → Dashboard / Notes, Ask Echelon\n\
-  Graduation → 4-step wizard: pick folder / mark grads / set up folders / render\n\
+  Vault (document library), Organizer → Dashboard / Calendar / Notes, Ask Echelon\n\
+  Graduation → 4-step wizard (Class Reel + per-child videos + slide deck + name cards + slide-image export + email reels)\n\
   Config (Settings) → Identity / Receipts & Email / Folders / Staff / Backups / Security / Stat Holidays / Notifications / Waitlist / About\n\
 \n\
 Common tasks and where to do them:\n\
@@ -366,31 +376,89 @@ Common tasks and where to do them:\n\
   Void a receipt: Students → History → open receipt → \"Void\" (you'll be asked for a reason).\n\
   Mark attendance for the month: Students → Attendance → pick the year+month at top → click a day cell to cycle P → A → blank.\n\
   Upload a paper attendance sheet: Students → Attendance → \"Upload sheet\" → either \"Import from Downloads\" (picks the newest scan) or choose manually. Review the extracted grid before saving.\n\
+  Print a blank monthly attendance template: Students → Attendance → \"Print Blank Template\" (top toolbar of the month grid).\n\
+  Print a daily kid sign-in / sign-out sheet: Students → Attendance → \"🖨 Daily sign-in sheet\" (uses the currently selected date). Renders a portrait Letter page with the centre's letterhead, one row per active child, and columns for Time In · Sign / Time Out · Sign / Comments.\n\
+  Print sign-in sheets for the whole month: Students → Attendance → \"📅 Whole month · <month>\" button next to the daily one. Prints one sign-in sheet per open day of the selected month; weekends and stat holidays are skipped automatically.\n\
   Mark a specific day open or closed: Students → Attendance → \"Centre Calendar\" (top-right of the month) → click the day → toggle Open/Closed.\n\
   Change which stat holidays apply: Config → Stat Holidays → tick/untick the 12 BC holidays (year-on-year).\n\
+  See a family's outstanding balance: Students → Aging (or Reports → Aging).\n\
+  Record a bank deposit slip: Students → Deposits → \"+ New deposit\" → tick which receipts are in the deposit → Save. Prints a bank-deposit slip.\n\
+  Run the annual (tax) receipt for a family: Students → Annual Receipts → pick year → per-student PDF. Use the \"Monthly breakdown\" toggle to show the month-by-month table on the receipt.\n\
+  Run the annual receipt for BC subsidies (CCFRI / ACCB): Students → Annual Receipts → subsidy PDFs are produced alongside the parent-paid receipt when subsidy contributions exist for the year.\n\
+\n\
+Staff:\n\
   Add a staff member: Staff → Hours → \"+ Add staff\" (top-right of the Staff list card). New staff appear immediately in the Hours table and in the Credentials, Schedule and Meeting Notes tabs.\n\
   Log staff hours from a sign-in sheet: Staff → Hours → \"Upload sheet\". Same dual-button flow as attendance.\n\
+  Quick-add a single day of hours: Staff → Hours → \"Quick add hours\" card in the right column. Pick the staff member, date, in/out — the \"Add to <month>\" button reflects whichever date is picked.\n\
   Build a staff schedule: Staff → Schedule → click a cell to add a shift. Publish week to lock changes.\n\
+  Bulk-delete shifts with the AI text panel: Staff → Schedule → open the AI text panel → type e.g. \"delete all shifts this week\" or \"delete Judy's shifts next week\". Ambiguous first names (two Judys) or typos are refused with an inline message so you can rephrase.\n\
+  Track staff credentials & expiries: Staff → Credentials.\n\
   Create meeting notes: Staff → Meeting Notes → \"+ New meeting\". Or paste raw notes into the AI panel to auto-fill title/attendees/actions.\n\
   Amend saved meeting notes with AI: open the meeting → click \"✨ Amend with AI\" next to Notes.\n\
+\n\
+Expenses:\n\
   Enter an expense: Expenses → Add Expense. For monthly bills use Expenses → Recurring.\n\
   Import a Visa / credit-card statement: Expenses → Import Statement → upload PDF/CSV → review → Save.\n\
-  Run the annual (tax) receipt for a family: Students → Annual Receipts → pick year → per-student PDF.\n\
+  Expense reports: Expenses → Reports (category breakdown, YTD, month-over-month).\n\
+\n\
+Reports:\n\
+  Reports overview / KPIs: Reports → Overview.\n\
+  Monthly financial report: Reports → Monthly (or Students → Reports — same screen).\n\
+  Aging (who owes what): Reports → Aging.\n\
+  Subsidy report (CCFRI / ACCB): Reports → Subsidy.\n\
+  Enrollment roster snapshot: Reports → Enrollment.\n\
+  Attendance summary + days open: Reports → Attendance.\n\
+  Credentials compliance dashboard: Reports → Credentials.\n\
+  Fire / earthquake drill log: Reports → Drills.\n\
+  AGM package: Reports → AGM. Pulls annual figures, staff hours, attendance and credential compliance into one printable pack.\n\
+\n\
+Communications:\n\
   Compose a bulk message to parents: Communications → Compose → pick audience → send now or schedule.\n\
+  Reusable message templates: Communications → Templates.\n\
+  Parent contact directory: Communications → Directory.\n\
+  Message history: Communications → History.\n\
+  See / cancel scheduled messages: Communications → Scheduled.\n\
+\n\
+Waitlist:\n\
   Add a family to the waitlist: Waitlist → List → \"+ Add family\".\n\
+  Convert waitlist to enrolled: Waitlist → List → open family → \"Enroll\". Enrolled families surface at Waitlist → Enrolled.\n\
+  Archive an inactive waitlist family: Waitlist → List → open family → \"Archive\". View at Waitlist → Archived.\n\
+  Waitlist settings (categories, priority weights): Config → Waitlist.\n\
+\n\
+Organizer & Vault:\n\
+  Jot a quick note (no reminder needed): Organizer → Notes → type in the textarea → \"+ Add note\". Search using the search box top-right. Click a note to edit inline, or use ✎/✕.\n\
+  Calendar of upcoming events / reminders: Organizer → Calendar.\n\
+  Store scanned documents (licences, contracts, insurance): Vault → upload PDF/image. Renames + files by tag.\n\
+\n\
+Ask Echelon:\n\
+  Ask a data or how-to question about this app: Ask Echelon (left sidebar). Data questions run SQL over the live database; how-to questions return numbered UI steps.\n\
+  Enable / disable Ask Echelon or its redaction default: Config → Identity → Ask Echelon toggles.\n\
+\n\
+Configuration:\n\
   Back up your database to email: Config → Backups → \"Send cloud backup now\" (needs a passphrase set on the same tab).\n\
   Restore from backup: Config → Backups → \"Restore from file\" (creates a safety copy of the current DB first).\n\
   Change PIN: Config → Security → \"Change PIN\".\n\
   Set up email (SMTP): Config → Receipts & Email → enter host / port / from address / password. Use \"Send test email\".\n\
-  Set up Azure AI (needed for OCR + statement import): Config → Staff → \"Azure AI Foundry key\".\n\
-  Jot a quick note (no reminder needed): Organizer → Notes → type in the textarea → \"+ Add note\". Search using the search box top-right. Click a note to edit inline, or use ✎/✕.\n\
+  Set up Azure AI (needed for OCR + statement import + Ask Echelon): Config → Staff → \"Azure AI Foundry key\".\n\
+  Configure per-event notifications: Config → Notifications.\n\
+  About / version / release notes: Config → About.\n\
 \n\
-Graduation Day (year-end reel + per-child videos + PowerPoint deck):\n\
-  Overview: Graduation → 4 numbered steps on one page. Renders a ~15-minute year reel, a 2-minute video per graduating child, and a slide deck with each child's teacher note.\n\
+Graduation Day (year-end reel + per-child videos + PowerPoint deck + slide-image export + email-to-parents):\n\
+  Overview: Graduation → 4 numbered steps on one page. Renders a ~15-minute year reel (\"Class Reel\"), a 2-minute video per graduating child, a slide deck with each child's teacher note, and per-child name cards.\n\
   Step 1 — Pick folder: Graduation → \"Choose folder\". The app creates a Graduation-YEAR subfolder inside it with everything it needs. Set the \"Graduation year\" (defaults to the current year).\n\
   Step 2 — Mark graduating students: Graduation → check every graduating child from the roster; type each child's teacher note in the textarea (the note appears on the child's slide and credits card).\n\
   Step 3 — Set up folders: Graduation → \"Set up folders\". Safe to re-run — existing folders/photos are preserved. Creates: 1-Year-Reel-Photos (drop group photos here), one folder per graduating child, Music, Template, Output.\n\
-  Step 4 — Drop photos + render: put group photos into 1-Year-Reel-Photos, and each child's photos into their own folder. Supports JPG/PNG/HEIC. Filenames like \"First Last.jpg\", \"First+Middle+Last.jpg\" or extensionless are auto-matched to the right child. Optional: drop an .mp3 into Music, or a .pptx template into Template. Then Graduation → \"Render everything\" (or \"Reel only\" / \"Per-child only\" / \"Slides only\"). Click \"Run preflight\" first if you want a dry-run warning list. Click \"Cancel\" during rendering to stop safely.\n\
+  Step 4 — Drop photos + render: put group photos into 1-Year-Reel-Photos, and each child's photos into their own folder. Supports JPG/PNG/HEIC. Filenames like \"First Last.jpg\", \"First+Middle+Last.jpg\" or extensionless are auto-matched to the right child. Optional: drop an .mp3 into Music, or a .pptx template into Template.\n\
+  Render buttons in Step 4:\n\
+    • \"Render everything\" — the whole pipeline (Class Reel + per-child videos + deck).\n\
+    • \"Reel only\" — just the Class Reel (~15-min group-photo year reel).\n\
+    • \"Per-child only\" — a 2-minute reel for every graduating child.\n\
+    • \"Slides only\" — the PowerPoint deck (one slide per child, teacher notes, cover slide branded with your centre logo & colours).\n\
+    • \"🖼 Export slides as PNG / JPEG\" — write every slide of the rendered deck as an image into 6-Slide-Images/. Toggle PNG/JPEG via the format dropdown next to the button. Requires LibreOffice to be installed (free at libreoffice.org). Two concurrent runs and mid-run failures no longer clobber each other or leave you with an empty folder (v3.19.0).\n\
+  Preflight & cancel: \"Run preflight\" gives a dry-run warning list. \"Cancel\" stops safely mid-render.\n\
+  📧 Email reels to parents: Graduation → \"📧 Email reels to parents\" opens a dialog listing every graduating child + their reel status + their parent email. Send to selected families in one click; each row is emailed independently with the child's per-child reel attached. Requires SMTP configured and each graduating student to have a per-child reel already rendered.\n\
+  Custom cover slide: enable the centre-branded cover slide in the Graduation screen — it renders your logo, centre name, address and colours onto slide 1 automatically (v3.12.0).\n\
+  Per-child name cards: rendered in Rust (v3.5.0) and included automatically when you render slides or the per-child pipeline.\n\
   Where outputs go: inside Graduation-YEAR → Output. Files are published atomically — the old version is never left half-overwritten.\n\
   If the reel is silent: no .mp3 in Music, or the file is corrupt. Drop a valid .mp3 in Music and re-render.\n\
   If a child's video is missing: their per-child folder is empty. Add at least one photo and re-render \"Per-child only\".\n\
