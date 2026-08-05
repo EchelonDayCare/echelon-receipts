@@ -4,6 +4,37 @@ All notable changes shipped as a DMG. Only entries the owner has approved
 for release are listed here — "code-complete, awaiting ship approval" work
 lives in the session plan.md until it ships.
 
+## v3.19.1 — Sign-in sheet polish · Ask Echelon nav map refresh
+
+Small polish release built on the same v3.19.0 codebase — no breaking
+changes and no schema migrations.
+
+**Sign-in sheet:**
+
+- Interior grid lines are ~2× darker (`#d6d3d1` → `#78716c`) so photocopies
+  and phone scans stay legible.
+- Dropped the `DAY & DATE` kicker — the header now reads simply
+  `Tuesday · 04 August 2026`.
+- Header now shows both the SMTP sender email and the generic contact
+  email side-by-side when they're set to different values (deduped
+  case-insensitively). Both are always rendered lowercase, so a legacy
+  uppercase value like `ECHELONDAYCARE@gmail.com` prints clean regardless
+  of what's stored in settings.
+
+**Ask Echelon:**
+
+- Refreshed the `UI_NAV_MAP` knowledge base for every feature shipped
+  between v3.3.0 and v3.19.0: sign-in sheets (daily + whole-month), the
+  deposits screen, aging/subsidy/AGM/drills/credentials reports, the
+  bulk-delete AI text panel (including the v3.19.0 hard-stop behaviour),
+  Class Reel, per-child videos, slide deck, slide-image export (PNG/JPEG
+  + LibreOffice requirement), email-reels-to-parents dialog, custom
+  branded cover slide, per-child name cards, waitlist enroll/archive,
+  Organizer Calendar, Vault, Quick add hours, and Configuration →
+  Notifications. Added a `LAST AUDITED` header + explicit
+  "must land here in the same PR" rule so the map can't drift silently
+  again.
+
 ## v3.19.0 — Sign-in sheet whole-month print · code-review hardening
 
 Two owner-visible upgrades and four internal quality fixes surfaced by
