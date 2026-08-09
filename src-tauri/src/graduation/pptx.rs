@@ -440,6 +440,17 @@ pub fn render_slides_cancellable(
     let target_aspect_hoisted: Option<f32> = swap_rid
         .as_deref()
         .map(|rid| compute_target_aspect(&String::from_utf8_lossy(&marker_slide_bytes), rid));
+    // v3.19.3: If the tagged child-photo shape uses <a:prstGeom
+    // prst="roundRect">, capture the corner adj. PowerPoint-for-Mac's
+    // Save-as-Pictures raster export drops shapes with non-`rect` prstGeom
+    // (see extract_round_rect_adj docstring). We work around it by
+    // encoding the photo as PNG with an alpha-masked rounded footprint
+    // and rewriting the shape's prstGeom to `rect` in the sanitizer.
+    let round_adj_hoisted: Option<u32> = swap_rid
+        .as_deref()
+        .and_then(|rid| extract_round_rect_adj(&String::from_utf8_lossy(&marker_slide_bytes), rid));
+    let use_png = round_adj_hoisted.map(|a| a > 0).unwrap_or(false);
+    let photo_ext = if use_png { "png" } else { "jpg" };
     let mut student_jpegs: Vec<Option<Result<Vec<u8>, String>>> = {
         use rayon::prelude::*;
         ctx.students
@@ -453,8 +464,16 @@ pub fn render_slides_cancellable(
                 };
                 match student.photos.as_slice() {
                     [] => None,
-                    [one] => Some(encode_as_jpeg_cancellable(one, ta, &|| is_cancelled())),
-                    many => Some(composite_photos_as_jpeg_cancellable(many, ta, &|| is_cancelled())),
+                    [one] => Some(if let Some(adj) = round_adj_hoisted {
+                        encode_as_png_with_round_mask_cancellable(one, ta, adj, &|| is_cancelled())
+                    } else {
+                        encode_as_jpeg_cancellable(one, ta, &|| is_cancelled())
+                    }),
+                    many => Some(if let Some(adj) = round_adj_hoisted {
+                        composite_photos_as_png_with_round_mask_cancellable(many, ta, adj, &|| is_cancelled())
+                    } else {
+                        composite_photos_as_jpeg_cancellable(many, ta, &|| is_cancelled())
+                    }),
                 }
             })
             .collect()
@@ -512,7 +531,13 @@ pub fn render_slides_cancellable(
                     });
                     let encoded = match student_jpegs.get_mut(i).and_then(|o| o.take()) {
                         Some(r) => r,
-                        None => if photos.len() == 1 {
+                        None => if let Some(adj) = round_adj_hoisted {
+                            if photos.len() == 1 {
+                                encode_as_png_with_round_mask_cancellable(&photos[0], target_aspect, adj, is_cancelled)
+                            } else {
+                                composite_photos_as_png_with_round_mask_cancellable(photos, target_aspect, adj, is_cancelled)
+                            }
+                        } else if photos.len() == 1 {
                             encode_as_jpeg_cancellable(&photos[0], target_aspect, is_cancelled)
                         } else {
                             composite_photos_as_jpeg_cancellable(photos, target_aspect, is_cancelled)
@@ -521,8 +546,8 @@ pub fn render_slides_cancellable(
                     match encoded {
                         Ok(jpeg_bytes) => {
                             let slug = media_slug(&student.name);
-                            let media_entry = format!("ppt/media/child-{new_num}-{slug}.jpg");
-                            let new_target = format!("../media/child-{new_num}-{slug}.jpg");
+                            let media_entry = format!("ppt/media/child-{new_num}-{slug}.{photo_ext}");
+                            let new_target = format!("../media/child-{new_num}-{slug}.{photo_ext}");
                             new_entries.push((media_entry, jpeg_bytes));
                             let status = if photos.len() == 1 {
                                 "Photo matched.".to_string()
@@ -1332,6 +1357,49 @@ fn extract_blip_embed(pic_block: &str) -> Option<String> {
     Some(pic_block[start..start + end_rel].to_string())
 }
 
+/// Read the `roundRect` corner `adj` value (in DrawingML 1/100000 units)
+/// from the `<p:pic>` whose `<a:blip r:embed="{rid}"/>` matches. Returns
+/// `None` if the shape uses `prst="rect"` or any non-`roundRect` preset,
+/// or if `adj` isn't present (PowerPoint defaults to `35000` when
+/// omitted — we return that default in that case so the on-screen
+/// rendered corners match the encoded PNG mask).
+///
+/// v3.19.3: the graduation template author styles the child-photo
+/// placeholder with `<a:prstGeom prst="roundRect">…adj…</a:prstGeom>`.
+/// PowerPoint-for-Mac's Save-as-Pictures raster export skips any
+/// `<p:pic>` whose prstGeom is non-`rect` (documented raster bug).
+/// We work around it by encoding the JPEG as a PNG with an alpha mask
+/// baked in (transparent rounded corners) and rewriting the shape's
+/// geom to `rect`. The visual result is identical on-screen — but now
+/// the raster exporter includes the picture.
+fn extract_round_rect_adj(slide_xml: &str, rid: &str) -> Option<u32> {
+    let embed_needle = format!("r:embed=\"{rid}\"");
+    let embed_pos = slide_xml.find(&embed_needle)?;
+    let pic_start = slide_xml[..embed_pos].rfind("<p:pic")?;
+    let pic_end_rel = slide_xml[embed_pos..].find("</p:pic>")?;
+    let pic_end = embed_pos + pic_end_rel;
+    let block = &slide_xml[pic_start..pic_end];
+
+    let geom_start = block.find("<a:prstGeom")?;
+    let geom_open_end = block[geom_start..].find('>')? + geom_start + 1;
+    let geom_open = &block[geom_start..geom_open_end];
+    let prst = attr_value(geom_open, "prst")?;
+    if prst != "roundRect" {
+        return None;
+    }
+    // adj value: <a:gd name="adj" fmla="val 25000"/>
+    let after_open = &block[geom_open_end..];
+    let Some(gd_pos) = after_open.find("name=\"adj\"") else {
+        // PowerPoint's roundRect default when adj is omitted.
+        return Some(35000);
+    };
+    let val_key = "fmla=\"val ";
+    let val_pos = after_open[gd_pos..].find(val_key)? + gd_pos + val_key.len();
+    let end_rel = after_open[val_pos..].find('"')?;
+    let val_str = after_open[val_pos..val_pos + end_rel].trim();
+    val_str.parse::<u32>().ok()
+}
+
 /// Strip template-inherited decorations from the `<p:pic>` block whose
 /// `<a:blip r:embed="{rid}"/>` matches, so PowerPoint-for-Mac's built-in
 /// **File → Save as Pictures** raster export includes the child photo.
@@ -1393,6 +1461,7 @@ fn sanitize_photo_pic_for_mac_export(slide_xml: &str, rid: &str) -> String {
     cleaned = strip_self_closing_tag(&cleaned, "p:ph");
     cleaned = strip_self_closing_tag(&cleaned, "a:srcRect");
     cleaned = strip_blip_extlst(&cleaned, rid);
+    cleaned = rewrite_prst_to_rect(&cleaned);
 
     let mut out = String::with_capacity(slide_xml.len());
     out.push_str(&slide_xml[..pic_start_rel]);
@@ -1719,6 +1788,124 @@ fn encode_as_jpeg_cancellable(
     Ok(buf)
 }
 
+/// Encode a per-child photo as PNG with a **transparent rounded-corner
+/// alpha mask** baked in.
+///
+/// Same decode / EXIF-orient / flatten / crop / downscale pipeline as
+/// `encode_as_jpeg_cancellable`, then:
+///  - Convert to RGBA.
+///  - Zero the alpha channel of every pixel outside a rounded-rectangle
+///    footprint whose corner radius derives from `adj_thousandths` per
+///    the DrawingML `roundRect` convention (`radius = adj/100000 *
+///    min(w,h)/2`). `adj=25000` → radius = 12.5% of shorter dim.
+///    `adj=50000` → radius = 25% of shorter dim.
+///  - Anti-alias the corner curve with one-pixel coverage sampling so
+///    the edge doesn't look stair-stepped at the certificate's zoom.
+///  - Encode PNG (image crate's default deflate level).
+///
+/// Callers pair this with `sanitize_photo_pic_for_mac_export()` which
+/// rewrites the shape's `prst="roundRect"` to `prst="rect"`. The visual
+/// result is identical on-screen (the corner rounding now lives in the
+/// PNG's alpha channel, not in the shape geometry) but PowerPoint-for-
+/// Mac's Save-as-Pictures raster export no longer skips the picture.
+fn encode_as_png_with_round_mask_cancellable(
+    source: &Path,
+    target_aspect: f32,
+    adj_thousandths: u32,
+    is_cancelled: &dyn Fn() -> bool,
+) -> Result<Vec<u8>, String> {
+    const MAX_EDGE: u32 = 1920;
+
+    let dyn_img = load_photo_cancellable(source, is_cancelled)?;
+    if is_cancelled() {
+        return Err("cancelled".into());
+    }
+    let rgb = flatten_over_white(&dyn_img);
+    let cropped = center_crop_to_aspect(rgb, target_aspect);
+    if is_cancelled() {
+        return Err("cancelled".into());
+    }
+    let resized = downscale_to_max_edge(cropped, MAX_EDGE);
+    let masked = apply_round_rect_alpha_mask(resized, adj_thousandths);
+
+    let mut buf = Vec::<u8>::new();
+    let encoder = image::codecs::png::PngEncoder::new(&mut buf);
+    use image::ImageEncoder;
+    encoder
+        .write_image(
+            masked.as_raw(),
+            masked.width(),
+            masked.height(),
+            image::ExtendedColorType::Rgba8,
+        )
+        .map_err(|e| format!("PNG encode: {e}"))?;
+    Ok(buf)
+}
+
+/// Bake a rounded-rectangle alpha mask into an RGB image, returning
+/// RGBA with transparent pixels outside the rounded footprint.
+///
+/// `adj_thousandths` is the DrawingML `roundRect` adj (0..100000).
+/// Radius formula: `r = adj / 100000 * min(w, h) / 2` — matches the
+/// on-screen render of `<a:prstGeom prst="roundRect">`. `adj=0` and
+/// `adj > 100000` are clamped safely; `adj=0` returns full-alpha RGBA
+/// (equivalent to a plain rectangle).
+///
+/// Anti-aliased with a 1-pixel-wide coverage transition along the arc
+/// so the corners look smooth at typical certificate zoom levels.
+fn apply_round_rect_alpha_mask(rgb: image::RgbImage, adj_thousandths: u32) -> image::RgbaImage {
+    let (w, h) = (rgb.width(), rgb.height());
+    let mut out = image::RgbaImage::new(w, h);
+    for (x, y, p) in rgb.enumerate_pixels() {
+        out.put_pixel(x, y, image::Rgba([p[0], p[1], p[2], 255]));
+    }
+    if adj_thousandths == 0 || w == 0 || h == 0 {
+        return out;
+    }
+    let adj = adj_thousandths.min(100_000) as f32;
+    let short = w.min(h) as f32;
+    let r = (adj / 100_000.0) * (short / 2.0);
+    if r < 0.5 {
+        return out;
+    }
+    let wf = w as f32;
+    let hf = h as f32;
+    // Corner centers, one per corner of the rounded rectangle.
+    let corners: [(f32, f32); 4] = [(r, r), (wf - r, r), (r, hf - r), (wf - r, hf - r)];
+
+    for y in 0..h {
+        for x in 0..w {
+            let px = x as f32 + 0.5;
+            let py = y as f32 + 0.5;
+            // Pixels in the "straight edge" band (inside the inner rect
+            // on at least one axis) keep full alpha.
+            let inside_inner_x = px >= r && px <= wf - r;
+            let inside_inner_y = py >= r && py <= hf - r;
+            if inside_inner_x || inside_inner_y {
+                continue; // already 255 from the seed loop above
+            }
+            // Corner region: pick the nearest corner center.
+            let (cx, cy) = *corners
+                .iter()
+                .min_by(|a, b| {
+                    let da = (a.0 - px).powi(2) + (a.1 - py).powi(2);
+                    let db = (b.0 - px).powi(2) + (b.1 - py).powi(2);
+                    da.partial_cmp(&db).unwrap_or(std::cmp::Ordering::Equal)
+                })
+                .unwrap();
+            // Signed distance from arc: negative inside, positive outside.
+            let d = ((px - cx).powi(2) + (py - cy).powi(2)).sqrt() - r;
+            // 1-pixel anti-aliased transition.
+            let alpha_f = (0.5 - d).clamp(0.0, 1.0);
+            let alpha = (alpha_f * 255.0).round() as u8;
+            let p = out.get_pixel(x, y);
+            out.put_pixel(x, y, image::Rgba([p[0], p[1], p[2], alpha]));
+        }
+    }
+    out
+}
+
+
 /// Center-crop an RGB image so its aspect ratio matches `target` (w/h).
 /// `target <= 0` or non-finite is treated as "no crop".
 fn center_crop_to_aspect(img: image::RgbImage, target: f32) -> image::RgbImage {
@@ -1984,6 +2171,87 @@ fn composite_photos_as_jpeg_cancellable(
     Ok(buf)
 }
 
+/// PNG-with-rounded-alpha-mask twin of `composite_photos_as_jpeg_cancellable`.
+/// Runs the same 2/3/4-cell composite pipeline, then applies a rounded-
+/// rectangle alpha mask matching the marker shape's `roundRect` adj
+/// value, and encodes PNG. Used when the child-photo shape in the
+/// template has `<a:prstGeom prst="roundRect">` (see
+/// `encode_as_png_with_round_mask_cancellable` and `extract_round_rect_adj`).
+fn composite_photos_as_png_with_round_mask_cancellable(
+    paths: &[std::path::PathBuf],
+    target_aspect: f32,
+    adj_thousandths: u32,
+    is_cancelled: &dyn Fn() -> bool,
+) -> Result<Vec<u8>, String> {
+    // Reuse the JPEG composite pipeline to produce the RGB canvas, then
+    // re-decode it as RGBA and mask. Simpler and cheaper than duplicating
+    // the composite logic.
+    let jpeg_bytes = composite_photos_as_jpeg_cancellable(paths, target_aspect, is_cancelled)?;
+    if is_cancelled() {
+        return Err("cancelled".into());
+    }
+    let decoded = image::load_from_memory_with_format(&jpeg_bytes, image::ImageFormat::Jpeg)
+        .map_err(|e| format!("decode composite JPEG for masking: {e}"))?;
+    let rgb = decoded.to_rgb8();
+    let masked = apply_round_rect_alpha_mask(rgb, adj_thousandths);
+    let mut buf = Vec::<u8>::new();
+    let encoder = image::codecs::png::PngEncoder::new(&mut buf);
+    use image::ImageEncoder;
+    encoder
+        .write_image(
+            masked.as_raw(),
+            masked.width(),
+            masked.height(),
+            image::ExtendedColorType::Rgba8,
+        )
+        .map_err(|e| format!("PNG encode composite: {e}"))?;
+    Ok(buf)
+}
+
+/// Rewrite `<a:prstGeom prst="roundRect">…<a:avLst>…</a:avLst>…</a:prstGeom>`
+/// (or the self-closing avLst variant) to `<a:prstGeom prst="rect"><a:avLst/></a:prstGeom>`.
+///
+/// **Why:** PowerPoint-for-Mac's built-in File → Save as Pictures raster
+/// export drops `<p:pic>` shapes whose preset geometry is anything other
+/// than `rect` — a documented raster bug that does NOT affect on-screen
+/// rendering. We bake the rounded corners into the PNG alpha channel
+/// (see `apply_round_rect_alpha_mask`) so we can safely flatten the
+/// shape to a plain rectangle without losing the visual.
+///
+/// If the block doesn't contain a `prstGeom`, or `prst` is already
+/// `rect`, the input is returned unchanged.
+fn rewrite_prst_to_rect(block: &str) -> String {
+    let Some(geom_start) = block.find("<a:prstGeom") else {
+        return block.to_string();
+    };
+    let Some(geom_end_rel) = block[geom_start..].find("</a:prstGeom>") else {
+        // Might be self-closing <a:prstGeom … />.
+        let Some(open_close_rel) = block[geom_start..].find("/>") else {
+            return block.to_string();
+        };
+        let open_close_end = geom_start + open_close_rel + 2;
+        let head = &block[geom_start..open_close_end];
+        if !head.contains(r#"prst="roundRect""#) {
+            return block.to_string();
+        }
+        let mut out = String::with_capacity(block.len());
+        out.push_str(&block[..geom_start]);
+        out.push_str(r#"<a:prstGeom prst="rect"><a:avLst/></a:prstGeom>"#);
+        out.push_str(&block[open_close_end..]);
+        return out;
+    };
+    let geom_end = geom_start + geom_end_rel + "</a:prstGeom>".len();
+    let geom_block = &block[geom_start..geom_end];
+    if !geom_block.contains(r#"prst="roundRect""#) {
+        return block.to_string();
+    }
+    let mut out = String::with_capacity(block.len());
+    out.push_str(&block[..geom_start]);
+    out.push_str(r#"<a:prstGeom prst="rect"><a:avLst/></a:prstGeom>"#);
+    out.push_str(&block[geom_end..]);
+    out
+}
+
 /// Compute the target aspect ratio (width/height) of the `<p:pic>`
 /// picture-frame in the marker slide that references `target_rid`.
 ///
@@ -2211,6 +2479,106 @@ mod tests {
         assert!(!out.contains("<a:extLst"), "extLst stripped:\n{out}");
         // Color transform survives (the whole point).
         assert!(out.contains("<a:duotone>"), "duotone MUST survive:\n{out}");
+    }
+
+    // v3.19.3: roundRect → PNG-with-alpha-mask path.
+
+    #[test]
+    fn extract_round_rect_adj_reads_value() {
+        let slide = r#"<p:pic><p:nvPicPr><p:cNvPr id="6" descr="{{Photo}}"/></p:nvPicPr>
+            <p:blipFill><a:blip r:embed="rIdKid"/><a:stretch><a:fillRect/></a:stretch></p:blipFill>
+            <p:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="100" cy="100"/></a:xfrm>
+            <a:prstGeom prst="roundRect"><a:avLst><a:gd name="adj" fmla="val 25000"/></a:avLst></a:prstGeom>
+            </p:spPr></p:pic>"#;
+        assert_eq!(extract_round_rect_adj(slide, "rIdKid"), Some(25000));
+    }
+
+    #[test]
+    fn extract_round_rect_adj_returns_default_when_omitted() {
+        let slide = r#"<p:pic><p:blipFill><a:blip r:embed="rIdKid"/></p:blipFill>
+            <p:spPr><a:prstGeom prst="roundRect"><a:avLst/></a:prstGeom></p:spPr></p:pic>"#;
+        // PowerPoint default when adj is omitted from a roundRect.
+        assert_eq!(extract_round_rect_adj(slide, "rIdKid"), Some(35000));
+    }
+
+    #[test]
+    fn extract_round_rect_adj_none_when_rect() {
+        let slide = r#"<p:pic><p:blipFill><a:blip r:embed="rIdKid"/></p:blipFill>
+            <p:spPr><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></p:spPr></p:pic>"#;
+        assert_eq!(extract_round_rect_adj(slide, "rIdKid"), None);
+    }
+
+    #[test]
+    fn extract_round_rect_adj_none_when_rid_missing() {
+        let slide = r#"<p:pic><p:blipFill><a:blip r:embed="rIdOther"/></p:blipFill>
+            <p:spPr><a:prstGeom prst="roundRect"><a:avLst><a:gd name="adj" fmla="val 25000"/></a:avLst></a:prstGeom></p:spPr></p:pic>"#;
+        assert_eq!(extract_round_rect_adj(slide, "rIdKid"), None);
+    }
+
+    #[test]
+    fn rewrite_prst_to_rect_flattens_roundrect() {
+        let block = r#"<p:pic><p:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="100" cy="100"/></a:xfrm>
+            <a:prstGeom prst="roundRect"><a:avLst><a:gd name="adj" fmla="val 25000"/></a:avLst></a:prstGeom>
+            </p:spPr></p:pic>"#;
+        let out = rewrite_prst_to_rect(block);
+        assert!(out.contains(r#"<a:prstGeom prst="rect"><a:avLst/></a:prstGeom>"#), "prst not rewritten:\n{out}");
+        assert!(!out.contains("roundRect"), "roundRect must be gone:\n{out}");
+        assert!(!out.contains(r#"name="adj""#), "adj must be gone:\n{out}");
+        // Non-geom siblings preserved.
+        assert!(out.contains(r#"<a:ext cx="100" cy="100"/>"#), "xfrm preserved");
+    }
+
+    #[test]
+    fn rewrite_prst_to_rect_noop_when_already_rect() {
+        let block = r#"<p:pic><p:spPr><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></p:spPr></p:pic>"#;
+        assert_eq!(rewrite_prst_to_rect(block), block);
+    }
+
+    #[test]
+    fn rewrite_prst_to_rect_noop_when_no_geom() {
+        let block = r#"<p:pic><p:spPr><a:xfrm/></p:spPr></p:pic>"#;
+        assert_eq!(rewrite_prst_to_rect(block), block);
+    }
+
+    #[test]
+    fn sanitize_photo_pic_flattens_roundrect_to_rect() {
+        let slide = r#"<p:pic><p:nvPicPr><p:cNvPr id="6" descr="{{Photo}}"/></p:nvPicPr>
+            <p:blipFill><a:blip r:embed="rIdKid"/><a:stretch><a:fillRect/></a:stretch></p:blipFill>
+            <p:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="100" cy="100"/></a:xfrm>
+            <a:prstGeom prst="roundRect"><a:avLst><a:gd name="adj" fmla="val 25000"/></a:avLst></a:prstGeom>
+            </p:spPr></p:pic>"#;
+        let out = sanitize_photo_pic_for_mac_export(slide, "rIdKid");
+        assert!(out.contains(r#"prst="rect""#), "must be rewritten to rect:\n{out}");
+        assert!(!out.contains("roundRect"), "roundRect must be gone:\n{out}");
+    }
+
+    #[test]
+    fn apply_round_rect_alpha_mask_corners_are_transparent_center_is_opaque() {
+        let rgb = image::RgbImage::from_pixel(100, 100, image::Rgb([200, 100, 50]));
+        // adj = 50000 → radius = 25% of min dim = 25px.
+        let out = apply_round_rect_alpha_mask(rgb, 50_000);
+        // Center pixel: full alpha.
+        let center = out.get_pixel(50, 50);
+        assert_eq!(center[3], 255, "center opaque");
+        assert_eq!([center[0], center[1], center[2]], [200, 100, 50], "colour preserved at center");
+        // Extreme corner (0,0): fully transparent (well outside the arc).
+        let corner = out.get_pixel(0, 0);
+        assert_eq!(corner[3], 0, "top-left corner transparent");
+        // Well inside the straight-edge band (top edge, middle column): opaque.
+        let top_edge = out.get_pixel(50, 0);
+        assert_eq!(top_edge[3], 255, "top-middle edge opaque");
+        // Well inside the arc (corner center pixel): opaque.
+        let corner_center = out.get_pixel(25, 25);
+        assert_eq!(corner_center[3], 255, "corner center opaque:\ngot alpha={}", corner_center[3]);
+    }
+
+    #[test]
+    fn apply_round_rect_alpha_mask_zero_adj_full_alpha() {
+        let rgb = image::RgbImage::from_pixel(10, 10, image::Rgb([1, 2, 3]));
+        let out = apply_round_rect_alpha_mask(rgb, 0);
+        for p in out.pixels() {
+            assert_eq!(p[3], 255);
+        }
     }
 
     #[test]
