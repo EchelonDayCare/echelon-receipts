@@ -4,6 +4,37 @@ All notable changes shipped as a DMG. Only entries the owner has approved
 for release are listed here — "code-complete, awaiting ship approval" work
 lives in the session plan.md until it ships.
 
+## v3.19.2 — Graduation deck: PowerPoint macOS Save-as-Pictures fix
+
+Single-purpose bug-fix release. No schema migrations, no workflow changes.
+
+**Fixed:** when a user opened a generated graduation deck in PowerPoint
+for macOS and used the built-in **File → Save as Pictures** export, the
+child photos went missing from the saved PNGs even though they displayed
+correctly on-screen (the cover-slide logo was preserved).
+
+**Root cause:** the cover-slide logo is a plain `<p:pic>` shape we
+author ourselves — minimal, layout-independent, and clean. The child
+photo lives inside the template author's `<p:pic>` shape (tagged
+`{{Photo}}` in alt-text) which typically inherits from a slide layout —
+carrying a `<p:ph type="pic"/>` reference, an inherited `<a:srcRect/>`
+crop, and an `<a:extLst>` `useLocalDpi` hint inside `<a:blip>`.
+PowerPoint-for-Mac's raster export path (older than the on-screen
+renderer) drops images with those decorations under specific
+placeholder-inheritance conditions.
+
+**Fix:** after each per-child photo swap, the marker slide's `<p:pic>`
+block is sanitized in place to strip the three offending decorations
+(`<p:ph>`, `<a:srcRect>`, `<a:extLst>` inside `<a:blip>`). The sanitizer
+is **surgical**: it preserves render-affecting `<a:blip>` color
+transforms (`<a:duotone>`, `<a:lum>`, `<a:tint>`, `<a:alphaModFix>`,
+`<a:clrChange>`, `<a:biLevel>`, `<a:grayscl>`) so a template designer
+can still apply brand-tint or B&W effects and every renderer
+(PowerPoint, LibreOffice, Keynote) shows them.
+
+**No workflow change:** photos continue to be auto-picked from
+per-child folders exactly as before.
+
 ## v3.19.1 — Sign-in sheet polish · Ask Echelon nav map refresh
 
 Small polish release built on the same v3.19.0 codebase — no breaking
