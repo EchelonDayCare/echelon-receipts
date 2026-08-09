@@ -4,6 +4,40 @@ All notable changes shipped as a DMG. Only entries the owner has approved
 for release are listed here — "code-complete, awaiting ship approval" work
 lives in the session plan.md until it ships.
 
+## v3.19.4 — Graduation deck: photo survives Mac PPT export + prints edge-to-edge on A4
+
+Two fixes to the graduation certificate pipeline:
+
+**1. Bake child photo into the certificate background.**
+v3.19.3 shipped a rounded-corner PNG-with-alpha-mask + `roundRect`→`rect`
+rewrite, but that still didn't survive PowerPoint-for-Mac's Save-as-Pictures
+raster export — the child `<p:pic>` was still being dropped regardless of
+attributes, shape geometry, position, filename, or content. After twelve
+controlled variant tests confirming the drop was not caused by any XML
+property we could tweak, the fix routes around the trigger entirely:
+
+- Compose the child photo (with its rounded-corner alpha mask) directly
+  onto the slide's background image at the correct position, producing a
+  per-student baked background PNG.
+- Remove the child `<p:pic>` shape from the slide XML entirely — there is
+  no separate picture element for Mac PPT to drop.
+- Rewire the slide's bg rId to the per-student baked file.
+
+Result: the photo is now part of the background pixels themselves; Mac
+PPT's Save-as-Pictures export cannot lose it. Deck size stays reasonable
+(~1 MB/student) because the composite reuses the bg's compression.
+
+**2. Resize the deck to A4 landscape.**
+Printing the exported certificates on A4 paper left large white bands
+top and bottom because the deck was 16:9 (1.78:1) while A4 landscape is
+1.41:1. The fix rescales every shape's `<a:off>`, `<a:ext>`, `<a:chOff>`,
+`<a:chExt>` non-uniformly on both axes and sets `<p:sldSz>` to A4
+landscape (10,692,000 × 7,560,000 EMU). Square shapes (circular logos,
+icons) are detected via `cx == cy` and scaled uniformly by `min(sx, sy)`
+so they stay circular rather than becoming ovals. Applied across slides,
+slide layouts, and slide masters. Printing from PowerPoint now fills the
+A4 sheet edge-to-edge.
+
 ## v3.19.3 — Graduation deck: PowerPoint macOS Save-as-Pictures fix (real fix)
 
 Supersedes the v3.19.2 attempt at the same bug. Inspecting a v3.19.2

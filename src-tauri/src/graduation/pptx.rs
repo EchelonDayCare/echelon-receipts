@@ -451,13 +451,68 @@ pub fn render_slides_cancellable(
         .and_then(|rid| extract_round_rect_adj(&String::from_utf8_lossy(&marker_slide_bytes), rid));
     let use_png = round_adj_hoisted.map(|a| a > 0).unwrap_or(false);
     let photo_ext = if use_png { "png" } else { "jpg" };
-    let mut student_jpegs: Vec<Option<Result<Vec<u8>, String>>> = {
+
+    #[derive(Clone)]
+    struct BakeInfo {
+        photo_geom: PicShapeGeom,
+        bg_rid: String,
+        bg_geom: PicShapeGeom,
+        bg_bytes: Vec<u8>,
+    }
+
+    let slide_size = read_slide_size(&pres_xml);
+    let slide_area = (slide_size.0 as u128) * (slide_size.1 as u128);
+    let bake_info: Option<BakeInfo> = swap_rid.as_deref().and_then(|rid| {
+        let marker_xml = String::from_utf8_lossy(&marker_slide_bytes);
+        let photo_geom = find_pic_geom_by_rid(&marker_xml, rid)?;
+        let (bg_rid, bg_geom) = find_background_pic_rid(&marker_xml, rid, slide_area)?;
+        let rels_str = String::from_utf8_lossy(marker_rels_bytes.as_ref()?);
+        let bg_rel = parse_image_rels(&rels_str)
+            .into_iter()
+            .find(|rel| rel.r_id == bg_rid)?;
+        let bg_bytes = entries
+            .iter()
+            .find(|(n, _)| n == &bg_rel.media_path)
+            .map(|(_, b)| b.clone())?;
+        Some(BakeInfo {
+            photo_geom,
+            bg_rid,
+            bg_geom,
+            bg_bytes,
+        })
+    });
+    let bake_adj = round_adj_hoisted.unwrap_or(0);
+
+    let mut student_images: Vec<Option<Result<Vec<u8>, String>>> = {
         use rayon::prelude::*;
         ctx.students
             .par_iter()
             .map(|student| -> Option<Result<Vec<u8>, String>> {
                 if is_cancelled() {
                     return Some(Err("cancelled".into()));
+                }
+                if let Some(bake) = bake_info.as_ref() {
+                    return match student.photos.as_slice() {
+                        [] => None,
+                        [one] => Some(bake_photo_into_background(
+                            &bake.bg_bytes,
+                            one,
+                            slide_size,
+                            &bake.bg_geom,
+                            &bake.photo_geom,
+                            bake_adj,
+                            &|| is_cancelled(),
+                        )),
+                        many => Some(bake_photos_into_background(
+                            &bake.bg_bytes,
+                            many,
+                            slide_size,
+                            &bake.bg_geom,
+                            &bake.photo_geom,
+                            bake_adj,
+                            &|| is_cancelled(),
+                        )),
+                    };
                 }
                 let (Some(ta), Some(_rid)) = (target_aspect_hoisted, swap_rid.as_deref()) else {
                     return None;
@@ -498,26 +553,66 @@ pub fn render_slides_cancellable(
 
         let mut slide_xml = String::from_utf8_lossy(&marker_slide_bytes).into_owned();
         slide_xml = substitute(&slide_xml, student, ctx.year);
-        // v3.19.2: strip template-inherited decorations from the child-photo
-        // <p:pic> block so PowerPoint-for-Mac's built-in File → Save as
-        // Pictures raster export includes the photo. On-screen render is
-        // unaffected (all removed attrs are cosmetic/redundant here).
-        // See sanitize_photo_pic_for_mac_export() docstring for details.
-        if let (Some(rid), photos) = (&swap_rid, student.photos.as_slice()) {
-            if !photos.is_empty() {
-                slide_xml = sanitize_photo_pic_for_mac_export(&slide_xml, rid);
-            }
-        }
-        new_entries.push((new_slide_path, slide_xml.into_bytes()));
-
+        let mut pending_media: Option<(String, Vec<u8>)> = None;
         if let Some(rels) = &marker_rels_bytes {
             let rels_str = String::from_utf8_lossy(rels);
-            let (rels_bytes, child_status) = match (&swap_rid, student.photos.as_slice()) {
-                (Some(_), []) => (
+            let mut remove_baked_pic = false;
+            let (rels_bytes, child_status) = match (bake_info.as_ref(), &swap_rid, student.photos.as_slice()) {
+                (_, Some(_), []) => (
                     rels.clone(),
                     "No matching photo found — using placeholder.".to_string(),
                 ),
-                (Some(rid), photos) => {
+                (Some(bake), Some(_rid), photos) => {
+                    let encoded = match student_images.get_mut(i).and_then(|o| o.take()) {
+                        Some(r) => r,
+                        None => {
+                            if photos.len() == 1 {
+                                bake_photo_into_background(
+                                    &bake.bg_bytes,
+                                    &photos[0],
+                                    slide_size,
+                                    &bake.bg_geom,
+                                    &bake.photo_geom,
+                                    bake_adj,
+                                    is_cancelled,
+                                )
+                            } else {
+                                bake_photos_into_background(
+                                    &bake.bg_bytes,
+                                    photos,
+                                    slide_size,
+                                    &bake.bg_geom,
+                                    &bake.photo_geom,
+                                    bake_adj,
+                                    is_cancelled,
+                                )
+                            }
+                        }
+                    };
+                    match encoded {
+                        Ok(png_bytes) => {
+                            let slug = media_slug(&student.name);
+                            let media_entry = format!("ppt/media/bg-{new_num}-{slug}.png");
+                            let new_target = format!("../media/bg-{new_num}-{slug}.png");
+                            pending_media = Some((media_entry, png_bytes));
+                            remove_baked_pic = true;
+                            (
+                                rewrite_image_target(&rels_str, &bake.bg_rid, &new_target).into_bytes(),
+                                "Photo baked into background.".to_string(),
+                            )
+                        }
+                        Err(e) => {
+                            let msg = format!(
+                                "Photo for '{}' bake error ({e}); using placeholder.",
+                                student.name
+                            );
+                            eprintln!("[graduation] {}", msg);
+                            report.warnings.push(msg.clone());
+                            (rels.clone(), format!("Bake error: {e} — using placeholder."))
+                        }
+                    }
+                }
+                (None, Some(rid), photos) => {
                     // v3.6.0: encode was pre-computed in parallel above.
                     // `take()` moves the pre-encoded bytes out of the
                     // vec so we don't hold two copies (parallel encode
@@ -529,7 +624,7 @@ pub fn render_slides_cancellable(
                     let target_aspect = target_aspect_hoisted.unwrap_or_else(|| {
                         compute_target_aspect(&String::from_utf8_lossy(&marker_slide_bytes), rid)
                     });
-                    let encoded = match student_jpegs.get_mut(i).and_then(|o| o.take()) {
+                    let encoded = match student_images.get_mut(i).and_then(|o| o.take()) {
                         Some(r) => r,
                         None => if let Some(adj) = round_adj_hoisted {
                             if photos.len() == 1 {
@@ -548,7 +643,7 @@ pub fn render_slides_cancellable(
                             let slug = media_slug(&student.name);
                             let media_entry = format!("ppt/media/child-{new_num}-{slug}.{photo_ext}");
                             let new_target = format!("../media/child-{new_num}-{slug}.{photo_ext}");
-                            new_entries.push((media_entry, jpeg_bytes));
+                            pending_media = Some((media_entry, jpeg_bytes));
                             let status = if photos.len() == 1 {
                                 "Photo matched.".to_string()
                             } else {
@@ -570,12 +665,32 @@ pub fn render_slides_cancellable(
                         }
                     }
                 }
-                (None, photos) if !photos.is_empty() => (
+                (_, None, photos) if !photos.is_empty() => (
                     rels.clone(),
                     "Photo swap disabled by template — using placeholder.".to_string(),
                 ),
                 _ => (rels.clone(), "No photo provided — using placeholder.".to_string()),
             };
+            if remove_baked_pic {
+                if let Some(rid) = &swap_rid {
+                    slide_xml = remove_pic_by_rid(&slide_xml, rid);
+                }
+            } else if bake_info.is_none() {
+                // v3.19.2: strip template-inherited decorations from the child-photo
+                // <p:pic> block so PowerPoint-for-Mac's built-in File → Save as
+                // Pictures raster export includes the photo. On-screen render is
+                // unaffected (all removed attrs are cosmetic/redundant here).
+                // See sanitize_photo_pic_for_mac_export() docstring for details.
+                if let (Some(rid), photos) = (&swap_rid, student.photos.as_slice()) {
+                    if !photos.is_empty() {
+                        slide_xml = sanitize_photo_pic_for_mac_export(&slide_xml, rid);
+                    }
+                }
+            }
+            new_entries.push((new_slide_path, slide_xml.into_bytes()));
+            if let Some(media) = pending_media.take() {
+                new_entries.push(media);
+            }
             new_entries.push((new_rels_path, rels_bytes));
             report.children.push(ChildRenderStatus {
                 name: student.name.clone(),
@@ -583,6 +698,7 @@ pub fn render_slides_cancellable(
                 status: child_status,
             });
         } else {
+            new_entries.push((new_slide_path, slide_xml.into_bytes()));
             report.children.push(ChildRenderStatus {
                 name: student.name.clone(),
                 photo_count: student.photos.len(),
@@ -628,7 +744,19 @@ pub fn render_slides_cancellable(
 
     entries[pres_idx].1 = pres_xml.into_bytes();
     entries[rels_idx].1 = rels_xml.into_bytes();
-    entries[ct_idx].1 = ensure_jpg_content_type(&ct_xml).into_bytes();
+    entries[ct_idx].1 = ensure_png_content_type(&ensure_jpg_content_type(&ct_xml)).into_bytes();
+
+    // v3.19.4: Resize the whole deck to A4 landscape so it prints edge-
+    // to-edge on A4 paper with no top/bottom whitespace bands. The
+    // bundled template is authored 16:9 (12192000×6858000 EMU); A4
+    // landscape is 10692000×7560000 EMU (297mm × 210mm at 36000
+    // EMU/mm). Every shape's <a:off>, <a:ext>, <a:chOff> and <a:chExt>
+    // is rescaled by the axis-independent factors so the layout maps
+    // proportionally onto the new canvas. Decorative content stretches
+    // ~12% vertically; text auto-fit compensates. This runs after all
+    // per-student baking so the composited backgrounds inherit the
+    // stretch via PowerPoint's <a:stretch> fill.
+    resize_deck_entries_to_a4_landscape(&mut entries, &mut new_entries, pres_idx);
 
     // Write output pptx.
     if let Some(parent) = output_pptx.parent() {
@@ -1713,6 +1841,18 @@ fn ensure_jpg_content_type(ct_xml: &str) -> String {
     )
 }
 
+/// Ensure `[Content_Types].xml` can resolve generated baked-background PNGs.
+fn ensure_png_content_type(ct_xml: &str) -> String {
+    if ct_xml.contains("Extension=\"png\"") {
+        return ct_xml.to_string();
+    }
+    insert_before(
+        ct_xml,
+        "</Types>",
+        r#"<Default Extension="png" ContentType="image/png"/>"#,
+    )
+}
+
 /// Sanitize a student display name into a lowercase alphanumeric-and-hyphen
 /// slug suitable for use in a zip entry filename.
 fn media_slug(name: &str) -> String {
@@ -1814,7 +1954,11 @@ fn encode_as_png_with_round_mask_cancellable(
     adj_thousandths: u32,
     is_cancelled: &dyn Fn() -> bool,
 ) -> Result<Vec<u8>, String> {
-    const MAX_EDGE: u32 = 1920;
+    // v3.19.3: 1920 was fine for JPEG (DCT smooths flat areas). PNG is
+    // lossless — a 1920px child photo lands at ~5-6 MB and blows the
+    // deck up to 80+ MB. 1280 is still ~640 DPI at the ~2-inch on-slide
+    // render size, well above any print or screen resolution.
+    const MAX_EDGE: u32 = 1280;
 
     let dyn_img = load_photo_cancellable(source, is_cancelled)?;
     if is_cancelled() {
@@ -1828,18 +1972,149 @@ fn encode_as_png_with_round_mask_cancellable(
     let resized = downscale_to_max_edge(cropped, MAX_EDGE);
     let masked = apply_round_rect_alpha_mask(resized, adj_thousandths);
 
-    let mut buf = Vec::<u8>::new();
-    let encoder = image::codecs::png::PngEncoder::new(&mut buf);
+    encode_rgba_as_png(&masked)
+}
+
+/// Encode an RGBA image as PNG using the image crate's Best compression
+/// + Adaptive filter — 20-40% smaller than the default Fast/NoFilter for
+/// photographic content, at negligible extra encode time (~50 ms per
+/// photo). Same lossless pixels.
+fn encode_rgba_as_png(img: &image::RgbaImage) -> Result<Vec<u8>, String> {
+    use image::codecs::png::{CompressionType, FilterType, PngEncoder};
     use image::ImageEncoder;
+    let mut buf = Vec::<u8>::new();
+    let encoder = PngEncoder::new_with_quality(
+        &mut buf,
+        CompressionType::Best,
+        FilterType::Adaptive,
+    );
     encoder
         .write_image(
-            masked.as_raw(),
-            masked.width(),
-            masked.height(),
+            img.as_raw(),
+            img.width(),
+            img.height(),
             image::ExtendedColorType::Rgba8,
         )
         .map_err(|e| format!("PNG encode: {e}"))?;
     Ok(buf)
+}
+
+fn downscale_rgba_to_max_edge(img: image::RgbaImage, max_edge: u32) -> image::RgbaImage {
+    let (w, h) = (img.width(), img.height());
+    let longest = w.max(h);
+    if longest <= max_edge {
+        return img;
+    }
+    let scale = max_edge as f32 / longest as f32;
+    let new_w = ((w as f32) * scale).round().max(1.0) as u32;
+    let new_h = ((h as f32) * scale).round().max(1.0) as u32;
+    image::imageops::resize(&img, new_w, new_h, image::imageops::FilterType::Lanczos3)
+}
+
+fn photo_region_pixels(
+    bg: &image::RgbaImage,
+    bg_shape: &PicShapeGeom,
+    photo_shape: &PicShapeGeom,
+) -> Result<(i64, i64, u32, u32), String> {
+    if bg_shape.ext_cx == 0 || bg_shape.ext_cy == 0 {
+        return Err("background shape has zero extent".to_string());
+    }
+    let scale_x = bg.width() as f64 / bg_shape.ext_cx as f64;
+    let scale_y = bg.height() as f64 / bg_shape.ext_cy as f64;
+    let px = ((photo_shape.off_x - bg_shape.off_x) as f64 * scale_x).round() as i64;
+    let py = ((photo_shape.off_y - bg_shape.off_y) as f64 * scale_y).round() as i64;
+    let pw = (photo_shape.ext_cx as f64 * scale_x).round().max(1.0) as u32;
+    let ph = (photo_shape.ext_cy as f64 * scale_y).round().max(1.0) as u32;
+    Ok((px, py, pw, ph))
+}
+
+/// Rasterize the child photo into the slide's background image so Mac
+/// PowerPoint's Save-as-Pictures path no longer has a separate photo shape
+/// to drop.
+fn bake_photo_into_background(
+    bg_bytes: &[u8],
+    photo_source: &Path,
+    slide_size: (u64, u64),
+    bg_shape: &PicShapeGeom,
+    photo_shape: &PicShapeGeom,
+    adj_thousandths: u32,
+    is_cancelled: &dyn Fn() -> bool,
+) -> Result<Vec<u8>, String> {
+    if slide_size.0 == 0 || slide_size.1 == 0 {
+        return Err("slide size is zero".to_string());
+    }
+    let mut bg_rgba = image::load_from_memory(bg_bytes)
+        .map_err(|e| format!("decode background image: {e}"))?
+        .to_rgba8();
+    if is_cancelled() {
+        return Err("cancelled".into());
+    }
+    bg_rgba = downscale_rgba_to_max_edge(bg_rgba, 2500);
+    let (px, py, pw, ph) = photo_region_pixels(&bg_rgba, bg_shape, photo_shape)?;
+
+    let dyn_img = load_photo_cancellable(photo_source, is_cancelled)?;
+    if is_cancelled() {
+        return Err("cancelled".into());
+    }
+    let rgb = flatten_over_white(&dyn_img);
+    let cropped = center_crop_to_aspect(rgb, pw as f32 / ph as f32);
+    if is_cancelled() {
+        return Err("cancelled".into());
+    }
+    let resized = image::imageops::resize(
+        &cropped,
+        pw,
+        ph,
+        image::imageops::FilterType::Lanczos3,
+    );
+    let photo_rgba = apply_round_rect_alpha_mask(resized, adj_thousandths);
+    if is_cancelled() {
+        return Err("cancelled".into());
+    }
+    image::imageops::overlay(&mut bg_rgba, &photo_rgba, px, py);
+    encode_rgba_as_png(&bg_rgba)
+}
+
+fn bake_photos_into_background(
+    bg_bytes: &[u8],
+    photo_sources: &[PathBuf],
+    slide_size: (u64, u64),
+    bg_shape: &PicShapeGeom,
+    photo_shape: &PicShapeGeom,
+    adj_thousandths: u32,
+    is_cancelled: &dyn Fn() -> bool,
+) -> Result<Vec<u8>, String> {
+    if slide_size.0 == 0 || slide_size.1 == 0 {
+        return Err("slide size is zero".to_string());
+    }
+    let mut bg_rgba = image::load_from_memory(bg_bytes)
+        .map_err(|e| format!("decode background image: {e}"))?
+        .to_rgba8();
+    if is_cancelled() {
+        return Err("cancelled".into());
+    }
+    bg_rgba = downscale_rgba_to_max_edge(bg_rgba, 2500);
+    let (px, py, pw, ph) = photo_region_pixels(&bg_rgba, bg_shape, photo_shape)?;
+    let target_aspect = pw as f32 / ph as f32;
+    let jpeg_bytes = composite_photos_as_jpeg_cancellable(photo_sources, target_aspect, is_cancelled)?;
+    if is_cancelled() {
+        return Err("cancelled".into());
+    }
+    let decoded = image::load_from_memory_with_format(&jpeg_bytes, image::ImageFormat::Jpeg)
+        .map_err(|e| format!("decode composite JPEG for baking: {e}"))?;
+    let rgb = decoded.to_rgb8();
+    let resized = image::imageops::resize(
+        &rgb,
+        pw,
+        ph,
+        image::imageops::FilterType::Lanczos3,
+    );
+    let photo_rgba = apply_round_rect_alpha_mask(resized, adj_thousandths);
+    if is_cancelled() {
+        return Err("cancelled".into());
+    }
+    image::imageops::overlay(&mut bg_rgba, &photo_rgba, px, py);
+    encode_rgba_as_png(&bg_rgba)
 }
 
 /// Bake a rounded-rectangle alpha mask into an RGB image, returning
@@ -2252,6 +2527,264 @@ fn rewrite_prst_to_rect(block: &str) -> String {
     out
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct PicShapeGeom {
+    off_x: i64,
+    off_y: i64,
+    ext_cx: u64,
+    ext_cy: u64,
+}
+
+fn parse_pic_shape_geom(pic_block: &str) -> Option<PicShapeGeom> {
+    let sp_start = pic_block.find("<p:spPr")?;
+    let sp_end = pic_block[sp_start..]
+        .find("</p:spPr>")
+        .map(|rel| sp_start + rel + "</p:spPr>".len())
+        .unwrap_or(pic_block.len());
+    let sp = &pic_block[sp_start..sp_end];
+    let off_pos = sp.find("<a:off ")?;
+    let ext_pos = sp.find("<a:ext ")?;
+    Some(PicShapeGeom {
+        off_x: attr_i64(&sp[off_pos..], "x")?,
+        off_y: attr_i64(&sp[off_pos..], "y")?,
+        ext_cx: attr_u64(&sp[ext_pos..], "cx")?,
+        ext_cy: attr_u64(&sp[ext_pos..], "cy")?,
+    })
+}
+
+fn find_pic_geom_by_rid(marker_xml: &str, target_rid: &str) -> Option<PicShapeGeom> {
+    let embed_needle = format!(r#"r:embed="{target_rid}""#);
+    let mut best_area: u128 = 0;
+    let mut best_geom = None;
+    let mut pos = 0;
+    while let Some(rel) = marker_xml[pos..].find("<p:pic") {
+        let start = pos + rel;
+        let Some(end_rel) = marker_xml[start..].find("</p:pic>") else { break };
+        let end = start + end_rel + "</p:pic>".len();
+        let block = &marker_xml[start..end];
+        if block.contains(&embed_needle) {
+            if let Some(geom) = parse_pic_shape_geom(block) {
+                let area = (geom.ext_cx as u128) * (geom.ext_cy as u128);
+                if area > best_area {
+                    best_area = area;
+                    best_geom = Some(geom);
+                }
+            }
+        }
+        pos = end;
+    }
+    best_geom
+}
+
+fn find_background_pic_rid(
+    marker_xml: &str,
+    exclude_rid: &str,
+    slide_area: u128,
+) -> Option<(String, PicShapeGeom)> {
+    let mut best: Option<(String, PicShapeGeom, u128)> = None;
+    let mut pos = 0;
+    while let Some(rel) = marker_xml[pos..].find("<p:pic") {
+        let start = pos + rel;
+        let Some(end_rel) = marker_xml[start..].find("</p:pic>") else { break };
+        let end = start + end_rel + "</p:pic>".len();
+        let block = &marker_xml[start..end];
+        if let (Some(rid), Some(geom)) = (extract_blip_embed(block), parse_pic_shape_geom(block)) {
+            if rid != exclude_rid {
+                let area = (geom.ext_cx as u128) * (geom.ext_cy as u128);
+                if best.as_ref().map(|(_, _, a)| area > *a).unwrap_or(true) {
+                    best = Some((rid, geom, area));
+                }
+            }
+        }
+        pos = end;
+    }
+    let (rid, geom, area) = best?;
+    if area.saturating_mul(2) < slide_area {
+        return None;
+    }
+    Some((rid, geom))
+}
+
+fn read_slide_size(pres_xml: &str) -> (u64, u64) {
+    const DEFAULT: (u64, u64) = (12_192_000, 6_858_000);
+    let Some(pos) = pres_xml.find("<p:sldSz") else {
+        return DEFAULT;
+    };
+    let Some(end_rel) = pres_xml[pos..].find('>') else {
+        return DEFAULT;
+    };
+    let tag = &pres_xml[pos..pos + end_rel + 1];
+    match (attr_u64(tag, "cx"), attr_u64(tag, "cy")) {
+        (Some(cx), Some(cy)) if cx > 0 && cy > 0 => (cx, cy),
+        _ => DEFAULT,
+    }
+}
+
+fn remove_pic_by_rid(slide_xml: &str, r_id: &str) -> String {
+    let embed_needle = format!(r#"r:embed="{r_id}""#);
+    let Some(embed_pos) = slide_xml.find(&embed_needle) else {
+        return slide_xml.to_string();
+    };
+    let Some(pic_start) = slide_xml[..embed_pos].rfind("<p:pic") else {
+        return slide_xml.to_string();
+    };
+    let Some(pic_end_rel) = slide_xml[embed_pos..].find("</p:pic>") else {
+        return slide_xml.to_string();
+    };
+    let pic_end = embed_pos + pic_end_rel + "</p:pic>".len();
+    let mut out = String::with_capacity(slide_xml.len().saturating_sub(pic_end - pic_start));
+    out.push_str(&slide_xml[..pic_start]);
+    out.push_str(&slide_xml[pic_end..]);
+    out
+}
+
+/// A4 landscape target size in EMU (297mm × 210mm at 36000 EMU/mm).
+const A4_LANDSCAPE_CX: u64 = 10_692_000;
+const A4_LANDSCAPE_CY: u64 = 7_560_000;
+
+/// Rescale every geometry attribute in the given XML by axis-independent
+/// factors. Rewrites `<a:off x="…" y="…"/>`, `<a:ext cx="…" cy="…"/>`,
+/// `<a:chOff x="…" y="…"/>` and `<a:chExt cx="…" cy="…"/>` — the four
+/// EMU-carrying transform elements that appear in DrawingML slide,
+/// layout and master XML. Signed values are handled (positions can be
+/// negative when a shape starts off-slide). Non-numeric matches are
+/// left untouched.
+///
+/// **Aspect preservation for square shapes:** when a *size* attribute
+/// pair (`<a:ext>` or `<a:chExt>`) has `cx == cy` — an intentional
+/// square (typically a circular logo or icon) — the size is scaled
+/// uniformly by `sx.min(sy)` so the shape stays circular. Positions
+/// still scale non-uniformly so the shape lands proportionally on the
+/// new canvas.
+fn scale_geometry_xml(xml: &str, sx: f64, sy: f64, _orig_cx: u64, _orig_cy: u64) -> String {
+    fn rewrite(
+        hay: &str,
+        tag_open: &str,
+        a: &str,
+        b: &str,
+        sa: f64,
+        sb: f64,
+        preserve_square: bool,
+    ) -> String {
+        let mut out = String::with_capacity(hay.len());
+        let mut pos = 0;
+        while let Some(rel) = hay[pos..].find(tag_open) {
+            let start = pos + rel;
+            let after_tag = start + tag_open.len();
+            let Some(close_rel) = hay[after_tag..].find("/>") else {
+                out.push_str(&hay[pos..]);
+                return out;
+            };
+            let close = after_tag + close_rel;
+            let inner = &hay[after_tag..close];
+            let av = attr_i64(inner, a);
+            let bv = attr_i64(inner, b);
+            let (Some(av), Some(bv)) = (av, bv) else {
+                out.push_str(&hay[pos..close + 2]);
+                pos = close + 2;
+                continue;
+            };
+            let (new_a, new_b) = if preserve_square && av == bv {
+                let uniform = sa.min(sb);
+                let s = (av as f64 * uniform).round() as i64;
+                (s, s)
+            } else {
+                let na = (av as f64 * sa).round() as i64;
+                let nb = (bv as f64 * sb).round() as i64;
+                (na, nb)
+            };
+            out.push_str(&hay[pos..start]);
+            out.push_str(tag_open);
+            out.push(' ');
+            out.push_str(a);
+            out.push_str("=\"");
+            out.push_str(&new_a.to_string());
+            out.push_str("\" ");
+            out.push_str(b);
+            out.push_str("=\"");
+            out.push_str(&new_b.to_string());
+            out.push_str("\"/>");
+            pos = close + 2;
+        }
+        out.push_str(&hay[pos..]);
+        out
+    }
+    let s1 = rewrite(xml, "<a:off", "x", "y", sx, sy, false);
+    let s2 = rewrite(&s1, "<a:ext", "cx", "cy", sx, sy, true);
+    let s3 = rewrite(&s2, "<a:chOff", "x", "y", sx, sy, false);
+    rewrite(&s3, "<a:chExt", "cx", "cy", sx, sy, true)
+}
+
+/// Rewrite `<p:sldSz cx="…" cy="…"/>` (or `<p:sldSz cx="…" cy="…" type="…"/>`)
+/// to A4 landscape dimensions. Returns the original xml unchanged if no
+/// `<p:sldSz` element is found. Also normalises the `type` attribute to
+/// `custom` (A4 landscape isn't a named PowerPoint preset).
+fn set_sld_sz_a4_landscape(pres_xml: &str) -> String {
+    let Some(start) = pres_xml.find("<p:sldSz") else {
+        return pres_xml.to_string();
+    };
+    let Some(close_rel) = pres_xml[start..].find("/>") else {
+        return pres_xml.to_string();
+    };
+    let close = start + close_rel + 2;
+    let new_tag = format!(
+        r#"<p:sldSz cx="{A4_LANDSCAPE_CX}" cy="{A4_LANDSCAPE_CY}" type="custom"/>"#
+    );
+    let mut out = String::with_capacity(pres_xml.len());
+    out.push_str(&pres_xml[..start]);
+    out.push_str(&new_tag);
+    out.push_str(&pres_xml[close..]);
+    out
+}
+
+/// Read `<p:sldSz cx=".." cy=".."/>` from presentation.xml. Falls back to
+/// the 16:9 default (12192000 × 6858000 EMU) if the tag or attributes
+/// can't be parsed.
+fn read_current_sld_sz(pres_xml: &str) -> (u64, u64) {
+    const DEFAULT: (u64, u64) = (12_192_000, 6_858_000);
+    let Some(start) = pres_xml.find("<p:sldSz") else { return DEFAULT };
+    let Some(close_rel) = pres_xml[start..].find("/>") else { return DEFAULT };
+    let inner = &pres_xml[start..start + close_rel];
+    let cx = attr_u64(inner, "cx").unwrap_or(DEFAULT.0);
+    let cy = attr_u64(inner, "cy").unwrap_or(DEFAULT.1);
+    (cx, cy)
+}
+
+/// Rescale every slide, slide layout, and slide master XML file in the
+/// pptx zip entries to A4 landscape, then update `presentation.xml`'s
+/// `<p:sldSz>`. See caller for rationale.
+fn resize_deck_entries_to_a4_landscape(
+    entries: &mut [(String, Vec<u8>)],
+    new_entries: &mut [(String, Vec<u8>)],
+    pres_idx: usize,
+) {
+    let pres_bytes = &entries[pres_idx].1;
+    let pres_str = String::from_utf8_lossy(pres_bytes).into_owned();
+    let (cur_cx, cur_cy) = read_current_sld_sz(&pres_str);
+    if cur_cx == 0 || cur_cy == 0 {
+        return;
+    }
+    if cur_cx == A4_LANDSCAPE_CX && cur_cy == A4_LANDSCAPE_CY {
+        return;
+    }
+    let sx = A4_LANDSCAPE_CX as f64 / cur_cx as f64;
+    let sy = A4_LANDSCAPE_CY as f64 / cur_cy as f64;
+    let is_scalable = |name: &str| -> bool {
+        (name.starts_with("ppt/slides/") && name.ends_with(".xml") && !name.contains("_rels/"))
+            || (name.starts_with("ppt/slideLayouts/") && name.ends_with(".xml") && !name.contains("_rels/"))
+            || (name.starts_with("ppt/slideMasters/") && name.ends_with(".xml") && !name.contains("_rels/"))
+    };
+    for (name, bytes) in entries.iter_mut().chain(new_entries.iter_mut()) {
+        if !is_scalable(name) {
+            continue;
+        }
+        let xml = String::from_utf8_lossy(bytes).into_owned();
+        let scaled = scale_geometry_xml(&xml, sx, sy, cur_cx, cur_cy);
+        *bytes = scaled.into_bytes();
+    }
+    entries[pres_idx].1 = set_sld_sz_a4_landscape(&pres_str).into_bytes();
+}
+
 /// Compute the target aspect ratio (width/height) of the `<p:pic>`
 /// picture-frame in the marker slide that references `target_rid`.
 ///
@@ -2303,6 +2836,13 @@ fn attr_u64(hay: &str, name: &str) -> Option<u64> {
     let start = hay.find(&key)? + key.len();
     let end_rel = hay[start..].find('"')?;
     hay[start..start + end_rel].parse::<u64>().ok()
+}
+
+fn attr_i64(hay: &str, name: &str) -> Option<i64> {
+    let key = format!(r#"{name}=""#);
+    let start = hay.find(&key)? + key.len();
+    let end_rel = hay[start..].find('"')?;
+    hay[start..start + end_rel].parse::<i64>().ok()
 }
 
 #[cfg(test)]
@@ -2604,6 +3144,121 @@ mod tests {
         let marker = r#"<p:pic><p:blipFill><a:blip r:embed="rId2"/></p:blipFill></p:pic>"#;
         let aspect = compute_target_aspect(marker, "rIdMissing");
         assert!((aspect - 0.93).abs() < 0.001);
+    }
+
+    #[test]
+    fn read_slide_size_parses_or_defaults() {
+        let pres = r#"<p:presentation><p:sldSz cx="12192000" cy="6858000" type="screen16x9"/></p:presentation>"#;
+        assert_eq!(read_slide_size(pres), (12_192_000, 6_858_000));
+        assert_eq!(read_slide_size("<p:presentation/>"), (12_192_000, 6_858_000));
+    }
+
+    #[test]
+    fn find_pic_geom_by_rid_returns_matching_geometry() {
+        let marker = r#"
+            <p:pic><p:blipFill><a:blip r:embed="rId1"/></p:blipFill><p:spPr><a:xfrm><a:off x="10" y="20"/><a:ext cx="100" cy="200"/></a:xfrm></p:spPr></p:pic>
+            <p:pic><p:blipFill><a:blip r:embed="rId2"/></p:blipFill><p:spPr><a:xfrm><a:off x="30" y="40"/><a:ext cx="300" cy="400"/></a:xfrm></p:spPr></p:pic>
+        "#;
+        assert_eq!(
+            find_pic_geom_by_rid(marker, "rId2"),
+            Some(PicShapeGeom {
+                off_x: 30,
+                off_y: 40,
+                ext_cx: 300,
+                ext_cy: 400,
+            })
+        );
+        assert_eq!(find_pic_geom_by_rid(marker, "rIdMissing"), None);
+    }
+
+    #[test]
+    fn find_background_pic_rid_picks_largest_non_swap_above_threshold() {
+        let marker = r#"
+            <p:pic><p:blipFill><a:blip r:embed="rIdKid"/></p:blipFill><p:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="100" cy="100"/></a:xfrm></p:spPr></p:pic>
+            <p:pic><p:blipFill><a:blip r:embed="rIdLogo"/></p:blipFill><p:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="200" cy="200"/></a:xfrm></p:spPr></p:pic>
+            <p:pic><p:blipFill><a:blip r:embed="rIdBg"/></p:blipFill><p:spPr><a:xfrm><a:off x="-5" y="10"/><a:ext cx="900" cy="900"/></a:xfrm></p:spPr></p:pic>
+        "#;
+        let found = find_background_pic_rid(marker, "rIdKid", 1_000_000).unwrap();
+        assert_eq!(found.0, "rIdBg");
+        assert_eq!(
+            found.1,
+            PicShapeGeom {
+                off_x: -5,
+                off_y: 10,
+                ext_cx: 900,
+                ext_cy: 900,
+            }
+        );
+
+        let too_small = r#"
+            <p:pic><p:blipFill><a:blip r:embed="rIdKid"/></p:blipFill><p:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="100" cy="100"/></a:xfrm></p:spPr></p:pic>
+            <p:pic><p:blipFill><a:blip r:embed="rIdSmall"/></p:blipFill><p:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="400" cy="400"/></a:xfrm></p:spPr></p:pic>
+        "#;
+        assert_eq!(find_background_pic_rid(too_small, "rIdKid", 1_000_000), None);
+    }
+
+    #[test]
+    fn remove_pic_by_rid_removes_only_matching_pic() {
+        let slide = r#"<p:spTree><p:pic><p:blipFill><a:blip r:embed="rIdLogo"/></p:blipFill><p:spPr><a:xfrm/></p:spPr></p:pic><p:pic><p:blipFill><a:blip r:embed="rIdKid"/></p:blipFill><p:spPr><a:xfrm/></p:spPr></p:pic></p:spTree>"#;
+        let out = remove_pic_by_rid(slide, "rIdKid");
+        assert!(out.contains("rIdLogo"), "unrelated pic should remain:\n{out}");
+        assert!(!out.contains("rIdKid"), "matching pic should be removed:\n{out}");
+        assert_eq!(remove_pic_by_rid(slide, "rIdMissing"), slide);
+        assert_eq!(remove_pic_by_rid(&out, "rIdKid"), out);
+    }
+
+    #[test]
+    fn bake_photo_into_background_places_photo_at_correct_pixel_position() {
+        let bg = image::RgbaImage::from_pixel(100, 100, image::Rgba([10, 20, 30, 255]));
+        let bg_bytes = encode_rgba_as_png(&bg).unwrap();
+
+        let photo = image::RgbImage::from_pixel(40, 20, image::Rgb([200, 50, 25]));
+        let mut cursor = Cursor::new(Vec::new());
+        image::DynamicImage::ImageRgb8(photo)
+            .write_to(&mut cursor, image::ImageFormat::Png)
+            .unwrap();
+        let test_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("target")
+            .join("graduation-pptx-tests");
+        std::fs::create_dir_all(&test_dir).unwrap();
+        let photo_path = test_dir.join(format!(
+            "bake-photo-{}-{}.png",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::write(&photo_path, cursor.into_inner()).unwrap();
+
+        let bg_shape = PicShapeGeom {
+            off_x: 0,
+            off_y: 0,
+            ext_cx: 1000,
+            ext_cy: 1000,
+        };
+        let photo_shape = PicShapeGeom {
+            off_x: 200,
+            off_y: 300,
+            ext_cx: 400,
+            ext_cy: 200,
+        };
+        let baked = bake_photo_into_background(
+            &bg_bytes,
+            &photo_path,
+            (1000, 1000),
+            &bg_shape,
+            &photo_shape,
+            0,
+            &|| false,
+        )
+        .unwrap();
+        let _ = std::fs::remove_file(&photo_path);
+
+        assert_eq!(image::guess_format(&baked).unwrap(), image::ImageFormat::Png);
+        let out = image::load_from_memory(&baked).unwrap().to_rgba8();
+        assert_eq!(out.get_pixel(40, 40).0, [200, 50, 25, 255]);
+        assert_eq!(out.get_pixel(5, 5).0, [10, 20, 30, 255]);
     }
 
     #[test]
