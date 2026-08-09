@@ -4,6 +4,37 @@ All notable changes shipped as a DMG. Only entries the owner has approved
 for release are listed here — "code-complete, awaiting ship approval" work
 lives in the session plan.md until it ships.
 
+## v3.19.3 — Graduation deck: PowerPoint macOS Save-as-Pictures fix (real fix)
+
+Supersedes the v3.19.2 attempt at the same bug. Inspecting a v3.19.2
+output deck showed the real trigger: the child-photo shape in the
+graduation template uses `<a:prstGeom prst="roundRect">` with a 25%
+corner radius. **PowerPoint-for-Mac's built-in File → Save as Pictures
+raster export silently drops any `<p:pic>` whose preset geometry is
+not `rect`.** The cover-slide logo (plain `rect`) survived; every kid
+photo (`roundRect`) did not.
+
+**Fix — preserve rounded corners AND make the photo export:**
+
+1. Detect the `roundRect` corner `adj` value once from the marker
+   template.
+2. Encode the child photo as **PNG with a transparent rounded-corner
+   alpha mask** baked into the pixels (radius = `adj / 100000 *
+   min(w, h) / 2` per the DrawingML spec). Anti-aliased signed-distance
+   corner curve for smooth edges at any zoom.
+3. Rewrite the shape's `prst="roundRect"` → `prst="rect"` so Mac PPT's
+   raster export path picks up the picture.
+
+Net visual result on-screen: identical. The rounded corners now live
+in the PNG's alpha channel instead of the shape geometry, so the
+certificate background (bluish, textured, gradient — anything)
+shows through naturally at the corners.
+
+Zero workflow change: photos still auto-picked from per-child folders.
+
+Composite multi-photo path (2/3/4 photos per child) supported via the
+same mask pipeline.
+
 ## v3.19.2 — Graduation deck: PowerPoint macOS Save-as-Pictures fix
 
 Single-purpose bug-fix release. No schema migrations, no workflow changes.
