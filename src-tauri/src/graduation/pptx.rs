@@ -479,6 +479,16 @@ pub fn render_slides_cancellable(
 
         let mut slide_xml = String::from_utf8_lossy(&marker_slide_bytes).into_owned();
         slide_xml = substitute(&slide_xml, student, ctx.year);
+        // v3.19.2: strip template-inherited decorations from the child-photo
+        // <p:pic> block so PowerPoint-for-Mac's built-in File → Save as
+        // Pictures raster export includes the photo. On-screen render is
+        // unaffected (all removed attrs are cosmetic/redundant here).
+        // See sanitize_photo_pic_for_mac_export() docstring for details.
+        if let (Some(rid), photos) = (&swap_rid, student.photos.as_slice()) {
+            if !photos.is_empty() {
+                slide_xml = sanitize_photo_pic_for_mac_export(&slide_xml, rid);
+            }
+        }
         new_entries.push((new_slide_path, slide_xml.into_bytes()));
 
         if let Some(rels) = &marker_rels_bytes {
@@ -1322,6 +1332,139 @@ fn extract_blip_embed(pic_block: &str) -> Option<String> {
     Some(pic_block[start..start + end_rel].to_string())
 }
 
+/// Strip template-inherited decorations from the `<p:pic>` block whose
+/// `<a:blip r:embed="{rid}"/>` matches, so PowerPoint-for-Mac's built-in
+/// **File → Save as Pictures** raster export includes the child photo.
+///
+/// **The bug we're working around** (v3.19.1 field report, macOS PPT 16.x):
+/// child photo displays perfectly on-screen, cover-slide logo displays
+/// perfectly on-screen, but Save as Pictures drops the child photo and
+/// keeps the logo. Root cause: the logo is a plain `<p:pic>` we author
+/// ourselves (see `logo_xml` on the cover). The child photo lives inside
+/// the *template author's* `<p:pic>` shape (tagged `{{Photo}}` in alt-
+/// text) which typically inherits from a slide layout — carrying a
+/// `<p:ph type="pic"/>` reference, an `<a:srcRect/>` inherited crop,
+/// and often `<a:extLst>` DPI hints inside `<a:blip>`. Mac PPT's raster
+/// path (older than the on-screen renderer) skips images with those
+/// decorations under specific placeholder-inheritance conditions.
+///
+/// **What we strip** (all safe: on-screen render is unaffected because
+/// the same shape's own geometry already carries the intent):
+/// - `<p:ph …/>` inside `<p:nvPicPr>/<p:nvPr>` — placeholder reference
+///   that the raster exporter can fail to resolve.
+/// - `<a:srcRect …/>` inside `<p:blipFill>` — inherited source-rect crop.
+///   Our per-child JPEG is already center-cropped to the frame aspect
+///   (see `encode_as_jpeg_cancellable`) so an inherited crop is redundant
+///   and confuses the exporter.
+/// - Any children of `<a:blip>` (typically `<a:extLst>` `useLocalDpi`) —
+///   collapse `<a:blip r:embed="X">…</a:blip>` to `<a:blip r:embed="X"/>`.
+///
+/// **What we preserve** (visual fidelity):
+/// - `<a:xfrm>` position + size, `<a:ext>` cx/cy, aspect lock.
+/// - `<a:stretch><a:fillRect/></a:stretch>` fill mode.
+/// - Every other attribute and sibling element in the shape.
+/// - The photo swap itself — `r:embed` value is untouched.
+///
+/// If no `<p:pic>` matches the rid, the input is returned unchanged.
+fn sanitize_photo_pic_for_mac_export(slide_xml: &str, rid: &str) -> String {
+    let embed_needle = format!("r:embed=\"{rid}\"");
+    let Some(embed_pos) = slide_xml.find(&embed_needle) else {
+        return slide_xml.to_string();
+    };
+    let Some(pic_start_rel) = slide_xml[..embed_pos].rfind("<p:pic") else {
+        return slide_xml.to_string();
+    };
+    let Some(pic_end_rel) = slide_xml[embed_pos..].find("</p:pic>") else {
+        return slide_xml.to_string();
+    };
+    let pic_end = embed_pos + pic_end_rel + "</p:pic>".len();
+    let block = &slide_xml[pic_start_rel..pic_end];
+
+    let mut cleaned = block.to_string();
+    cleaned = strip_self_closing_tag(&cleaned, "p:ph");
+    cleaned = strip_self_closing_tag(&cleaned, "a:srcRect");
+    cleaned = collapse_blip_to_self_close(&cleaned, rid);
+
+    let mut out = String::with_capacity(slide_xml.len());
+    out.push_str(&slide_xml[..pic_start_rel]);
+    out.push_str(&cleaned);
+    out.push_str(&slide_xml[pic_end..]);
+    out
+}
+
+/// Remove every occurrence of a self-closing element `<{name} …/>` from `xml`.
+/// Handles arbitrary whitespace and attributes; leaves paired `<name>…</name>`
+/// alone (we don't need to strip those for the current sanitizer).
+fn strip_self_closing_tag(xml: &str, name: &str) -> String {
+    let open = format!("<{name}");
+    let mut out = String::with_capacity(xml.len());
+    let mut pos = 0;
+    while let Some(rel) = xml[pos..].find(&open) {
+        let tag_start = pos + rel;
+        // Guard against a longer name matching (e.g. "p:ph" vs "p:phX").
+        let after_name = tag_start + open.len();
+        let next = xml.as_bytes().get(after_name).copied();
+        let is_boundary = matches!(next, Some(b' ') | Some(b'\t') | Some(b'\r') | Some(b'\n') | Some(b'/') | Some(b'>'));
+        if !is_boundary {
+            out.push_str(&xml[pos..after_name]);
+            pos = after_name;
+            continue;
+        }
+        // Find the first '>' after the tag_start.
+        let Some(gt_rel) = xml[tag_start..].find('>') else {
+            out.push_str(&xml[pos..]);
+            return out;
+        };
+        let tag_end = tag_start + gt_rel + 1;
+        let tag_body = &xml[tag_start..tag_end];
+        // Only strip self-closing form: `<name … />`.
+        if tag_body.ends_with("/>") {
+            out.push_str(&xml[pos..tag_start]);
+            pos = tag_end;
+        } else {
+            out.push_str(&xml[pos..tag_end]);
+            pos = tag_end;
+        }
+    }
+    out.push_str(&xml[pos..]);
+    out
+}
+
+/// Collapse `<a:blip r:embed="{rid}"…>…children…</a:blip>` to the
+/// self-closing form `<a:blip r:embed="{rid}"…/>`. If the tag is already
+/// self-closing (`<a:blip …/>`), the input is returned unchanged.
+fn collapse_blip_to_self_close(xml: &str, rid: &str) -> String {
+    let embed_needle = format!("r:embed=\"{rid}\"");
+    let Some(embed_pos) = xml.find(&embed_needle) else {
+        return xml.to_string();
+    };
+    let Some(blip_open_rel) = xml[..embed_pos].rfind("<a:blip") else {
+        return xml.to_string();
+    };
+    let Some(gt_rel) = xml[embed_pos..].find('>') else {
+        return xml.to_string();
+    };
+    let open_end = embed_pos + gt_rel + 1;
+    let open_body = &xml[blip_open_rel..open_end];
+    if open_body.ends_with("/>") {
+        return xml.to_string(); // already self-closing
+    }
+    // Find the matching </a:blip> — no nesting is legal here.
+    let Some(close_rel) = xml[open_end..].find("</a:blip>") else {
+        return xml.to_string();
+    };
+    let close_end = open_end + close_rel + "</a:blip>".len();
+
+    // Build self-closing open tag: drop the trailing '>' and append "/>".
+    let self_close = format!("{}/>", &open_body[..open_body.len() - 1]);
+
+    let mut out = String::with_capacity(xml.len());
+    out.push_str(&xml[..blip_open_rel]);
+    out.push_str(&self_close);
+    out.push_str(&xml[close_end..]);
+    out
+}
+
 
 /// Called on the marker slide's `_rels` before we duplicate it per
 /// student so we don't end up with every generated slide pointing at
@@ -1870,6 +2013,90 @@ mod tests {
         ] {
             assert!(!is_precompressed_media(name), "should be Deflated: {name}");
         }
+    }
+
+    #[test]
+    fn sanitize_photo_pic_strips_ph_srcrect_and_blip_children() {
+        let slide = r#"<p:sld><p:cSld><p:spTree>
+            <p:pic>
+              <p:nvPicPr>
+                <p:cNvPr id="7" name="Photo" descr="{{Photo}}"/>
+                <p:cNvPicPr/>
+                <p:nvPr><p:ph type="pic" idx="1"/></p:nvPr>
+              </p:nvPicPr>
+              <p:blipFill>
+                <a:blip r:embed="rIdKid"><a:extLst><a:ext uri="{28A0092B-C50C-407E-A947-70E740481C1C}"><a14:useLocalDpi val="0"/></a:ext></a:extLst></a:blip>
+                <a:srcRect l="10000" t="0" r="10000" b="0"/>
+                <a:stretch><a:fillRect/></a:stretch>
+              </p:blipFill>
+              <p:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="4846320" cy="5212080"/></a:xfrm></p:spPr>
+            </p:pic>
+        </p:spTree></p:cSld></p:sld>"#;
+        let out = sanitize_photo_pic_for_mac_export(slide, "rIdKid");
+        // Bad bits are gone.
+        assert!(!out.contains("<p:ph"), "p:ph should be stripped:\n{out}");
+        assert!(!out.contains("<a:srcRect"), "srcRect should be stripped:\n{out}");
+        assert!(!out.contains("<a:extLst"), "blip extLst should be stripped:\n{out}");
+        assert!(!out.contains("useLocalDpi"), "extLst contents should be stripped:\n{out}");
+        // Good bits preserved.
+        assert!(out.contains(r#"<a:blip r:embed="rIdKid"/>"#), "blip must be self-closing with rId preserved:\n{out}");
+        assert!(out.contains(r#"<a:ext cx="4846320" cy="5212080"/>"#), "xfrm ext preserved");
+        assert!(out.contains(r#"descr="{{Photo}}""#), "alt-text tag preserved");
+        assert!(out.contains("<a:stretch>"), "stretch/fillRect preserved");
+    }
+
+    #[test]
+    fn sanitize_photo_pic_is_noop_when_rid_not_present() {
+        let slide = r#"<p:pic><p:blipFill><a:blip r:embed="rIdOther"/></p:blipFill></p:pic>"#;
+        let out = sanitize_photo_pic_for_mac_export(slide, "rIdKid");
+        assert_eq!(out, slide);
+    }
+
+    #[test]
+    fn sanitize_photo_pic_leaves_other_pics_alone() {
+        // Two pics: only the one whose blip matches should be sanitized.
+        let slide = r#"<p:spTree>
+            <p:pic><p:nvPicPr><p:nvPr><p:ph type="pic"/></p:nvPr></p:nvPicPr><p:blipFill><a:blip r:embed="rIdLogo"/></p:blipFill></p:pic>
+            <p:pic><p:nvPicPr><p:nvPr><p:ph type="pic"/></p:nvPr></p:nvPicPr><p:blipFill><a:srcRect l="1"/><a:blip r:embed="rIdKid"/></p:blipFill></p:pic>
+        </p:spTree>"#;
+        let out = sanitize_photo_pic_for_mac_export(slide, "rIdKid");
+        // First (logo) pic's p:ph is preserved.
+        let first = &out[..out.find("rIdKid").unwrap()];
+        assert!(first.contains(r#"<p:ph type="pic"/>"#), "unrelated pic must keep p:ph:\n{first}");
+        // Second (kid) pic's p:ph + srcRect are gone.
+        let second = &out[out.find("rIdKid").unwrap()..];
+        assert!(!second.contains("<p:ph"), "kid pic p:ph stripped:\n{second}");
+        assert!(!second.contains("<a:srcRect"), "kid pic srcRect stripped:\n{second}");
+    }
+
+    #[test]
+    fn sanitize_photo_pic_noop_when_already_clean() {
+        let slide = r#"<p:pic><p:nvPicPr><p:cNvPr id="1"/></p:nvPicPr><p:blipFill><a:blip r:embed="rIdKid"/><a:stretch><a:fillRect/></a:stretch></p:blipFill></p:pic>"#;
+        let out = sanitize_photo_pic_for_mac_export(slide, "rIdKid");
+        assert_eq!(out, slide);
+    }
+
+    #[test]
+    fn strip_self_closing_tag_respects_name_boundary() {
+        // "<p:phX/>" must NOT match name "p:ph".
+        let xml = r#"<a><p:ph type="pic"/><p:phX foo="bar"/></a>"#;
+        let out = strip_self_closing_tag(xml, "p:ph");
+        assert!(!out.contains("<p:ph "), "self-closing p:ph gone:\n{out}");
+        assert!(out.contains("<p:phX"), "p:phX preserved:\n{out}");
+    }
+
+    #[test]
+    fn collapse_blip_leaves_self_closing_alone() {
+        let xml = r#"<p:blipFill><a:blip r:embed="rIdKid"/></p:blipFill>"#;
+        let out = collapse_blip_to_self_close(xml, "rIdKid");
+        assert_eq!(out, xml);
+    }
+
+    #[test]
+    fn collapse_blip_folds_paired_form() {
+        let xml = r#"<a:blip r:embed="rIdKid"><a:extLst><a:ext/></a:extLst></a:blip>"#;
+        let out = collapse_blip_to_self_close(xml, "rIdKid");
+        assert_eq!(out, r#"<a:blip r:embed="rIdKid"/>"#);
     }
 
     #[test]
