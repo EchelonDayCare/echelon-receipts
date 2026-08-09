@@ -1356,8 +1356,17 @@ fn extract_blip_embed(pic_block: &str) -> Option<String> {
 ///   Our per-child JPEG is already center-cropped to the frame aspect
 ///   (see `encode_as_jpeg_cancellable`) so an inherited crop is redundant
 ///   and confuses the exporter.
-/// - Any children of `<a:blip>` (typically `<a:extLst>` `useLocalDpi`) —
-///   collapse `<a:blip r:embed="X">…</a:blip>` to `<a:blip r:embed="X"/>`.
+/// - `<a:extLst>` children of `<a:blip>` (typically the `useLocalDpi`
+///   hint) — via `strip_blip_extlst`, which is **surgical**: it removes
+///   ONLY `<a:extLst>` and preserves every other child of `<a:blip>`.
+///   That matters because DrawingML CT_Blip allows render-affecting
+///   color transforms as children — `<a:duotone>`, `<a:lum>`, `<a:tint>`,
+///   `<a:alphaModFix>`, `<a:clrChange>`, `<a:biLevel>`, `<a:grayscl>`,
+///   etc. A template designer might apply e.g. `<a:duotone>` to force
+///   B&W or brand-tint child photos. Blanket-collapsing to self-close
+///   would silently drop those transforms and break on-screen render
+///   across PowerPoint, LibreOffice, and Keynote — violating the
+///   non-negotiable on-screen fidelity contract.
 ///
 /// **What we preserve** (visual fidelity):
 /// - `<a:xfrm>` position + size, `<a:ext>` cx/cy, aspect lock.
@@ -1383,7 +1392,7 @@ fn sanitize_photo_pic_for_mac_export(slide_xml: &str, rid: &str) -> String {
     let mut cleaned = block.to_string();
     cleaned = strip_self_closing_tag(&cleaned, "p:ph");
     cleaned = strip_self_closing_tag(&cleaned, "a:srcRect");
-    cleaned = collapse_blip_to_self_close(&cleaned, rid);
+    cleaned = strip_blip_extlst(&cleaned, rid);
 
     let mut out = String::with_capacity(slide_xml.len());
     out.push_str(&slide_xml[..pic_start_rel]);
@@ -1430,10 +1439,26 @@ fn strip_self_closing_tag(xml: &str, name: &str) -> String {
     out
 }
 
-/// Collapse `<a:blip r:embed="{rid}"…>…children…</a:blip>` to the
-/// self-closing form `<a:blip r:embed="{rid}"…/>`. If the tag is already
-/// self-closing (`<a:blip …/>`), the input is returned unchanged.
-fn collapse_blip_to_self_close(xml: &str, rid: &str) -> String {
+/// Remove any `<a:extLst>…</a:extLst>` children of the `<a:blip r:embed="{rid}"/>`
+/// element, while preserving every other child element verbatim.
+///
+/// **Why surgical and not "collapse to self-close":** the DrawingML schema
+/// (ECMA-376 CT_Blip) allows `<a:blip>` to carry render-affecting color
+/// transforms — `<a:duotone>`, `<a:lum>`, `<a:tint>`, `<a:alphaModFix>`,
+/// `<a:clrChange>`, `<a:biLevel>`, `<a:grayscl>`, etc. A template
+/// designer might apply e.g. `<a:duotone>` to the `{{Photo}}` placeholder
+/// to force B&W or brand-tint every child photo. Blanket-collapsing to
+/// self-closing would silently strip those transforms and break on-screen
+/// render across every renderer (PowerPoint, LibreOffice, Keynote). That
+/// violates the non-negotiable "on-screen render must remain identical"
+/// constraint.
+///
+/// The macOS Save-as-Pictures bug is triggered by the `<a:extLst>`
+/// `useLocalDpi` hint specifically, so we strip only that.
+///
+/// If the tag is already self-closing (no children at all), or no
+/// `<a:extLst>` child exists, the input is returned unchanged.
+fn strip_blip_extlst(xml: &str, rid: &str) -> String {
     let embed_needle = format!("r:embed=\"{rid}\"");
     let Some(embed_pos) = xml.find(&embed_needle) else {
         return xml.to_string();
@@ -1447,21 +1472,59 @@ fn collapse_blip_to_self_close(xml: &str, rid: &str) -> String {
     let open_end = embed_pos + gt_rel + 1;
     let open_body = &xml[blip_open_rel..open_end];
     if open_body.ends_with("/>") {
-        return xml.to_string(); // already self-closing
+        return xml.to_string(); // already self-closing, no children
     }
-    // Find the matching </a:blip> — no nesting is legal here.
+    // Find the matching </a:blip>.
     let Some(close_rel) = xml[open_end..].find("</a:blip>") else {
         return xml.to_string();
     };
-    let close_end = open_end + close_rel + "</a:blip>".len();
+    let close_start = open_end + close_rel;
+    let inner = &xml[open_end..close_start];
+    // Fast path: no extLst → no change.
+    if !inner.contains("<a:extLst") {
+        return xml.to_string();
+    }
+    // Strip every <a:extLst>…</a:extLst> segment from the inner content.
+    let mut cleaned_inner = String::with_capacity(inner.len());
+    let mut pos = 0;
+    while let Some(rel) = inner[pos..].find("<a:extLst") {
+        let tag_start = pos + rel;
+        cleaned_inner.push_str(&inner[pos..tag_start]);
+        // Two shapes to handle: paired <a:extLst …>…</a:extLst> or
+        // self-closing <a:extLst …/>.
+        let Some(gt_rel2) = inner[tag_start..].find('>') else {
+            // Malformed — bail; return original xml unchanged.
+            return xml.to_string();
+        };
+        let open_tag_end = tag_start + gt_rel2 + 1;
+        let open_tag = &inner[tag_start..open_tag_end];
+        if open_tag.ends_with("/>") {
+            pos = open_tag_end;
+            continue;
+        }
+        let Some(close_rel2) = inner[open_tag_end..].find("</a:extLst>") else {
+            return xml.to_string();
+        };
+        pos = open_tag_end + close_rel2 + "</a:extLst>".len();
+    }
+    cleaned_inner.push_str(&inner[pos..]);
 
-    // Build self-closing open tag: drop the trailing '>' and append "/>".
-    let self_close = format!("{}/>", &open_body[..open_body.len() - 1]);
-
+    // If nothing remains between the open and close tags, collapse to self-close.
+    // (Trimming whitespace is safe — inter-child whitespace has no rendering effect.)
+    let trimmed = cleaned_inner.trim();
     let mut out = String::with_capacity(xml.len());
     out.push_str(&xml[..blip_open_rel]);
-    out.push_str(&self_close);
-    out.push_str(&xml[close_end..]);
+    if trimmed.is_empty() {
+        // Collapse to self-closing.
+        out.push_str(&open_body[..open_body.len() - 1]);
+        out.push_str("/>");
+        out.push_str(&xml[close_start + "</a:blip>".len()..]);
+    } else {
+        out.push_str(open_body);
+        out.push_str(&cleaned_inner);
+        out.push_str("</a:blip>");
+        out.push_str(&xml[close_start + "</a:blip>".len()..]);
+    }
     out
 }
 
@@ -2086,17 +2149,68 @@ mod tests {
     }
 
     #[test]
-    fn collapse_blip_leaves_self_closing_alone() {
+    fn strip_blip_extlst_leaves_self_closing_alone() {
         let xml = r#"<p:blipFill><a:blip r:embed="rIdKid"/></p:blipFill>"#;
-        let out = collapse_blip_to_self_close(xml, "rIdKid");
+        let out = strip_blip_extlst(xml, "rIdKid");
         assert_eq!(out, xml);
     }
 
     #[test]
-    fn collapse_blip_folds_paired_form() {
+    fn strip_blip_extlst_folds_when_only_extlst_child() {
         let xml = r#"<a:blip r:embed="rIdKid"><a:extLst><a:ext/></a:extLst></a:blip>"#;
-        let out = collapse_blip_to_self_close(xml, "rIdKid");
+        let out = strip_blip_extlst(xml, "rIdKid");
         assert_eq!(out, r#"<a:blip r:embed="rIdKid"/>"#);
+    }
+
+    #[test]
+    fn strip_blip_extlst_preserves_color_transforms() {
+        // Template designer applied duotone + lum to force B&W child photos.
+        // The sanitizer MUST preserve these — dropping them would break
+        // on-screen render across every renderer (PPT/LibreOffice/Keynote).
+        let xml = r#"<a:blip r:embed="rIdKid"><a:duotone><a:prstClr val="black"/><a:srgbClr val="FFFFFF"/></a:duotone><a:lum bright="-20000"/><a:extLst><a:ext uri="{28A0092B-C50C-407E-A947-70E740481C1C}"><a14:useLocalDpi val="0"/></a:ext></a:extLst></a:blip>"#;
+        let out = strip_blip_extlst(xml, "rIdKid");
+        assert!(out.contains("<a:duotone>"), "duotone must survive:\n{out}");
+        assert!(out.contains(r#"<a:lum bright="-20000"/>"#), "lum must survive:\n{out}");
+        assert!(!out.contains("<a:extLst"), "extLst must be stripped:\n{out}");
+        assert!(!out.contains("useLocalDpi"), "extLst contents gone:\n{out}");
+        // Blip stays paired form because color transforms remain.
+        assert!(out.contains(r#"<a:blip r:embed="rIdKid">"#), "blip open tag paired:\n{out}");
+        assert!(out.contains("</a:blip>"), "blip close tag paired:\n{out}");
+    }
+
+    #[test]
+    fn strip_blip_extlst_handles_self_closing_extlst() {
+        let xml = r#"<a:blip r:embed="rIdKid"><a:extLst/></a:blip>"#;
+        let out = strip_blip_extlst(xml, "rIdKid");
+        assert_eq!(out, r#"<a:blip r:embed="rIdKid"/>"#);
+    }
+
+    #[test]
+    fn strip_blip_extlst_noop_when_no_extlst() {
+        // Paired form with only a color transform — should stay paired, unchanged.
+        let xml = r#"<a:blip r:embed="rIdKid"><a:lum bright="-20000"/></a:blip>"#;
+        let out = strip_blip_extlst(xml, "rIdKid");
+        assert_eq!(out, xml);
+    }
+
+    #[test]
+    fn sanitize_photo_pic_preserves_color_transforms_end_to_end() {
+        let slide = r#"<p:pic>
+              <p:nvPicPr><p:cNvPr id="7" descr="{{Photo}}"/><p:cNvPicPr/><p:nvPr><p:ph type="pic"/></p:nvPr></p:nvPicPr>
+              <p:blipFill>
+                <a:blip r:embed="rIdKid"><a:duotone><a:srgbClr val="112233"/><a:srgbClr val="FFFFFF"/></a:duotone><a:extLst><a:ext/></a:extLst></a:blip>
+                <a:srcRect l="1"/>
+                <a:stretch><a:fillRect/></a:stretch>
+              </p:blipFill>
+              <p:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="100" cy="100"/></a:xfrm></p:spPr>
+            </p:pic>"#;
+        let out = sanitize_photo_pic_for_mac_export(slide, "rIdKid");
+        // Bad bits gone.
+        assert!(!out.contains("<p:ph"), "p:ph stripped:\n{out}");
+        assert!(!out.contains("<a:srcRect"), "srcRect stripped:\n{out}");
+        assert!(!out.contains("<a:extLst"), "extLst stripped:\n{out}");
+        // Color transform survives (the whole point).
+        assert!(out.contains("<a:duotone>"), "duotone MUST survive:\n{out}");
     }
 
     #[test]
