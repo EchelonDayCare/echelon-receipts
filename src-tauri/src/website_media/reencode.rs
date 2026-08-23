@@ -37,9 +37,10 @@ pub const JPG_QUALITY: u8 = 82;
 /// better than JPEG at the same quantizer.
 pub const AVIF_QUALITY: f32 = 50.0;
 
-/// rav1e speed preset (1..=10). 4 is a good tradeoff; higher = faster
-/// encode but worse compression.
-pub const AVIF_SPEED: u8 = 4;
+/// rav1e speed preset (1..=10). 8 is aggressive — encode ~2-3× faster
+/// than speed 4 with ~15-25% larger files, but AVIF at speed 8 still
+/// beats WebP on compression, so the on-disk cost is acceptable.
+pub const AVIF_SPEED: u8 = 8;
 
 /// Decode any of our supported inputs into an in-memory image, applying
 /// EXIF orientation from the source bytes so downstream variants have
