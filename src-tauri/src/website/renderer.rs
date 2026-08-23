@@ -239,6 +239,17 @@ pub fn build_page_context(
                 ctx.insert("gallery".into(), v.clone());
             }
         }
+        "gallery-photos" => {
+            // Photos page reuses the existing gallery.json content.
+            if let Some(v) = content.get("gallery") {
+                ctx.insert("gallery".into(), v.clone());
+            }
+        }
+        "gallery-videos" => {
+            if let Some(v) = content.get("gallery-videos") {
+                ctx.insert("gallery_videos".into(), v.clone());
+            }
+        }
         "contact" => {
             if let Some(v) = content.get("contact") {
                 ctx.insert("contact".into(), v.clone());
@@ -265,6 +276,8 @@ fn active_nav_key_for(page_key: &str) -> Option<&'static str> {
         "about" => Some("about"),
         "services" => Some("services"),
         "gallery" => Some("gallery"),
+        "gallery-photos" => Some("gallery"),
+        "gallery-videos" => Some("gallery"),
         "contact" => Some("contact"),
         "tour" => Some("tour"),
         "careers" => Some("careers"),
@@ -450,6 +463,8 @@ pub const ALL_PAGES: &[PageRender] = &[
     PageRender { key: "about",     template: "pages/about.html.j2",     output: "pages/about.html" },
     PageRender { key: "services",  template: "pages/services.html.j2",  output: "pages/services.html" },
     PageRender { key: "gallery",   template: "pages/gallery.html.j2",   output: "pages/gallery.html" },
+    PageRender { key: "gallery-photos", template: "pages/gallery-photos.html.j2", output: "pages/gallery-photos.html" },
+    PageRender { key: "gallery-videos", template: "pages/gallery-videos.html.j2", output: "pages/gallery-videos.html" },
     PageRender { key: "contact",   template: "pages/contact.html.j2",   output: "pages/contact.html" },
     PageRender { key: "tour",      template: "pages/tour.html.j2",      output: "pages/tour.html" },
     PageRender { key: "careers",   template: "pages/careers.html.j2",   output: "pages/careers.html" },

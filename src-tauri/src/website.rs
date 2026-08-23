@@ -49,6 +49,7 @@ use tokio::sync::Mutex;
 
 pub mod ai_edit;
 pub mod commands;
+pub mod gallery_videos;
 pub mod git_ops;
 pub mod media;
 pub mod pat;
@@ -67,14 +68,17 @@ pub mod tour;
 pub struct FeatureFlag(pub bool);
 
 impl FeatureFlag {
-    /// Read `ECHELON_WEBSITE_CMS` from the environment. Value must be
-    /// exactly `"1"` — any other value (including `"true"`, `"yes"`,
-    /// `"0"`, or unset) is treated as disabled. Intentionally strict
-    /// so accidental noise doesn't unlock a partial UI.
+    /// Read `ECHELON_WEBSITE_CMS` from the environment.
+    ///
+    /// From v3.23.0 the Website CMS is a shipped feature: it is enabled
+    /// by default. The env var is retained as an explicit **opt-out**
+    /// escape hatch (`ECHELON_WEBSITE_CMS=0`) for support scenarios or
+    /// automated tests where the module should stay hidden. Any other
+    /// value (missing, `"1"`, `"true"`, ...) leaves it enabled.
     pub fn detect() -> Self {
         let enabled = std::env::var("ECHELON_WEBSITE_CMS")
-            .map(|v| v == "1")
-            .unwrap_or(false);
+            .map(|v| v != "0")
+            .unwrap_or(true);
         Self(enabled)
     }
 

@@ -19,6 +19,7 @@ const FILE_LABELS: Record<EditableFile, string> = {
   tour: "Virtual Tour",
   careers: "Careers",
   seo: "SEO",
+  "gallery-videos": "Gallery Videos",
 };
 
 // One editor screen per content file. Uses a JSON textarea today —
