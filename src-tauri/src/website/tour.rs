@@ -193,6 +193,11 @@ pub(crate) fn next_id(existing: &[TourVideo]) -> String {
 pub(crate) const GITHUB_MAX_MB: u64 = 90;
 
 pub(crate) fn transcode_video(ffmpeg: &Path, src: &Path, dst: &Path) -> Result<(), String> {
+    // Pick the encoder available on this OS. macOS ships with
+    // h264_videotoolbox; Windows with h264_mf; Linux/other rely on
+    // the bundled libopenh264. Using libopenh264 unconditionally
+    // failed on macOS with "Unknown encoder 'libopenh264'".
+    let encoder = crate::graduation::engine::HwEncoder::for_current_os().ffmpeg_codec_name();
     // (video_bitrate, max_height)
     let attempts: &[(&str, &str)] = &[
         ("1500k", "720"),
@@ -213,7 +218,7 @@ pub(crate) fn transcode_video(ffmpeg: &Path, src: &Path, dst: &Path) -> Result<(
             .arg(src)
             .args([
                 "-vf", vf.as_str(),
-                "-c:v", "libopenh264",
+                "-c:v", encoder,
                 "-b:v", vbit,
                 "-pix_fmt", "yuv420p",
                 "-movflags", "+faststart",

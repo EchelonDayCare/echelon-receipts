@@ -4,6 +4,14 @@ All notable changes shipped as a DMG. Only entries the owner has approved
 for release are listed here — "code-complete, awaiting ship approval" work
 lives in the session plan.md until it ships.
 
+## v3.23.3 — Fix gallery video upload on macOS
+
+- **Video transcode now uses the OS-native encoder.** `transcode_video`
+  hardcoded `libopenh264`, which the bundled macOS ffmpeg doesn't
+  include, producing `Unknown encoder 'libopenh264'` on Upload videos.
+  Now picks `h264_videotoolbox` on macOS, `h264_mf` on Windows, and
+  `libopenh264` on Linux via the existing `HwEncoder` helper.
+
 ## v3.23.2 — Preview iframe fix on macOS
 
 - **Preview now renders on Mac.** The Tauri CSP `frame-src` directive
