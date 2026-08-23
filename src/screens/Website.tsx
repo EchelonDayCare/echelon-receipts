@@ -137,18 +137,29 @@ export default function Website() {
 
       <section style={{ marginTop: 28 }}>
         <h2 style={{ marginBottom: 8 }}>Pages</h2>
+        {status && !status.cloned && (
+          <div
+            className="home-alert tone-info"
+            style={{ marginBottom: 12 }}
+          >
+            Set up the working copy first — the page tiles unlock once
+            the site content has finished downloading.
+          </div>
+        )}
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(280px, 1fr))", gap: 12 }}>
           {editors.map((e) => (
             <button
               key={e.key}
               onClick={() => nav(`/website/${e.key}`)}
+              disabled={!status?.cloned}
               style={{
                 textAlign: "left",
                 padding: 16,
                 borderRadius: 10,
                 border: "1px solid rgba(0,0,0,0.1)",
                 background: "white",
-                cursor: "pointer",
+                cursor: status?.cloned ? "pointer" : "not-allowed",
+                opacity: status?.cloned ? 1 : 0.5,
               }}
             >
               <div style={{ fontWeight: 600, fontSize: 15 }}>{e.label}</div>
@@ -157,13 +168,15 @@ export default function Website() {
           ))}
           <button
             onClick={() => nav("/website/gallery")}
+            disabled={!status?.cloned}
             style={{
               textAlign: "left",
               padding: 16,
               borderRadius: 10,
               border: "1px solid rgba(0,0,0,0.1)",
               background: "white",
-              cursor: "pointer",
+              cursor: status?.cloned ? "pointer" : "not-allowed",
+              opacity: status?.cloned ? 1 : 0.5,
             }}
           >
             <div style={{ fontWeight: 600, fontSize: 15 }}>Gallery</div>
@@ -173,13 +186,15 @@ export default function Website() {
           </button>
           <button
             onClick={() => nav("/website/assets")}
+            disabled={!status?.cloned}
             style={{
               textAlign: "left",
               padding: 16,
               borderRadius: 10,
               border: "1px solid rgba(0,0,0,0.1)",
               background: "white",
-              cursor: "pointer",
+              cursor: status?.cloned ? "pointer" : "not-allowed",
+              opacity: status?.cloned ? 1 : 0.5,
             }}
           >
             <div style={{ fontWeight: 600, fontSize: 15 }}>Site assets</div>
@@ -192,13 +207,28 @@ export default function Website() {
 
       <section style={{ marginTop: 28 }}>
         <div style={{ display: "flex", gap: 12, flexWrap: "wrap" }}>
-          <button className="btn" onClick={() => nav("/website/preview")}>
+          <button
+            className="btn"
+            onClick={() => nav("/website/preview")}
+            disabled={!status?.cloned}
+            title={status?.cloned ? "" : "Working copy not cloned yet"}
+          >
             Preview site locally
           </button>
-          <button className="btn" onClick={() => nav("/website/history")}>
+          <button
+            className="btn"
+            onClick={() => nav("/website/history")}
+            disabled={!status?.cloned}
+            title={status?.cloned ? "" : "Working copy not cloned yet"}
+          >
             Version history
           </button>
-          <button className="btn" onClick={() => nav("/website/publish")}>
+          <button
+            className="btn"
+            onClick={() => nav("/website/publish")}
+            disabled={!status?.cloned}
+            title={status?.cloned ? "" : "Working copy not cloned yet"}
+          >
             Publish…
           </button>
         </div>

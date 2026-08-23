@@ -552,6 +552,7 @@ function Shell({ logo, name, staffEnabled }: { logo: string; name: string; staff
           <Route path="/website/gallery-videos" element={<WebsiteGalleryVideos />} />
           <Route path="/website/tour-videos" element={<WebsiteTourVideos />} />
           <Route path="/website/assets" element={<WebsiteAssets />} />
+          <Route path="/website/edit/:file" element={<WebsitePageEditor />} />
           <Route path="/website/:file" element={<WebsitePageEditor />} />
 
           {/* Redirects for old Students routes now moved to Reports module */}

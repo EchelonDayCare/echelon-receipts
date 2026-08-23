@@ -108,7 +108,10 @@ pub fn website_working_copy_status(app: AppHandle) -> Result<WorkingCopyStatus, 
 /// upstream. The next explicit `website_working_copy_pull` surfaces
 /// the divergence properly so it isn't silent forever.
 #[tauri::command]
-pub async fn website_working_copy_init(app: AppHandle) -> Result<WorkingCopyStatus, String> {
+pub async fn website_working_copy_init(
+    app: AppHandle,
+    db: State<'_, DbGate>,
+) -> Result<WorkingCopyStatus, String> {
     require_enabled()?;
     let wc = working_copy_from_app(&app)?;
     let wc_clone = git_ops::WorkingCopy::from_app_data(
@@ -128,6 +131,15 @@ pub async fn website_working_copy_init(app: AppHandle) -> Result<WorkingCopyStat
     })
     .await
     .map_err(|e| format!("join: {e}"))??;
+    // Hydrate the local SQLite gallery index from content/gallery.json
+    // so a fresh clone on a new machine sees the existing photos
+    // instead of an empty gallery (the first caption edit / delete
+    // there would otherwise silently rewrite gallery.json and wipe
+    // every published photo). Log failures so they surface in the
+    // dev console instead of silently leaving the Gallery blank.
+    if let Err(e) = super::media::hydrate_gallery_from_json(db.inner(), &wc.repo_dir).await {
+        eprintln!("[website] hydrate_gallery_from_json failed: {e}");
+    }
     let head_sha = wc.open().ok().and_then(|r| git_ops::head_sha(&r).ok());
     Ok(WorkingCopyStatus {
         root: wc.root.to_string_lossy().to_string(),

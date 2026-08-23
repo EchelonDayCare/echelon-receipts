@@ -478,10 +478,10 @@ async fn run_pipeline_inner(
             }
             return Ok(PipelineOutcome {
                 publication_id,
-                final_state: "verified_live".into(),
+                final_state: "no_changes".into(),
                 commit_sha: Some(sha),
                 verified_url: Some(inputs.verified_url.clone()),
-                error: Some("no changes to commit".into()),
+                error: None,
                 pages_written,
             });
         }
@@ -512,7 +512,7 @@ async fn run_pipeline_inner(
         }
         return Ok(PipelineOutcome {
             publication_id,
-            final_state: "verified_live".into(),
+            final_state: "dry_run_complete".into(),
             commit_sha: Some(commit_sha),
             verified_url: Some(format!("{} (dry-run — not pushed)", inputs.verified_url)),
             error: None,

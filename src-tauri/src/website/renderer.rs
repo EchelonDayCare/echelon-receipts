@@ -64,7 +64,12 @@ impl RenderInputs {
         {
             let entry = entry.map_err(|e| format!("read entry: {e}"))?;
             let path = entry.path();
-            if path.extension().and_then(|s| s.to_str()) != Some("json") {
+            if path
+                .extension()
+                .and_then(|s| s.to_str())
+                .map(|e| e.eq_ignore_ascii_case("json"))
+                != Some(true)
+            {
                 continue;
             }
             let stem = match path.file_stem().and_then(|s| s.to_str()) {
@@ -489,10 +494,9 @@ pub fn render_all(
         if !tmpl_path.exists() {
             continue;
         }
-        let tmpl = match env.get_template(page.template) {
-            Ok(t) => t,
-            Err(_) => continue,
-        };
+        let tmpl = env
+            .get_template(page.template)
+            .map_err(|e| format!("load template {}: {e}", page.template))?;
         let ctx = build_page_context(page.key, &inputs.content)?;
         let mj_ctx: MjValue = MjValue::from_serialize(&ctx);
         let html = tmpl

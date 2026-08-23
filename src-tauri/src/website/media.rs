@@ -29,6 +29,7 @@
 
 use std::io::Cursor;
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
 
 use image::{imageops::FilterType, DynamicImage, GenericImageView, ImageFormat};
 use rusqlite::{params, OptionalExtension};
@@ -265,13 +266,30 @@ pub async fn reorder_gallery(
     // But we look up the record for each id so a "reorder to a
     // record that was soft-deleted" attempt gets dropped.
     let mut records: Vec<MediaRecord> = Vec::new();
+    let mut kept_ids: Vec<i64> = Vec::new();
     for id in ordered_media_ids {
         if let Some(rec) = try_load_media_record(db, id).await? {
             if rec.deleted_at.is_none() && rec.kind == "photo" {
+                kept_ids.push(rec.id);
                 records.push(rec);
             }
         }
     }
+    // Persist sort_order on the DB so a subsequent list_media reflects
+    // the new order without needing to re-parse gallery.json.
+    let ids_for_db = kept_ids.clone();
+    db.with_conn(move |conn| {
+        let tx = conn.unchecked_transaction()?;
+        for (i, id) in ids_for_db.iter().enumerate() {
+            tx.execute(
+                "UPDATE site_media SET sort_order = ?1 WHERE id = ?2",
+                params![i as i64, id],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    })
+    .await?;
     rewrite_gallery_items(repo_dir, &records)?;
     Ok(())
 }
@@ -466,6 +484,86 @@ pub async fn replace_og_image(
 /// Return every non-deleted media record, optionally filtered by kind.
 /// Sorted by insertion order (id ASC) for gallery, so the frontend's
 /// initial render matches the on-disk `content/gallery.json` order.
+/// Hydrate SQLite `site_media` (+ variants) from `content/gallery.json`.
+/// Called on working-copy init so a fresh clone on a new machine
+/// still sees the existing gallery. Idempotent — uses INSERT OR
+/// IGNORE keyed on `(base_hash, kind)` so re-running is a no-op.
+///
+/// Only handles kind='photo' — brand assets (logo/favicon/og) live
+/// outside gallery.json and are re-derived when the owner
+/// (re-)uploads them.
+pub async fn hydrate_gallery_from_json(db: &DbGate, repo_dir: &Path) -> MediaResult<usize> {
+    let root = match read_gallery_root(repo_dir) {
+        Ok(r) => r,
+        Err(_) => return Ok(0),
+    };
+    let items = parse_items(&root);
+    if items.is_empty() {
+        return Ok(0);
+    }
+    let items_for_db = items.clone();
+    let inserted: usize = db
+        .with_conn(move |conn| {
+            let tx = conn.unchecked_transaction()?;
+            let mut count = 0usize;
+            for (i, it) in items_for_db.iter().enumerate() {
+                let existing: Option<i64> = tx
+                    .query_row(
+                        "SELECT id FROM site_media WHERE base_hash = ?1 AND kind = 'photo'",
+                        params![it.base_hash],
+                        |r| r.get::<_, i64>(0),
+                    )
+                    .optional()?;
+                let media_id = if let Some(id) = existing {
+                    tx.execute(
+                        "UPDATE site_media SET sort_order = ?1 WHERE id = ?2",
+                        params![i as i64, id],
+                    )?;
+                    id
+                } else {
+                    tx.execute(
+                        "INSERT INTO site_media \
+                            (base_hash, source_filename, kind, caption, alt, \
+                             focal_x, focal_y, width, height, exif_stripped, \
+                             created_at, sort_order) \
+                         VALUES (?1, ?2, 'photo', ?3, ?4, ?5, ?6, ?7, ?8, 1, datetime('now'), ?9)",
+                        params![
+                            it.base_hash,
+                            it.source_filename,
+                            it.caption,
+                            it.alt,
+                            it.focal_x,
+                            it.focal_y,
+                            it.width,
+                            it.height,
+                            i as i64,
+                        ],
+                    )?;
+                    count += 1;
+                    tx.last_insert_rowid()
+                };
+                // Refresh variants — cheap and lets a re-hydrate pick
+                // up new variant rows if the JSON schema evolved.
+                tx.execute(
+                    "DELETE FROM site_media_variants WHERE media_id = ?1",
+                    params![media_id],
+                )?;
+                for v in &it.variants {
+                    tx.execute(
+                        "INSERT INTO site_media_variants \
+                            (media_id, width, format, filename, bytes_len) \
+                         VALUES (?1, ?2, ?3, ?4, 0)",
+                        params![media_id, v.width, v.format, v.filename],
+                    )?;
+                }
+            }
+            tx.commit()?;
+            Ok(count)
+        })
+        .await?;
+    Ok(inserted)
+}
+
 pub async fn list_media(
     db: &DbGate,
     kind: Option<MediaKind>,
@@ -478,7 +576,7 @@ pub async fn list_media(
                 let mut stmt = conn.prepare(
                     "SELECT id FROM site_media \
                      WHERE deleted_at IS NULL AND kind = ?1 \
-                     ORDER BY id ASC",
+                     ORDER BY sort_order ASC, id ASC",
                 )?;
                 let rows = stmt.query_map(params![k], |r| r.get::<_, i64>(0))?;
                 for r in rows {
@@ -488,7 +586,7 @@ pub async fn list_media(
                 let mut stmt = conn.prepare(
                     "SELECT id FROM site_media \
                      WHERE deleted_at IS NULL \
-                     ORDER BY id ASC",
+                     ORDER BY sort_order ASC, id ASC",
                 )?;
                 let rows = stmt.query_map([], |r| r.get::<_, i64>(0))?;
                 for r in rows {
@@ -643,13 +741,14 @@ async fn upsert_media_and_variants(
 
     let media_id: i64 = db
         .with_conn(move |conn| {
-            // Try INSERT — on UNIQUE conflict on base_hash, treat as
-            // "already ingested" and update mutable fields in-place so
-            // callers get a consistent record.
+            // Dedup key is (base_hash, kind) not base_hash alone —
+            // the same bytes uploaded as a logo AND a gallery photo
+            // are legitimately distinct media rows. Previously the
+            // second upload would clobber the first's kind/variants.
             let existing: Option<i64> = conn
                 .query_row(
-                    "SELECT id FROM site_media WHERE base_hash = ?1",
-                    params![base_hash_owned],
+                    "SELECT id FROM site_media WHERE base_hash = ?1 AND kind = ?2",
+                    params![base_hash_owned, kind_owned],
                     |r| r.get::<_, i64>(0),
                 )
                 .optional()?;
@@ -819,6 +918,17 @@ fn gallery_json_path(repo_dir: &Path) -> PathBuf {
     repo_dir.join("content").join("gallery.json")
 }
 
+/// Global mutex serialising every read-modify-write of gallery.json.
+/// Concurrent uploads (`website_upload_photos` runs `ingest_photo`
+/// under `buffer_unordered`) previously produced a lost-update race
+/// where two workers each read the same items array, appended their
+/// own row, and clobbered the other. Held only around the JSON RMW,
+/// not around image encoding or DB writes.
+fn gallery_json_lock() -> &'static Mutex<()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+}
+
 /// Read gallery.json as a free-form JSON object so we can preserve
 /// site-owned top-level fields (page_heading, search_placeholder,
 /// caption_pool, total_images, photo_path_pattern, ...) that PR 1
@@ -833,10 +943,21 @@ fn read_gallery_root(repo_dir: &Path) -> MediaResult<serde_json::Map<String, ser
         return Ok(root);
     }
     let raw = std::fs::read_to_string(&p)?;
-    let value: serde_json::Value = serde_json::from_str(&raw).unwrap_or(serde_json::json!({}));
+    // Refuse to silently coerce corrupt/partial JSON to `{}` — doing
+    // so lets the next write wipe every site-owned top-level field
+    // (page_heading, caption_pool, ...) and every existing photo row.
+    // The caller surfaces this to the UI so the owner can restore
+    // from git before we clobber their gallery.
+    let value: serde_json::Value = serde_json::from_str(&raw)
+        .map_err(|e| MediaOpError::InvalidWorkingCopy(format!("{}: corrupt JSON — {e}", p.display())))?;
     let mut root = match value {
         serde_json::Value::Object(m) => m,
-        _ => serde_json::Map::new(),
+        _ => {
+            return Err(MediaOpError::InvalidWorkingCopy(format!(
+                "{}: expected top-level JSON object",
+                p.display()
+            )))
+        }
     };
     if !root.contains_key("schema_version") {
         root.insert("schema_version".into(), serde_json::json!(1));
@@ -904,6 +1025,7 @@ fn set_items(
 /// Append or update an item for `rec`, preserving the existing order
 /// of all other items AND all site-owned top-level fields.
 fn upsert_gallery_entry(repo_dir: &Path, rec: &MediaRecord) -> MediaResult<()> {
+    let _guard = gallery_json_lock().lock().unwrap_or_else(|p| p.into_inner());
     let mut root = read_gallery_root(repo_dir)?;
     let mut items = parse_items(&root);
     let item = record_to_item(rec);
@@ -921,6 +1043,7 @@ fn upsert_gallery_entry(repo_dir: &Path, rec: &MediaRecord) -> MediaResult<()> {
 /// (in order). Used by reorder / soft_delete / set_photo_meta.
 /// Preserves site-owned top-level fields.
 fn rewrite_gallery_items(repo_dir: &Path, records: &[MediaRecord]) -> MediaResult<()> {
+    let _guard = gallery_json_lock().lock().unwrap_or_else(|p| p.into_inner());
     let mut root = read_gallery_root(repo_dir)?;
     let items: Vec<GalleryItem> = records.iter().map(record_to_item).collect();
     set_items(&mut root, items)?;
@@ -1022,8 +1145,10 @@ async fn regenerate_favicons_from_source(
 pub(crate) fn apply_test_migrations(conn: &Connection) {
     let sql14 = include_str!("../../migrations/014_website_cms.sql");
     let sql15 = include_str!("../../migrations/015_website_media.sql");
+    let sql16 = include_str!("../../migrations/016_site_media_kind_unique.sql");
     conn.execute_batch(sql14).unwrap();
     conn.execute_batch(sql15).unwrap();
+    conn.execute_batch(sql16).unwrap();
 }
 
 #[cfg(test)]

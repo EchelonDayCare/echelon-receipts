@@ -42,6 +42,19 @@ export default function PageEditor() {
   const [busy, setBusy] = useState(false);
   const [saved, setSaved] = useState<string | null>(null);
 
+  // Warn on browser close / refresh with unsaved edits. In Tauri the
+  // window-close still fires `beforeunload`, so this catches ⌘Q as
+  // well as the sidebar Cmd-click that swaps pages.
+  useEffect(() => {
+    if (!dirty) return;
+    const handler = (e: BeforeUnloadEvent) => {
+      e.preventDefault();
+      e.returnValue = "";
+    };
+    window.addEventListener("beforeunload", handler);
+    return () => window.removeEventListener("beforeunload", handler);
+  }, [dirty]);
+
   // AI edit state — only rendered when the current page supports it.
   const AI_EDIT_PAGES: EditableFile[] = ["careers", "tour", "contact"];
   const aiEnabled = AI_EDIT_PAGES.includes(file);

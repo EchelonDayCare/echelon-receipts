@@ -247,8 +247,8 @@ pub async fn website_gallery_videos_delete(
             .iter()
             .any(|c| c.src == r.src || c.poster == r.poster);
         if !still_used {
-            let _ = std::fs::remove_file(wc.repo_dir.join(&r.src));
-            let _ = std::fs::remove_file(wc.repo_dir.join(&r.poster));
+            crate::website::tour::safe_delete_under_repo(&wc.repo_dir, &r.src, "assets/video/");
+            crate::website::tour::safe_delete_under_repo(&wc.repo_dir, &r.poster, "assets/video/");
         }
     }
 

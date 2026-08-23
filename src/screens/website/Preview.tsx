@@ -93,7 +93,26 @@ export default function Preview() {
           ⚠ {err}
         </div>
       )}
-      <div style={{ flex: 1, background: "#111827" }}>
+      <div style={{ flex: 1, background: "#111827", position: "relative" }}>
+        {info && info.pages.length === 0 && !busy && !err && (
+          <div
+            style={{
+              position: "absolute",
+              inset: 0,
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              color: "#94a3b8",
+              fontSize: 14,
+              padding: 24,
+              textAlign: "center",
+            }}
+          >
+            No pages rendered yet — check that the working copy has
+            been set up and templates are present under Website →
+            Overview.
+          </div>
+        )}
         {info && (
           <iframe
             ref={iframeRef}

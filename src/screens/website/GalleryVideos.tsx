@@ -49,8 +49,7 @@ export default function GalleryVideos() {
   const posterUrl = useCallback(
     (rel: string): string | null => {
       if (!repoRoot || !rel) return null;
-      const win = rel.split("/").join("\\");
-      const absPath = `${repoRoot}\\repo\\${win}`;
+      const absPath = `${repoRoot}/repo/${rel}`;
       return convertFileSrc(absPath);
     },
     [repoRoot],

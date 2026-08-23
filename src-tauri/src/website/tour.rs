@@ -192,6 +192,42 @@ pub(crate) fn next_id(existing: &[TourVideo]) -> String {
 /// still yields > 90 MB.
 pub(crate) const GITHUB_MAX_MB: u64 = 90;
 
+/// Best-effort delete of a repo-relative path, guarded against path
+/// traversal and absolute paths in the source JSON. The relative path
+/// must (a) not be empty, (b) not contain any `..` component, (c) not
+/// be absolute, (d) start with `expected_prefix` (repo-relative), and
+/// (e) resolve to a target inside `repo_dir` after canonicalization.
+/// Silently no-ops otherwise — the caller has no useful UI recovery.
+pub(crate) fn safe_delete_under_repo(repo_dir: &Path, rel: &str, expected_prefix: &str) {
+    if rel.is_empty() {
+        return;
+    }
+    if !rel.replace('\\', "/").starts_with(expected_prefix) {
+        return;
+    }
+    let candidate = PathBuf::from(rel);
+    if candidate.is_absolute() {
+        return;
+    }
+    if candidate
+        .components()
+        .any(|c| matches!(c, std::path::Component::ParentDir))
+    {
+        return;
+    }
+    let full = repo_dir.join(&candidate);
+    // Only canonicalize the parent (target may not exist for reasons
+    // other than being outside the repo) and require it under repo_dir.
+    let Some(parent) = full.parent() else { return };
+    let (Ok(rd_canon), Ok(par_canon)) = (repo_dir.canonicalize(), parent.canonicalize()) else {
+        return;
+    };
+    if !par_canon.starts_with(&rd_canon) {
+        return;
+    }
+    let _ = std::fs::remove_file(&full);
+}
+
 pub(crate) fn transcode_video(ffmpeg: &Path, src: &Path, dst: &Path) -> Result<(), String> {
     // Pick the encoder available on this OS. macOS ships with
     // h264_videotoolbox; Windows with h264_mf; Linux/other rely on
@@ -241,7 +277,14 @@ pub(crate) fn transcode_video(ffmpeg: &Path, src: &Path, dst: &Path) -> Result<(
             }
         }
     }
-    Ok(())
+    // All bitrate attempts still produced a file larger than GitHub's
+    // push cap. Fail loudly so the owner can trim the video before
+    // publish — otherwise `git push` would reject the whole commit and
+    // the failure would only surface at publish time.
+    let size_mb = std::fs::metadata(dst).map(|m| m.len() / 1024 / 1024).unwrap_or(0);
+    Err(format!(
+        "transcoded video is still {size_mb} MB (max {GITHUB_MAX_MB} MB) after 3 bitrate reductions — trim the source video or reduce its resolution"
+    ))
 }
 
 pub(crate) fn extract_poster(
@@ -429,12 +472,15 @@ pub async fn website_tour_delete_video(
     }
 
     // Best-effort delete files from working copy (only if not still
-    // referenced by another entry).
+    // referenced by another entry). Guard against path traversal /
+    // absolute paths in the JSON — src/poster are meant to be
+    // repo-relative under assets/video/, but a hand-edited tour.json
+    // could point anywhere.
     for r in &removed {
         let still_used = current.iter().any(|c| c.src == r.src || c.poster == r.poster);
         if !still_used {
-            let _ = std::fs::remove_file(wc.repo_dir.join(&r.src));
-            let _ = std::fs::remove_file(wc.repo_dir.join(&r.poster));
+            safe_delete_under_repo(&wc.repo_dir, &r.src, "assets/video/");
+            safe_delete_under_repo(&wc.repo_dir, &r.poster, "assets/video/");
         }
     }
 
