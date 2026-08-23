@@ -1,0 +1,505 @@
+//! Tauri command surface for the Website CMS module.
+//!
+//! # Feature-flag gating
+//! Every command below except `website_feature_enabled` first checks
+//! [`crate::website::FeatureFlag`] and refuses to run if the flag is
+//! off. So even if the frontend accidentally imports a screen while
+//! the flag is disabled, the Rust side won't write to
+//! `site_revisions` or spawn a preview server.
+//!
+//! # Working-copy discipline
+//! Every command that touches the working copy resolves paths via
+//! [`crate::website::git_ops::WorkingCopy::from_app_data`] using the
+//! Tauri `AppHandle`'s `app_data_dir()`. This is the same directory
+//! `path_guard::app_data_dir` is scoped to, so a rogue command
+//! argument can't redirect writes elsewhere.
+
+use std::path::PathBuf;
+
+use serde::{Deserialize, Serialize};
+use tauri::{AppHandle, Manager, State};
+
+use crate::db_gate::DbGate;
+use crate::website::{
+    git_ops, pat, preview_server, publish, renderer, revisions, schema, FeatureFlag,
+    WebsiteState,
+};
+
+fn require_enabled() -> Result<(), String> {
+    if !FeatureFlag::detect().enabled() {
+        return Err(
+            "Website CMS is disabled. Set ECHELON_WEBSITE_CMS=1 to enable."
+                .to_string(),
+        );
+    }
+    Ok(())
+}
+
+fn working_copy_from_app(app: &AppHandle) -> Result<git_ops::WorkingCopy, String> {
+    let base = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| format!("app_data_dir: {e}"))?;
+    std::fs::create_dir_all(&base).map_err(|e| format!("mkdir app data: {e}"))?;
+    Ok(git_ops::WorkingCopy::from_app_data(&base))
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Feature flag
+// ─────────────────────────────────────────────────────────────────────
+
+/// Returns whether the CMS is enabled. Never fails — the frontend
+/// gates every entry point on this. Called during app-boot to decide
+/// whether to render the sidebar entry and Home tile.
+#[tauri::command]
+pub fn website_feature_enabled() -> bool {
+    FeatureFlag::detect().enabled()
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Working copy lifecycle
+// ─────────────────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize)]
+pub struct WorkingCopyStatus {
+    pub root: String,
+    pub cloned: bool,
+    pub head_sha: Option<String>,
+    /// True iff `content/` and `templates/` both exist.
+    pub content_present: bool,
+    pub templates_present: bool,
+}
+
+/// Report the working-copy state.
+#[tauri::command]
+pub fn website_working_copy_status(app: AppHandle) -> Result<WorkingCopyStatus, String> {
+    require_enabled()?;
+    let wc = working_copy_from_app(&app)?;
+    let cloned = wc.exists();
+    let head_sha = if cloned {
+        wc.open().ok().and_then(|r| git_ops::head_sha(&r).ok())
+    } else {
+        None
+    };
+    let content_present = wc.repo_dir.join("content").is_dir();
+    let templates_present = wc.repo_dir.join("templates").is_dir();
+    Ok(WorkingCopyStatus {
+        root: wc.root.to_string_lossy().to_string(),
+        cloned,
+        head_sha,
+        content_present,
+        templates_present,
+    })
+}
+
+/// Ensure the working copy exists (clone if needed). Returns updated
+/// status. Long-running: performs a network clone on first call.
+#[tauri::command]
+pub async fn website_working_copy_init(app: AppHandle) -> Result<WorkingCopyStatus, String> {
+    require_enabled()?;
+    let wc = working_copy_from_app(&app)?;
+    // git2::Repository::clone is blocking — spawn it on the blocking pool.
+    let wc_clone = git_ops::WorkingCopy::from_app_data(
+        &app.path().app_data_dir().map_err(|e| e.to_string())?,
+    );
+    tokio::task::spawn_blocking(move || wc_clone.ensure_cloned().map(|_| ()))
+        .await
+        .map_err(|e| format!("join: {e}"))??;
+    let head_sha = wc.open().ok().and_then(|r| git_ops::head_sha(&r).ok());
+    Ok(WorkingCopyStatus {
+        root: wc.root.to_string_lossy().to_string(),
+        cloned: true,
+        head_sha,
+        content_present: wc.repo_dir.join("content").is_dir(),
+        templates_present: wc.repo_dir.join("templates").is_dir(),
+    })
+}
+
+/// Fetch + fast-forward `main`. Returns the new HEAD sha.
+#[tauri::command]
+pub async fn website_working_copy_pull(app: AppHandle) -> Result<String, String> {
+    require_enabled()?;
+    let wc = working_copy_from_app(&app)?;
+    tokio::task::spawn_blocking(move || {
+        let repo = wc.open()?;
+        git_ops::fetch_and_ff_main(&repo)
+    })
+    .await
+    .map_err(|e| format!("join: {e}"))?
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Content read / draft save
+// ─────────────────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ContentFile {
+    pub file: String,
+    pub content_json: String,
+    pub source: &'static str,
+    pub active_draft_rev: Option<i64>,
+}
+
+/// Load `content/<file>.json` — preferring the current draft in
+/// `site_revisions` over the working-copy version. If neither exists,
+/// returns Err.
+#[tauri::command]
+pub async fn website_load_content(
+    app: AppHandle,
+    db: State<'_, DbGate>,
+    file: String,
+) -> Result<ContentFile, String> {
+    require_enabled()?;
+    if !schema::is_editable(&file) {
+        return Err(format!("File '{file}' is not editable in PR 2 (media / gallery lands in PR 3)."));
+    }
+    let wc = working_copy_from_app(&app)?;
+
+    // Prefer the DB draft if one exists.
+    let draft = revisions::load_draft(db.inner(), &file)
+        .await
+        .map_err(|e| e.to_string())?;
+    let pointer = revisions::list_pointers(db.inner())
+        .await
+        .map_err(|e| e.to_string())?
+        .into_iter()
+        .find(|p| p.file == file);
+    if let Some(content_json) = draft {
+        return Ok(ContentFile {
+            file,
+            content_json,
+            source: "draft",
+            active_draft_rev: pointer.and_then(|p| p.active_draft_rev),
+        });
+    }
+
+    // Fall back to working copy.
+    let path: PathBuf = wc.repo_dir.join("content").join(format!("{file}.json"));
+    if !path.exists() {
+        return Err(format!("{}: not found in working copy", path.display()));
+    }
+    let content_json =
+        std::fs::read_to_string(&path).map_err(|e| format!("read {}: {e}", path.display()))?;
+    Ok(ContentFile {
+        file,
+        content_json,
+        source: "working_copy",
+        active_draft_rev: None,
+    })
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct SaveDraftRequest {
+    pub file: String,
+    pub content_json: String,
+    pub author: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct SaveDraftResponse {
+    pub revision_id: i64,
+    pub file: String,
+}
+
+/// Validate + save a draft. Returns the new revision id so the UI
+/// can jump into the History screen if the user wants.
+#[tauri::command]
+pub async fn website_save_draft(
+    db: State<'_, DbGate>,
+    req: SaveDraftRequest,
+) -> Result<SaveDraftResponse, String> {
+    require_enabled()?;
+    if !schema::is_editable(&req.file) {
+        return Err(format!("File '{}' is not editable in PR 2.", req.file));
+    }
+    // Reject invalid JSON before it hits the DB.
+    schema::validate(&req.file, &req.content_json)?;
+    let rev_id = revisions::save_draft(
+        db.inner(),
+        &req.file,
+        &req.content_json,
+        req.author.as_deref(),
+    )
+    .await
+    .map_err(|e| e.to_string())?;
+    Ok(SaveDraftResponse {
+        revision_id: rev_id,
+        file: req.file,
+    })
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// History
+// ─────────────────────────────────────────────────────────────────────
+
+#[tauri::command]
+pub async fn website_list_revisions(
+    db: State<'_, DbGate>,
+    file: String,
+    limit: Option<i64>,
+) -> Result<Vec<revisions::RevisionRow>, String> {
+    require_enabled()?;
+    let limit = limit.unwrap_or(100).clamp(1, 500);
+    revisions::list_revisions(db.inner(), &file, limit)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn website_load_revision(
+    db: State<'_, DbGate>,
+    rev_id: i64,
+) -> Result<String, String> {
+    require_enabled()?;
+    revisions::load_revision(db.inner(), rev_id)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn website_restore_revision(
+    db: State<'_, DbGate>,
+    rev_id: i64,
+    author: Option<String>,
+) -> Result<i64, String> {
+    require_enabled()?;
+    revisions::restore_revision(db.inner(), rev_id, author.as_deref())
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn website_list_pointers(
+    db: State<'_, DbGate>,
+) -> Result<Vec<revisions::PointerRow>, String> {
+    require_enabled()?;
+    revisions::list_pointers(db.inner())
+        .await
+        .map_err(|e| e.to_string())
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Preview
+// ─────────────────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize)]
+pub struct PreviewInfo {
+    pub url: String,
+    pub port: u16,
+    pub render_dir: String,
+    pub pages: Vec<String>,
+}
+
+/// Re-render the site from the current drafts + working copy and
+/// (re)start the preview server. The frontend loads `info.url` in an
+/// `<iframe>` on the Preview screen.
+#[tauri::command]
+pub async fn website_start_preview(
+    app: AppHandle,
+    db: State<'_, DbGate>,
+    state: State<'_, WebsiteState>,
+) -> Result<PreviewInfo, String> {
+    require_enabled()?;
+    let wc = working_copy_from_app(&app)?;
+    if !wc.exists() {
+        return Err(
+            "Working copy not initialized. Click 'Set up working copy' first.".into(),
+        );
+    }
+    // Collect the current draft for every editable file. If a file
+    // has no draft, fall back silently to the working-copy version.
+    let mut overrides = std::collections::BTreeMap::new();
+    for file in schema::EDITABLE_FILES {
+        if let Some(json_str) = revisions::load_draft(db.inner(), file)
+            .await
+            .map_err(|e| e.to_string())?
+        {
+            let v: serde_json::Value = serde_json::from_str(&json_str).map_err(|e| {
+                format!("draft for {file} is not valid JSON: {e}")
+            })?;
+            overrides.insert(file.to_string(), v);
+        }
+    }
+    let render_dir = wc.render_dir.clone();
+    std::fs::create_dir_all(&render_dir)
+        .map_err(|e| format!("mkdir render_dir: {e}"))?;
+    let repo_dir = wc.repo_dir.clone();
+    let (pages, render_dir) = tokio::task::spawn_blocking(move || {
+        let inputs = renderer::RenderInputs::load(&repo_dir, overrides)?;
+        let written = renderer::render_all(&inputs, &render_dir)?;
+        // Best-effort copy of assets/ for CSS/img/JS.
+        let _ = copy_assets_best_effort(&inputs.repo_root, &render_dir);
+        Ok::<_, String>((written, render_dir))
+    })
+    .await
+    .map_err(|e| format!("join: {e}"))??;
+
+    // (Re)start the server. Drop the old handle first so the port
+    // binder doesn't collide.
+    let mut guard = state.preview.lock().await;
+    guard.take(); // drops any prior server
+    let handle = preview_server::PreviewHandle::start(render_dir.clone())?;
+    let info = PreviewInfo {
+        url: handle.url.clone(),
+        port: handle.port,
+        render_dir: handle.root.to_string_lossy().to_string(),
+        pages: pages.into_iter().map(|(k, _)| k).collect(),
+    };
+    *guard = Some(handle);
+    Ok(info)
+}
+
+fn copy_assets_best_effort(
+    repo_dir: &std::path::Path,
+    render_dir: &std::path::Path,
+) -> std::io::Result<()> {
+    let src = repo_dir.join("assets");
+    if !src.is_dir() {
+        return Ok(());
+    }
+    let dst = render_dir.join("assets");
+    copy_tree(&src, &dst)
+}
+
+fn copy_tree(src: &std::path::Path, dst: &std::path::Path) -> std::io::Result<()> {
+    if !src.is_dir() {
+        return Ok(());
+    }
+    std::fs::create_dir_all(dst)?;
+    for entry in std::fs::read_dir(src)? {
+        let entry = entry?;
+        let ty = entry.file_type()?;
+        let from = entry.path();
+        let to = dst.join(entry.file_name());
+        if ty.is_dir() {
+            copy_tree(&from, &to)?;
+        } else if ty.is_file() {
+            std::fs::copy(&from, &to)?;
+        }
+    }
+    Ok(())
+}
+
+/// Stop the preview server. Idempotent.
+#[tauri::command]
+pub async fn website_stop_preview(state: State<'_, WebsiteState>) -> Result<(), String> {
+    require_enabled()?;
+    let mut guard = state.preview.lock().await;
+    guard.take();
+    Ok(())
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Publish
+// ─────────────────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct PublishRequest {
+    pub commit_message: String,
+    pub author_display: Option<String>,
+    /// If true, we skip the actual push to GitHub. Used for local
+    /// dry-runs the user's expected to do a few times before enabling
+    /// real publishing in a follow-up PR.
+    #[serde(default)]
+    pub dry_run: bool,
+}
+
+/// Run the publish pipeline synchronously (from the caller's point of
+/// view — the actual work happens on a Tokio task).
+#[tauri::command]
+pub async fn website_publish(
+    app: AppHandle,
+    db: State<'_, DbGate>,
+    state: State<'_, WebsiteState>,
+    req: PublishRequest,
+) -> Result<publish::PipelineOutcome, String> {
+    require_enabled()?;
+    let wc = working_copy_from_app(&app)?;
+    if !wc.exists() {
+        return Err("Working copy not initialized.".into());
+    }
+
+    // Only one publish at a time.
+    let _lock = state.publish_in_flight.lock().await;
+
+    // Collect drafts.
+    let mut drafts: Vec<(String, String)> = Vec::new();
+    for file in schema::EDITABLE_FILES {
+        if let Some(json_str) = revisions::load_draft(db.inner(), file)
+            .await
+            .map_err(|e| e.to_string())?
+        {
+            drafts.push((file.to_string(), json_str));
+        }
+    }
+
+    let pat_opt = if req.dry_run { None } else { pat::load_pat()? };
+
+    let inputs = publish::PipelineInputs {
+        db: db.inner(),
+        repo_dir: &wc.repo_dir,
+        render_dir: &wc.render_dir,
+        drafts: drafts.clone(),
+        commit_message: req.commit_message,
+        author_display: req.author_display,
+        pat: pat_opt,
+        dry_run: req.dry_run,
+        verified_url: "https://echelondaycare.com/".to_string(),
+    };
+    let outcome = publish::run_pipeline(inputs).await;
+
+    if outcome.error.is_none() && !req.dry_run {
+        // Mark pushed + verified so the pointer table reflects reality.
+        let files: Vec<String> = drafts.iter().map(|(f, _)| f.clone()).collect();
+        let _ = revisions::mark_pushed(db.inner(), &files).await;
+        let _ = revisions::mark_verified_live(db.inner(), &files).await;
+    }
+    Ok(outcome)
+}
+
+#[tauri::command]
+pub async fn website_list_publications(
+    db: State<'_, DbGate>,
+    limit: Option<i64>,
+) -> Result<Vec<publish::PublicationRow>, String> {
+    require_enabled()?;
+    let limit = limit.unwrap_or(50).clamp(1, 500);
+    publish::list_recent(db.inner(), limit)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// PAT wizard
+// ─────────────────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize)]
+pub struct PatStatus {
+    pub connected: bool,
+}
+
+#[tauri::command]
+pub fn website_pat_status() -> Result<PatStatus, String> {
+    require_enabled()?;
+    Ok(PatStatus {
+        connected: pat::is_stored()?,
+    })
+}
+
+#[tauri::command]
+pub async fn website_pat_verify_and_store(
+    token: String,
+) -> Result<pat::PatVerification, String> {
+    require_enabled()?;
+    let v = pat::verify_pat(&token).await?;
+    if v.ok {
+        pat::store_pat(&token)?;
+    }
+    Ok(v)
+}
+
+#[tauri::command]
+pub fn website_pat_disconnect() -> Result<(), String> {
+    require_enabled()?;
+    pat::delete_pat()
+}

@@ -72,6 +72,33 @@ quick-xml = "0.36"
 unicode-normalization = "0.1"
 tempfile = "3"
 
+# ── Website CMS module (v3.20.0 PR 2) ──────────────────────────────────
+# git2 = libgit2 bindings for clone / fetch / commit / push against the
+# `EchelonDayCare/echelon-website` repo. vendored-libgit2 avoids a
+# system libgit2 dep; https is kept so HTTPS clone of the public
+# GitHub repo works. On Windows, libgit2's https transport uses
+# WinHTTP (schannel) — no openssl link needed. default-features are
+# disabled so we don't drag in libssh2.
+git2 = { version = "0.19", default-features = false, features = ["vendored-libgit2", "https"] }
+# MiniJinja renders the same Jinja2 templates the site repo's
+# scripts/render.py uses — so the desktop preview matches the
+# committed HTML byte-for-byte on schema-compatible inputs. `json`
+# feature enables `tojson`, `loader` enables the FileSystemLoader
+# so we can point at the pinned templates/ dir in the working copy.
+minijinja = { version = "2", features = ["json", "loader"] }
+# tiny_http is a synchronous, single-crate HTTP server used only to
+# serve the local render preview at http://127.0.0.1:<random>/ from
+# the WebView. axum was the alternative but requires new tokio task
+# plumbing for a purely static-file server; tiny_http is 300 lines
+# of code and adds no async runtime obligations. Preview does not
+# need concurrency, HTTPS, or routing — just static bytes.
+tiny_http = "0.12"
+mime_guess = "2"
+walkdir = "2"
+# scraper parses the rendered HTML pages before publish so we fail
+# fast on template bugs rather than pushing broken HTML to Pages.
+scraper = "0.20"
+
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
