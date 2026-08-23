@@ -1,5 +1,5 @@
-import { useEffect, useRef, useState } from "react";
-import { useNavigate } from "react-router-dom";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { useNavigate, useSearchParams } from "react-router-dom";
 import {
   websiteStartPreview,
   websiteStopPreview,
@@ -9,12 +9,24 @@ import {
 // Live preview of the rendered site inside an iframe pointing at the
 // tiny_http server the backend started. Clicking "Refresh" re-renders
 // from the current drafts + working copy and reloads the iframe.
+//
+// Accepts optional `?page=<slug>` query param — e.g. `?page=careers`
+// opens the preview directly on `/pages/careers.html` instead of the
+// site index. Used by the streamlined AI-edit flow so the user sees
+// their target page immediately after clicking Preview.
 export default function Preview() {
   const nav = useNavigate();
+  const [params] = useSearchParams();
+  const page = params.get("page");
   const [info, setInfo] = useState<PreviewInfo | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const iframeRef = useRef<HTMLIFrameElement | null>(null);
+
+  const initialPath = useMemo(
+    () => (page ? `/pages/${page}.html` : ""),
+    [page],
+  );
 
   async function refresh() {
     setBusy(true);
@@ -22,10 +34,8 @@ export default function Preview() {
     try {
       const p = await websiteStartPreview();
       setInfo(p);
-      // Force iframe reload with a cache-buster because tiny_http
-      // sets no-store but browsers still cache aggressively.
       if (iframeRef.current) {
-        iframeRef.current.src = `${p.url}?t=${Date.now()}`;
+        iframeRef.current.src = `${p.url}${initialPath}?t=${Date.now()}`;
       }
     } catch (e: any) {
       setErr(String(e?.message ?? e));
@@ -65,6 +75,13 @@ export default function Preview() {
           <button className="btn" onClick={refresh} disabled={busy}>
             {busy ? "Rendering…" : "Refresh preview"}
           </button>
+          <button
+            className="btn"
+            onClick={() => nav("/website/publish")}
+            style={{ background: "#059669", color: "white" }}
+          >
+            Publish →
+          </button>
         </div>
       </header>
       {err && (
@@ -76,7 +93,7 @@ export default function Preview() {
         {info && (
           <iframe
             ref={iframeRef}
-            src={info.url}
+            src={`${info.url}${initialPath}`}
             title="Site preview"
             style={{ width: "100%", height: "100%", border: 0, background: "white" }}
           />
