@@ -25,6 +25,7 @@ mod db_gate;
 mod auth;
 mod printing;
 mod graduation;
+mod website;
 
 /// Every schema migration we ship, in version order. Version numbers
 /// are stable across v1.x → v2.0.0 so entries backfilled from the
@@ -45,6 +46,7 @@ pub fn embedded_migrations() -> Vec<(i64, &'static str, &'static str)> {
         (11, "add_no_lunch_flag", include_str!("../migrations/011_no_lunch.sql")),
         (12, "add_graduation_renders", include_str!("../migrations/012_graduation_renders.sql")),
         (13, "add_grad_reel_email_defaults", include_str!("../migrations/013_grad_email.sql")),
+        (14, "add_website_cms_tables", include_str!("../migrations/014_website_cms.sql")),
     ]
 }
 
@@ -58,6 +60,7 @@ pub fn run() {
         .manage(db_gate::DbGate::new())
         .manage(auth::AuthState::new())
         .manage(graduation::commands::RenderState::default())
+        .manage(website::WebsiteState::default())
         .setup(|app| {
             // Install panic hook + error log file before anything else can crash.
             errlog::init(&app.handle());
@@ -187,6 +190,23 @@ pub fn run() {
             graduation::commands::graduation_reset_cancel,
             graduation::commands::graduation_render_slides,
             graduation::commands::graduation_export_slide_images,
+            website::commands::website_feature_enabled,
+            website::commands::website_working_copy_status,
+            website::commands::website_working_copy_init,
+            website::commands::website_working_copy_pull,
+            website::commands::website_load_content,
+            website::commands::website_save_draft,
+            website::commands::website_list_revisions,
+            website::commands::website_load_revision,
+            website::commands::website_restore_revision,
+            website::commands::website_list_pointers,
+            website::commands::website_start_preview,
+            website::commands::website_stop_preview,
+            website::commands::website_publish,
+            website::commands::website_list_publications,
+            website::commands::website_pat_status,
+            website::commands::website_pat_verify_and_store,
+            website::commands::website_pat_disconnect,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
