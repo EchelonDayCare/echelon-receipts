@@ -181,6 +181,113 @@ export function websitePatDisconnect(): Promise<void> {
   return invoke("website_pat_disconnect");
 }
 
+// ─────────────────────────────────────────────────────────────────────
+// Media pipeline (PR 3)
+// ─────────────────────────────────────────────────────────────────────
+
+export type MediaKind =
+  | "photo"
+  | "video"
+  | "pdf"
+  | "logo"
+  | "favicon"
+  | "og_image";
+
+export type MediaVariant = {
+  id: number;
+  width: number;
+  format: string;
+  filename: string;
+  bytes_len: number;
+};
+
+export type MediaRecord = {
+  id: number;
+  base_hash: string;
+  source_filename: string;
+  kind: string;
+  caption: string | null;
+  alt: string | null;
+  focal_x: number | null;
+  focal_y: number | null;
+  width: number | null;
+  height: number | null;
+  original_bytes_len: number | null;
+  exif_stripped: boolean;
+  created_at: string;
+  deleted_at: string | null;
+  variants: MediaVariant[];
+};
+
+export function websiteListMedia(kind?: MediaKind): Promise<MediaRecord[]> {
+  return invoke<MediaRecord[]>("website_list_media", { kind });
+}
+
+export function websiteUploadPhoto(
+  sourcePath: string,
+  caption?: string,
+  alt?: string,
+): Promise<MediaRecord> {
+  return invoke<MediaRecord>("website_upload_photo", {
+    sourcePath,
+    caption,
+    alt,
+  });
+}
+
+export function websiteUploadPhotos(
+  sourcePaths: string[],
+): Promise<MediaRecord[]> {
+  return invoke<MediaRecord[]>("website_upload_photos", { sourcePaths });
+}
+
+export function websiteReorderGallery(
+  orderedMediaIds: number[],
+): Promise<void> {
+  return invoke("website_reorder_gallery", { orderedMediaIds });
+}
+
+export function websiteEditMedia(
+  mediaId: number,
+  caption?: string,
+  alt?: string,
+  focal?: [number, number] | null,
+): Promise<MediaRecord> {
+  return invoke<MediaRecord>("website_edit_media", {
+    mediaId,
+    caption,
+    alt,
+    focal: focal ?? null,
+  });
+}
+
+export function websiteDeleteMedia(mediaId: number): Promise<void> {
+  return invoke("website_delete_media", { mediaId });
+}
+
+export function websiteEmergencyRemove(
+  mediaId: number,
+  reason: string,
+): Promise<void> {
+  return invoke("website_emergency_remove", { mediaId, reason });
+}
+
+export function websiteReplaceLogo(sourcePath: string): Promise<MediaRecord> {
+  return invoke<MediaRecord>("website_replace_logo", { sourcePath });
+}
+
+export function websiteReplaceFavicon(
+  sourcePath: string,
+): Promise<MediaRecord> {
+  return invoke<MediaRecord>("website_replace_favicon", { sourcePath });
+}
+
+export function websiteReplaceOgImage(
+  sourcePath: string,
+): Promise<MediaRecord> {
+  return invoke<MediaRecord>("website_replace_og_image", { sourcePath });
+}
+
 /// Small helper: try to pretty-print a JSON blob for the editor
 /// textarea. If parse fails, hand back the raw string so the user
 /// can still salvage their edits.

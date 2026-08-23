@@ -52,6 +52,8 @@ const WebsitePreview = lazy(() => import("./screens/website/Preview"));
 const WebsiteHistory = lazy(() => import("./screens/website/History"));
 const WebsitePublish = lazy(() => import("./screens/website/Publish"));
 const WebsiteSettings = lazy(() => import("./screens/website/Settings"));
+const WebsiteGallery = lazy(() => import("./screens/website/Gallery"));
+const WebsiteAssets = lazy(() => import("./screens/website/Assets"));
 import { runCloudBackupIfDue } from "./lib/cloudBackup";
 import { getSettings } from "./lib/db";
 import { getVersion } from "@tauri-apps/api/app";
@@ -357,6 +359,9 @@ function Shell({ logo, name, staffEnabled }: { logo: string; name: string; staff
           { to: "/website/tour", label: "Virtual Tour" },
           { to: "/website/careers", label: "Careers" },
           { to: "/website/seo", label: "SEO" },
+          { to: "", label: "Media", header: true },
+          { to: "/website/gallery", label: "Gallery" },
+          { to: "/website/assets", label: "Logo / OG image" },
           { to: "", label: "Publish", header: true },
           { to: "/website/preview", label: "Preview" },
           { to: "/website/history", label: "Version history" },
@@ -537,6 +542,8 @@ function Shell({ logo, name, staffEnabled }: { logo: string; name: string; staff
           <Route path="/website/history" element={<WebsiteHistory />} />
           <Route path="/website/publish" element={<WebsitePublish />} />
           <Route path="/website/settings" element={<WebsiteSettings />} />
+          <Route path="/website/gallery" element={<WebsiteGallery />} />
+          <Route path="/website/assets" element={<WebsiteAssets />} />
           <Route path="/website/:file" element={<WebsitePageEditor />} />
 
           {/* Redirects for old Students routes now moved to Reports module */}

@@ -241,7 +241,10 @@ fn detect_qr_fiducials(img: &image::DynamicImage) -> Option<(u32, [Option<(f64, 
         hints.PureBarcode = Some(false);
         let mut found: [Option<(f64, f64)>; 4] = [None; 4];
         for binarizer_kind in ["hybrid", "global"] {
-            let source = Luma8LuminanceSource::new(gray.as_raw().clone(), w, h);
+            let source = match Luma8LuminanceSource::new(gray.as_raw().clone(), w, h) {
+                Ok(s) => s,
+                Err(_) => break,
+            };
             let attempt: Result<Vec<rxing::RXingResult>, _> = if binarizer_kind == "hybrid" {
                 let mut bitmap = BinaryBitmap::new(HybridBinarizer::new(source));
                 QRCodeMultiReader::new().decode_multiple_with_hints(&mut bitmap, &hints)

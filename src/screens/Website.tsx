@@ -155,18 +155,38 @@ export default function Website() {
               <div style={{ fontSize: 12, color: "var(--muted, #64748b)", marginTop: 4 }}>{e.desc}</div>
             </button>
           ))}
-          <div
+          <button
+            onClick={() => nav("/website/gallery")}
             style={{
+              textAlign: "left",
               padding: 16,
               borderRadius: 10,
-              border: "1px dashed rgba(0,0,0,0.15)",
-              background: "rgba(0,0,0,0.02)",
-              color: "var(--muted, #64748b)",
+              border: "1px solid rgba(0,0,0,0.1)",
+              background: "white",
+              cursor: "pointer",
             }}
           >
-            <div style={{ fontWeight: 600, fontSize: 15 }}>Gallery & media</div>
-            <div style={{ fontSize: 12, marginTop: 4 }}>Coming in the media module (PR 3).</div>
-          </div>
+            <div style={{ fontWeight: 600, fontSize: 15 }}>Gallery</div>
+            <div style={{ fontSize: 12, color: "var(--muted, #64748b)", marginTop: 4 }}>
+              Upload, reorder, caption, and moderate site photos.
+            </div>
+          </button>
+          <button
+            onClick={() => nav("/website/assets")}
+            style={{
+              textAlign: "left",
+              padding: 16,
+              borderRadius: 10,
+              border: "1px solid rgba(0,0,0,0.1)",
+              background: "white",
+              cursor: "pointer",
+            }}
+          >
+            <div style={{ fontWeight: 600, fontSize: 15 }}>Site assets</div>
+            <div style={{ fontSize: 12, color: "var(--muted, #64748b)", marginTop: 4 }}>
+              Logo, favicons (auto-regenerated), and Open Graph image.
+            </div>
+          </button>
         </div>
       </section>
 

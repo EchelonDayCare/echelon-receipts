@@ -4,6 +4,46 @@ All notable changes shipped as a DMG. Only entries the owner has approved
 for release are listed here — "code-complete, awaiting ship approval" work
 lives in the session plan.md until it ships.
 
+## v3.20.0 — Website CMS module: content editor + media pipeline (behind ECHELON_WEBSITE_CMS=1)
+
+New in-app module for editing `EchelonDayCare/echelon-website` — text
+content, gallery photos, logo/favicons/OG image — from the desktop
+without ever touching git or an editor. **Gated behind the
+`ECHELON_WEBSITE_CMS=1` env var** so the daycare owner sees nothing new
+until we flip the switch.
+
+**PR 2 (content):**
+- Text editors for `site.json`, `home.json`, `about.json`, `services.json`,
+  `contact.json`, `tour.json`, `careers.json`, `seo.json`.
+- Immutable revision history (`site_revisions`) with pointer table
+  (`site_pointers`) for active-draft / last-pushed / last-verified-live.
+- Local MiniJinja preview server bound to a random loopback port,
+  matching the site-repo's `scripts/render.py` byte-for-byte on
+  schema-compatible inputs.
+- PAT wizard: verify token against `GET /repos/.../echelon-website` and
+  store in the OS keychain — the frontend never sees the token bytes.
+- Publish state machine persisted in `site_publications`.
+
+**PR 3 (media, this release):**
+- Deterministic photo pipeline: BLAKE3-hashed filenames, EXIF/XMP/IPTC/ICC
+  strip, 3 widths × 3 formats (AVIF q=50, WebP, JPG q=82) via Rayon.
+- EXIF orientation baked into pixel data before strip, so phone photos
+  taken in portrait render upright (browsers no longer need the stripped
+  orientation tag).
+- New DB tables: `site_media`, `site_media_variants`,
+  `site_emergency_removes` (migration 015).
+- Gallery editor: drag-drop upload zone, thumbnail grid with HTML5
+  drag-reorder, click-to-edit modal (caption / alt / focal-point
+  picker), delete + emergency-remove flows.
+- Site assets editor: logo replace (auto-regenerates 16/32/180 px
+  favicons), Open Graph image replace (1200 × 630 crop-to-fill).
+- HEIC input supported via existing `libheif-rs` dep (converted to
+  JPEG then fed to the pipeline).
+
+Video and PDF ingestion are stubbed — real ffmpeg-sidecar + PDF
+rasteriser wiring lands in PR 3.5. Publish-time git history rewrite
+for emergency-removes lands in PR 4.
+
 ## v3.19.4 — Graduation deck: photo survives Mac PPT export + prints edge-to-edge on A4
 
 Two fixes to the graduation certificate pipeline:
