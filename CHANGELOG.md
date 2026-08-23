@@ -4,6 +4,19 @@ All notable changes shipped as a DMG. Only entries the owner has approved
 for release are listed here — "code-complete, awaiting ship approval" work
 lives in the session plan.md until it ships.
 
+## v3.20.1 — Website CMS: 5-10× faster bulk photo upload
+
+- `website_upload_photos` now runs up to 8 photo ingests in parallel
+  (bounded by `available_parallelism() - 1`, capped at 8) instead of
+  serially. Different photos overlap disk read + DB write + moderate
+  encode phases while the per-photo rayon pool still saturates cores
+  within a photo.
+- AVIF speed preset bumped 4 → 8 (~2-3× faster encode, ~15-25% larger
+  files). AVIF-at-8 is still smaller than WebP on typical photos, so
+  the on-disk cost is acceptable for a self-hosted gallery.
+- Expected wall-time for 50 photos: ~15-25s in release / DMG (was
+  ~60s), ~2 min in Windows debug build (was ~10 min).
+
 ## v3.20.0 — Website CMS module: content editor + media pipeline (behind ECHELON_WEBSITE_CMS=1)
 
 New in-app module for editing `EchelonDayCare/echelon-website` — text
