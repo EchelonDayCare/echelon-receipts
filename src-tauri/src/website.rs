@@ -49,6 +49,7 @@ use tokio::sync::Mutex;
 
 pub mod commands;
 pub mod git_ops;
+pub mod media;
 pub mod pat;
 pub mod preview_server;
 pub mod publish;

@@ -26,6 +26,7 @@ mod auth;
 mod printing;
 mod graduation;
 mod website;
+mod website_media;
 
 /// Every schema migration we ship, in version order. Version numbers
 /// are stable across v1.x → v2.0.0 so entries backfilled from the
@@ -47,6 +48,7 @@ pub fn embedded_migrations() -> Vec<(i64, &'static str, &'static str)> {
         (12, "add_graduation_renders", include_str!("../migrations/012_graduation_renders.sql")),
         (13, "add_grad_reel_email_defaults", include_str!("../migrations/013_grad_email.sql")),
         (14, "add_website_cms_tables", include_str!("../migrations/014_website_cms.sql")),
+        (15, "add_website_media", include_str!("../migrations/015_website_media.sql")),
     ]
 }
 
@@ -207,6 +209,16 @@ pub fn run() {
             website::commands::website_pat_status,
             website::commands::website_pat_verify_and_store,
             website::commands::website_pat_disconnect,
+            website::commands::website_list_media,
+            website::commands::website_upload_photo,
+            website::commands::website_upload_photos,
+            website::commands::website_reorder_gallery,
+            website::commands::website_edit_media,
+            website::commands::website_delete_media,
+            website::commands::website_emergency_remove,
+            website::commands::website_replace_logo,
+            website::commands::website_replace_favicon,
+            website::commands::website_replace_og_image,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -14,14 +14,14 @@
 //! `path_guard::app_data_dir` is scoped to, so a rogue command
 //! argument can't redirect writes elsewhere.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Manager, State};
 
 use crate::db_gate::DbGate;
 use crate::website::{
-    git_ops, pat, preview_server, publish, renderer, revisions, schema, FeatureFlag,
+    git_ops, media, pat, preview_server, publish, renderer, revisions, schema, FeatureFlag,
     WebsiteState,
 };
 
@@ -502,4 +502,189 @@ pub async fn website_pat_verify_and_store(
 pub fn website_pat_disconnect() -> Result<(), String> {
     require_enabled()?;
     pat::delete_pat()
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Media pipeline (v3.20.0 PR 3)
+// ─────────────────────────────────────────────────────────────────────
+//
+// All commands below are `async` because the underlying pipeline is
+// CPU-bound and runs on `tokio::task::spawn_blocking` inside
+// `media::ingest_photo`. Every command resolves the working-copy
+// path from `AppHandle` so a malicious frontend can't redirect
+// writes elsewhere.
+
+fn ensure_working_copy(app: &AppHandle) -> Result<git_ops::WorkingCopy, String> {
+    let wc = working_copy_from_app(app)?;
+    if !wc.exists() {
+        return Err(
+            "Working copy not initialized. Click 'Set up working copy' first.".into(),
+        );
+    }
+    Ok(wc)
+}
+
+fn to_err<E: std::fmt::Display>(e: E) -> String {
+    e.to_string()
+}
+
+#[tauri::command]
+pub async fn website_list_media(
+    db: State<'_, DbGate>,
+    kind: Option<String>,
+) -> Result<Vec<media::MediaRecord>, String> {
+    require_enabled()?;
+    let parsed_kind = match kind {
+        Some(k) => Some(media::MediaKind::parse(&k).ok_or_else(|| format!("unknown kind: {k}"))?),
+        None => None,
+    };
+    media::list_media(db.inner(), parsed_kind)
+        .await
+        .map_err(to_err)
+}
+
+#[tauri::command]
+pub async fn website_upload_photo(
+    app: AppHandle,
+    db: State<'_, DbGate>,
+    source_path: String,
+    caption: Option<String>,
+    alt: Option<String>,
+) -> Result<media::MediaRecord, String> {
+    require_enabled()?;
+    let wc = ensure_working_copy(&app)?;
+    media::ingest_photo(
+        db.inner(),
+        &wc.repo_dir,
+        Path::new(&source_path),
+        media::MediaKind::Photo,
+        caption,
+        alt,
+    )
+    .await
+    .map_err(to_err)
+}
+
+#[tauri::command]
+pub async fn website_upload_photos(
+    app: AppHandle,
+    db: State<'_, DbGate>,
+    source_paths: Vec<String>,
+) -> Result<Vec<media::MediaRecord>, String> {
+    require_enabled()?;
+    let wc = ensure_working_copy(&app)?;
+    let mut out = Vec::with_capacity(source_paths.len());
+    for path in source_paths {
+        let rec = media::ingest_photo(
+            db.inner(),
+            &wc.repo_dir,
+            Path::new(&path),
+            media::MediaKind::Photo,
+            None,
+            None,
+        )
+        .await
+        .map_err(to_err)?;
+        out.push(rec);
+    }
+    Ok(out)
+}
+
+#[tauri::command]
+pub async fn website_reorder_gallery(
+    app: AppHandle,
+    db: State<'_, DbGate>,
+    ordered_media_ids: Vec<i64>,
+) -> Result<(), String> {
+    require_enabled()?;
+    let wc = ensure_working_copy(&app)?;
+    media::reorder_gallery(db.inner(), &wc.repo_dir, ordered_media_ids)
+        .await
+        .map_err(to_err)
+}
+
+#[tauri::command]
+pub async fn website_edit_media(
+    app: AppHandle,
+    db: State<'_, DbGate>,
+    media_id: i64,
+    caption: Option<String>,
+    alt: Option<String>,
+    focal: Option<(f32, f32)>,
+) -> Result<media::MediaRecord, String> {
+    require_enabled()?;
+    let wc = ensure_working_copy(&app)?;
+    media::set_photo_meta(db.inner(), &wc.repo_dir, media_id, caption, alt, focal)
+        .await
+        .map_err(to_err)
+}
+
+#[tauri::command]
+pub async fn website_delete_media(
+    app: AppHandle,
+    db: State<'_, DbGate>,
+    media_id: i64,
+) -> Result<(), String> {
+    require_enabled()?;
+    let wc = ensure_working_copy(&app)?;
+    media::soft_delete(db.inner(), &wc.repo_dir, media_id)
+        .await
+        .map_err(to_err)
+}
+
+#[tauri::command]
+pub async fn website_emergency_remove(
+    app: AppHandle,
+    db: State<'_, DbGate>,
+    media_id: i64,
+    reason: String,
+) -> Result<(), String> {
+    require_enabled()?;
+    let wc = ensure_working_copy(&app)?;
+    // We don't have a signed-in user in the CMS module; use a
+    // constant identifier so audit rows stay attributable to the
+    // desktop client.
+    let requested_by = "cms-desktop@echelondaycare.local".to_string();
+    media::emergency_remove(db.inner(), &wc.repo_dir, media_id, reason, requested_by)
+        .await
+        .map_err(to_err)
+}
+
+#[tauri::command]
+pub async fn website_replace_logo(
+    app: AppHandle,
+    db: State<'_, DbGate>,
+    source_path: String,
+) -> Result<media::MediaRecord, String> {
+    require_enabled()?;
+    let wc = ensure_working_copy(&app)?;
+    media::replace_logo(db.inner(), &wc.repo_dir, Path::new(&source_path))
+        .await
+        .map_err(to_err)
+}
+
+#[tauri::command]
+pub async fn website_replace_favicon(
+    app: AppHandle,
+    db: State<'_, DbGate>,
+    source_path: String,
+) -> Result<media::MediaRecord, String> {
+    require_enabled()?;
+    let wc = ensure_working_copy(&app)?;
+    media::replace_favicon(db.inner(), &wc.repo_dir, Path::new(&source_path))
+        .await
+        .map_err(to_err)
+}
+
+#[tauri::command]
+pub async fn website_replace_og_image(
+    app: AppHandle,
+    db: State<'_, DbGate>,
+    source_path: String,
+) -> Result<media::MediaRecord, String> {
+    require_enabled()?;
+    let wc = ensure_working_copy(&app)?;
+    media::replace_og_image(db.inner(), &wc.repo_dir, Path::new(&source_path))
+        .await
+        .map_err(to_err)
 }
