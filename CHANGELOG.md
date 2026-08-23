@@ -4,6 +4,21 @@ All notable changes shipped as a DMG. Only entries the owner has approved
 for release are listed here — "code-complete, awaiting ship approval" work
 lives in the session plan.md until it ships.
 
+## v3.20.3 — Website CMS Gallery: thumbnails, multi-select, batch delete
+
+- **Thumbnails now render** in the Gallery editor. Adds
+  `assetProtocol.enable` + scope to `tauri.conf.json` so the WebView
+  can load `asset://` URLs from `%APPDATA%\org.echelondaycare.receipts\...`
+  (Windows) and `~/Library/.../` (macOS).
+- **Multi-select toolbar**: "Select all" checkbox + per-card checkbox,
+  "Delete selected (N)" button, and "Delete all N" button.
+- Batch delete runs one `websiteDeleteMedia` call per target, reports
+  aggregate success/failure, then refreshes the grid.
+
+Flow after this ship: Open Gallery → see current live photos as thumbnails
+→ tick to delete some, or "Delete all" → drop new photos → Publish →
+site updates in one click (v3.20.2 already covers the publish half).
+
 ## v3.20.2 — Website CMS: publish now commits rendered HTML + assets
 
 Fixes a deploy-blocking gap: previously `website_publish` only committed

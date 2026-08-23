@@ -56,6 +56,10 @@ export default function Gallery() {
   const [emergencyPending, setEmergencyPending] = useState<MediaRecord | null>(
     null,
   );
+  const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set());
+  const [batchDeletePending, setBatchDeletePending] = useState<
+    "selected" | "all" | null
+  >(null);
 
   const refresh = useCallback(async () => {
     setErr(null);
@@ -164,12 +168,67 @@ export default function Gallery() {
       await websiteDeleteMedia(id);
       setMsg("Photo deleted.");
       if (selected?.id === id) setSelected(null);
+      setSelectedIds((s) => {
+        if (!s.has(id)) return s;
+        const n = new Set(s);
+        n.delete(id);
+        return n;
+      });
       await refresh();
     } catch (e: any) {
       setErr(String(e?.message ?? e));
     } finally {
       setBusy(false);
     }
+  }
+
+  function toggleSelectId(id: number) {
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  }
+
+  function selectAll() {
+    setSelectedIds(new Set(items.map((it) => it.id)));
+  }
+
+  function clearSelection() {
+    setSelectedIds(new Set());
+  }
+
+  async function onConfirmBatchDelete() {
+    if (!batchDeletePending) return;
+    const targets =
+      batchDeletePending === "all"
+        ? items.map((it) => it.id)
+        : items.filter((it) => selectedIds.has(it.id)).map((it) => it.id);
+    setBatchDeletePending(null);
+    if (targets.length === 0) return;
+    setBusy(true);
+    setErr(null);
+    let ok = 0;
+    let fail = 0;
+    for (const id of targets) {
+      try {
+        await websiteDeleteMedia(id);
+        ok += 1;
+      } catch (e: any) {
+        fail += 1;
+        setErr(String(e?.message ?? e));
+      }
+    }
+    setSelectedIds(new Set());
+    setSelected(null);
+    setMsg(
+      fail === 0
+        ? `Deleted ${ok} photo${ok === 1 ? "" : "s"}.`
+        : `Deleted ${ok}, failed ${fail}. See error above.`,
+    );
+    await refresh();
+    setBusy(false);
   }
 
   const modal = selected;
@@ -204,6 +263,73 @@ export default function Gallery() {
       {msg && (
         <div className="home-alert tone-info" style={{ margin: "12px 0" }}>
           ✓ {msg}
+        </div>
+      )}
+
+      {items.length > 0 && (
+        <div
+          style={{
+            display: "flex",
+            alignItems: "center",
+            gap: 10,
+            padding: "10px 12px",
+            background: "rgba(0,0,0,0.03)",
+            border: "1px solid rgba(0,0,0,0.08)",
+            borderRadius: 10,
+            marginBottom: 12,
+            flexWrap: "wrap",
+          }}
+        >
+          <label
+            style={{
+              display: "flex",
+              alignItems: "center",
+              gap: 8,
+              fontSize: 13,
+              cursor: "pointer",
+            }}
+          >
+            <input
+              type="checkbox"
+              checked={
+                selectedIds.size > 0 && selectedIds.size === items.length
+              }
+              ref={(el) => {
+                if (el)
+                  el.indeterminate =
+                    selectedIds.size > 0 && selectedIds.size < items.length;
+              }}
+              onChange={(e) =>
+                e.target.checked ? selectAll() : clearSelection()
+              }
+            />
+            <span>
+              {selectedIds.size === 0
+                ? "Select all"
+                : `${selectedIds.size} of ${items.length} selected`}
+            </span>
+          </label>
+          <button
+            className="btn"
+            onClick={() => setBatchDeletePending("selected")}
+            disabled={busy || selectedIds.size === 0}
+            style={{
+              background: selectedIds.size > 0 ? "#dc2626" : undefined,
+              color: selectedIds.size > 0 ? "white" : undefined,
+              opacity: selectedIds.size === 0 ? 0.5 : 1,
+            }}
+          >
+            Delete selected ({selectedIds.size})
+          </button>
+          <button
+            className="btn"
+            onClick={() => setBatchDeletePending("all")}
+            disabled={busy}
+            style={{ marginLeft: "auto" }}
+            title="Remove every photo from the gallery"
+          >
+            Delete all {items.length}
+          </button>
         </div>
       )}
 
@@ -381,6 +507,28 @@ export default function Gallery() {
               >
                 ☰
               </div>
+              <label
+                onClick={(e) => e.stopPropagation()}
+                style={{
+                  position: "absolute",
+                  top: 6,
+                  left: 40,
+                  background: "rgba(255,255,255,0.92)",
+                  padding: "3px 6px",
+                  borderRadius: 6,
+                  cursor: "pointer",
+                  display: "flex",
+                  alignItems: "center",
+                }}
+                title="Select"
+              >
+                <input
+                  type="checkbox"
+                  checked={selectedIds.has(it.id)}
+                  onChange={() => toggleSelectId(it.id)}
+                  style={{ margin: 0, cursor: "pointer" }}
+                />
+              </label>
             </div>
           );
         })}
@@ -433,6 +581,35 @@ export default function Gallery() {
           confirmLabel="Delete"
           onCancel={() => setDeletePending(null)}
           onConfirm={onConfirmDelete}
+        />
+      )}
+
+      {batchDeletePending && (
+        <ConfirmModal
+          title={
+            batchDeletePending === "all"
+              ? `Delete all ${items.length} photos?`
+              : `Delete ${selectedIds.size} selected photo${selectedIds.size === 1 ? "" : "s"}?`
+          }
+          body={
+            <>
+              <p>
+                {batchDeletePending === "all"
+                  ? `Every photo in the gallery will be removed.`
+                  : `The ${selectedIds.size} selected photo${selectedIds.size === 1 ? "" : "s"} will be removed.`}{" "}
+                On-disk working copy files are swept on the next publish.
+              </p>
+              <p style={{ color: "#64748b", fontSize: 13 }}>
+                Prior git history still contains the files. Use{" "}
+                <b>Emergency remove</b> per-photo if a parent revoked consent.
+              </p>
+            </>
+          }
+          confirmLabel={
+            batchDeletePending === "all" ? "Delete all" : "Delete selected"
+          }
+          onCancel={() => setBatchDeletePending(null)}
+          onConfirm={onConfirmBatchDelete}
         />
       )}
 
