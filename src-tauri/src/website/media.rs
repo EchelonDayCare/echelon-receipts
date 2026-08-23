@@ -815,41 +815,47 @@ struct GalleryVariant {
     filename: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct GalleryJson {
-    schema_version: i64,
-    items: Vec<GalleryItem>,
-}
-
-impl Default for GalleryJson {
-    fn default() -> Self {
-        Self {
-            schema_version: 1,
-            items: Vec::new(),
-        }
-    }
-}
-
 fn gallery_json_path(repo_dir: &Path) -> PathBuf {
     repo_dir.join("content").join("gallery.json")
 }
 
-fn read_gallery_json(repo_dir: &Path) -> MediaResult<GalleryJson> {
+/// Read gallery.json as a free-form JSON object so we can preserve
+/// site-owned top-level fields (page_heading, search_placeholder,
+/// caption_pool, total_images, photo_path_pattern, ...) that PR 1
+/// added and templates depend on. Only the `items` key is under
+/// this module's control.
+fn read_gallery_root(repo_dir: &Path) -> MediaResult<serde_json::Map<String, serde_json::Value>> {
     let p = gallery_json_path(repo_dir);
     if !p.exists() {
-        return Ok(GalleryJson::default());
+        let mut root = serde_json::Map::new();
+        root.insert("schema_version".into(), serde_json::json!(1));
+        root.insert("items".into(), serde_json::json!([]));
+        return Ok(root);
     }
     let raw = std::fs::read_to_string(&p)?;
-    let parsed: GalleryJson = serde_json::from_str(&raw).unwrap_or_default();
-    Ok(parsed)
+    let value: serde_json::Value = serde_json::from_str(&raw).unwrap_or(serde_json::json!({}));
+    let mut root = match value {
+        serde_json::Value::Object(m) => m,
+        _ => serde_json::Map::new(),
+    };
+    if !root.contains_key("schema_version") {
+        root.insert("schema_version".into(), serde_json::json!(1));
+    }
+    if !root.contains_key("items") {
+        root.insert("items".into(), serde_json::json!([]));
+    }
+    Ok(root)
 }
 
-fn write_gallery_json(repo_dir: &Path, gj: &GalleryJson) -> MediaResult<()> {
+fn write_gallery_root(
+    repo_dir: &Path,
+    root: &serde_json::Map<String, serde_json::Value>,
+) -> MediaResult<()> {
     let p = gallery_json_path(repo_dir);
     if let Some(parent) = p.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let mut s = serde_json::to_string_pretty(gj)?;
+    let mut s = serde_json::to_string_pretty(&serde_json::Value::Object(root.clone()))?;
     if !s.ends_with('\n') {
         s.push('\n');
     }
@@ -881,27 +887,44 @@ fn record_to_item(rec: &MediaRecord) -> GalleryItem {
     }
 }
 
+fn parse_items(root: &serde_json::Map<String, serde_json::Value>) -> Vec<GalleryItem> {
+    root.get("items")
+        .and_then(|v| serde_json::from_value::<Vec<GalleryItem>>(v.clone()).ok())
+        .unwrap_or_default()
+}
+
+fn set_items(
+    root: &mut serde_json::Map<String, serde_json::Value>,
+    items: Vec<GalleryItem>,
+) -> MediaResult<()> {
+    root.insert("items".into(), serde_json::to_value(items)?);
+    Ok(())
+}
+
 /// Append or update an item for `rec`, preserving the existing order
-/// of all other items.
+/// of all other items AND all site-owned top-level fields.
 fn upsert_gallery_entry(repo_dir: &Path, rec: &MediaRecord) -> MediaResult<()> {
-    let mut gj = read_gallery_json(repo_dir)?;
+    let mut root = read_gallery_root(repo_dir)?;
+    let mut items = parse_items(&root);
     let item = record_to_item(rec);
-    if let Some(pos) = gj.items.iter().position(|it| it.media_id == rec.id) {
-        gj.items[pos] = item;
+    if let Some(pos) = items.iter().position(|it| it.media_id == rec.id) {
+        items[pos] = item;
     } else {
-        gj.items.push(item);
+        items.push(item);
     }
-    write_gallery_json(repo_dir, &gj)?;
+    set_items(&mut root, items)?;
+    write_gallery_root(repo_dir, &root)?;
     Ok(())
 }
 
 /// Replace the gallery.json items array with the passed-in records
 /// (in order). Used by reorder / soft_delete / set_photo_meta.
+/// Preserves site-owned top-level fields.
 fn rewrite_gallery_items(repo_dir: &Path, records: &[MediaRecord]) -> MediaResult<()> {
-    let mut gj = read_gallery_json(repo_dir)?;
-    gj.schema_version = 1;
-    gj.items = records.iter().map(record_to_item).collect();
-    write_gallery_json(repo_dir, &gj)?;
+    let mut root = read_gallery_root(repo_dir)?;
+    let items: Vec<GalleryItem> = records.iter().map(record_to_item).collect();
+    set_items(&mut root, items)?;
+    write_gallery_root(repo_dir, &root)?;
     Ok(())
 }
 
@@ -1024,6 +1047,15 @@ mod tests {
     use super::*;
     use image::codecs::jpeg::JpegEncoder;
     use image::{ImageEncoder, RgbImage};
+
+    /// Test-only projection of the items-only slice of gallery.json.
+    /// Real gallery.json also carries page_heading/search_placeholder/
+    /// caption_pool/... which we deliberately preserve but ignore here.
+    #[derive(Debug, Clone, Deserialize)]
+    struct GalleryJson {
+        #[serde(default)]
+        items: Vec<GalleryItem>,
+    }
 
     fn make_solid_jpeg(w: u32, h: u32, colour: [u8; 3]) -> Vec<u8> {
         let mut img = RgbImage::new(w, h);
