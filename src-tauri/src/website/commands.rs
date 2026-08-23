@@ -93,19 +93,41 @@ pub fn website_working_copy_status(app: AppHandle) -> Result<WorkingCopyStatus, 
     })
 }
 
-/// Ensure the working copy exists (clone if needed). Returns updated
-/// status. Long-running: performs a network clone on first call.
+/// Ensure the working copy exists **and is in sync with origin/main**.
+///
+/// * If missing: clone from the site repo.
+/// * If present: fetch + fast-forward `main` so the local working copy
+///   picks up any template / content changes pushed since the last
+///   time this machine ran the app. This prevents the "old template
+///   vs new content schema" mismatch that ships as a strict-undefined
+///   render error the first time a new machine tries to preview.
+///
+/// If the local `main` has diverged (rare — only if the user hand-
+/// edited the repo), we swallow the ff error and return normally: the
+/// user can still edit + publish, they just won't have the latest
+/// upstream. The next explicit `website_working_copy_pull` surfaces
+/// the divergence properly so it isn't silent forever.
 #[tauri::command]
 pub async fn website_working_copy_init(app: AppHandle) -> Result<WorkingCopyStatus, String> {
     require_enabled()?;
     let wc = working_copy_from_app(&app)?;
-    // git2::Repository::clone is blocking — spawn it on the blocking pool.
     let wc_clone = git_ops::WorkingCopy::from_app_data(
         &app.path().app_data_dir().map_err(|e| e.to_string())?,
     );
-    tokio::task::spawn_blocking(move || wc_clone.ensure_cloned().map(|_| ()))
-        .await
-        .map_err(|e| format!("join: {e}"))??;
+    tokio::task::spawn_blocking(move || -> Result<(), String> {
+        let already = wc_clone.exists();
+        let repo = wc_clone.ensure_cloned()?;
+        if already {
+            // Best-effort sync: swallow non-fast-forward so the user
+            // isn't blocked from opening the CMS just because they
+            // have a stray local edit. Real conflicts surface via the
+            // dedicated pull command.
+            let _ = git_ops::fetch_and_ff_main(&repo);
+        }
+        Ok(())
+    })
+    .await
+    .map_err(|e| format!("join: {e}"))??;
     let head_sha = wc.open().ok().and_then(|r| git_ops::head_sha(&r).ok());
     Ok(WorkingCopyStatus {
         root: wc.root.to_string_lossy().to_string(),
