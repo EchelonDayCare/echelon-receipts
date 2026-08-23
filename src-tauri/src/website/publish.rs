@@ -446,6 +446,11 @@ async fn run_pipeline_inner(
         .await
         .map_err(|e| e.to_string())?;
     let _touched = git_ops::stage_content_writes(&repo, &inputs.drafts)?;
+    // Also stage the rendered HTML (+ sitemap, robots, assets/data)
+    // and any newly-uploaded media variants under assets/img/**.
+    // Without this the GH content-render-validation workflow blocks
+    // the Pages deploy because committed HTML lags committed JSON.
+    let _rendered = git_ops::stage_rendered_html_and_assets(&repo, inputs.render_dir)?;
     let commit_sha = match git_ops::commit_all(
         &repo,
         &inputs.commit_message,
