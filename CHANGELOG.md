@@ -4,6 +4,14 @@ All notable changes shipped as a DMG. Only entries the owner has approved
 for release are listed here — "code-complete, awaiting ship approval" work
 lives in the session plan.md until it ships.
 
+## v3.23.2 — Preview iframe fix on macOS
+
+- **Preview now renders on Mac.** The Tauri CSP `frame-src` directive
+  only allowed `'self' blob: data:`, so macOS WKWebView blocked the
+  Preview iframe from loading `http://127.0.0.1:<port>/` (Windows
+  WebView2 was more permissive and worked incidentally). Added
+  `http://127.0.0.1:*` and `http://localhost:*` to `frame-src`.
+
 ## v3.23.1 — Fresh-machine setup fixes + Contact form phone/email
 
 - **Templates now ship with Publish.** The CMS is the source of truth
