@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import {
+  websiteAiEditContent,
   websiteLoadContent,
   websiteSaveDraft,
   tryPrettyJson,
@@ -39,6 +40,18 @@ export default function PageEditor() {
   const [err, setErr] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [saved, setSaved] = useState<string | null>(null);
+
+  // AI edit state — only rendered when the current page supports it.
+  const AI_EDIT_PAGES: EditableFile[] = ["careers"];
+  const aiEnabled = AI_EDIT_PAGES.includes(file);
+  const [aiPrompt, setAiPrompt] = useState("");
+  const [aiBusy, setAiBusy] = useState(false);
+  const [aiErr, setAiErr] = useState<string | null>(null);
+  const [aiProposed, setAiProposed] = useState<{
+    text: string;
+    summary: string;
+    model: string;
+  } | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -96,6 +109,38 @@ export default function PageEditor() {
     }
   }
 
+  async function onAiPropose() {
+    if (!aiPrompt.trim()) return;
+    setAiBusy(true);
+    setAiErr(null);
+    setAiProposed(null);
+    try {
+      const res = await websiteAiEditContent(file, aiPrompt.trim());
+      setAiProposed({
+        text: tryPrettyJson(res.proposed_json),
+        summary: res.summary,
+        model: res.model,
+      });
+    } catch (e: any) {
+      setAiErr(String(e?.message ?? e));
+    } finally {
+      setAiBusy(false);
+    }
+  }
+
+  function onAiApply() {
+    if (!aiProposed) return;
+    setText(aiProposed.text);
+    setDirty(true);
+    setAiProposed(null);
+    setAiPrompt("");
+    setSaved(null);
+  }
+
+  function onAiDiscard() {
+    setAiProposed(null);
+  }
+
   return (
     <div style={{ padding: 24, maxWidth: 1200, margin: "0 auto" }}>
       <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
@@ -139,6 +184,141 @@ export default function PageEditor() {
       {saved && (
         <div className="home-alert tone-info" style={{ margin: "12px 0" }}>
           ✓ {saved}
+        </div>
+      )}
+
+      {aiEnabled && (
+        <div
+          style={{
+            border: "1px solid rgba(99,102,241,0.35)",
+            background: "linear-gradient(180deg, rgba(99,102,241,0.06), rgba(99,102,241,0.02))",
+            borderRadius: 12,
+            padding: 16,
+            marginBottom: 16,
+          }}
+        >
+          <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6 }}>
+            <span style={{ fontSize: 18 }}>✨</span>
+            <b style={{ fontSize: 15 }}>Ask AI to edit this page</b>
+            <span style={{ fontSize: 11, color: "#64748b", marginLeft: "auto" }}>
+              Azure OpenAI · gpt-5.4
+            </span>
+          </div>
+          <p style={{ fontSize: 13, color: "#475569", margin: "0 0 10px" }}>
+            Describe the change in plain English. Examples:{" "}
+            <i>“Add a Friday-only cook role, casual, $22-25/hr.”</i> ·{" "}
+            <i>“Change the hiring email to careers@echelondaycare.com.”</i> ·{" "}
+            <i>“Remove the Warehouse Assistant posting.”</i>
+          </p>
+          <textarea
+            value={aiPrompt}
+            onChange={(e) => setAiPrompt(e.target.value)}
+            placeholder="Describe your change…"
+            disabled={aiBusy}
+            style={{
+              width: "100%",
+              minHeight: 72,
+              padding: 10,
+              border: "1px solid rgba(0,0,0,0.15)",
+              borderRadius: 8,
+              fontSize: 13,
+              fontFamily: "inherit",
+              background: "white",
+            }}
+          />
+          <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
+            <button
+              className="btn"
+              onClick={onAiPropose}
+              disabled={aiBusy || !aiPrompt.trim()}
+              style={{
+                background: aiBusy || !aiPrompt.trim() ? undefined : "#6366f1",
+                color: aiBusy || !aiPrompt.trim() ? undefined : "white",
+              }}
+            >
+              {aiBusy ? "Thinking…" : "Propose edit"}
+            </button>
+            {aiPrompt && !aiBusy && (
+              <button className="btn" onClick={() => setAiPrompt("")}>
+                Clear
+              </button>
+            )}
+          </div>
+          {aiErr && (
+            <div
+              className="home-alert tone-danger"
+              style={{ marginTop: 10, fontSize: 13 }}
+            >
+              ⚠ {aiErr}
+            </div>
+          )}
+          {aiProposed && (
+            <div
+              style={{
+                marginTop: 12,
+                padding: 12,
+                border: "1px solid rgba(0,0,0,0.12)",
+                borderRadius: 8,
+                background: "white",
+              }}
+            >
+              <div style={{ fontSize: 13, marginBottom: 6 }}>
+                <b>Proposed change ({aiProposed.model})</b>
+              </div>
+              <p
+                style={{
+                  fontSize: 13,
+                  margin: "0 0 10px",
+                  color: "#334155",
+                  whiteSpace: "pre-wrap",
+                }}
+              >
+                {aiProposed.summary}
+              </p>
+              <details>
+                <summary style={{ cursor: "pointer", fontSize: 12, color: "#64748b" }}>
+                  Show proposed JSON
+                </summary>
+                <pre
+                  style={{
+                    marginTop: 8,
+                    padding: 10,
+                    background: "#0f172a",
+                    color: "#e2e8f0",
+                    borderRadius: 6,
+                    fontSize: 12,
+                    maxHeight: 320,
+                    overflow: "auto",
+                    whiteSpace: "pre-wrap",
+                  }}
+                >
+                  {aiProposed.text}
+                </pre>
+              </details>
+              <div style={{ display: "flex", gap: 8, marginTop: 10 }}>
+                <button
+                  className="btn"
+                  onClick={onAiApply}
+                  style={{ background: "#059669", color: "white" }}
+                >
+                  Apply to editor
+                </button>
+                <button className="btn" onClick={onAiDiscard}>
+                  Discard
+                </button>
+                <span
+                  style={{
+                    fontSize: 12,
+                    color: "#64748b",
+                    alignSelf: "center",
+                    marginLeft: "auto",
+                  }}
+                >
+                  Applying loads the JSON below — you still need to Save + Publish.
+                </span>
+              </div>
+            </div>
+          )}
         </div>
       )}
 

@@ -26,7 +26,7 @@ use crate::website::{
     WebsiteState,
 };
 
-fn require_enabled() -> Result<(), String> {
+pub fn require_enabled() -> Result<(), String> {
     if !FeatureFlag::detect().enabled() {
         return Err(
             "Website CMS is disabled. Set ECHELON_WEBSITE_CMS=1 to enable."
