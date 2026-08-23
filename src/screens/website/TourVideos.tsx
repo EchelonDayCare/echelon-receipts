@@ -27,6 +27,9 @@ export default function TourVideos() {
   const [dragIndex, setDragIndex] = useState<number | null>(null);
   const [dragOverIndex, setDragOverIndex] = useState<number | null>(null);
   const [pendingDelete, setPendingDelete] = useState<TourVideo | null>(null);
+  // Multi-select delete (v3.22.4) — parity with Careers jobs list.
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+  const [bulkPending, setBulkPending] = useState(false);
 
   const refresh = useCallback(async () => {
     setErr(null);
@@ -99,6 +102,50 @@ export default function TourVideos() {
       setBusy(false);
     }
   }
+
+  function toggleSelected(id: string) {
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id); else next.add(id);
+      return next;
+    });
+  }
+  const allSelected = items.length > 0 && selectedIds.size === items.length;
+  function toggleAllSelected() {
+    if (allSelected) setSelectedIds(new Set());
+    else setSelectedIds(new Set(items.map((v) => v.id)));
+  }
+  async function performBulkDelete() {
+    if (selectedIds.size === 0) return;
+    setBusy(true);
+    setErr(null);
+    try {
+      let lastRev = 0;
+      // Delete sequentially so each save_draft sees the previous state.
+      for (const id of Array.from(selectedIds)) {
+        const rev = await websiteTourDeleteVideo(id);
+        lastRev = rev;
+      }
+      setMsg(`Deleted ${selectedIds.size} video${selectedIds.size === 1 ? "" : "s"} — draft rev #${lastRev}`);
+      setSelectedIds(new Set());
+      setBulkPending(false);
+      await refresh();
+    } catch (e: any) {
+      setErr(String(e?.message ?? e));
+    } finally {
+      setBusy(false);
+    }
+  }
+  // Prune stale selections when the list changes (e.g. after a bulk delete
+  // or an AI edit).
+  useEffect(() => {
+    setSelectedIds((prev) => {
+      const ids = new Set(items.map((v) => v.id));
+      const next = new Set<string>();
+      prev.forEach((id) => { if (ids.has(id)) next.add(id); });
+      return next;
+    });
+  }, [items]);
 
   async function commitReorder(next: TourVideo[]) {
     setItems(next);
@@ -190,6 +237,46 @@ export default function TourVideos() {
           </p>
         </div>
       ) : (
+        <>
+        <div
+          style={{
+            display: "flex",
+            alignItems: "center",
+            gap: 12,
+            padding: "10px 12px",
+            background: "white",
+            border: "1px solid rgba(0,0,0,0.1)",
+            borderRadius: 10,
+            marginBottom: 12,
+          }}
+        >
+          <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13, cursor: "pointer" }}>
+            <input
+              type="checkbox"
+              checked={allSelected}
+              onChange={toggleAllSelected}
+              disabled={busy}
+            />
+            <b>Select all</b>
+          </label>
+          <span style={{ fontSize: 12, color: "#64748b" }}>
+            {selectedIds.size > 0 ? `${selectedIds.size} selected` : "Tick a video to include it in bulk delete"}
+          </span>
+          <button
+            className="btn"
+            onClick={() => setBulkPending(true)}
+            disabled={selectedIds.size === 0 || busy}
+            style={{
+              marginLeft: "auto",
+              background: selectedIds.size > 0 ? "#dc2626" : undefined,
+              color: selectedIds.size > 0 ? "white" : undefined,
+              fontSize: 13,
+              padding: "6px 14px",
+            }}
+          >
+            {busy ? "Working…" : `Delete selected${selectedIds.size > 0 ? ` (${selectedIds.size})` : ""}`}
+          </button>
+        </div>
         <ul
           style={{
             listStyle: "none",
@@ -252,6 +339,31 @@ export default function TourVideos() {
                       PLAYS FIRST
                     </span>
                   )}
+                  <label
+                    onClick={(e) => e.stopPropagation()}
+                    style={{
+                      position: "absolute",
+                      top: 8,
+                      right: 8,
+                      background: "rgba(255,255,255,0.95)",
+                      borderRadius: 6,
+                      padding: "3px 6px",
+                      display: "inline-flex",
+                      alignItems: "center",
+                      gap: 4,
+                      cursor: "pointer",
+                      boxShadow: "0 2px 4px rgba(0,0,0,0.15)",
+                      fontSize: 12,
+                    }}
+                  >
+                    <input
+                      type="checkbox"
+                      checked={selectedIds.has(v.id)}
+                      onChange={() => toggleSelected(v.id)}
+                      onClick={(e) => e.stopPropagation()}
+                      disabled={busy}
+                    />
+                  </label>
                 </div>
                 <div style={{ padding: 12 }}>
                   <div
@@ -312,6 +424,7 @@ export default function TourVideos() {
             );
           })}
         </ul>
+        </>
       )}
 
       <p
@@ -375,6 +488,56 @@ export default function TourVideos() {
                 style={{ background: "#dc2626", color: "white" }}
               >
                 {busy ? "Deleting…" : "Delete"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {bulkPending && (
+        <div
+          onClick={() => setBulkPending(false)}
+          style={{
+            position: "fixed",
+            inset: 0,
+            background: "rgba(15,23,42,0.5)",
+            display: "grid",
+            placeItems: "center",
+            zIndex: 50,
+          }}
+        >
+          <div
+            onClick={(e) => e.stopPropagation()}
+            style={{
+              background: "white",
+              padding: 24,
+              borderRadius: 12,
+              maxWidth: 460,
+              boxShadow: "0 20px 60px rgba(0,0,0,0.3)",
+            }}
+          >
+            <h3 style={{ margin: "0 0 12px" }}>Delete {selectedIds.size} video{selectedIds.size === 1 ? "" : "s"}?</h3>
+            <p style={{ margin: "0 0 16px", color: "#475569" }}>
+              The following videos will be removed from the tour page and their
+              files deleted from your working copy. This creates a draft
+              revision — the change goes live only after Publish.
+            </p>
+            <ul style={{ margin: "0 0 20px", padding: "0 0 0 18px", color: "#1d3557", fontSize: 13, maxHeight: 160, overflow: "auto" }}>
+              {items.filter((v) => selectedIds.has(v.id)).map((v) => (
+                <li key={v.id}>{v.title} <span style={{ color: "#94a3b8", fontFamily: "monospace" }}>({v.id})</span></li>
+              ))}
+            </ul>
+            <div style={{ display: "flex", gap: 8, justifyContent: "flex-end" }}>
+              <button className="btn" onClick={() => setBulkPending(false)}>
+                Cancel
+              </button>
+              <button
+                className="btn"
+                onClick={performBulkDelete}
+                disabled={busy}
+                style={{ background: "#dc2626", color: "white" }}
+              >
+                {busy ? "Deleting…" : `Delete ${selectedIds.size}`}
               </button>
             </div>
           </div>

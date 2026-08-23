@@ -4,6 +4,34 @@ All notable changes shipped as a DMG. Only entries the owner has approved
 for release are listed here — "code-complete, awaiting ship approval" work
 lives in the session plan.md until it ships.
 
+## v3.22.1 — Contact page edits, unified CMS UX, video auto-transcode
+
+- **Contact page inline form.** Website → Contact now has a first-class
+  form for the heading, address (updates the map + iframe title
+  automatically) and Facebook link — no JSON editing required. AI prompt
+  panel handles anything else.
+- **Open social platforms via AI.** The AI Contact editor also has access
+  to `site.json` and can add Instagram, TikTok, YouTube, LinkedIn, X,
+  WhatsApp or any other platform to the contact page by adding a key to
+  `site.socials`. The template renders a matching icon per platform with
+  a globe fallback for unknown ones.
+- **Consistent Preview.** Every CMS edit surface (Careers / Tour /
+  Contact / Gallery / other pages) now has a **Preview →** button on the
+  header row for one-click preview of the pending draft.
+- **Tour videos multi-select delete.** Select-all checkbox and
+  per-card checkboxes on the Virtual Tour videos screen, matching the
+  Careers bulk-delete UX.
+- **Video auto-transcode on upload.** Tour video uploads now transcode
+  large files through a 3-tier ladder (1500k→1000k→700k @ 720p/540p) so
+  publishes never trip GitHub's 100 MB hard limit. AI also auto-fills
+  title + description from the filename via `gpt-5.4`.
+- **Delete now sticks.** Fixed tour-video list/add/delete/reorder
+  commands reading disk while `save_draft` wrote to the DB, so the UI
+  reflected stale state after every mutation.
+- **Website shortcut moved.** Removed the "Website" tile from the Home
+  grid; it now lives as a globe icon in the top-right stack next to the
+  notification bell and lock button.
+
 ## v3.22.0 — Website CMS: Virtual Tour goes multi-video with AI editing
 
 The Virtual Tour page now supports a playlist of multiple videos and can

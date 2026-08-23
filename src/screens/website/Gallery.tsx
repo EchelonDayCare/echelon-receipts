@@ -244,7 +244,15 @@ export default function Gallery() {
           ← Website
         </button>
         <h1 style={{ margin: 0 }}>Gallery</h1>
-        <span style={{ marginLeft: "auto", fontSize: 12, color: "var(--muted, #64748b)" }}>
+        <button
+          className="btn"
+          onClick={() => nav("/website/preview?page=gallery")}
+          style={{ marginLeft: "auto", fontSize: 13, padding: "6px 14px" }}
+          title="Preview the Gallery page with pending drafts"
+        >
+          Preview →
+        </button>
+        <span style={{ fontSize: 12, color: "var(--muted, #64748b)" }}>
           {items.length} photo{items.length === 1 ? "" : "s"}
         </span>
       </div>
