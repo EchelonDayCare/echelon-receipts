@@ -562,9 +562,11 @@ fn render_step(inputs: &PipelineInputs<'_>) -> Result<Vec<String>, String> {
     let render_inputs = renderer::RenderInputs::load(inputs.repo_dir, overrides)?;
     let out_dir: PathBuf = inputs.render_dir.to_path_buf();
     let _ = std::fs::create_dir_all(&out_dir);
-    let written = renderer::render_all(&render_inputs, &out_dir)?;
-    // Also copy assets/ over so the preview browser can find CSS/img.
+    // Copy assets FIRST, THEN render — so CMS-derived files like
+    // `assets/data/jobs.json` (written by render_all from careers.json)
+    // aren't clobbered by the repo's stale copy.
     copy_assets_if_present(inputs.repo_dir, &out_dir).ok();
+    let written = renderer::render_all(&render_inputs, &out_dir)?;
     Ok(written.into_iter().map(|(k, _)| k).collect())
 }
 

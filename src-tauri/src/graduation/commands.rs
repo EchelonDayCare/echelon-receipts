@@ -1552,7 +1552,7 @@ fn reset_cancelled(state: &State<'_, RenderState>) {
 /// Tries every plausible target-triple name so a mixed-arch Mac (Intel
 /// vs Apple Silicon) or a fresh Windows install (with or without
 /// Tauri's target-triple suffix) resolves cleanly.
-fn sidecar_binary_path(app: &AppHandle) -> Result<PathBuf, String> {
+pub(crate) fn sidecar_binary_path(app: &AppHandle) -> Result<PathBuf, String> {
     // Prefer the resource dir (bundle-relative); fall back to the exe's
     // parent for `cargo tauri dev` where the sidecar sits next to the
     // dev binary, then the src-tauri/binaries/ dev tree.

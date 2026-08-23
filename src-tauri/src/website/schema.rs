@@ -70,8 +70,10 @@ pub fn validate(name: &str, raw: &str) -> Result<Value, String> {
 fn check_schema_version(name: &str, v: &Value) -> Result<(), String> {
     match v.get("schema_version").and_then(|x| x.as_i64()) {
         Some(1) => Ok(()),
+        // tour.json bumped to v2 in v3.22.0 (playlist / multi-video).
+        Some(2) if name == "tour" => Ok(()),
         Some(other) => Err(format!(
-            "{name}.json has schema_version={other}, this app only supports 1"
+            "{name}.json has schema_version={other}, this app does not support that version"
         )),
         None => Err(format!("{name}.json is missing schema_version")),
     }

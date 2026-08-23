@@ -4,6 +4,27 @@ All notable changes shipped as a DMG. Only entries the owner has approved
 for release are listed here — "code-complete, awaiting ship approval" work
 lives in the session plan.md until it ships.
 
+## v3.22.0 — Website CMS: Virtual Tour goes multi-video with AI editing
+
+The Virtual Tour page now supports a playlist of multiple videos and can
+be edited with plain-English prompts, matching the Careers flow.
+
+- **AI edit for Tour** — same purple panel: describe the change, submit,
+  preview, publish. Works on heading, intro, per-video titles and
+  descriptions, and the fallback strings.
+- **Upload multiple videos** — new **Manage videos** screen from the tour
+  editor (or `/website/tour-videos`). Pick one or many MP4 / MOV files;
+  the app copies them into `assets/video/` and extracts a first-frame
+  JPEG poster with ffmpeg (the sidecar already bundled for graduation).
+- **Drag-drop reorder** — the top video plays first when a visitor lands
+  on the page. Delete removes both the entry and the underlying files.
+- **Playlist layout on the live site** — one big player with a thumbnail
+  strip below. Clicking a thumb swaps in the new video and updates the
+  "now playing" title + description.
+- Schema: `content/tour.json` bumped to `schema_version: 2` with a
+  `videos: [{id, title, description, src, poster}]` array. Backward
+  compatible: v1 tour.json auto-migrates on first read.
+
 ## v3.21.1 — Website CMS: streamlined Careers AI flow
 
 Simplifies the Careers AI editor per owner feedback ("the diff view was

@@ -53,6 +53,7 @@ const WebsiteHistory = lazy(() => import("./screens/website/History"));
 const WebsitePublish = lazy(() => import("./screens/website/Publish"));
 const WebsiteSettings = lazy(() => import("./screens/website/Settings"));
 const WebsiteGallery = lazy(() => import("./screens/website/Gallery"));
+const WebsiteTourVideos = lazy(() => import("./screens/website/TourVideos"));
 const WebsiteAssets = lazy(() => import("./screens/website/Assets"));
 import { runCloudBackupIfDue } from "./lib/cloudBackup";
 import { getSettings } from "./lib/db";
@@ -543,6 +544,7 @@ function Shell({ logo, name, staffEnabled }: { logo: string; name: string; staff
           <Route path="/website/publish" element={<WebsitePublish />} />
           <Route path="/website/settings" element={<WebsiteSettings />} />
           <Route path="/website/gallery" element={<WebsiteGallery />} />
+          <Route path="/website/tour-videos" element={<WebsiteTourVideos />} />
           <Route path="/website/assets" element={<WebsiteAssets />} />
           <Route path="/website/:file" element={<WebsitePageEditor />} />
 

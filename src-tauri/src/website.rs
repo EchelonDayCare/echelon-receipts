@@ -57,6 +57,7 @@ pub mod publish;
 pub mod renderer;
 pub mod revisions;
 pub mod schema;
+pub mod tour;
 
 /// Feature flag captured once at startup. See module docs for why we
 /// do this at startup vs on every command — the env var is set (or

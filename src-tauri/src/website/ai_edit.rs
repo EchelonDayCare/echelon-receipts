@@ -23,7 +23,7 @@ const AZURE_OPENAI_ENDPOINT: &str = "https://ai-nse.openai.azure.com";
 const CHAT_DEPLOY: &str = "gpt-5.4";
 const CHAT_API_VER: &str = "2025-04-01-preview";
 
-const SUPPORTED_PAGES: &[&str] = &["careers"];
+const SUPPORTED_PAGES: &[&str] = &["careers", "tour"];
 
 #[derive(Debug, Deserialize)]
 pub struct AiEditRequest {

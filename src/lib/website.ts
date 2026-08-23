@@ -142,6 +142,37 @@ export function websiteAiEditContent(
   });
 }
 
+// ── Virtual Tour videos (v3.22.0) ─────────────────────────────────────
+export interface TourVideo {
+  id: string;
+  title: string;
+  description: string;
+  src: string;
+  poster: string;
+}
+export interface TourAddResponse {
+  added: TourVideo[];
+  revision_id: number;
+}
+export function websiteTourListVideos(): Promise<TourVideo[]> {
+  return invoke<TourVideo[]>("website_tour_list_videos");
+}
+export function websiteTourAddVideos(paths: string[]): Promise<TourAddResponse> {
+  return invoke<TourAddResponse>("website_tour_add_videos", {
+    request: { paths },
+  });
+}
+export function websiteTourDeleteVideo(id: string): Promise<number> {
+  return invoke<number>("website_tour_delete_video", {
+    request: { id },
+  });
+}
+export function websiteTourReorderVideos(ids: string[]): Promise<number> {
+  return invoke<number>("website_tour_reorder_videos", {
+    request: { ids },
+  });
+}
+
 export function websiteListRevisions(
   file: EditableFile,
   limit = 100,
