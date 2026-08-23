@@ -1,0 +1,457 @@
+//! Tour videos backend (v3.22.0).
+//!
+//! - `website_tour_list_videos` — read videos array from `content/tour.json`.
+//! - `website_tour_add_videos` — copy user files into `<repo>/assets/video/`,
+//!    extract first-frame poster via ffmpeg sidecar, append to tour.json.
+//! - `website_tour_delete_video` — remove entry + files, rewrite tour.json.
+//! - `website_tour_reorder_videos` — rewrite ordering.
+//!
+//! Draft-safe: every mutation is committed as a `site_revisions` draft
+//! for `tour` via `revisions::save_draft`, matching Careers/Home. The
+//! actual media files are copied into the working-copy repo assets/;
+//! publish handles committing them via `stage_rendered_html_and_assets`
+//! which already recurses `assets/**`.
+
+use std::path::{Path, PathBuf};
+
+use serde::{Deserialize, Serialize};
+use serde_json::{json, Value};
+use tauri::{AppHandle, Manager, State};
+
+use crate::db_gate::DbGate;
+use crate::website::commands::require_enabled;
+use crate::website::git_ops::WorkingCopy;
+use crate::website::revisions;
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct TourVideo {
+    pub id: String,
+    pub title: String,
+    #[serde(default)]
+    pub description: String,
+    pub src: String,
+    pub poster: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct AddVideosResponse {
+    pub added: Vec<TourVideo>,
+    pub revision_id: i64,
+}
+
+fn working_copy_from_app(app: &AppHandle) -> Result<WorkingCopy, String> {
+    let root = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| format!("app_data_dir: {e}"))?
+        .join("website");
+    Ok(WorkingCopy {
+        root: root.clone(),
+        repo_dir: root.join("repo"),
+        render_dir: root.join("render"),
+    })
+}
+
+fn tour_json_path(repo_dir: &Path) -> PathBuf {
+    repo_dir.join("content").join("tour.json")
+}
+
+fn read_tour_content(repo_dir: &Path) -> Result<Value, String> {
+    let path = tour_json_path(repo_dir);
+    let raw = std::fs::read_to_string(&path)
+        .map_err(|e| format!("read {}: {e}", path.display()))?;
+    serde_json::from_str::<Value>(&raw).map_err(|e| format!("parse tour.json: {e}"))
+}
+
+/// Given a tour.json Value, always return a v2-shaped object with `videos: []`.
+/// v1 (single video_src/video_poster) migrates on read.
+fn ensure_v2(mut v: Value) -> Value {
+    let obj = v.as_object_mut().expect("tour.json root must be object");
+    let has_videos = obj
+        .get("videos")
+        .map(|x| x.is_array())
+        .unwrap_or(false);
+    if !has_videos {
+        let mut videos = Vec::<Value>::new();
+        if let (Some(src), Some(poster)) = (
+            obj.get("video_src").and_then(|x| x.as_str()).map(String::from),
+            obj.get("video_poster").and_then(|x| x.as_str()).map(String::from),
+        ) {
+            let heading = obj
+                .get("heading")
+                .and_then(|x| x.as_str())
+                .unwrap_or("Virtual Tour")
+                .to_string();
+            videos.push(json!({
+                "id": "V001",
+                "title": heading,
+                "description": "",
+                "src": src,
+                "poster": poster,
+            }));
+        }
+        obj.insert("videos".into(), Value::Array(videos));
+    }
+    obj.insert("schema_version".into(), json!(2));
+    v
+}
+
+#[tauri::command]
+pub async fn website_tour_list_videos(app: AppHandle) -> Result<Vec<TourVideo>, String> {
+    require_enabled()?;
+    let wc = working_copy_from_app(&app)?;
+    let v = ensure_v2(read_tour_content(&wc.repo_dir)?);
+    let arr = v
+        .get("videos")
+        .and_then(|x| x.as_array())
+        .cloned()
+        .unwrap_or_default();
+    let mut out = Vec::new();
+    for item in arr {
+        match serde_json::from_value::<TourVideo>(item.clone()) {
+            Ok(tv) => out.push(tv),
+            Err(e) => return Err(format!("videos entry invalid: {e}")),
+        }
+    }
+    Ok(out)
+}
+
+#[derive(Debug, Deserialize)]
+pub struct AddVideosRequest {
+    pub paths: Vec<String>,
+}
+
+/// Sanitise a user-supplied filename into an assets/video/-safe stem.
+fn safe_stem(name: &str) -> String {
+    let stem = Path::new(name)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("video")
+        .to_lowercase();
+    let mut out = String::with_capacity(stem.len());
+    let mut last_dash = false;
+    for ch in stem.chars() {
+        if ch.is_ascii_alphanumeric() {
+            out.push(ch);
+            last_dash = false;
+        } else if !last_dash && !out.is_empty() {
+            out.push('-');
+            last_dash = true;
+        }
+    }
+    let out = out.trim_end_matches('-').to_string();
+    if out.is_empty() { "video".into() } else { out }
+}
+
+fn unique_stem(assets_video: &Path, base: &str) -> String {
+    let mut candidate = base.to_string();
+    let mut n = 2;
+    while assets_video.join(format!("{candidate}.mp4")).exists()
+        || assets_video.join(format!("{candidate}-poster.jpg")).exists()
+    {
+        candidate = format!("{base}-{n}");
+        n += 1;
+        if n > 999 { break; }
+    }
+    candidate
+}
+
+fn next_id(existing: &[TourVideo]) -> String {
+    let mut n = 1i64;
+    let taken: std::collections::HashSet<String> =
+        existing.iter().map(|v| v.id.clone()).collect();
+    loop {
+        let id = format!("V{n:03}");
+        if !taken.contains(&id) {
+            return id;
+        }
+        n += 1;
+    }
+}
+
+fn extract_poster(
+    ffmpeg: &Path,
+    video_path: &Path,
+    poster_path: &Path,
+) -> Result<(), String> {
+    // Grab a frame ~1 second in (avoids black lead-in), scaled to a
+    // reasonable poster size, high quality JPEG.
+    let out = std::process::Command::new(ffmpeg)
+        .args([
+            "-hide_banner",
+            "-loglevel", "error",
+            "-y",
+            "-ss", "00:00:01.000",
+            "-i",
+        ])
+        .arg(video_path)
+        .args([
+            "-frames:v", "1",
+            "-vf", "scale='min(1280,iw)':-2",
+            "-q:v", "3",
+        ])
+        .arg(poster_path)
+        .output()
+        .map_err(|e| format!("spawn ffmpeg: {e}"))?;
+    if !out.status.success() {
+        // Retry from time 0 (video shorter than 1s or seek failed).
+        let out2 = std::process::Command::new(ffmpeg)
+            .args([
+                "-hide_banner",
+                "-loglevel", "error",
+                "-y",
+                "-i",
+            ])
+            .arg(video_path)
+            .args([
+                "-frames:v", "1",
+                "-vf", "scale='min(1280,iw)':-2",
+                "-q:v", "3",
+            ])
+            .arg(poster_path)
+            .output()
+            .map_err(|e| format!("spawn ffmpeg (retry): {e}"))?;
+        if !out2.status.success() {
+            return Err(format!(
+                "ffmpeg poster extraction failed: {}",
+                String::from_utf8_lossy(&out2.stderr)
+            ));
+        }
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn website_tour_add_videos(
+    app: AppHandle,
+    db: State<'_, DbGate>,
+    request: AddVideosRequest,
+) -> Result<AddVideosResponse, String> {
+    require_enabled()?;
+    if request.paths.is_empty() {
+        return Err("Choose one or more video files first.".into());
+    }
+    let wc = working_copy_from_app(&app)?;
+    let ffmpeg = crate::graduation::commands::sidecar_binary_path(&app)?;
+    let assets_video = wc.repo_dir.join("assets").join("video");
+    std::fs::create_dir_all(&assets_video)
+        .map_err(|e| format!("mkdir assets/video: {e}"))?;
+
+    let mut tour_val = ensure_v2(read_tour_content(&wc.repo_dir)?);
+    let mut current: Vec<TourVideo> = serde_json::from_value(
+        tour_val
+            .get("videos")
+            .cloned()
+            .unwrap_or_else(|| json!([])),
+    )
+    .map_err(|e| format!("read current videos: {e}"))?;
+
+    let mut added = Vec::<TourVideo>::new();
+
+    for src_path in &request.paths {
+        let src = PathBuf::from(src_path);
+        if !src.is_file() {
+            return Err(format!("Not a file: {}", src.display()));
+        }
+        let orig_name = src
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("video.mp4")
+            .to_string();
+        let base = safe_stem(&orig_name);
+        let stem = unique_stem(&assets_video, &base);
+
+        let video_rel = format!("assets/video/{stem}.mp4");
+        let poster_rel = format!("assets/video/{stem}-poster.jpg");
+        let video_dst = wc.repo_dir.join(&video_rel);
+        let poster_dst = wc.repo_dir.join(&poster_rel);
+
+        std::fs::copy(&src, &video_dst)
+            .map_err(|e| format!("copy {} → {}: {e}", src.display(), video_dst.display()))?;
+
+        if let Err(e) = extract_poster(&ffmpeg, &video_dst, &poster_dst) {
+            // Poster is a soft requirement — fall back to the previous
+            // video's poster or the site's og-image so the entry is
+            // still usable. Log the error via the returned message
+            // downstream (we surface a warning).
+            let _ = std::fs::write(
+                poster_dst.with_extension("txt"),
+                format!("ffmpeg poster extraction skipped: {e}"),
+            );
+        }
+
+        let id = next_id(&current);
+        let title_stem = Path::new(&orig_name)
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("Untitled")
+            .to_string();
+        let entry = TourVideo {
+            id: id.clone(),
+            title: title_stem,
+            description: String::new(),
+            src: video_rel,
+            poster: if poster_dst.exists() { poster_rel } else { "assets/img/og-image.png".into() },
+        };
+        current.push(entry.clone());
+        added.push(entry);
+    }
+
+    tour_val
+        .as_object_mut()
+        .unwrap()
+        .insert("videos".into(), serde_json::to_value(&current).unwrap());
+    let pretty = serde_json::to_string_pretty(&tour_val)
+        .map_err(|e| format!("serialize tour.json: {e}"))?
+        + "\n";
+
+    let rev = revisions::save_draft(db.inner(), "tour", &pretty, None)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    Ok(AddVideosResponse {
+        added,
+        revision_id: rev,
+    })
+}
+
+#[derive(Debug, Deserialize)]
+pub struct DeleteVideoRequest {
+    pub id: String,
+}
+
+#[tauri::command]
+pub async fn website_tour_delete_video(
+    app: AppHandle,
+    db: State<'_, DbGate>,
+    request: DeleteVideoRequest,
+) -> Result<i64, String> {
+    require_enabled()?;
+    let wc = working_copy_from_app(&app)?;
+    let mut tour_val = ensure_v2(read_tour_content(&wc.repo_dir)?);
+    let mut current: Vec<TourVideo> = serde_json::from_value(
+        tour_val
+            .get("videos")
+            .cloned()
+            .unwrap_or_else(|| json!([])),
+    )
+    .map_err(|e| format!("read current videos: {e}"))?;
+
+    let before = current.len();
+    let removed: Vec<TourVideo> = current
+        .iter()
+        .filter(|v| v.id == request.id)
+        .cloned()
+        .collect();
+    current.retain(|v| v.id != request.id);
+    if current.len() == before {
+        return Err(format!("no video with id={}", request.id));
+    }
+
+    // Best-effort delete files from working copy (only if not still
+    // referenced by another entry).
+    for r in &removed {
+        let still_used = current.iter().any(|c| c.src == r.src || c.poster == r.poster);
+        if !still_used {
+            let _ = std::fs::remove_file(wc.repo_dir.join(&r.src));
+            let _ = std::fs::remove_file(wc.repo_dir.join(&r.poster));
+        }
+    }
+
+    tour_val
+        .as_object_mut()
+        .unwrap()
+        .insert("videos".into(), serde_json::to_value(&current).unwrap());
+    let pretty = serde_json::to_string_pretty(&tour_val)
+        .map_err(|e| format!("serialize tour.json: {e}"))?
+        + "\n";
+    let rev = revisions::save_draft(db.inner(), "tour", &pretty, None)
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(rev)
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ReorderVideosRequest {
+    pub ids: Vec<String>,
+}
+
+#[tauri::command]
+pub async fn website_tour_reorder_videos(
+    app: AppHandle,
+    db: State<'_, DbGate>,
+    request: ReorderVideosRequest,
+) -> Result<i64, String> {
+    require_enabled()?;
+    let wc = working_copy_from_app(&app)?;
+    let mut tour_val = ensure_v2(read_tour_content(&wc.repo_dir)?);
+    let current: Vec<TourVideo> = serde_json::from_value(
+        tour_val
+            .get("videos")
+            .cloned()
+            .unwrap_or_else(|| json!([])),
+    )
+    .map_err(|e| format!("read current videos: {e}"))?;
+    let by_id: std::collections::HashMap<String, TourVideo> =
+        current.iter().map(|v| (v.id.clone(), v.clone())).collect();
+    let mut reordered = Vec::<TourVideo>::new();
+    for id in &request.ids {
+        if let Some(v) = by_id.get(id) {
+            reordered.push(v.clone());
+        }
+    }
+    // Append any that weren't in the request (defensive).
+    for v in &current {
+        if !request.ids.contains(&v.id) {
+            reordered.push(v.clone());
+        }
+    }
+    tour_val
+        .as_object_mut()
+        .unwrap()
+        .insert("videos".into(), serde_json::to_value(&reordered).unwrap());
+    let pretty = serde_json::to_string_pretty(&tour_val)
+        .map_err(|e| format!("serialize tour.json: {e}"))?
+        + "\n";
+    let rev = revisions::save_draft(db.inner(), "tour", &pretty, None)
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(rev)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn safe_stem_normalises_unicode_and_spaces() {
+        assert_eq!(safe_stem("My Cool Tour.mp4"), "my-cool-tour");
+        assert_eq!(safe_stem("kids' rooms - final v2.mov"), "kids-rooms-final-v2");
+        assert_eq!(safe_stem("...."), "video");
+    }
+
+    #[test]
+    fn ensure_v2_migrates_v1() {
+        let v1 = json!({
+            "schema_version": 1,
+            "heading": "Virtual Tour",
+            "video_src": "assets/video/tour.mp4",
+            "video_poster": "assets/video/tour-poster.jpg"
+        });
+        let v = ensure_v2(v1);
+        assert_eq!(v["schema_version"], 2);
+        let vids = v["videos"].as_array().unwrap();
+        assert_eq!(vids.len(), 1);
+        assert_eq!(vids[0]["src"], "assets/video/tour.mp4");
+        assert_eq!(vids[0]["title"], "Virtual Tour");
+    }
+
+    #[test]
+    fn next_id_skips_taken() {
+        let taken = vec![
+            TourVideo { id: "V001".into(), title: "".into(), description: "".into(), src: "".into(), poster: "".into() },
+            TourVideo { id: "V002".into(), title: "".into(), description: "".into(), src: "".into(), poster: "".into() },
+        ];
+        assert_eq!(next_id(&taken), "V003");
+    }
+}

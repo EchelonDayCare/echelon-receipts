@@ -493,7 +493,57 @@ pub fn render_all(
             .map_err(|e| format!("write {}: {e}", out_path.display()))?;
         written.push((page.key.to_string(), PathBuf::from(page.output)));
     }
+    // Mirror `content/careers.json`'s `jobs` array out to
+    // `assets/data/jobs.json` — the careers template fetches jobs from
+    // that file at runtime, so without this the AI edits (or any
+    // hand-edit to careers.json) would never show up in the preview or
+    // on the live site. Matches scripts/render.py's render_jobs_json.
+    if let Some(jobs_path) = write_jobs_json(&inputs.content, out_dir)? {
+        written.push(("careers_jobs".to_string(), jobs_path));
+    }
     Ok(written)
+}
+
+/// Emit `assets/data/jobs.json` from `content.careers.jobs`. Field order
+/// mirrors the Python renderer so committed diffs stay minimal.
+fn write_jobs_json(
+    content: &std::collections::BTreeMap<String, serde_json::Value>,
+    out_dir: &Path,
+) -> Result<Option<PathBuf>, String> {
+    let Some(careers) = content.get("careers") else {
+        return Ok(None);
+    };
+    let Some(jobs) = careers.get("jobs").and_then(|v| v.as_array()) else {
+        return Ok(None);
+    };
+    const FIELD_ORDER: &[&str] = &[
+        "id", "title", "category", "type", "location", "short", "details", "datePosted",
+    ];
+    let mut ordered: Vec<serde_json::Value> = Vec::with_capacity(jobs.len());
+    for j in jobs {
+        let Some(obj) = j.as_object() else { continue };
+        let mut ord = serde_json::Map::new();
+        for k in FIELD_ORDER {
+            if let Some(v) = obj.get(*k) {
+                ord.insert((*k).to_string(), v.clone());
+            }
+        }
+        ordered.push(serde_json::Value::Object(ord));
+    }
+    let rel = PathBuf::from("assets").join("data").join("jobs.json");
+    let out_path = out_dir.join(&rel);
+    if let Some(parent) = out_path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("mkdir {}: {e}", parent.display()))?;
+    }
+    let mut text = serde_json::to_string_pretty(&serde_json::Value::Array(ordered))
+        .map_err(|e| format!("serialize jobs.json: {e}"))?;
+    if !text.ends_with('\n') {
+        text.push('\n');
+    }
+    std::fs::write(&out_path, text.as_bytes())
+        .map_err(|e| format!("write {}: {e}", out_path.display()))?;
+    Ok(Some(rel))
 }
 
 fn normalize_lf(s: &str) -> String {
@@ -554,5 +604,62 @@ mod tests {
             .join("tests")
             .join("fixtures")
             .join("website")
+    }
+
+    #[test]
+    fn write_jobs_json_mirrors_careers_jobs_with_python_field_order() {
+        let mut content = BTreeMap::new();
+        content.insert(
+            "careers".to_string(),
+            serde_json::json!({
+                "jobs": [
+                    {
+                        "id": "J001",
+                        "title": "Educator",
+                        "category": "Teaching",
+                        "type": "Full-time",
+                        "location": "Vancouver",
+                        "short": "s",
+                        "details": "d",
+                        "datePosted": "2026-01-01",
+                        "extra_ignored": "nope"
+                    },
+                    {
+                        "id": "J002",
+                        "title": "Cook",
+                        "type": "Casual",
+                        "location": "Vancouver",
+                        "short": "s2",
+                        "details": "d2",
+                        "datePosted": "2026-08-23"
+                    }
+                ]
+            }),
+        );
+        let tmp = tempfile::tempdir().unwrap();
+        let out = write_jobs_json(&content, tmp.path()).unwrap().unwrap();
+        assert_eq!(out, PathBuf::from("assets/data/jobs.json"));
+        let raw = std::fs::read_to_string(tmp.path().join(&out)).unwrap();
+        assert!(raw.ends_with('\n'));
+        // Field order and dropped-extra check via textual position.
+        let j1 = raw.find("\"J001\"").unwrap();
+        let title1 = raw.find("\"Educator\"").unwrap();
+        let cat1 = raw.find("\"Teaching\"").unwrap();
+        assert!(j1 < title1 && title1 < cat1);
+        assert!(!raw.contains("extra_ignored"));
+        // Second job omits "category" cleanly.
+        let parsed: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        assert_eq!(parsed.as_array().unwrap().len(), 2);
+        assert!(parsed[1].get("category").is_none());
+        assert_eq!(parsed[1]["title"], "Cook");
+    }
+
+    #[test]
+    fn write_jobs_json_returns_none_when_no_careers() {
+        let content = BTreeMap::new();
+        let tmp = tempfile::tempdir().unwrap();
+        let out = write_jobs_json(&content, tmp.path()).unwrap();
+        assert!(out.is_none());
+        assert!(!tmp.path().join("assets/data/jobs.json").exists());
     }
 }

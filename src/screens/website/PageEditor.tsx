@@ -42,7 +42,7 @@ export default function PageEditor() {
   const [saved, setSaved] = useState<string | null>(null);
 
   // AI edit state — only rendered when the current page supports it.
-  const AI_EDIT_PAGES: EditableFile[] = ["careers"];
+  const AI_EDIT_PAGES: EditableFile[] = ["careers", "tour"];
   const aiEnabled = AI_EDIT_PAGES.includes(file);
   const [aiPrompt, setAiPrompt] = useState("");
   const [aiBusy, setAiBusy] = useState(false);
@@ -92,6 +92,78 @@ export default function PageEditor() {
       setErr(String(e?.message ?? e));
     } finally {
       setBusy(false);
+    }
+  }
+
+  // Careers: current-jobs list with multi-select delete (v3.22.1).
+  const [selectedJobIds, setSelectedJobIds] = useState<Set<string>>(new Set());
+  const [jobsBusy, setJobsBusy] = useState(false);
+  const [deleteJobsPending, setDeleteJobsPending] = useState(false);
+  const currentJobs: Array<{ id: string; title: string; type?: string; location?: string; category?: string }> = useMemo(() => {
+    if (file !== "careers" || !content) return [];
+    try {
+      const parsed = JSON.parse(content.content_json);
+      const arr = Array.isArray(parsed?.jobs) ? parsed.jobs : [];
+      return arr.map((j: any) => ({
+        id: String(j.id ?? ""),
+        title: String(j.title ?? "Untitled"),
+        type: j.type ? String(j.type) : undefined,
+        location: j.location ? String(j.location) : undefined,
+        category: j.category ? String(j.category) : undefined,
+      }));
+    } catch {
+      return [];
+    }
+  }, [file, content]);
+
+  useEffect(() => {
+    // Prune stale selections when jobs list changes (e.g. after AI edit).
+    setSelectedJobIds((prev) => {
+      const ids = new Set(currentJobs.map((j) => j.id));
+      const next = new Set<string>();
+      prev.forEach((id) => { if (ids.has(id)) next.add(id); });
+      return next;
+    });
+  }, [currentJobs]);
+
+  const allJobsSelected = currentJobs.length > 0 && selectedJobIds.size === currentJobs.length;
+
+  function toggleJob(id: string) {
+    setSelectedJobIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id); else next.add(id);
+      return next;
+    });
+  }
+  function toggleAllJobs() {
+    if (allJobsSelected) setSelectedJobIds(new Set());
+    else setSelectedJobIds(new Set(currentJobs.map((j) => j.id)));
+  }
+
+  async function performDeleteJobs() {
+    if (!content || selectedJobIds.size === 0) return;
+    setJobsBusy(true);
+    setErr(null);
+    setSaved(null);
+    try {
+      const parsed = JSON.parse(content.content_json);
+      const kept = Array.isArray(parsed.jobs)
+        ? parsed.jobs.filter((j: any) => !selectedJobIds.has(String(j.id ?? "")))
+        : [];
+      parsed.jobs = kept;
+      const nextJson = JSON.stringify(parsed, null, 2) + "\n";
+      const res = await websiteSaveDraft({ file: "careers", content_json: nextJson });
+      setSaved(`Deleted ${selectedJobIds.size} job${selectedJobIds.size === 1 ? "" : "s"} — draft rev #${res.revision_id}`);
+      setSelectedJobIds(new Set());
+      setDeleteJobsPending(false);
+      const c = await websiteLoadContent("careers");
+      setContent(c);
+      setText(tryPrettyJson(c.content_json));
+      setDirty(false);
+    } catch (e: any) {
+      setErr(String(e?.message ?? e));
+    } finally {
+      setJobsBusy(false);
     }
   }
 
@@ -212,6 +284,114 @@ export default function PageEditor() {
 
       {aiEnabled ? (
         <div>
+          {file === "careers" && currentJobs.length > 0 && (
+            <div
+              style={{
+                border: "1px solid rgba(0,0,0,0.1)",
+                background: "white",
+                borderRadius: 12,
+                padding: 16,
+                marginBottom: 16,
+              }}
+            >
+              <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 12 }}>
+                <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 14, cursor: "pointer" }}>
+                  <input
+                    type="checkbox"
+                    checked={allJobsSelected}
+                    onChange={toggleAllJobs}
+                    disabled={jobsBusy}
+                  />
+                  <b>Current job postings ({currentJobs.length})</b>
+                </label>
+                <span style={{ fontSize: 12, color: "#64748b" }}>
+                  {selectedJobIds.size > 0 ? `${selectedJobIds.size} selected` : "Select to delete"}
+                </span>
+                <button
+                  className="btn"
+                  onClick={() => setDeleteJobsPending(true)}
+                  disabled={selectedJobIds.size === 0 || jobsBusy}
+                  style={{
+                    marginLeft: "auto",
+                    background: selectedJobIds.size > 0 ? "#dc2626" : undefined,
+                    color: selectedJobIds.size > 0 ? "white" : undefined,
+                    fontSize: 13,
+                    padding: "6px 14px",
+                  }}
+                >
+                  {jobsBusy ? "Deleting…" : `Delete selected${selectedJobIds.size > 0 ? ` (${selectedJobIds.size})` : ""}`}
+                </button>
+              </div>
+              <ul style={{ listStyle: "none", padding: 0, margin: 0, display: "grid", gap: 8 }}>
+                {currentJobs.map((j) => {
+                  const checked = selectedJobIds.has(j.id);
+                  return (
+                    <li
+                      key={j.id || j.title}
+                      style={{
+                        display: "flex",
+                        alignItems: "center",
+                        gap: 12,
+                        padding: "10px 12px",
+                        border: "1px solid rgba(0,0,0,0.08)",
+                        background: checked ? "#fef2f2" : "#f8fafc",
+                        borderRadius: 8,
+                      }}
+                    >
+                      <input
+                        type="checkbox"
+                        checked={checked}
+                        onChange={() => toggleJob(j.id)}
+                        disabled={jobsBusy}
+                      />
+                      <div style={{ flex: 1, minWidth: 0 }}>
+                        <div style={{ fontWeight: 600, color: "#1d3557", fontSize: 14, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                          {j.title}
+                        </div>
+                        <div style={{ fontSize: 12, color: "#64748b", marginTop: 2 }}>
+                          {[j.type, j.category, j.location].filter(Boolean).join(" · ") || "\u00a0"}
+                        </div>
+                      </div>
+                      <span style={{ fontSize: 11, color: "#94a3b8", fontFamily: "monospace" }}>{j.id}</span>
+                    </li>
+                  );
+                })}
+              </ul>
+              <p style={{ margin: "12px 0 0", fontSize: 12, color: "#94a3b8" }}>
+                Tip: to add or edit a posting, use the AI prompt below.
+              </p>
+            </div>
+          )}
+          {file === "tour" && (
+            <div
+              style={{
+                border: "1px solid rgba(29,95,163,0.25)",
+                background: "rgba(29,95,163,0.05)",
+                borderRadius: 12,
+                padding: 16,
+                marginBottom: 16,
+                display: "flex",
+                alignItems: "center",
+                gap: 12,
+              }}
+            >
+              <span style={{ fontSize: 22 }}>🎬</span>
+              <div style={{ flex: 1 }}>
+                <b style={{ fontSize: 14 }}>Upload or manage tour videos</b>
+                <div style={{ fontSize: 12, color: "#475569", marginTop: 2 }}>
+                  Add MP4 / MOV files, reorder, or delete. Posters are extracted
+                  automatically from the first frame.
+                </div>
+              </div>
+              <button
+                className="btn"
+                onClick={() => nav("/website/tour-videos")}
+                style={{ background: "#1d5fa3", color: "white" }}
+              >
+                Manage videos →
+              </button>
+            </div>
+          )}
           <div
             style={{
               border: "1px solid rgba(99,102,241,0.35)",
@@ -231,7 +411,7 @@ export default function PageEditor() {
               }}
             >
               <span style={{ fontSize: 20 }}>✨</span>
-              <b style={{ fontSize: 16 }}>Ask AI to update the Careers page</b>
+              <b style={{ fontSize: 16 }}>Ask AI to update the {FILE_LABELS[file]} page</b>
               <span
                 style={{
                   fontSize: 11,
@@ -257,7 +437,9 @@ export default function PageEditor() {
               value={aiPrompt}
               onChange={(e) => setAiPrompt(e.target.value)}
               placeholder={
-                "e.g. Post a Friday-only Cook role, casual, $22-25/hr. Also change the hiring email to careers@echelondaycare.com and remove the Cleaner posting."
+                file === "tour"
+                  ? "e.g. Change the intro to emphasise our outdoor play area. Rename the classroom video to 'Toddler classroom walk-through'."
+                  : "e.g. Post a Friday-only Cook role, casual, $22-25/hr. Also change the hiring email to careers@echelondaycare.com and remove the Cleaner posting."
               }
               disabled={aiBusy}
               rows={5}
@@ -482,6 +664,52 @@ export default function PageEditor() {
             </button>
           </div>
         </>
+      )}
+      {deleteJobsPending && (
+        <div
+          onClick={() => setDeleteJobsPending(false)}
+          style={{
+            position: "fixed",
+            inset: 0,
+            background: "rgba(15,23,42,0.5)",
+            display: "grid",
+            placeItems: "center",
+            zIndex: 50,
+          }}
+        >
+          <div
+            onClick={(e) => e.stopPropagation()}
+            style={{
+              background: "white",
+              padding: 24,
+              borderRadius: 12,
+              maxWidth: 460,
+              boxShadow: "0 20px 60px rgba(0,0,0,0.3)",
+            }}
+          >
+            <h3 style={{ margin: "0 0 12px" }}>
+              Delete {selectedJobIds.size} job posting{selectedJobIds.size === 1 ? "" : "s"}?
+            </h3>
+            <p style={{ margin: "0 0 20px", color: "#475569" }}>
+              This creates a draft revision — the change goes live only after
+              Publish. You can restore any prior version from the version
+              history screen.
+            </p>
+            <div style={{ display: "flex", gap: 8, justifyContent: "flex-end" }}>
+              <button className="btn" onClick={() => setDeleteJobsPending(false)}>
+                Cancel
+              </button>
+              <button
+                className="btn"
+                onClick={performDeleteJobs}
+                disabled={jobsBusy}
+                style={{ background: "#dc2626", color: "white" }}
+              >
+                {jobsBusy ? "Deleting…" : "Delete"}
+              </button>
+            </div>
+          </div>
+        </div>
       )}
     </div>
   );

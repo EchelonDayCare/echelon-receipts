@@ -327,9 +327,12 @@ pub async fn website_start_preview(
     let repo_dir = wc.repo_dir.clone();
     let (pages, render_dir) = tokio::task::spawn_blocking(move || {
         let inputs = renderer::RenderInputs::load(&repo_dir, overrides)?;
-        let written = renderer::render_all(&inputs, &render_dir)?;
-        // Best-effort copy of assets/ for CSS/img/JS.
+        // Copy assets FIRST (CSS/img/JS/data), THEN render. Otherwise the
+        // asset copy overwrites files the renderer generates from CMS
+        // content (notably `assets/data/jobs.json`, which is derived from
+        // `content/careers.json`).
         let _ = copy_assets_best_effort(&inputs.repo_root, &render_dir);
+        let written = renderer::render_all(&inputs, &render_dir)?;
         Ok::<_, String>((written, render_dir))
     })
     .await
