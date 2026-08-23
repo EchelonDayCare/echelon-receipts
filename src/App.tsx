@@ -46,6 +46,12 @@ const OrganizerCalendar = lazy(() => import("./screens/organizer/calendar/Calend
 const NotificationsHistory = lazy(() => import("./screens/Notifications"));
 const Deposits = lazy(() => import("./screens/Deposits"));
 const Graduation = lazy(() => import("./screens/Graduation"));
+const Website = lazy(() => import("./screens/Website"));
+const WebsitePageEditor = lazy(() => import("./screens/website/PageEditor"));
+const WebsitePreview = lazy(() => import("./screens/website/Preview"));
+const WebsiteHistory = lazy(() => import("./screens/website/History"));
+const WebsitePublish = lazy(() => import("./screens/website/Publish"));
+const WebsiteSettings = lazy(() => import("./screens/website/Settings"));
 import { runCloudBackupIfDue } from "./lib/cloudBackup";
 import { getSettings } from "./lib/db";
 import { getVersion } from "@tauri-apps/api/app";
@@ -333,6 +339,32 @@ function Shell({ logo, name, staffEnabled }: { logo: string; name: string; staff
         items={[{ to: "/graduation", label: "Render Year-End Content" }]}
       />
     );
+  } else if (path.startsWith("/website")) {
+    sidebar = (
+      <ModuleSidebar
+        title="Website"
+        accent="#0891b2"
+        logo={logo}
+        name={name}
+        items={[
+          { to: "/website", label: "Overview" },
+          { to: "", label: "Edit pages", header: true },
+          { to: "/website/site", label: "Site (global)" },
+          { to: "/website/home", label: "Home" },
+          { to: "/website/about", label: "About" },
+          { to: "/website/services", label: "Programs & Waiting List" },
+          { to: "/website/contact", label: "Contact" },
+          { to: "/website/tour", label: "Virtual Tour" },
+          { to: "/website/careers", label: "Careers" },
+          { to: "/website/seo", label: "SEO" },
+          { to: "", label: "Publish", header: true },
+          { to: "/website/preview", label: "Preview" },
+          { to: "/website/history", label: "Version history" },
+          { to: "/website/publish", label: "Publish…" },
+          { to: "/website/settings", label: "GitHub connection" },
+        ]}
+      />
+    );
   } else if (path.startsWith("/expenses")) {
     sidebar = (
       <ModuleSidebar
@@ -493,6 +525,19 @@ function Shell({ logo, name, staffEnabled }: { logo: string; name: string; staff
           {/* Notifications history — accessible only via the bell footer */}
           <Route path="/notifications" element={<NotificationsHistory />} />
           <Route path="/graduation" element={<Graduation />} />
+
+          {/* Website CMS (v3.20.0 PR 2). Route table is unconditionally
+              registered; the routes only become visible via the Home
+              tile / sidebar when isWebsiteCmsEnabled() returns true
+              (gated on ECHELON_WEBSITE_CMS=1). Direct URL access still
+              works so a developer can bookmark /website even with the
+              tile hidden. */}
+          <Route path="/website" element={<Website />} />
+          <Route path="/website/preview" element={<WebsitePreview />} />
+          <Route path="/website/history" element={<WebsiteHistory />} />
+          <Route path="/website/publish" element={<WebsitePublish />} />
+          <Route path="/website/settings" element={<WebsiteSettings />} />
+          <Route path="/website/:file" element={<WebsitePageEditor />} />
 
           {/* Redirects for old Students routes now moved to Reports module */}
           <Route path="/students/reports" element={<Navigate to="/reports/monthly" replace />} />

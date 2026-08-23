@@ -183,7 +183,7 @@ pub async fn set_state(
         if !cur.can_transition_to(target) {
             return Err(DbError::Sqlite(rusqlite::Error::InvalidQuery));
         }
-        let ended = target.is_terminal().then(|| "datetime('now')");
+        let ended = target.is_terminal().then_some("datetime('now')");
         let sql = if ended.is_some() {
             "UPDATE site_publications SET state = ?2, ended_at = datetime('now') WHERE id = ?1"
         } else {
