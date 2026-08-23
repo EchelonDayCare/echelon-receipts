@@ -125,6 +125,23 @@ export function websiteSaveDraft(req: {
   return invoke<SaveDraftResponse>("website_save_draft", { req });
 }
 
+export interface AiEditResponse {
+  page: string;
+  original_json: string;
+  proposed_json: string;
+  summary: string;
+  model: string;
+}
+
+export function websiteAiEditContent(
+  page: EditableFile,
+  userPrompt: string,
+): Promise<AiEditResponse> {
+  return invoke<AiEditResponse>("website_ai_edit_content", {
+    request: { page, user_prompt: userPrompt },
+  });
+}
+
 export function websiteListRevisions(
   file: EditableFile,
   limit = 100,

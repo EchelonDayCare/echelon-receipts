@@ -4,6 +4,26 @@ All notable changes shipped as a DMG. Only entries the owner has approved
 for release are listed here — "code-complete, awaiting ship approval" work
 lives in the session plan.md until it ships.
 
+## v3.21.0 — Website CMS: AI-driven content edits on the Careers page
+
+Adds an "Ask AI to edit this page" panel to the Careers content editor.
+Owner describes the change in plain English (broad restyle or narrow
+tweak — "add a Friday cook role, part-time, $22-25/hr"), the app calls
+Azure OpenAI gpt-5.4 with the current `careers.json` and the request,
+then shows the proposed replacement JSON + a plain-English summary.
+Owner clicks **Apply to editor** to load it, then Save + Publish as
+usual — nothing auto-commits.
+
+- New backend command `website_ai_edit_content` in
+  `website/ai_edit.rs`. Uses AOAI `response_format: json_schema` with
+  a strict object shape `{content_json, summary}`. Read/write scope
+  is limited to `content/careers.json`; other pages return an error.
+- New frontend wrapper `websiteAiEditContent(page, prompt)` +
+  `AiEditResponse` in `src/lib/website.ts`.
+- `PageEditor.tsx` renders the AI panel only when the current page is
+  in the allowlist (`careers` today). Preserves the existing raw-JSON
+  editor for advanced users; AI is an addition, not a replacement.
+
 ## v3.20.3 — Website CMS Gallery: thumbnails, multi-select, batch delete
 
 - **Thumbnails now render** in the Gallery editor. Adds

@@ -1263,7 +1263,7 @@ checksum = "d0881ea181b1df73ff77ffaaf9c7544ecc11e82fba9b5f27b262a3c73a332555"
 
 [[package]]
 name = "echelon-receipts"
-version = "3.20.3"
+version = "3.21.0"
 dependencies = [
  "ab_glyph",
  "argon2",

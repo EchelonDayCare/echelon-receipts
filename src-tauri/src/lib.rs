@@ -198,6 +198,7 @@ pub fn run() {
             website::commands::website_working_copy_pull,
             website::commands::website_load_content,
             website::commands::website_save_draft,
+            website::ai_edit::website_ai_edit_content,
             website::commands::website_list_revisions,
             website::commands::website_load_revision,
             website::commands::website_restore_revision,

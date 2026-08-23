@@ -47,6 +47,7 @@ use std::sync::Arc;
 
 use tokio::sync::Mutex;
 
+pub mod ai_edit;
 pub mod commands;
 pub mod git_ops;
 pub mod media;
