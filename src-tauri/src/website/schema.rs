@@ -28,10 +28,12 @@
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
-/// The set of content files this PR edits. `gallery` intentionally
-/// omitted — PR 3.
+/// The set of content files this PR edits. Gallery photos live in
+/// `gallery.json` and are still locked (photo CRUD is a bespoke UI, not
+/// JSON editing); `gallery-videos.json` (v3.23.0) is JSON-editable
+/// alongside tour videos.
 pub const EDITABLE_FILES: &[&str] = &[
-    "site", "home", "about", "services", "contact", "tour", "careers", "seo",
+    "site", "home", "about", "services", "contact", "tour", "careers", "seo", "gallery-videos",
 ];
 
 /// Files present in the site repo but NOT editable in PR 2.
@@ -60,6 +62,7 @@ pub fn validate(name: &str, raw: &str) -> Result<Value, String> {
         "services" => require_object(&v, "daycare_program")?,
         "contact" => require_string(&v, "heading")?,
         "tour" => require_string(&v, "heading")?,
+        "gallery-videos" => require_string(&v, "heading")?,
         "careers" => require_object(&v, "hero_banner")?,
         "seo" => require_object(&v, "pages")?,
         _ => return Err(format!("Unknown content file: {name}")),

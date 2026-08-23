@@ -138,7 +138,7 @@ pub struct AddVideosRequest {
 }
 
 /// Sanitise a user-supplied filename into an assets/video/-safe stem.
-fn safe_stem(name: &str) -> String {
+pub(crate) fn safe_stem(name: &str) -> String {
     let stem = Path::new(name)
         .file_stem()
         .and_then(|s| s.to_str())
@@ -159,7 +159,7 @@ fn safe_stem(name: &str) -> String {
     if out.is_empty() { "video".into() } else { out }
 }
 
-fn unique_stem(assets_video: &Path, base: &str) -> String {
+pub(crate) fn unique_stem(assets_video: &Path, base: &str) -> String {
     let mut candidate = base.to_string();
     let mut n = 2;
     while assets_video.join(format!("{candidate}.mp4")).exists()
@@ -172,7 +172,7 @@ fn unique_stem(assets_video: &Path, base: &str) -> String {
     candidate
 }
 
-fn next_id(existing: &[TourVideo]) -> String {
+pub(crate) fn next_id(existing: &[TourVideo]) -> String {
     let mut n = 1i64;
     let taken: std::collections::HashSet<String> =
         existing.iter().map(|v| v.id.clone()).collect();
@@ -190,9 +190,9 @@ fn next_id(existing: &[TourVideo]) -> String {
 /// libx264). Keeps files well under GitHub's 100 MB push limit while
 /// preserving playback quality. Two-tier bitrate ladder if the first pass
 /// still yields > 90 MB.
-const GITHUB_MAX_MB: u64 = 90;
+pub(crate) const GITHUB_MAX_MB: u64 = 90;
 
-fn transcode_video(ffmpeg: &Path, src: &Path, dst: &Path) -> Result<(), String> {
+pub(crate) fn transcode_video(ffmpeg: &Path, src: &Path, dst: &Path) -> Result<(), String> {
     // (video_bitrate, max_height)
     let attempts: &[(&str, &str)] = &[
         ("1500k", "720"),
@@ -239,7 +239,7 @@ fn transcode_video(ffmpeg: &Path, src: &Path, dst: &Path) -> Result<(), String> 
     Ok(())
 }
 
-fn extract_poster(
+pub(crate) fn extract_poster(
     ffmpeg: &Path,
     video_path: &Path,
     poster_path: &Path,
@@ -498,15 +498,22 @@ pub async fn website_tour_reorder_videos(
 /// one-sentence description from a raw filename. Never blocks the
 /// upload: any error, timeout, or malformed response returns `None`
 /// and the caller falls back to a stem-derived title.
-async fn ai_polish_video_meta(orig_name: &str) -> Option<(String, String)> {
+pub(crate) async fn ai_polish_video_meta(orig_name: &str) -> Option<(String, String)> {
+    ai_polish_video_meta_ctx(orig_name, "Virtual Tour").await
+}
+
+/// Like [`ai_polish_video_meta`] but with an explicit context label
+/// (e.g. `"Virtual Tour"`, `"Gallery"`) so the prompt matches the page
+/// the caller is populating.
+pub(crate) async fn ai_polish_video_meta_ctx(orig_name: &str, context_label: &str) -> Option<(String, String)> {
     let key = crate::secrets::get_secret("azure_ai_key").ok()?;
     let url = format!(
         "https://ai-nse.openai.azure.com/openai/deployments/gpt-5.4/chat/completions?api-version=2025-04-01-preview"
     );
-    let sys = "You clean up raw video filenames for a daycare's public 'Virtual Tour' website. \
+    let sys = format!("You clean up raw video filenames for a daycare's public '{context_label}' website. \
         Return a short human-friendly title (2-6 words, Title Case, no filler like 'video' or 'demo') \
         and a warm one-sentence description (max 20 words) suitable as caption text. \
-        Never invent facts; if the filename is opaque, describe generically.";
+        Never invent facts; if the filename is opaque, describe generically.");
     let user = format!("Filename: {orig_name}\nReturn JSON with fields `title` and `description`.");
     let schema = json!({
         "type": "object",

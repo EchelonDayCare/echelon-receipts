@@ -240,13 +240,13 @@ export default function Gallery() {
   return (
     <div style={{ padding: 24, maxWidth: 1200, margin: "0 auto" }}>
       <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
-        <button className="btn link" onClick={() => nav("/website")} style={{ padding: 0 }}>
-          ← Website
+        <button className="btn link" onClick={() => nav("/website/gallery")} style={{ padding: 0 }}>
+          ← Gallery
         </button>
         <h1 style={{ margin: 0 }}>Gallery</h1>
         <button
           className="btn"
-          onClick={() => nav("/website/preview?page=gallery")}
+          onClick={() => nav("/website/preview?page=gallery-photos")}
           style={{ marginLeft: "auto", fontSize: 13, padding: "6px 14px" }}
           title="Preview the Gallery page with pending drafts"
         >

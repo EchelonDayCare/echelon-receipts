@@ -168,7 +168,7 @@ export default function Website() {
           >
             <div style={{ fontWeight: 600, fontSize: 15 }}>Gallery</div>
             <div style={{ fontSize: 12, color: "var(--muted, #64748b)", marginTop: 4 }}>
-              Upload, reorder, caption, and moderate site photos.
+              Manage photos and videos shown on the site's gallery page.
             </div>
           </button>
           <button

@@ -29,7 +29,7 @@ use crate::website::{
 pub fn require_enabled() -> Result<(), String> {
     if !FeatureFlag::detect().enabled() {
         return Err(
-            "Website CMS is disabled. Set ECHELON_WEBSITE_CMS=1 to enable."
+            "Website CMS is disabled. Unset ECHELON_WEBSITE_CMS or set it to a non-zero value."
                 .to_string(),
         );
     }

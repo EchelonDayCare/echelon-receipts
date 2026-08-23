@@ -4,6 +4,36 @@ All notable changes shipped as a DMG. Only entries the owner has approved
 for release are listed here — "code-complete, awaiting ship approval" work
 lives in the session plan.md until it ships.
 
+## v3.23.0 — Gallery split (Photos + Videos), CMS enabled by default
+
+- **Gallery is now a two-section area.** On the public site, `/gallery`
+  renders a chooser page with **Photos** and **Videos** tiles. Photos
+  open the existing photo gallery; Videos open a new playlist page
+  cloned from the Virtual Tour player (auto-plays first video,
+  click-to-switch playlist, per-video description).
+- **New CMS Gallery Videos screen.** Website → Gallery is now a landing
+  page with the same two tiles. **Photos** goes to the existing photo
+  gallery editor; **Videos** opens a new Tour-style editor:
+  - Upload one or more MP4/MOV/WEBM at a time (auto-transcoded to H.264
+    where needed to stay under the GitHub 100 MB limit)
+  - AI auto-suggests a friendly title and description per upload,
+    tagged with the "Gallery" context so titles read naturally
+  - Drag-drop to reorder (first video plays by default on the site)
+  - Multi-select delete with confirmation
+  - Preview button for the exact draft the visitor will see
+- **Gallery videos have their own asset folder.** New videos live under
+  `assets/video/gallery/` (not `assets/video/`) so gallery and tour
+  stems can never collide.
+- **Website CMS enabled by default.** No more `ECHELON_WEBSITE_CMS=1`
+  requirement. The Website icon in the topbar and the CMS commands are
+  now on out of the box for every DMG install (Mac and Windows). The
+  env var is kept as an explicit opt-out (`ECHELON_WEBSITE_CMS=0`) for
+  support scenarios.
+- **Contact template map iteration fix.** MiniJinja 2 iterates dicts
+  directly as key-value pairs; the AI-generated contact template was
+  calling `.items()` which does not exist, causing a preview error.
+  Working-copy template patched.
+
 ## v3.22.1 — Contact page edits, unified CMS UX, video auto-transcode
 
 - **Contact page inline form.** Website → Contact now has a first-class

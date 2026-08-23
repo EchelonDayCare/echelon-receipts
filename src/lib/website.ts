@@ -16,6 +16,7 @@ export const EDITABLE_FILES = [
   "tour",
   "careers",
   "seo",
+  "gallery-videos",
 ] as const;
 export type EditableFile = (typeof EDITABLE_FILES)[number];
 
@@ -171,6 +172,26 @@ export function websiteTourDeleteVideo(id: string): Promise<number> {
 }
 export function websiteTourReorderVideos(ids: string[]): Promise<number> {
   return invoke<number>("website_tour_reorder_videos", {
+    request: { ids },
+  });
+}
+
+// ── Gallery videos (v3.23.0) ─────────────────────────────────────────
+export function websiteGalleryVideosList(): Promise<TourVideo[]> {
+  return invoke<TourVideo[]>("website_gallery_videos_list");
+}
+export function websiteGalleryVideosAdd(paths: string[]): Promise<TourAddResponse> {
+  return invoke<TourAddResponse>("website_gallery_videos_add", {
+    request: { paths },
+  });
+}
+export function websiteGalleryVideosDelete(id: string): Promise<number> {
+  return invoke<number>("website_gallery_videos_delete", {
+    request: { id },
+  });
+}
+export function websiteGalleryVideosReorder(ids: string[]): Promise<number> {
+  return invoke<number>("website_gallery_videos_reorder", {
     request: { ids },
   });
 }
