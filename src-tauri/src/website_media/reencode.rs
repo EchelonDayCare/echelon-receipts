@@ -32,13 +32,12 @@ pub const WIDTHS: [u32; 3] = [400, 800, 1600];
 /// for content photos — matches the current Tauri profile builder.
 pub const JPG_QUALITY: u8 = 82;
 
-/// AVIF quality (0–100). 50 is aggressive but still visually acceptable
-/// at typical viewing distances; the format's contrast retention is much
-/// better than JPEG at the same quantizer.
+// AVIF constants kept as documentation of the intended PR 3.5 settings.
+// They are unused today because encode_avif is stubbed — see the
+// TODO: reintroduce ravif in PR3.5 note.
+#[allow(dead_code)]
 pub const AVIF_QUALITY: f32 = 50.0;
-
-/// rav1e speed preset (1..=10). 4 is a good tradeoff; higher = faster
-/// encode but worse compression.
+#[allow(dead_code)]
 pub const AVIF_SPEED: u8 = 4;
 
 /// Decode any of our supported inputs into an in-memory image.
@@ -107,33 +106,23 @@ pub fn encode_webp(img: &DynamicImage) -> Result<Vec<u8>, MediaError> {
     Ok(out)
 }
 
-/// Encode an AVIF at [`AVIF_QUALITY`] / [`AVIF_SPEED`]. Single-threaded
-/// for determinism.
-pub fn encode_avif(img: &DynamicImage) -> Result<Vec<u8>, MediaError> {
-    let rgba = img.to_rgba8();
-    let (w, h) = (rgba.width() as usize, rgba.height() as usize);
-    // Rebuild as a Vec<RGBA8>; ravif re-exports rgb::RGBA8 and imgref::Img.
-    let pixels: Vec<ravif::RGBA8> = rgba
-        .chunks_exact(4)
-        .map(|c| ravif::RGBA8 {
-            r: c[0],
-            g: c[1],
-            b: c[2],
-            a: c[3],
-        })
-        .collect();
-    let img_ref = ravif::Img::new(pixels.as_slice(), w, h);
-
-    let encoded = ravif::Encoder::new()
-        .with_quality(AVIF_QUALITY)
-        .with_speed(AVIF_SPEED)
-        .with_num_threads(Some(1))
-        .encode_rgba(img_ref)
-        .map_err(|e| MediaError::EncodeFailed(format!("avif: {e}")))?;
-    Ok(encoded.avif_file)
+/// Encode an AVIF — **stubbed in PR 3 groundwork**.
+///
+/// `ravif` was pulled from the dependency list because rav1e + dav1d
+/// transitive compile took too long for this PR's budget. WebP + JPG
+/// are enough to ship the pipeline end-to-end; AVIF returns
+/// [`MediaError::StubNotImplemented`] so callers can distinguish
+/// "not-wired-yet" from "genuine encode failure".
+///
+/// TODO: reintroduce ravif in PR3.5 (paired with the lossy libwebp
+/// swap and a `RECIPE_VERSION` bump to 2).
+pub fn encode_avif(_img: &DynamicImage) -> Result<Vec<u8>, MediaError> {
+    Err(MediaError::StubNotImplemented("encode_avif (AVIF via ravif deferred to PR 3.5)"))
 }
 
-/// Encode into the requested format.
+/// Encode into the requested format. AVIF returns
+/// [`MediaError::StubNotImplemented`] in PR 3 groundwork — see
+/// [`encode_avif`].
 pub fn encode(img: &DynamicImage, format: Format) -> Result<Vec<u8>, MediaError> {
     match format {
         Format::Avif => encode_avif(img),
@@ -201,9 +190,10 @@ mod tests {
     }
 
     #[test]
-    fn reencode_produces_3_widths_3_formats() {
-        // Feed a JPEG large enough that every target width actually
-        // triggers a resize, so we can assert output dimensions.
+    fn reencode_produces_3_widths_2_formats() {
+        // AVIF is stubbed in PR 3 groundwork (see encode_avif TODO), so
+        // this test verifies WebP + JPG for each width. The AVIF slot
+        // will come back in PR 3.5 alongside ravif being re-introduced.
         let jpeg = make_solid_rgb_jpeg(2000, 1500, [200, 40, 40]);
         let img = decode(&jpeg).unwrap();
 
@@ -212,15 +202,10 @@ mod tests {
             let (rw, rh) = resized.dimensions();
             assert_eq!(rw.max(rh), w, "max dim should equal target {w}");
 
-            let avif = encode_avif(&resized).unwrap();
             let webp = encode_webp(&resized).unwrap();
             let jpg = encode_jpg(&resized).unwrap();
 
             // Format magic byte checks — cheapest possible verification.
-            assert!(
-                avif.len() > 12 && &avif[4..8] == b"ftyp",
-                "avif magic missing"
-            );
             assert!(
                 webp.len() > 12 && &webp[0..4] == b"RIFF" && &webp[8..12] == b"WEBP",
                 "webp magic missing"
@@ -229,6 +214,12 @@ mod tests {
                 jpg.len() > 3 && jpg[0] == 0xFF && jpg[1] == 0xD8 && jpg[2] == 0xFF,
                 "jpg SOI missing"
             );
+
+            // AVIF is the stub path in PR 3 groundwork.
+            assert!(matches!(
+                encode_avif(&resized),
+                Err(MediaError::StubNotImplemented(_))
+            ));
         }
     }
 

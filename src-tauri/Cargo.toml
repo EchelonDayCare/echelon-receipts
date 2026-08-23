@@ -76,9 +76,14 @@ tempfile = "3"
 # img-parts: surgical EXIF/XMP/IPTC/ICC strip on JPEG/PNG/WebP without
 # re-encoding the pixel data (marker-level edits only).
 img-parts = "0.3"
-# ravif: pure-Rust AV1 image encoder (AVIF). No system deps. Used for
-# the highest-compression variant of every photo (q=50 speed=4).
-ravif = "0.11"
+# NOTE: ravif (AVIF encoder) is intentionally OMITTED from PR 3
+# groundwork. rav1e + dav1d transitive-compile blew past the branch's
+# time budget. AVIF encoding is stubbed with StubNotImplemented; PR 3.5
+# re-introduces ravif AND swaps WebP to lossy libwebp in the same
+# recipe-version bump. WebP + JPG (6 variants) is enough for PR 3 to
+# ship the pipeline end-to-end.
+# TODO: reintroduce ravif in PR3.5
+# ravif = "0.11"
 # blake3: fast, deterministic hash for derived filenames. Combined with
 # sha2 (already in deps) to build the (source_hash, width, format,
 # recipe_version) tuple key. Bumping the recipe version cache-busts

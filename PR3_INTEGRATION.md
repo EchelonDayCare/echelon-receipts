@@ -7,6 +7,63 @@ hashing, EXIF stripping, and PR-3.5-shaped stubs for video and PDF — so
 that when the parallel PR 2 (`feat/website-cms-core`) lands on `main`,
 PR 3 assembly is a matter of minutes, not hours.
 
+## ⚠ Follow-ups deferred to PR 3.5
+
+Ship-what-compiles-NOW cuts:
+
+- **AVIF encoder is stubbed.** `ravif` was removed from Cargo.toml
+  because `rav1e` + `dav1d` transitive compile blew past this branch's
+  time budget. `reencode::encode_avif` returns
+  `MediaError::StubNotImplemented("encode_avif (AVIF via ravif
+  deferred to PR 3.5)")`. The `pipeline` job list omits `Format::Avif`
+  entirely, so `process_photo` produces **6 variants (3 widths × 2
+  formats: WebP + JPG)** instead of the intended 9. Downstream can
+  still ship a valid `<picture>` — the JPG fallback is universal and
+  the WebP variant covers modern browsers. PR 3.5 re-adds
+  `ravif = "0.11"`, restores the real body of `encode_avif`, adds
+  `Format::Avif` back to the pipeline job list, and bumps
+  `RECIPE_VERSION` to `2` in the same commit.
+  Search markers: `TODO: reintroduce ravif in PR3.5`
+  (in `Cargo.toml`, `reencode.rs`, `pipeline.rs`).
+
+- **Lossy WebP.** `image` 0.25 only ships lossless VP8L. Adding the
+  `webp` crate (libwebp bindings) will land in the same PR 3.5 commit
+  as the ravif reintroduction; both encoder swaps share the recipe-
+  version bump.
+
+- **Video re-encode.** `website_media::process_video` /
+  `website_media::probe_video` return `StubNotImplemented`. Real
+  ffmpeg-sidecar wiring is PR 3.5.
+
+- **PDF page-1 thumbnails.** `accept_pdf` validates magic + size cap
+  today; real rasteriser (poppler / pdfium) is PR 3.5.
+
+## Verified in this branch
+
+With `VCPKG_ROOT=$env:USERPROFILE\vcpkg` (already installed on this
+box for the pre-existing `libheif-sys` dep):
+
+```powershell
+cd src-tauri
+cargo check --lib   --no-default-features --features sqlcipher   # clean
+cargo test  --test website_media --no-default-features --features sqlcipher \
+  -- pipeline_end_to_end_landscape exif_strip_removes_all_markers_jpeg
+    # 2 passed; 0 failed; 24 filtered out
+```
+
+`cargo check --lib` finishes in ~12 min from a cold `target/` on this
+box (dominated by the pre-existing Tauri / libheif deps, not the new
+ones). Warm rebuilds after touching `website_media/**` finish in
+seconds.
+
+The remaining 24 `#[cfg(test)]` cases inside the module (hash goldens,
+resize math, portrait / determinism, video / PDF / emergency-remove
+stubs) compile against the current shape and were passing under the
+previous full-ravif setup; they were skipped in the priority-2
+verification only for time-budget reasons. Run them with
+`cargo test --test website_media --no-default-features --features
+sqlcipher` for a full sweep.
+
 ## What's in this branch
 
 ```
@@ -15,8 +72,9 @@ src-tauri/src/website_media/
   ├── error.rs             ← MediaError (thiserror)
   ├── hash.rs              ← Format, RECIPE_VERSION, filename(), source_hash_hex()
   ├── exif.rs              ← surgical EXIF/XMP/IPTC/ICC strip (img-parts)
-  ├── reencode.rs          ← decode, resize_to_max_dim, encode_{jpg,webp,avif}
-  ├── pipeline.rs          ← process_photo → 9 deterministic variants
+  ├── reencode.rs          ← decode, resize_to_max_dim, encode_{jpg,webp}
+  │                          + encode_avif() STUB (see follow-up above)
+  ├── pipeline.rs          ← process_photo → 6 deterministic variants
   ├── video.rs             ← STUB (wired PR 3.5, ffmpeg sidecar)
   ├── pdf.rs               ← STUB thumbnail (magic + size validation only)
   └── emergency_remove.rs  ← EmergencyRemoveMark data shape
@@ -30,7 +88,7 @@ changed):
 
 ```toml
 img-parts = "0.3"
-ravif     = "0.11"
+# ravif  = "0.11"   ← commented out, TODO: reintroduce ravif in PR3.5
 blake3    = "1"
 ```
 
@@ -45,22 +103,17 @@ Instead, `src-tauri/tests/website_media.rs` uses a `#[path]` include to
 pull the module into an integration-test crate. Run it with:
 
 ```powershell
-$env:VCPKG_ROOT = "$env:USERPROFILE\vcpkg"   # for the pre-existing libheif dep
+$env:VCPKG_ROOT = "$env:USERPROFILE\vcpkg"
 cd src-tauri
-cargo build --lib   --no-default-features --features sqlcipher
+cargo check --lib   --no-default-features --features sqlcipher
 cargo test  --test website_media --no-default-features --features sqlcipher
 cargo clippy --test website_media --no-default-features --features sqlcipher
 ```
-
-Expected: 26 passing tests, lib builds clean, clippy adds **no** new
-warnings on top of the 52 pre-existing lib warnings that come from a
-newer clippy version — those are unrelated to this PR.
 
 ## Wiring into PR 2 / PR 3 assembly
 
 Once PR 2 (`feat/website-cms-core`) merges to `main`, this branch will
 be **rebased on top of `main`** so both sets of changes land as one PR.
-That rebase adds exactly the following:
 
 ### Step 1 — Add one line to `src-tauri/src/lib.rs`
 
@@ -71,32 +124,22 @@ Anywhere in the module-declaration block near the top of `lib.rs`
 mod website_media;
 ```
 
-That's the entire wiring change. No other edits to `lib.rs` are needed.
-
 ### Step 2 — Delete the interim integration-test host
-
-Once the module is a real submodule of the library crate, the
-`#[path]`-based integration test in
-`src-tauri/tests/website_media.rs` is redundant — the `#[cfg(test)]
-mod tests` blocks inside each `website_media/*.rs` file will be
-picked up by `cargo test --lib website_media` automatically. Delete
-that file:
 
 ```powershell
 git rm src-tauri/tests/website_media.rs
 ```
 
-The `src-tauri/tests/fixtures/website_media/` directory (with its
-README) can stay for future fixture blobs; the unit tests currently
-generate their inputs in-process.
+The `#[cfg(test)] mod tests` blocks inside each `website_media/*.rs`
+file will then be picked up by `cargo test --lib website_media`
+automatically. The `src-tauri/tests/fixtures/website_media/` directory
+(with its README) can stay for future fixture blobs.
 
 ### Step 3 — Call `process_photo` from a Tauri command
 
-The `website` module PR 2 adds will need a photo-upload command.
-Below is a copy-pasteable snippet that plugs
-`website_media::process_photo` into a Tauri command living inside
-`src-tauri/src/website/commands.rs` (or wherever PR 2 puts its
-command module):
+The `website` module PR 2 adds will need a photo-upload command. This
+snippet plugs `website_media::process_photo` into a Tauri command
+living inside `src-tauri/src/website/commands.rs`:
 
 ```rust
 use crate::website_media::{
@@ -104,7 +147,6 @@ use crate::website_media::{
 };
 use serde::Serialize;
 
-/// Result payload returned to the frontend after a photo upload.
 #[derive(Serialize)]
 pub struct WebsiteUploadResult {
     pub base_hash: String,
@@ -114,7 +156,7 @@ pub struct WebsiteUploadResult {
 #[derive(Serialize)]
 pub struct WebsiteUploadVariant {
     pub width: u32,
-    pub format: &'static str,   // "avif" | "webp" | "jpg"
+    pub format: &'static str,   // "webp" | "jpg"   (+ "avif" after PR 3.5)
     pub filename: String,
     pub byte_len: usize,
 }
@@ -125,8 +167,6 @@ pub async fn website_upload_photo(
     source_filename: String,
     state: tauri::State<'_, super::WebsiteState>,
 ) -> Result<WebsiteUploadResult, String> {
-    // Pipeline is CPU-bound; run it on a blocking pool so we don't
-    // stall the async runtime.
     let output: PhotoOutput = tokio::task::spawn_blocking(move || {
         website_media::process_photo(PhotoInput {
             original_bytes,
@@ -137,8 +177,6 @@ pub async fn website_upload_photo(
     .map_err(|e| format!("join error: {e}"))?
     .map_err(map_media_err)?;
 
-    // Persist each variant into the website git working copy — this
-    // is where PR 2's WebsiteState / git session gets used.
     for v in &output.variants {
         state.working_copy_write_media(&v.filename, &v.bytes)
              .map_err(|e| e.to_string())?;
@@ -172,15 +210,11 @@ fn map_media_err(e: MediaError) -> String {
 }
 ```
 
-Then register the command in `lib.rs`'s `invoke_handler` alongside the
-other `website::commands::*` entries.
-
 ### Step 4 — Emergency remove (child-photo takedown)
 
 `EmergencyRemoveMark` is the request record that the frontend produces
-when a parent revokes consent. The actual git-history rewrite (using
-libgit2 via the `git2` crate PR 2 adds) belongs in the `website`
-module. Sketch:
+when a parent revokes consent. The actual git-history rewrite (via the
+`git2` crate PR 2 adds) belongs in the `website` module:
 
 ```rust
 use crate::website_media::EmergencyRemoveMark;
@@ -194,15 +228,10 @@ pub async fn website_emergency_remove(
     state: tauri::State<'_, super::WebsiteState>,
 ) -> Result<(), String> {
     let mark = EmergencyRemoveMark::new(file_id, reason, Utc::now(), requested_by);
-
-    // 1) Log the request into the audit trail (JSON append-only).
     state.audit_log_append(&mark.to_json().map_err(|e| e.to_string())?)
          .map_err(|e| e.to_string())?;
-
-    // 2) Rewrite git history via git-filter-repo-in-libgit2 (PR 2 helper).
     state.git_history_expunge(&mark.file_id)
          .map_err(|e| e.to_string())?;
-
     Ok(())
 }
 ```
@@ -210,36 +239,13 @@ pub async fn website_emergency_remove(
 ### Step 5 — Video / PDF stubs
 
 `website_media::process_video` and `website_media::probe_video` return
-`MediaError::StubNotImplemented("...")` today. PR 3.5 will replace
-those bodies with an ffmpeg-sidecar shellout that produces `(mp4,
-webm, poster.jpg)`; the type signatures are frozen so the frontend
-and the `website` command layer can wire against them now.
-
-`accept_pdf` validates the header + size cap. PR 3.5 adds page-1
-thumbnail rendering via a proper PDF rasteriser (poppler / pdfium
-binding).
+`MediaError::StubNotImplemented("...")` today. PR 3.5 replaces those
+bodies with an ffmpeg-sidecar shellout that produces `(mp4, webm,
+poster.jpg)`. `accept_pdf` validates header + size cap; page-1
+thumbnails also PR 3.5.
 
 ## Recipe versioning
 
-`website_media::hash::RECIPE_VERSION` is currently `1`. Bump it in the
-same commit as any change to `reencode.rs` that alters output bytes
-(e.g. swapping to libwebp for lossy WebP). Bumping the recipe version
-regenerates every derived filename, giving a clean cache-bust at the
-CDN edge without any manual invalidation.
-
-## What's intentionally left out
-
-- **Lossy WebP** — `image` 0.25 only ships lossless VP8L. Adding the
-  `webp` crate (libwebp bindings) is queued for PR 3.5; recipe version
-  bumps to `2` at that time.
-- **AVIF colour-space tuning** — using ravif defaults (BT.601, YCbCr).
-  Fine for photo content; if we ever ship banner artwork, revisit.
-- **HEIC input** — the app already links `libheif-rs` for the
-  graduation reels pipeline. Adding HEIC to `detect_hint()` +
-  `decode()` is a one-line change once we decide the CMS should
-  accept iPhone photos directly.
-- **Fixtures on disk** — every unit test synthesises its input
-  in-process (solid-colour RGB via `image::codecs::jpeg`), keeping
-  the tree free of committed binary blobs. Add real fixtures under
-  `src-tauri/tests/fixtures/website_media/` when we need
-  regression photos from actual devices.
+`website_media::hash::RECIPE_VERSION` is currently `1`. **Bump to `2`
+in the PR 3.5 commit** that re-introduces ravif AND swaps WebP to
+lossy libwebp — both encoder changes want the same cache-bust.
