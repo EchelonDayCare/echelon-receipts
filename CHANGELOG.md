@@ -4,6 +4,23 @@ All notable changes shipped as a DMG. Only entries the owner has approved
 for release are listed here — "code-complete, awaiting ship approval" work
 lives in the session plan.md until it ships.
 
+## v3.21.1 — Website CMS: streamlined Careers AI flow
+
+Simplifies the Careers AI editor per owner feedback ("the diff view was
+too complex"). New flow: type a request → **Submit** (spinner while AI
+works) → **Preview →** button appears → click Preview to see the actual
+Careers page rendered with the AI's changes → **Publish →** ships live.
+
+- AI panel no longer shows raw JSON, apply/discard buttons, or the "what
+  changed" tree. Just prompt in, preview out. The generated content is
+  auto-saved as a draft the moment the AI returns, so Preview always
+  reflects the latest AI edit.
+- Advanced users can still edit `careers.json` by hand under a collapsed
+  **Advanced: edit JSON directly** section.
+- `Preview.tsx` accepts `?page=<slug>` and iframes that specific page
+  directly (`/pages/careers.html`). A new green **Publish →** button in
+  the Preview header jumps straight to the Publish screen.
+
 ## v3.21.0 — Website CMS: AI-driven content edits on the Careers page
 
 Adds an "Ask AI to edit this page" panel to the Careers content editor.
