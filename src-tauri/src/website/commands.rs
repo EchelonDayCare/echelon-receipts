@@ -16,6 +16,7 @@
 
 use std::path::{Path, PathBuf};
 
+use futures::stream::StreamExt;
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Manager, State};
 
@@ -573,19 +574,44 @@ pub async fn website_upload_photos(
 ) -> Result<Vec<media::MediaRecord>, String> {
     require_enabled()?;
     let wc = ensure_working_copy(&app)?;
-    let mut out = Vec::with_capacity(source_paths.len());
-    for path in source_paths {
-        let rec = media::ingest_photo(
-            db.inner(),
-            &wc.repo_dir,
-            Path::new(&path),
-            media::MediaKind::Photo,
-            None,
-            None,
-        )
-        .await
-        .map_err(to_err)?;
-        out.push(rec);
+
+    // Ingest photos in parallel: each `ingest_photo` blocks on rayon
+    // for the 9-variant encode + a small tokio::spawn_blocking hop.
+    // Bulk uploads (e.g. 50 photos) benefit massively from running
+    // several ingests concurrently — the per-photo rayon pool already
+    // saturates cores within a photo, but different photos still
+    // overlap the disk read + DB write + moderate encode phases.
+    // Bound the concurrency to avoid RAM spikes on very large uploads.
+    let cpus: usize = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(4);
+    let concurrency = std::cmp::max(2, cpus.saturating_sub(1)).min(8);
+    let repo_dir = wc.repo_dir.clone();
+    let db_gate = db.inner().clone();
+    let results: Vec<Result<media::MediaRecord, String>> =
+        futures::stream::iter(source_paths.into_iter().map(|path| {
+            let repo_dir = repo_dir.clone();
+            let db_gate = db_gate.clone();
+            async move {
+                media::ingest_photo(
+                    &db_gate,
+                    &repo_dir,
+                    Path::new(&path),
+                    media::MediaKind::Photo,
+                    None,
+                    None,
+                )
+                .await
+                .map_err(to_err)
+            }
+        }))
+        .buffer_unordered(concurrency)
+        .collect()
+        .await;
+
+    let mut out = Vec::with_capacity(results.len());
+    for r in results {
+        out.push(r?);
     }
     Ok(out)
 }
