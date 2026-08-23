@@ -1,6 +1,6 @@
 [package]
 name = "echelon-receipts"
-version = "3.20.2"
+version = "3.20.3"
 description = "Echelon Daycare receipt generator"
 authors = ["Echelon Daycare Society"]
 edition = "2021"
@@ -24,7 +24,7 @@ tauri-build = { version = "2", features = [] }
 # in release builds. Debug builds (`cargo tauri dev`) already get devtools
 # for free without this feature — only omit it here to keep release builds
 # from shipping an always-on inspector.
-tauri = { version = "2", features = [] }
+tauri = { version = "2", features = ["protocol-asset"] }
 tauri-plugin-opener = "2"
 tauri-plugin-dialog = "2"
 tauri-plugin-fs = "2"
