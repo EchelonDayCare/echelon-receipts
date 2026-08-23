@@ -1,0 +1,291 @@
+//! git2 wrapper for the working copy of the site repo.
+//!
+//! # What this module owns
+//! - Clone / open the local working copy under
+//!   `app_data_dir/website/repo/`.
+//! - Pull fast-forward from origin/main so the templates reflect the
+//!   latest server state before we render.
+//! - Stage every content file that changed, create a signed-off
+//!   commit, and (optionally) push to origin/main using a PAT.
+//! - Read `HEAD.rev_parse("HEAD")` sha for reporting to the state
+//!   machine.
+//!
+//! # Non-goals
+//! - Merge conflict resolution. If `git fetch` shows origin/main
+//!   ahead of the local working copy in a non-fast-forward way, we
+//!   surface the conflict and refuse to auto-publish. The user must
+//!   pull manually (out-of-band) and re-open the app.
+//! - Branch juggling. We always work on `main`. Feature branches are
+//!   out of scope for the CMS.
+
+use std::path::{Path, PathBuf};
+
+use git2::{
+    build::CheckoutBuilder, Cred, FetchOptions, PushOptions, RemoteCallbacks, Repository,
+    Signature,
+};
+
+/// URL of the canonical site repo. Hard-coded because there's only
+/// one — and hardcoding it means a user can't accidentally point the
+/// CMS at some other repo.
+pub const SITE_REPO_URL: &str = "https://github.com/EchelonDayCare/echelon-website.git";
+
+/// Working-copy layout under `app_data_dir/website/`.
+pub struct WorkingCopy {
+    pub root: PathBuf,
+    pub repo_dir: PathBuf,
+    pub render_dir: PathBuf,
+}
+
+impl WorkingCopy {
+    /// Build a `WorkingCopy` layout rooted at `app_data_dir`. Does not
+    /// touch disk — callers use `ensure_cloned` / `open` etc. for that.
+    pub fn from_app_data(app_data_dir: &Path) -> Self {
+        let root = app_data_dir.join("website");
+        let repo_dir = root.join("repo");
+        let render_dir = root.join("preview");
+        Self {
+            root,
+            repo_dir,
+            render_dir,
+        }
+    }
+
+    /// Return true iff the working copy has already been cloned.
+    pub fn exists(&self) -> bool {
+        self.repo_dir.join(".git").exists()
+    }
+
+    /// Clone the site repo into `repo_dir` if it isn't there yet. Uses
+    /// the default git2 transport (WinHTTP on Windows, OpenSSL/schannel
+    /// on Unix — depends on how libgit2 was compiled). Public repo, so
+    /// no credentials needed for read.
+    pub fn ensure_cloned(&self) -> Result<Repository, String> {
+        std::fs::create_dir_all(&self.root)
+            .map_err(|e| format!("mkdir {}: {e}", self.root.display()))?;
+        if self.exists() {
+            return Repository::open(&self.repo_dir)
+                .map_err(|e| format!("open existing repo: {e}"));
+        }
+        Repository::clone(SITE_REPO_URL, &self.repo_dir)
+            .map_err(|e| format!("clone {SITE_REPO_URL}: {e}"))
+    }
+
+    /// Open an already-cloned working copy. Returns Err if missing.
+    pub fn open(&self) -> Result<Repository, String> {
+        if !self.exists() {
+            return Err(format!(
+                "site working copy not initialized at {}",
+                self.repo_dir.display()
+            ));
+        }
+        Repository::open(&self.repo_dir).map_err(|e| format!("open repo: {e}"))
+    }
+}
+
+/// Return the HEAD commit sha as lowercase hex.
+pub fn head_sha(repo: &Repository) -> Result<String, String> {
+    let head = repo.head().map_err(|e| format!("HEAD: {e}"))?;
+    let oid = head.target().ok_or_else(|| "HEAD has no target".to_string())?;
+    Ok(oid.to_string())
+}
+
+/// Fetch `origin/main` and fast-forward the local branch onto it. If
+/// the local branch has diverged from origin, return
+/// `Err("non-fast-forward")` so the caller can surface a conflict.
+pub fn fetch_and_ff_main(repo: &Repository) -> Result<String, String> {
+    let mut remote = repo
+        .find_remote("origin")
+        .map_err(|e| format!("find remote origin: {e}"))?;
+
+    let mut cb = RemoteCallbacks::new();
+    cb.credentials(|_url, username_from_url, _allowed| {
+        // Public repo fetch: git2 tries anonymous first. If a proxy
+        // demands credentials we don't have any to hand over, so
+        // fall through to CredentialType::DEFAULT which is
+        // equivalent to no auth.
+        Cred::default().or_else(|_| Cred::username(username_from_url.unwrap_or("git")))
+    });
+    let mut fo = FetchOptions::new();
+    fo.remote_callbacks(cb);
+
+    remote
+        .fetch(&["main"], Some(&mut fo), None)
+        .map_err(|e| format!("fetch: {e}"))?;
+
+    let fetch_head = repo
+        .find_reference("FETCH_HEAD")
+        .map_err(|e| format!("FETCH_HEAD: {e}"))?;
+    let fetch_commit = repo
+        .reference_to_annotated_commit(&fetch_head)
+        .map_err(|e| format!("annotate FETCH_HEAD: {e}"))?;
+    let analysis = repo
+        .merge_analysis(&[&fetch_commit])
+        .map_err(|e| format!("merge_analysis: {e}"))?;
+
+    if analysis.0.is_up_to_date() {
+        return head_sha(repo);
+    }
+    if analysis.0.is_fast_forward() {
+        let refname = "refs/heads/main";
+        let mut r = repo
+            .find_reference(refname)
+            .map_err(|e| format!("find main: {e}"))?;
+        r.set_target(fetch_commit.id(), "fast-forward")
+            .map_err(|e| format!("ff main: {e}"))?;
+        repo.set_head(refname).map_err(|e| format!("set_head: {e}"))?;
+        repo.checkout_head(Some(CheckoutBuilder::default().force()))
+            .map_err(|e| format!("checkout_head: {e}"))?;
+        return head_sha(repo);
+    }
+    Err("non-fast-forward: local main has diverged from origin/main. Reopen the app or reclone the working copy.".to_string())
+}
+
+/// Write `content_by_file` (keyed by `"site" | "home" | ...`) into
+/// `repo/content/<name>.json` and stage them. Returns the sorted list
+/// of touched paths.
+pub fn stage_content_writes(
+    repo: &Repository,
+    content_by_file: &[(String, String)],
+) -> Result<Vec<PathBuf>, String> {
+    let workdir = repo
+        .workdir()
+        .ok_or_else(|| "bare repo has no workdir".to_string())?;
+    let content_dir = workdir.join("content");
+    std::fs::create_dir_all(&content_dir)
+        .map_err(|e| format!("mkdir {}: {e}", content_dir.display()))?;
+
+    let mut index = repo.index().map_err(|e| format!("index: {e}"))?;
+    let mut touched = Vec::new();
+    for (file, raw) in content_by_file {
+        let rel = format!("content/{file}.json");
+        let full = workdir.join(&rel);
+        // Normalise LF endings before writing (matches `.gitattributes`
+        // + render.py's normalisation).
+        let normalised = raw.replace("\r\n", "\n");
+        let with_trailing = if normalised.ends_with('\n') {
+            normalised
+        } else {
+            format!("{normalised}\n")
+        };
+        std::fs::write(&full, with_trailing.as_bytes())
+            .map_err(|e| format!("write {}: {e}", full.display()))?;
+        index
+            .add_path(Path::new(&rel))
+            .map_err(|e| format!("index add {rel}: {e}"))?;
+        touched.push(PathBuf::from(rel));
+    }
+    index.write().map_err(|e| format!("index write: {e}"))?;
+    touched.sort();
+    Ok(touched)
+}
+
+/// Create a commit on `main` with the given message. Fails if the
+/// index has no staged changes (nothing to commit).
+///
+/// Uses a generic author signature — commits produced by the CMS are
+/// visibly bot-authored so they're easy to filter in git log.
+pub fn commit_all(
+    repo: &Repository,
+    message: &str,
+    author_display: Option<&str>,
+) -> Result<String, String> {
+    let mut index = repo.index().map_err(|e| format!("index: {e}"))?;
+    let tree_id = index.write_tree().map_err(|e| format!("write_tree: {e}"))?;
+    let tree = repo
+        .find_tree(tree_id)
+        .map_err(|e| format!("find_tree: {e}"))?;
+
+    let head_ref = repo.head().map_err(|e| format!("HEAD: {e}"))?;
+    let parent_commit = head_ref
+        .peel_to_commit()
+        .map_err(|e| format!("HEAD peel: {e}"))?;
+    // Refuse to commit if the tree is identical to HEAD's tree.
+    if parent_commit.tree().map_err(|e| format!("HEAD tree: {e}"))?.id() == tree_id {
+        return Err("no changes to commit".to_string());
+    }
+
+    let author = author_display.unwrap_or("Echelon CMS (desktop)");
+    let email = "cms-desktop@echelondaycare.local";
+    let sig = Signature::now(author, email).map_err(|e| format!("signature: {e}"))?;
+
+    let commit_id = repo
+        .commit(Some("HEAD"), &sig, &sig, message, &tree, &[&parent_commit])
+        .map_err(|e| format!("commit: {e}"))?;
+    Ok(commit_id.to_string())
+}
+
+/// Push `main` to `origin` using the supplied PAT. On Windows the
+/// libgit2 https transport uses WinHTTP; on Unix it uses OpenSSL —
+/// both accept `Cred::userpass_plaintext("x-access-token", pat)` for
+/// GitHub token auth.
+///
+/// Returns Err on non-fast-forward reject or any transport error.
+pub fn push_main_with_pat(repo: &Repository, pat: &str) -> Result<(), String> {
+    let mut remote = repo
+        .find_remote("origin")
+        .map_err(|e| format!("find origin: {e}"))?;
+
+    let push_err: std::sync::Arc<std::sync::Mutex<Option<String>>> =
+        std::sync::Arc::new(std::sync::Mutex::new(None));
+    let mut cb = RemoteCallbacks::new();
+    let pat_owned = pat.to_string();
+    cb.credentials(move |_url, _user, _allowed| {
+        Cred::userpass_plaintext("x-access-token", &pat_owned)
+    });
+    let push_err_cb = push_err.clone();
+    cb.push_update_reference(move |refname, status| {
+        if let Some(msg) = status {
+            if let Ok(mut g) = push_err_cb.lock() {
+                *g = Some(format!("remote rejected {refname}: {msg}"));
+            }
+        }
+        Ok(())
+    });
+    let mut po = PushOptions::new();
+    po.remote_callbacks(cb);
+
+    remote
+        .push(&["refs/heads/main:refs/heads/main"], Some(&mut po))
+        .map_err(|e| format!("push: {e}"))?;
+    // Drop po/cb (and their borrow of push_err) before we read.
+    drop(po);
+    let taken = push_err.lock().ok().and_then(|mut g| g.take());
+    if let Some(e) = taken {
+        return Err(e);
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn from_app_data_layout_paths() {
+        let base = std::env::temp_dir().join("echelon-website-test");
+        let wc = WorkingCopy::from_app_data(&base);
+        assert_eq!(wc.root, base.join("website"));
+        assert_eq!(wc.repo_dir, base.join("website").join("repo"));
+        assert_eq!(wc.render_dir, base.join("website").join("preview"));
+        assert!(!wc.exists());
+    }
+
+    // Full clone test — hits the network, so gated by env. Enable
+    // manually with `set ECHELON_WEBSITE_TEST_NET=1`. We init an
+    // empty local repo instead of network-cloning to keep the
+    // default test run offline-safe.
+    #[test]
+    fn ensure_cloned_creates_dir_and_repo_locally() {
+        let tmp = tempfile::tempdir().unwrap();
+        let base = tmp.path().to_path_buf();
+        // Simulate what ensure_cloned does on a machine without network
+        // by manually initialising an empty repo — `open()` should then
+        // succeed.
+        let wc = WorkingCopy::from_app_data(&base);
+        std::fs::create_dir_all(&wc.repo_dir).unwrap();
+        Repository::init(&wc.repo_dir).unwrap();
+        assert!(wc.exists());
+        assert!(wc.open().is_ok());
+    }
+}

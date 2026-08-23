@@ -91,17 +91,11 @@ pub fn process_photo(input: PhotoInput) -> Result<PhotoOutput, MediaError> {
 
     let base_hash = source_hash_hex(&input.original_bytes);
 
-    // NOTE: PR 3 groundwork ships WebP + JPG only (6 variants).
-    // AVIF (Format::Avif) is intentionally omitted from the job list —
-    // its encoder is stubbed in `reencode::encode_avif`. PR 3.5 will
-    // re-add `Format::Avif` here in the same commit that re-introduces
-    // the `ravif` dependency and bumps `RECIPE_VERSION` to 2.
-    // TODO: reintroduce Format::Avif in PR3.5
     let jobs: Vec<(u32, Format)> = WIDTHS
         .iter()
         .copied()
         .flat_map(|w| {
-            [Format::Webp, Format::Jpg]
+            [Format::Avif, Format::Webp, Format::Jpg]
                 .into_iter()
                 .map(move |f| (w, f))
         })
@@ -157,22 +151,18 @@ mod tests {
         })
         .expect("pipeline ok");
 
-        // PR 3 groundwork: 3 widths × 2 formats (WebP + JPG). AVIF is
-        // stubbed until PR 3.5 re-introduces ravif.
-        assert_eq!(out.variants.len(), 6, "expected 3 widths × 2 formats");
+        assert_eq!(out.variants.len(), 9, "expected 3 widths × 3 formats");
         assert_eq!(out.base_hash.len(), 64);
 
         // Sorted by (width, format).
         let widths: Vec<u32> = out.variants.iter().map(|v| v.width).collect();
-        assert_eq!(widths, vec![400, 400, 800, 800, 1600, 1600]);
+        assert_eq!(widths, vec![400, 400, 400, 800, 800, 800, 1600, 1600, 1600]);
 
         // Every filename ends in the right extension.
         for v in &out.variants {
             assert!(v.filename.ends_with(v.format.ext()), "wrong ext: {}", v.filename);
             assert!(v.filename.contains(&format!("-w{}", v.width)));
             assert!(!v.bytes.is_empty(), "empty output bytes");
-            // AVIF must not appear in the shipped variant set.
-            assert_ne!(v.format, Format::Avif, "AVIF should be stubbed in PR 3 groundwork");
         }
     }
 
@@ -186,7 +176,7 @@ mod tests {
         })
         .expect("pipeline ok");
 
-        assert_eq!(out.variants.len(), 6);
+        assert_eq!(out.variants.len(), 9);
         // Sniff dimensions of the JPG variant at width 800 → should be 533×800.
         let v = out
             .variants
@@ -204,7 +194,7 @@ mod tests {
 
     #[test]
     fn pipeline_is_deterministic() {
-        // Full end-to-end determinism: same input twice → same 6 outputs
+        // Full end-to-end determinism: same input twice → same 9 outputs
         // byte-for-byte. This is what unlocks safe CDN caching.
         let jpeg = make_solid_jpeg(400, 300, [90, 90, 90]);
         let a = process_photo(PhotoInput {

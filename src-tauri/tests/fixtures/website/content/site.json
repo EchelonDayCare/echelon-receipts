@@ -1,0 +1,65 @@
+{
+  "schema_version": 1,
+  "name": "Echelon Day Care",
+  "tagline": "Echelon Day Care",
+  "brand": {
+    "brand_color": "#2e7dd1",
+    "brand_color_strong": "#1d5fa3",
+    "theme_color": "#2e7dd1"
+  },
+  "cache_bust": "202606010606",
+  "address": {
+    "streetAddress": "575 W 8th Ave",
+    "addressLocality": "Vancouver",
+    "addressRegion": "BC",
+    "postalCode": "V5Z 1M9",
+    "addressCountry": "CA",
+    "display": "575 W 8th Ave, Vancouver, BC V5Z 1M9",
+    "footer_display": "575 W 8th Ave, Vancouver, BC"
+  },
+  "phone": {
+    "e164": "+1-604-874-4010",
+    "display": "+1 604-874-4010",
+    "tel_href": "tel:+16048744010",
+    "display_short": "604-874-4010"
+  },
+  "email": "echelondaycare@hotmail.com",
+  "geo": { "latitude": 49.2641, "longitude": -123.1186 },
+  "socials": { "facebook": "https://www.facebook.com/echelon.daycare.5" },
+  "same_as": ["https://www.facebook.com/echelon.daycare.5"],
+  "area_served": [{ "type": "City", "name": "Vancouver" }],
+  "hire_link": { "label": "Work With Us", "aria_label": "Work With Us" },
+  "sticky_call": { "label": "Call us", "aria_label": "Call us" },
+  "nav": [{ "label": "Home", "path": "index.html", "key": "home" }],
+  "assets": {
+    "logo": "assets/img/logoMod.png",
+    "logo_alt": "Echelon Day Care logo",
+    "favicon_16": "",
+    "favicon_32": "",
+    "favicon_180": "",
+    "og_image": "",
+    "webmanifest": "",
+    "css": "assets/css/site.min.css",
+    "js": "assets/js/site.js"
+  },
+  "urls": {
+    "base": "https://echelondaycare.com",
+    "logo_absolute": "https://echelondaycare.com/assets/img/logoMod.png",
+    "og_image_absolute": "",
+    "favicon_16_absolute": "",
+    "favicon_32_absolute": "",
+    "favicon_180_absolute": ""
+  },
+  "footer": {
+    "copyright_holder": "Echelon Day Care",
+    "rights": "All rights reserved.",
+    "contact_link_label": "Contact"
+  },
+  "a11y": {
+    "skip_to_content": "Skip to content",
+    "primary_nav_label": "Primary",
+    "nav_toggle_aria_label": "Open menu"
+  },
+  "sitemap": { "changefreq_default": "monthly" },
+  "robots_default": "index, follow"
+}
