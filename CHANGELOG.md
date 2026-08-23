@@ -4,6 +4,24 @@ All notable changes shipped as a DMG. Only entries the owner has approved
 for release are listed here — "code-complete, awaiting ship approval" work
 lives in the session plan.md until it ships.
 
+## v3.20.2 — Website CMS: publish now commits rendered HTML + assets
+
+Fixes a deploy-blocking gap: previously `website_publish` only committed
+the CMS JSON under `content/*.json`. The site repo's
+`content-render-validation` workflow requires committed `pages/*.html` to
+match the render of that JSON — so every publish caused a Pages deploy
+failure and no live update.
+
+- `stage_rendered_html_and_assets` copies rendered top-level `*.html`,
+  `pages/*.html`, `sitemap.xml`, `robots.txt`, and `assets/data/**` from
+  the pipeline's render dir into the working copy, then stages them.
+- Also runs `add_all` under `assets/` to pick up newly-uploaded media
+  variants written by `website_upload_photos`.
+- Wired into `run_pipeline_inner` immediately after `stage_content_writes`.
+
+Result: Upload photos → Publish → Pages deploys → live site updates,
+in one click, no manual `render.py` push required.
+
 ## v3.20.1 — Website CMS: 5-10× faster bulk photo upload
 
 - `website_upload_photos` now runs up to 8 photo ingests in parallel

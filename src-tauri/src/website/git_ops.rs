@@ -180,6 +180,107 @@ pub fn stage_content_writes(
     Ok(touched)
 }
 
+/// Copy rendered HTML (top-level `*.html` + `pages/*.html`),
+/// `sitemap.xml`, `robots.txt`, and `assets/data/**` from
+/// `render_dir` into the working copy at `repo_dir`, then stage
+/// those files plus everything under `assets/img/**` (variants that
+/// `write_variants_to_working_copy` dropped there during upload).
+///
+/// Called during publish so the commit carries both the CMS JSON
+/// and the fully-rendered site GitHub Pages will serve. Without
+/// this, GH's content-render-validation workflow blocks deploy
+/// because committed HTML lags behind committed JSON.
+pub fn stage_rendered_html_and_assets(
+    repo: &Repository,
+    render_dir: &Path,
+) -> Result<Vec<PathBuf>, String> {
+    let workdir = repo
+        .workdir()
+        .ok_or_else(|| "bare repo has no workdir".to_string())?
+        .to_path_buf();
+
+    // 1. Mirror render_dir into workdir for the tracked outputs.
+    let mut copied: Vec<PathBuf> = Vec::new();
+    copy_rendered_outputs(render_dir, &workdir, &mut copied)?;
+
+    // 2. Stage: rendered outputs + everything under assets/.
+    let mut index = repo.index().map_err(|e| format!("index: {e}"))?;
+    for rel in &copied {
+        index
+            .add_path(rel)
+            .map_err(|e| format!("index add {}: {e}", rel.display()))?;
+    }
+    // assets/** — pick up new variant files written by upload flow.
+    let assets_dir = workdir.join("assets");
+    if assets_dir.is_dir() {
+        index
+            .add_all(["assets/*"].iter(), git2::IndexAddOption::DEFAULT, None)
+            .map_err(|e| format!("index add_all assets: {e}"))?;
+    }
+    index.write().map_err(|e| format!("index write: {e}"))?;
+
+    copied.sort();
+    Ok(copied)
+}
+
+/// Walk `render_dir` and copy `*.html`, `sitemap.xml`, `robots.txt`,
+/// and everything under `assets/data/` into `workdir`, preserving
+/// relative paths. Records copied paths (repo-relative) into `out`.
+fn copy_rendered_outputs(
+    render_dir: &Path,
+    workdir: &Path,
+    out: &mut Vec<PathBuf>,
+) -> Result<(), String> {
+    fn walk(
+        base: &Path,
+        rel: &Path,
+        workdir: &Path,
+        out: &mut Vec<PathBuf>,
+    ) -> Result<(), String> {
+        let full = base.join(rel);
+        if !full.exists() {
+            return Ok(());
+        }
+        for entry in std::fs::read_dir(&full)
+            .map_err(|e| format!("read_dir {}: {e}", full.display()))?
+        {
+            let entry = entry.map_err(|e| format!("dir entry: {e}"))?;
+            let name = entry.file_name();
+            let ty = entry
+                .file_type()
+                .map_err(|e| format!("file_type: {e}"))?;
+            let child_rel = if rel.as_os_str().is_empty() {
+                PathBuf::from(&name)
+            } else {
+                rel.join(&name)
+            };
+            if ty.is_dir() {
+                walk(base, &child_rel, workdir, out)?;
+            } else if ty.is_file() {
+                let name_str = name.to_string_lossy();
+                let rel_str = child_rel.to_string_lossy().replace('\\', "/");
+                let keep = name_str.ends_with(".html")
+                    || rel_str == "sitemap.xml"
+                    || rel_str == "robots.txt"
+                    || rel_str.starts_with("assets/data/");
+                if !keep {
+                    continue;
+                }
+                let dst = workdir.join(&child_rel);
+                if let Some(parent) = dst.parent() {
+                    std::fs::create_dir_all(parent)
+                        .map_err(|e| format!("mkdir {}: {e}", parent.display()))?;
+                }
+                std::fs::copy(entry.path(), &dst)
+                    .map_err(|e| format!("copy {} -> {}: {e}", entry.path().display(), dst.display()))?;
+                out.push(child_rel);
+            }
+        }
+        Ok(())
+    }
+    walk(render_dir, Path::new(""), workdir, out)
+}
+
 /// Create a commit on `main` with the given message. Fails if the
 /// index has no staged changes (nothing to commit).
 ///
