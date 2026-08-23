@@ -8,7 +8,7 @@
 use super::error::MediaError;
 use super::exif::{strip_metadata, FormatHint};
 use super::hash::{filename, source_hash_hex, Format, RECIPE_VERSION};
-use super::reencode::{decode, encode, resize_to_max_dim, WIDTHS};
+use super::reencode::{encode, resize_to_max_dim, WIDTHS};
 use rayon::prelude::*;
 
 /// Hard cap on input photo size. 50 MiB is generous for any camera JPEG
@@ -86,8 +86,10 @@ pub fn process_photo(input: PhotoInput) -> Result<PhotoOutput, MediaError> {
     // Decode from the stripped bytes so the encode is fully deterministic
     // w.r.t. the stripped source — otherwise a pipeline run against a
     // freshly-stripped copy could diverge from a pipeline run against the
-    // original.
-    let decoded = decode(&stripped)?;
+    // original. Orientation is read from the ORIGINAL bytes (which still
+    // carry EXIF) and baked into the decoded pixels, so browsers see an
+    // upright photo without needing the (stripped) orientation tag.
+    let decoded = super::reencode::decode_with_orientation(&stripped, &input.original_bytes)?;
 
     let base_hash = source_hash_hex(&input.original_bytes);
 

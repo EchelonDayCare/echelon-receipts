@@ -27,6 +27,9 @@ until we flip the switch.
 **PR 3 (media, this release):**
 - Deterministic photo pipeline: BLAKE3-hashed filenames, EXIF/XMP/IPTC/ICC
   strip, 3 widths × 3 formats (AVIF q=50, WebP, JPG q=82) via Rayon.
+- EXIF orientation baked into pixel data before strip, so phone photos
+  taken in portrait render upright (browsers no longer need the stripped
+  orientation tag).
 - New DB tables: `site_media`, `site_media_variants`,
   `site_emergency_removes` (migration 015).
 - Gallery editor: drag-drop upload zone, thumbnail grid with HTML5
