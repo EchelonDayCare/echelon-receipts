@@ -127,6 +127,24 @@ pub fn fetch_and_ff_main(repo: &Repository) -> Result<String, String> {
         return head_sha(repo);
     }
     if analysis.0.is_fast_forward() {
+        // Refuse to fast-forward if the working tree has uncommitted
+        // changes — `checkout_head` with `force()` would silently blow
+        // away the owner's draft edits, uploaded photos not yet
+        // committed, etc.
+        // Ignore untracked files (stray .DS_Store on macOS, editor
+        // swap files, etc.) — only refuse on real user-edited state.
+        let mut opts = git2::StatusOptions::new();
+        opts.include_untracked(false).include_ignored(false);
+        let statuses = repo
+            .statuses(Some(&mut opts))
+            .map_err(|e| format!("status: {e}"))?;
+        let dirty = statuses.iter().any(|s| {
+            let f = s.status();
+            !f.is_ignored() && !f.is_empty()
+        });
+        if dirty {
+            return Err("working copy has uncommitted changes; refusing to fast-forward. Publish or discard your changes first.".to_string());
+        }
         let refname = "refs/heads/main";
         let mut r = repo
             .find_reference(refname)
@@ -227,6 +245,16 @@ pub fn stage_rendered_html_and_assets(
         index
             .add_all(["templates/*"].iter(), git2::IndexAddOption::DEFAULT, None)
             .map_err(|e| format!("index add_all templates: {e}"))?;
+    }
+    // content/** — media commands (uploads, reorders, deletes) write
+    // gallery.json / video manifests directly. Without staging content
+    // here those mutations never make it into the commit, so a fresh
+    // clone sees images on disk but an empty JSON manifest.
+    let content_dir = workdir.join("content");
+    if content_dir.is_dir() {
+        index
+            .add_all(["content/*"].iter(), git2::IndexAddOption::DEFAULT, None)
+            .map_err(|e| format!("index add_all content: {e}"))?;
     }
     index.write().map_err(|e| format!("index write: {e}"))?;
 

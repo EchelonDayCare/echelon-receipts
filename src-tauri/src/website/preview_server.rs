@@ -104,12 +104,61 @@ fn serve_loop(server: &Arc<Server>, root: &std::path::Path, stop_rx: mpsc::Recei
             Err(_) => return,
         };
         let url = req.url().to_string();
-        let response = serve_request(&url, root);
+        let range = req
+            .headers()
+            .iter()
+            .find(|h| h.field.equiv("Range"))
+            .map(|h| h.value.as_str().to_string());
+        let response = serve_request(&url, root, range.as_deref());
         let _ = req.respond(response);
     }
 }
 
-fn serve_request(url: &str, root: &std::path::Path) -> Response<std::io::Cursor<Vec<u8>>> {
+/// Parse a single-range `Range: bytes=<start>-<end?>` header.
+/// Returns `(start, end_inclusive)` clamped to `[0, file_len)` on
+/// success, or `None` for anything unusual (multi-range, suffix
+/// ranges past EOF, malformed). Callers fall back to a normal 200
+/// response on `None`.
+fn parse_range(header: &str, file_len: u64) -> Option<(u64, u64)> {
+    let stripped = header.strip_prefix("bytes=")?.trim();
+    // Refuse comma-separated multi-range — tiny_http would need
+    // multipart/byteranges which we don't emit.
+    if stripped.contains(',') {
+        return None;
+    }
+    let (lo_s, hi_s) = stripped.split_once('-')?;
+    let lo_s = lo_s.trim();
+    let hi_s = hi_s.trim();
+    if lo_s.is_empty() {
+        // Suffix: last N bytes.
+        let n: u64 = hi_s.parse().ok()?;
+        if n == 0 || file_len == 0 {
+            return None;
+        }
+        let start = file_len.saturating_sub(n);
+        return Some((start, file_len - 1));
+    }
+    let start: u64 = lo_s.parse().ok()?;
+    if start >= file_len {
+        return None;
+    }
+    let end: u64 = if hi_s.is_empty() {
+        file_len - 1
+    } else {
+        let e: u64 = hi_s.parse().ok()?;
+        e.min(file_len - 1)
+    };
+    if end < start {
+        return None;
+    }
+    Some((start, end))
+}
+
+fn serve_request(
+    url: &str,
+    root: &std::path::Path,
+    range: Option<&str>,
+) -> Response<std::io::Cursor<Vec<u8>>> {
     // Strip query / fragment, then normalise to `<root>/<path>`.
     let path_only = url.split(&['?', '#'][..]).next().unwrap_or(url);
     // Default document.
@@ -147,8 +196,44 @@ fn serve_request(url: &str, root: &std::path::Path) -> Response<std::io::Cursor<
     let mime = mime_guess::from_path(&full_canon)
         .first_or_octet_stream()
         .to_string();
+    let file_len = buf.len() as u64;
+
+    // Honour Range headers. WKWebView refuses to play `<video>`
+    // sources that don't accept range requests — without this, Mac
+    // preview video playback stalls after the first packet.
+    if let Some(h) = range {
+        if let Some((start, end)) = parse_range(h, file_len) {
+            let slice = buf[start as usize..=end as usize].to_vec();
+            let len = end - start + 1;
+            let mut resp = Response::from_data(slice).with_status_code(StatusCode(206));
+            if let Ok(h) = Header::from_bytes(b"Content-Type", mime.as_bytes()) {
+                resp = resp.with_header(h);
+            }
+            if let Ok(h) = Header::from_bytes(b"Accept-Ranges", b"bytes") {
+                resp = resp.with_header(h);
+            }
+            if let Ok(h) = Header::from_bytes(
+                b"Content-Range",
+                format!("bytes {start}-{end}/{file_len}").as_bytes(),
+            ) {
+                resp = resp.with_header(h);
+            }
+            if let Ok(h) = Header::from_bytes(b"Content-Length", len.to_string().as_bytes()) {
+                resp = resp.with_header(h);
+            }
+            if let Ok(h) = Header::from_bytes(b"Cache-Control", b"no-store") {
+                resp = resp.with_header(h);
+            }
+            return resp;
+        }
+    }
+
     let mut resp = Response::from_data(buf);
     if let Ok(h) = Header::from_bytes(b"Content-Type", mime.as_bytes()) {
+        resp = resp.with_header(h);
+    }
+    // Always advertise range support so WKWebView is willing to seek.
+    if let Ok(h) = Header::from_bytes(b"Accept-Ranges", b"bytes") {
         resp = resp.with_header(h);
     }
     // Preview MUST NOT be cached — the user is iterating on edits.

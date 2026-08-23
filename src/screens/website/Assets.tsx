@@ -52,7 +52,7 @@ export default function Assets() {
     if (!repoRoot) return null;
     const pick = filename ?? rec?.variants[0]?.filename;
     if (!pick) return null;
-    const absPath = `${repoRoot}\\repo\\assets\\img\\${pick}`;
+    const absPath = `${repoRoot}/repo/assets/img/${pick}`;
     return convertFileSrc(absPath);
   }
 

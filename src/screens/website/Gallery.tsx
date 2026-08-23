@@ -1,7 +1,8 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { open } from "@tauri-apps/plugin-dialog";
 import { convertFileSrc } from "@tauri-apps/api/core";
+import { getCurrentWebview } from "@tauri-apps/api/webview";
 import {
   websiteDeleteMedia,
   websiteEditMedia,
@@ -79,13 +80,84 @@ export default function Gallery() {
     void refresh();
   }, [refresh]);
 
+  // Tauri v2 intercepts native OS drag-drop at the webview layer and
+  // fires `onDragDropEvent` — the DOM `dataTransfer.files` is empty
+  // by the time our HTML `onDrop` handler runs. Subscribe here and
+  // route dropped paths straight into the upload command.
+  const busyRef = useRef(false);
+  useEffect(() => {
+    busyRef.current = busy;
+  }, [busy]);
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    let cancelled = false;
+    (async () => {
+      try {
+        const wv = getCurrentWebview();
+        const un = await wv.onDragDropEvent(async (event) => {
+          const t = event.payload.type;
+          if (t === "over" || t === "enter") {
+            setUploadDragActive(true);
+            return;
+          }
+          if (t === "leave") {
+            setUploadDragActive(false);
+            return;
+          }
+          if (t === "drop") {
+            setUploadDragActive(false);
+            const paths = (event.payload as { paths?: string[] }).paths ?? [];
+            if (paths.length === 0) return;
+            const images = paths.filter((p) =>
+              /\.(jpe?g|png|webp|heic|heif)$/i.test(p),
+            );
+            if (images.length === 0) {
+              setErr("Drop image files (jpg, png, webp, heic).");
+              return;
+            }
+            if (busyRef.current) return;
+            setBusy(true);
+            setErr(null);
+            try {
+              await websiteUploadPhotos(images);
+              setMsg(
+                `Uploaded ${images.length} photo${images.length === 1 ? "" : "s"}`,
+              );
+              await refresh();
+            } catch (e: any) {
+              setErr(String(e?.message ?? e));
+            } finally {
+              setBusy(false);
+            }
+          }
+        });
+        // If the effect was already torn down while we were awaiting
+        // the subscription (StrictMode double-mount, fast route
+        // change), immediately release the listener instead of
+        // leaking it — otherwise a subsequent OS drop double-fires.
+        if (cancelled) {
+          un();
+        } else {
+          unlisten = un;
+        }
+      } catch {
+        // Non-Tauri host (test runner) — silently no-op.
+      }
+    })();
+    return () => {
+      cancelled = true;
+      if (unlisten) unlisten();
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [refresh]);
+
   const thumbUrl = useCallback(
     (rec: MediaRecord): string | null => {
       if (!repoRoot) return null;
       const filename = pickThumbnail(rec);
       if (!filename) return null;
       // repoRoot is e.g. "…\website" — the git working copy lives under repoRoot\repo\.
-      const absPath = `${repoRoot}\\repo\\assets\\img\\gallery\\${filename}`;
+      const absPath = `${repoRoot}/repo/assets/img/gallery/${filename}`;
       // Tauri v2 asset scheme.
       return convertFileSrc(absPath);
     },
@@ -576,13 +648,15 @@ export default function Gallery() {
           body={
             <>
               <p>
-                <b>{deletePending.source_filename}</b> will be removed from the
-                gallery and the on-disk working copy files will be swept on
-                the next publish.
+                <b>{deletePending.source_filename}</b> will be removed from
+                the gallery listing on the next publish. The photo file
+                itself stays on disk and in git history until you run an
+                Emergency remove.
               </p>
               <p style={{ color: "#64748b", fontSize: 13 }}>
-                Prior git history still contains the file. Use{" "}
-                <b>Emergency remove</b> instead if a parent revoked consent.
+                Use <b>Emergency remove</b> instead if a parent revoked
+                consent — that flow additionally requests a git history
+                rewrite.
               </p>
             </>
           }
@@ -603,13 +677,13 @@ export default function Gallery() {
             <>
               <p>
                 {batchDeletePending === "all"
-                  ? `Every photo in the gallery will be removed.`
-                  : `The ${selectedIds.size} selected photo${selectedIds.size === 1 ? "" : "s"} will be removed.`}{" "}
-                On-disk working copy files are swept on the next publish.
+                  ? `Every photo in the gallery will be removed from the site listing on the next publish.`
+                  : `The ${selectedIds.size} selected photo${selectedIds.size === 1 ? "" : "s"} will be removed from the site listing on the next publish.`}
               </p>
               <p style={{ color: "#64748b", fontSize: 13 }}>
-                Prior git history still contains the files. Use{" "}
-                <b>Emergency remove</b> per-photo if a parent revoked consent.
+                Photo files stay on disk and in git history. Use{" "}
+                <b>Emergency remove</b> per-photo if a parent revoked
+                consent.
               </p>
             </>
           }
@@ -629,7 +703,7 @@ export default function Gallery() {
             setEmergencyPending(null);
             setSelected(null);
             setMsg(
-              "Emergency-remove request logged. History rewrite will run on next publish.",
+              "Emergency-remove request logged. Contact your engineer with the audit log entry so they can rewrite git history — Publish does not automate this.",
             );
             await refresh();
           }}
@@ -988,9 +1062,10 @@ function EmergencyRemoveModal({
             margin: "12px 0",
           }}
         >
-          ⚠ This flags the photo for a git history rewrite the next time
-          the site is published. Previous commits still contain the
-          image until then.
+          ⚠ This flags the photo for a manual git history rewrite. Publish
+          removes the photo from the site listing, but the underlying git
+          history purge is not yet automated — please contact your
+          engineer with the audit log entry so they can rewrite history.
         </div>
 
         <label style={{ display: "block", fontSize: 13, fontWeight: 600, marginTop: 8 }}>
@@ -1018,7 +1093,8 @@ function EmergencyRemoveModal({
             onChange={(e) => setAck(e.target.checked)}
           />
           <span>
-            I understand this triggers a git history rewrite on next publish.
+            I understand the photo will be flagged for a manual history
+            rewrite (not automated by Publish).
           </span>
         </label>
 

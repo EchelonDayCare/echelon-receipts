@@ -148,7 +148,18 @@ export default function Publish() {
           <h3 style={{ marginTop: 0 }}>Last publish</h3>
           <div style={{ fontSize: 13 }}>
             <div>Publication #{outcome.publication_id}</div>
-            <div>State: <b>{outcome.final_state}</b></div>
+            <div>
+              State:{" "}
+              <b>
+                {outcome.final_state === "verified_live"
+                  ? "✅ Published — site is live"
+                  : outcome.final_state === "dry_run_complete"
+                    ? "🧪 Dry run complete — nothing was pushed"
+                    : outcome.final_state === "no_changes"
+                      ? "ℹ Nothing to publish — everything is already live"
+                      : outcome.final_state}
+              </b>
+            </div>
             {outcome.commit_sha && <div>Commit: <code>{outcome.commit_sha}</code></div>}
             {outcome.verified_url && <div>Verified URL: {outcome.verified_url}</div>}
             {outcome.error && (

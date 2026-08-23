@@ -49,6 +49,7 @@ pub fn embedded_migrations() -> Vec<(i64, &'static str, &'static str)> {
         (13, "add_grad_reel_email_defaults", include_str!("../migrations/013_grad_email.sql")),
         (14, "add_website_cms_tables", include_str!("../migrations/014_website_cms.sql")),
         (15, "add_website_media", include_str!("../migrations/015_website_media.sql")),
+        (16, "site_media_kind_unique_and_sort", include_str!("../migrations/016_site_media_kind_unique.sql")),
     ]
 }
 

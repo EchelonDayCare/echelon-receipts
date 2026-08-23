@@ -4,6 +4,76 @@ All notable changes shipped as a DMG. Only entries the owner has approved
 for release are listed here — "code-complete, awaiting ship approval" work
 lives in the session plan.md until it ships.
 
+## v3.23.4 — Website module deep-review hardening
+
+Consolidated fixes from a 4-agent parallel review (code review, functionality
+review, security review, Mac/perf review) of the Website CMS module.
+
+### macOS + robustness
+
+- **Preview server now supports HTTP Range requests.** WKWebView refused
+  to play locally-hosted video without `Accept-Ranges`. Added single-range
+  parsing (`bytes=X-Y`, `bytes=X-`, `bytes=-N`) with 206 Partial Content
+  responses; `Accept-Ranges: bytes` emitted on every response.
+- **`minimumSystemVersion` raised to 11.0** so Apple Silicon Big Sur+
+  users can install without the wrong-arch warning.
+- **All working-copy paths now use forward slashes.** Prevented broken
+  thumbnails and dead links on macOS when reading DB rows populated on
+  Windows.
+
+### Data safety
+
+- **Fresh clones no longer lose gallery entries.** SQLite was treated
+  as the source of truth; on a fresh Mac install, `gallery.json` was
+  present but the DB was empty, so the Gallery tab appeared blank.
+  Publish now stages every `content/**` JSON, and a new
+  `hydrate_gallery_from_json` runs idempotently on init to seed
+  SQLite from the JSON on any machine.
+- **Migration 016** adds `UNIQUE(base_hash, kind)` + `sort_order`
+  column, so identical images can coexist as photo + hero + og and
+  gallery drag-order persists across restarts.
+- **Gallery mutations are now serialised.** A process-wide mutex
+  around every `gallery.json` read-modify-write closes a race that
+  could truncate the file when two uploads finished within a few
+  hundred ms of each other.
+- **Corrupt `gallery.json` is now a hard error.** Previously silently
+  coerced to `{}`, wiping content on the next save.
+- **Fetch refuses to fast-forward if the working tree is dirty**, so
+  publishing from one Mac can't discard uncommitted local edits from
+  another.
+- **Delete flows are locked to the repo directory** via a new
+  `safe_delete_under_repo` guard that canonicalizes the parent and
+  rejects absolute paths, `..` components, or paths outside
+  `assets/{video,image}/…`.
+
+### UX polish
+
+- **Publish "no changes" now returns a clean success**, not a
+  simultaneous success+error banner.
+- **Preview shows an empty state** when zero pages have rendered.
+- **PageEditor guards against accidental window close/refresh** when
+  edits are unsaved.
+- **Tile links disabled until the working copy is cloned** with a
+  first-run info banner, so users can't click Gallery/Preview before
+  the repo exists.
+- **Drag-drop upload rewired to Tauri v2's webview drag events** —
+  DOM `onDrop` never fired under Tauri v2, so drag-drop was silently
+  broken. Gallery now uses `getCurrentWebview().onDragDropEvent`.
+- **Broken "Ask AI to update this page" link fixed** — added the
+  missing `/website/edit/:file` route.
+- **Emergency-remove wording matches reality** — no longer promises
+  an automatic history rewrite the code doesn't perform.
+
+### Backend correctness
+
+- **Template parse errors no longer swallowed.** A single broken
+  template used to make the whole render succeed silently with a
+  page missing; now surfaces as a real error.
+- **Case-insensitive `.json` filtering** in the renderer.
+- **`transcode_video` returns an explicit error** when the encoded
+  file is still oversize (was silent success producing a corrupt
+  reel).
+
 ## v3.23.3 — Fix gallery video upload on macOS
 
 - **Video transcode now uses the OS-native encoder.** `transcode_video`
