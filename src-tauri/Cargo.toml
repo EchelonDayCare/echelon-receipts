@@ -72,6 +72,19 @@ quick-xml = "0.36"
 unicode-normalization = "0.1"
 tempfile = "3"
 
+# ── Website media pipeline (v3.20.0 PR 3 groundwork) ────────────────────
+# img-parts: surgical EXIF/XMP/IPTC/ICC strip on JPEG/PNG/WebP without
+# re-encoding the pixel data (marker-level edits only).
+img-parts = "0.3"
+# ravif: pure-Rust AV1 image encoder (AVIF). No system deps. Used for
+# the highest-compression variant of every photo (q=50 speed=4).
+ravif = "0.11"
+# blake3: fast, deterministic hash for derived filenames. Combined with
+# sha2 (already in deps) to build the (source_hash, width, format,
+# recipe_version) tuple key. Bumping the recipe version cache-busts
+# every derived file at CDN edge.
+blake3 = "1"
+
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
