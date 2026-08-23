@@ -4,6 +4,31 @@ All notable changes shipped as a DMG. Only entries the owner has approved
 for release are listed here — "code-complete, awaiting ship approval" work
 lives in the session plan.md until it ships.
 
+## v3.23.1 — Fresh-machine setup fixes + Contact form phone/email
+
+- **Templates now ship with Publish.** The CMS is the source of truth
+  for both content and templates. Prior versions only pushed rendered
+  HTML + content JSON; templates lived upstream only if manually
+  synced. On a fresh clone (e.g. installing on a new Mac) this caused
+  strict-undefined render errors when the local template referenced
+  fields the local JSON didn't have. Publish now stages
+  `templates/**` too.
+- **Working copy auto-syncs on setup.** `website_working_copy_init`
+  now fetches + fast-forwards `main` when the local repo already
+  exists, so opening the CMS on a machine that's been offline for
+  a while pulls in any templates / content changes made from other
+  machines. No more manual "delete the working copy" step.
+- **Contact form: phone and email are inline.** Phone (with auto-
+  derived `tel:` href) and email fields now sit next to Address /
+  Facebook on the Contact editor. Previously these lived only under
+  Site (global).
+- **Preview from Site (global) / SEO now lands on the home page.**
+  Both keys point at data shared by every page, not a page of their
+  own, so Preview opens the site index instead of a 404.
+- **Gallery Videos template parse fix.** Removed a stray `{% endif %}`
+  that was silently swallowed by the renderer and dropped the videos
+  page from the render output.
+
 ## v3.23.0 — Gallery split (Photos + Videos), CMS enabled by default
 
 - **Gallery is now a two-section area.** On the public site, `/gallery`

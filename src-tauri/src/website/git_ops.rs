@@ -217,6 +217,17 @@ pub fn stage_rendered_html_and_assets(
             .add_all(["assets/*"].iter(), git2::IndexAddOption::DEFAULT, None)
             .map_err(|e| format!("index add_all assets: {e}"))?;
     }
+    // templates/** — since the CMS is the source of truth for template
+    // edits, publish also has to push templates so a fresh clone on
+    // another machine renders correctly. Without this, a machine that
+    // clones fresh gets whatever template last landed upstream, which
+    // may be far behind the JSON schema the CMS is now writing.
+    let templates_dir = workdir.join("templates");
+    if templates_dir.is_dir() {
+        index
+            .add_all(["templates/*"].iter(), git2::IndexAddOption::DEFAULT, None)
+            .map_err(|e| format!("index add_all templates: {e}"))?;
+    }
     index.write().map_err(|e| format!("index write: {e}"))?;
 
     copied.sort();

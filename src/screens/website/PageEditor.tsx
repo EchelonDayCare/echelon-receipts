@@ -147,6 +147,8 @@ export default function PageEditor() {
   const [contactHeading, setContactHeading] = useState("");
   const [contactAddress, setContactAddress] = useState("");
   const [contactFacebookUrl, setContactFacebookUrl] = useState("");
+  const [contactPhone, setContactPhone] = useState("");
+  const [contactEmail, setContactEmail] = useState("");
   const [contactSubmitBusy, setContactSubmitBusy] = useState(false);
   const [contactMsg, setContactMsg] = useState<string | null>(null);
   const [contactErr, setContactErr] = useState<string | null>(null);
@@ -174,9 +176,13 @@ export default function PageEditor() {
       const s = siteContent ? JSON.parse(siteContent.content_json) : null;
       setContactAddress(String(s?.address?.display ?? currentContact?.address ?? ""));
       setContactFacebookUrl(String(s?.socials?.facebook ?? ""));
+      setContactPhone(String(s?.phone?.display ?? ""));
+      setContactEmail(String(s?.email ?? ""));
     } catch {
       setContactAddress(currentContact?.address ?? "");
       setContactFacebookUrl("");
+      setContactPhone("");
+      setContactEmail("");
     }
   }, [file, currentContact, siteContent]);
 
@@ -191,27 +197,37 @@ export default function PageEditor() {
     const hChanged = (contactHeading || "") !== (currentContact?.heading ?? "");
     let currentFb = "";
     let currentAddrDisplay = "";
+    let currentPhone = "";
+    let currentEmail = "";
     try {
       const s = JSON.parse(siteContent?.content_json ?? "{}");
       currentFb = String(s?.socials?.facebook ?? "");
       currentAddrDisplay = String(s?.address?.display ?? "");
+      currentPhone = String(s?.phone?.display ?? "");
+      currentEmail = String(s?.email ?? "");
     } catch { /* ignore */ }
-    // Compare address against site.address.display (what the site actually
-    // renders) — the contact.json map_iframe_title is derived, not authoritative.
     const aChanged = (contactAddress || "") !== currentAddrDisplay;
     const fbChanged = (contactFacebookUrl || "") !== currentFb;
-    return hChanged || aChanged || fbChanged;
-  }, [file, contactHeading, contactAddress, contactFacebookUrl, currentContact, siteContent]);
+    const pChanged = (contactPhone || "") !== currentPhone;
+    const eChanged = (contactEmail || "") !== currentEmail;
+    return hChanged || aChanged || fbChanged || pChanged || eChanged;
+  }, [file, contactHeading, contactAddress, contactFacebookUrl, contactPhone, contactEmail, currentContact, siteContent]);
 
   async function submitContactForm() {
     if (!content) return;
     const heading = contactHeading.trim();
     const address = contactAddress.trim();
     const fbUrl = contactFacebookUrl.trim();
+    const phone = contactPhone.trim();
+    const email = contactEmail.trim();
     if (!heading) { setContactErr("Page heading can't be empty."); return; }
     if (!address) { setContactErr("Address can't be empty."); return; }
     if (fbUrl && !/^https?:\/\//i.test(fbUrl)) {
       setContactErr("Facebook link must start with http:// or https://");
+      return;
+    }
+    if (email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+      setContactErr("Email doesn't look valid.");
       return;
     }
     setContactSubmitBusy(true);
@@ -253,6 +269,26 @@ export default function PageEditor() {
             display: address,
             footer_display: address,
           };
+          siteChanged = true;
+        }
+        const oldPhoneDisplay = String(siteObj?.phone?.display ?? "");
+        if (phone !== oldPhoneDisplay) {
+          // Phone renders on Contact page + footer + JSON-LD. Auto-derive
+          // tel_href from the display value by stripping every non-digit
+          // (keeps `+` if the user typed it) so `tel:` links stay valid.
+          const telHref = phone
+            ? "tel:" + phone.replace(/[^\d+]/g, "")
+            : "";
+          siteObj.phone = {
+            ...(siteObj.phone ?? {}),
+            display: phone,
+            tel_href: telHref,
+          };
+          siteChanged = true;
+        }
+        const oldEmail = String(siteObj?.email ?? "");
+        if (email !== oldEmail) {
+          siteObj.email = email;
           siteChanged = true;
         }
         if (siteChanged) {
@@ -586,6 +622,26 @@ export default function PageEditor() {
                   placeholder="575 W 8th Ave, Vancouver, BC"
                   style={{ padding: "8px 10px", border: "1px solid rgba(0,0,0,0.15)", borderRadius: 6, fontSize: 13, background: "white" }}
                 />
+                <label htmlFor="contact-phone" style={{ color: "#64748b", alignSelf: "center" }}>Phone</label>
+                <input
+                  id="contact-phone"
+                  type="tel"
+                  value={contactPhone}
+                  onChange={(e) => setContactPhone(e.target.value)}
+                  disabled={contactSubmitBusy || !siteContent}
+                  placeholder="+1 604-874-4010"
+                  style={{ padding: "8px 10px", border: "1px solid rgba(0,0,0,0.15)", borderRadius: 6, fontSize: 13, background: "white" }}
+                />
+                <label htmlFor="contact-email" style={{ color: "#64748b", alignSelf: "center" }}>Email</label>
+                <input
+                  id="contact-email"
+                  type="email"
+                  value={contactEmail}
+                  onChange={(e) => setContactEmail(e.target.value)}
+                  disabled={contactSubmitBusy || !siteContent}
+                  placeholder="hello@echelondaycare.com"
+                  style={{ padding: "8px 10px", border: "1px solid rgba(0,0,0,0.15)", borderRadius: 6, fontSize: 13, background: "white" }}
+                />
                 <label htmlFor="contact-facebook" style={{ color: "#64748b", alignSelf: "center" }}>Facebook link</label>
                 <input
                   id="contact-facebook"
@@ -630,14 +686,13 @@ export default function PageEditor() {
                   Preview →
                 </button>
                 <span style={{ fontSize: 12, color: "#94a3b8" }}>
-                  Address updates map + iframe title automatically. Facebook
-                  link is stored site-wide.
+                  Address updates map + iframe title. Phone / email / Facebook
+                  are site-wide (footer + header + JSON-LD).
                 </span>
               </div>
               <p style={{ margin: "14px 0 0", fontSize: 12, color: "#94a3b8" }}>
-                Phone number and email live on the <b>Site (global)</b> page. For
-                anything not shown here (map aria label, layout tweaks), use the
-                AI prompt below.
+                For anything not shown here (map aria label, socials other than
+                Facebook, layout tweaks), use the AI prompt below.
               </p>
             </div>
           )}

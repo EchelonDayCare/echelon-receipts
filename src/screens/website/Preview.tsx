@@ -23,10 +23,14 @@ export default function Preview() {
   const [busy, setBusy] = useState(false);
   const iframeRef = useRef<HTMLIFrameElement | null>(null);
 
-  const initialPath = useMemo(
-    () => (page ? `/pages/${page}.html` : ""),
-    [page],
-  );
+  const initialPath = useMemo(() => {
+    if (!page) return "";
+    // These content keys don't map to a page of their own — the
+    // "site" JSON is shared globals used by all pages, and "seo" is
+    // metadata read into every page. Land the user on the site home.
+    if (page === "site" || page === "seo") return "";
+    return `/pages/${page}.html`;
+  }, [page]);
 
   async function refresh() {
     setBusy(true);
