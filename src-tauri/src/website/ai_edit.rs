@@ -23,7 +23,7 @@ const AZURE_OPENAI_ENDPOINT: &str = "https://ai-nse.openai.azure.com";
 const CHAT_DEPLOY: &str = "gpt-5.4";
 const CHAT_API_VER: &str = "2025-04-01-preview";
 
-const SUPPORTED_PAGES: &[&str] = &["careers", "tour"];
+const SUPPORTED_PAGES: &[&str] = &["careers", "tour", "contact"];
 
 #[derive(Debug, Deserialize)]
 pub struct AiEditRequest {
@@ -38,6 +38,15 @@ pub struct AiEditResponse {
     pub proposed_json: String,
     pub summary: String,
     pub model: String,
+    /// For pages whose UI touches shared state (currently only `contact`,
+    /// which renders social links from `site.json`), the AI may also
+    /// return a full replacement for `site.json`. When present, the
+    /// frontend should save it as a second draft. `None` means the model
+    /// left site.json unchanged (or the page doesn't touch it).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub site_original_json: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub site_proposed_json: Option<String>,
 }
 
 #[tauri::command]
@@ -73,14 +82,38 @@ pub async fn website_ai_edit_content(
     let original_value: serde_json::Value = serde_json::from_str(&original_json)
         .map_err(|e| format!("current {page}.json is not valid JSON: {e}"))?;
 
+    // Contact page also renders content from site.json (socials, address,
+    // phone, email). Feed that as extra context so the AI can add / remove
+    // social platforms, adjust the aria label, etc.
+    let (site_original_json, site_original_value): (Option<String>, Option<serde_json::Value>) = if page == "contact" {
+        let site_path = wc.repo_dir.join("content").join("site.json");
+        if site_path.exists() {
+            match std::fs::read_to_string(&site_path) {
+                Ok(s) => match serde_json::from_str::<serde_json::Value>(&s) {
+                    Ok(v) => (Some(s), Some(v)),
+                    Err(_) => (None, None),
+                },
+                Err(_) => (None, None),
+            }
+        } else {
+            (None, None)
+        }
+    } else {
+        (None, None)
+    };
+
     // Call AOAI with a strict-JSON response contract.
     let key = crate::secrets::get_secret("azure_ai_key")?;
-    let (proposed_json, summary) =
-        call_content_editor(&key, &page, &original_value, prompt).await?;
+    let (proposed_json, site_proposed_json, summary) =
+        call_content_editor(&key, &page, &original_value, site_original_value.as_ref(), prompt).await?;
 
     // Validate the proposed JSON — refuse anything that doesn't parse.
     let _: serde_json::Value = serde_json::from_str(&proposed_json)
         .map_err(|e| format!("model returned invalid JSON: {e}"))?;
+    if let Some(ref s) = site_proposed_json {
+        let _: serde_json::Value = serde_json::from_str(s)
+            .map_err(|e| format!("model returned invalid site JSON: {e}"))?;
+    }
 
     Ok(AiEditResponse {
         page,
@@ -88,6 +121,8 @@ pub async fn website_ai_edit_content(
         proposed_json,
         summary,
         model: CHAT_DEPLOY.to_string(),
+        site_original_json,
+        site_proposed_json,
     })
 }
 
@@ -108,11 +143,32 @@ async fn call_content_editor(
     api_key: &str,
     page: &str,
     original: &serde_json::Value,
+    site_original: Option<&serde_json::Value>,
     user_prompt: &str,
-) -> Result<(String, String), String> {
+) -> Result<(String, Option<String>, String), String> {
     let url = format!(
         "{AZURE_OPENAI_ENDPOINT}/openai/deployments/{CHAT_DEPLOY}/chat/completions?api-version={CHAT_API_VER}"
     );
+
+    let contact_extra = if page == "contact" {
+        "\n\
+         CONTACT PAGE — EXTRA CONTEXT\n\
+         The Contact page renders social links from `site.socials` (an open \
+         dict of `{platform_key: url}`). The template iterates every key, so \
+         you can add ANY platform the user asks for (instagram, tiktok, \
+         youtube, linkedin, x, threads, whatsapp, etc.) by adding a new key \
+         to `site.socials`. Use lowercase keys with no spaces. When adding \
+         or removing a social link:\n\
+         * Return the full replacement `site.json` in `site_content_json`.\n\
+         * Also keep `site.same_as` (a JSON-LD array) in sync — add the new \
+           URL if the user gave one, remove URLs whose platform was removed.\n\
+         * Never rename or delete existing `site.socials` keys that the user \
+           didn't ask to change.\n\
+         * If the user's request only affects `contact.json` (heading, map, \
+           aria labels), leave `site_content_json` empty (null).\n"
+    } else {
+        ""
+    };
 
     let system_prompt = format!(
         "You are a content editor for the Echelon Day Care website's static-site CMS.\n\
@@ -125,7 +181,8 @@ async fn call_content_editor(
          1. Preserve the exact top-level shape of the input. Never rename keys, \
             never drop keys the site template depends on. Add new items only \
             inside array fields that clearly hold user content (e.g. `jobs`, \
-            `type_options`).\n\
+            `type_options`), or inside dict fields explicitly documented as \
+            open (e.g. `site.socials` for the contact page).\n\
          2. If the user asks for something outside the schema (e.g. a new \
             top-level key or a style/visual change), reflect the intent in the \
             closest legal field and describe the gap in `summary`. Do not \
@@ -135,32 +192,62 @@ async fn call_content_editor(
          4. Copy tone: warm, professional, brief. Avoid emojis unless the \
             existing content uses them.\n\
          5. Return only the JSON object described in the response schema. No \
-            prose, no markdown, no code fences."
+            prose, no markdown, no code fences.{contact_extra}"
     );
 
-    let user_text = format!(
+    let mut user_text = format!(
         "Current `{page}.json`:\n```json\n{}\n```\n\nUser request:\n{}",
         serde_json::to_string_pretty(original).unwrap_or_else(|_| original.to_string()),
         user_prompt,
     );
+    if let Some(site_v) = site_original {
+        user_text = format!(
+            "Current `site.json` (shared site-wide data — socials, address, phone, email):\n```json\n{}\n```\n\n{}",
+            serde_json::to_string_pretty(site_v).unwrap_or_else(|_| site_v.to_string()),
+            user_text,
+        );
+    }
 
     // Structured output: model MUST return an object with `content_json` (the
-    // new full JSON, as a string) plus a plain-English `summary`.
-    let schema = json!({
-        "type": "object",
-        "properties": {
-            "content_json": {
-                "type": "string",
-                "description": "The complete replacement JSON for the page, as a raw JSON-encoded string. Must parse via JSON.parse."
+    // new full JSON, as a string) plus a plain-English `summary`. For the
+    // contact page it may also return `site_content_json` (nullable).
+    let schema = if page == "contact" {
+        json!({
+            "type": "object",
+            "properties": {
+                "content_json": {
+                    "type": "string",
+                    "description": "The complete replacement JSON for contact.json, as a raw JSON-encoded string. Must parse via JSON.parse."
+                },
+                "site_content_json": {
+                    "type": ["string", "null"],
+                    "description": "Optional full replacement JSON for site.json when the user's request touches shared fields (socials, address, phone, email). Null when only contact.json changed."
+                },
+                "summary": {
+                    "type": "string",
+                    "description": "Brief plain-English recap of the changes made (2-4 sentences)."
+                }
             },
-            "summary": {
-                "type": "string",
-                "description": "Brief plain-English recap of the changes made (2-4 sentences)."
-            }
-        },
-        "required": ["content_json", "summary"],
-        "additionalProperties": false
-    });
+            "required": ["content_json", "site_content_json", "summary"],
+            "additionalProperties": false
+        })
+    } else {
+        json!({
+            "type": "object",
+            "properties": {
+                "content_json": {
+                    "type": "string",
+                    "description": "The complete replacement JSON for the page, as a raw JSON-encoded string. Must parse via JSON.parse."
+                },
+                "summary": {
+                    "type": "string",
+                    "description": "Brief plain-English recap of the changes made (2-4 sentences)."
+                }
+            },
+            "required": ["content_json", "summary"],
+            "additionalProperties": false
+        })
+    };
 
     let body = json!({
         "messages": [
@@ -218,11 +305,15 @@ async fn call_content_editor(
         .as_str()
         .ok_or("model output missing `content_json`")?
         .to_string();
+    let site_content_json = parsed["site_content_json"]
+        .as_str()
+        .filter(|s| !s.trim().is_empty())
+        .map(|s| s.to_string());
     let summary = parsed["summary"]
         .as_str()
         .unwrap_or("(no summary provided)")
         .to_string();
-    Ok((content_json, summary))
+    Ok((content_json, site_content_json, summary))
 }
 
 fn truncate(s: &str, n: usize) -> String {

@@ -42,7 +42,7 @@ export default function PageEditor() {
   const [saved, setSaved] = useState<string | null>(null);
 
   // AI edit state — only rendered when the current page supports it.
-  const AI_EDIT_PAGES: EditableFile[] = ["careers", "tour"];
+  const AI_EDIT_PAGES: EditableFile[] = ["careers", "tour", "contact"];
   const aiEnabled = AI_EDIT_PAGES.includes(file);
   const [aiPrompt, setAiPrompt] = useState("");
   const [aiBusy, setAiBusy] = useState(false);
@@ -115,6 +115,169 @@ export default function PageEditor() {
       return [];
     }
   }, [file, content]);
+
+  // Contact: readable summary of current published fields (v3.22.2).
+  const currentContact: {
+    heading?: string;
+    address?: string;
+    map_embed_url?: string;
+    facebook_aria_label?: string;
+  } | null = useMemo(() => {
+    if (file !== "contact" || !content) return null;
+    try {
+      const p = JSON.parse(content.content_json);
+      const title = String(p?.map_iframe_title ?? "");
+      const address = title.replace(/^Map of\s*/i, "").trim() || undefined;
+      return {
+        heading: p?.heading ? String(p.heading) : undefined,
+        address,
+        map_embed_url: p?.map_embed_url ? String(p.map_embed_url) : undefined,
+        facebook_aria_label: p?.facebook_aria_label ? String(p.facebook_aria_label) : undefined,
+      };
+    } catch {
+      return null;
+    }
+  }, [file, content]);
+
+  // Contact: inline edit form for heading + address + Facebook URL (v3.22.3).
+  // Facebook URL is stored in site.socials.facebook, so we load site.json
+  // alongside contact.json and save two drafts on Submit.
+  const [siteContent, setSiteContent] = useState<ContentFile | null>(null);
+  const [contactHeading, setContactHeading] = useState("");
+  const [contactAddress, setContactAddress] = useState("");
+  const [contactFacebookUrl, setContactFacebookUrl] = useState("");
+  const [contactSubmitBusy, setContactSubmitBusy] = useState(false);
+  const [contactMsg, setContactMsg] = useState<string | null>(null);
+  const [contactErr, setContactErr] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (file !== "contact") { setSiteContent(null); return; }
+    let cancelled = false;
+    (async () => {
+      try {
+        const s = await websiteLoadContent("site");
+        if (!cancelled) setSiteContent(s);
+      } catch {
+        if (!cancelled) setSiteContent(null);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [file]);
+
+  // Seed the form when content loads or reverts. Keep this separate from
+  // status messages so a successful save doesn't clear its own toast.
+  useEffect(() => {
+    if (file !== "contact") return;
+    setContactHeading(currentContact?.heading ?? "");
+    try {
+      const s = siteContent ? JSON.parse(siteContent.content_json) : null;
+      setContactAddress(String(s?.address?.display ?? currentContact?.address ?? ""));
+      setContactFacebookUrl(String(s?.socials?.facebook ?? ""));
+    } catch {
+      setContactAddress(currentContact?.address ?? "");
+      setContactFacebookUrl("");
+    }
+  }, [file, currentContact, siteContent]);
+
+  // Clear contact status only when switching files.
+  useEffect(() => {
+    setContactMsg(null);
+    setContactErr(null);
+  }, [file]);
+
+  const contactDirty = useMemo(() => {
+    if (file !== "contact") return false;
+    const hChanged = (contactHeading || "") !== (currentContact?.heading ?? "");
+    let currentFb = "";
+    let currentAddrDisplay = "";
+    try {
+      const s = JSON.parse(siteContent?.content_json ?? "{}");
+      currentFb = String(s?.socials?.facebook ?? "");
+      currentAddrDisplay = String(s?.address?.display ?? "");
+    } catch { /* ignore */ }
+    // Compare address against site.address.display (what the site actually
+    // renders) — the contact.json map_iframe_title is derived, not authoritative.
+    const aChanged = (contactAddress || "") !== currentAddrDisplay;
+    const fbChanged = (contactFacebookUrl || "") !== currentFb;
+    return hChanged || aChanged || fbChanged;
+  }, [file, contactHeading, contactAddress, contactFacebookUrl, currentContact, siteContent]);
+
+  async function submitContactForm() {
+    if (!content) return;
+    const heading = contactHeading.trim();
+    const address = contactAddress.trim();
+    const fbUrl = contactFacebookUrl.trim();
+    if (!heading) { setContactErr("Page heading can't be empty."); return; }
+    if (!address) { setContactErr("Address can't be empty."); return; }
+    if (fbUrl && !/^https?:\/\//i.test(fbUrl)) {
+      setContactErr("Facebook link must start with http:// or https://");
+      return;
+    }
+    setContactSubmitBusy(true);
+    setContactErr(null);
+    setContactMsg(null);
+    try {
+      // Rewrite contact.json: heading + derived map fields.
+      const contactObj = JSON.parse(content.content_json);
+      contactObj.heading = heading;
+      contactObj.map_iframe_title = `Map of ${address}`;
+      const encoded = encodeURIComponent(address).replace(/%20/g, "+");
+      contactObj.map_embed_url = `https://www.google.com/maps?q=${encoded}&output=embed`;
+      const contactRev = await websiteSaveDraft({
+        file: "contact",
+        content_json: JSON.stringify(contactObj, null, 2) + "\n",
+      });
+      let siteRev: number | null = null;
+      if (siteContent) {
+        const siteObj = JSON.parse(siteContent.content_json);
+        const oldFb = String(siteObj?.socials?.facebook ?? "");
+        const oldDisplay = String(siteObj?.address?.display ?? "");
+        let siteChanged = false;
+        if (fbUrl !== oldFb) {
+          siteObj.socials = { ...(siteObj.socials ?? {}), facebook: fbUrl };
+          if (Array.isArray(siteObj.same_as)) {
+            siteObj.same_as = siteObj.same_as.map((u: string) => (u === oldFb ? fbUrl : u));
+            if (fbUrl && !siteObj.same_as.includes(fbUrl)) siteObj.same_as.push(fbUrl);
+          }
+          siteChanged = true;
+        }
+        if (address !== oldDisplay) {
+          // Address is what visitors actually see (Contact page + footer +
+          // schema.org). Update display + footer_display verbatim from the
+          // form. The structured street/locality/region/postal fields are
+          // left as-is (they feed JSON-LD only); use the AI prompt to
+          // rewrite those if precise SEO markup matters.
+          siteObj.address = {
+            ...(siteObj.address ?? {}),
+            display: address,
+            footer_display: address,
+          };
+          siteChanged = true;
+        }
+        if (siteChanged) {
+          const r = await websiteSaveDraft({
+            file: "site",
+            content_json: JSON.stringify(siteObj, null, 2) + "\n",
+          });
+          siteRev = r.revision_id;
+          setSiteContent(await websiteLoadContent("site"));
+        }
+      }
+      const c = await websiteLoadContent("contact");
+      setContent(c);
+      setText(tryPrettyJson(c.content_json));
+      setDirty(false);
+      setContactMsg(
+        `Saved — contact draft rev #${contactRev.revision_id}` +
+        (siteRev !== null ? `, site draft rev #${siteRev}` : "") +
+        ". Click Preview to see it, then Publish to go live."
+      );
+    } catch (e: any) {
+      setContactErr(String(e?.message ?? e));
+    } finally {
+      setContactSubmitBusy(false);
+    }
+  }
 
   useEffect(() => {
     // Prune stale selections when jobs list changes (e.g. after AI edit).
@@ -197,6 +360,21 @@ export default function PageEditor() {
         file,
         content_json: pretty,
       });
+      // Contact-page prompts may also affect site.json (socials, address,
+      // phone, email). When the AI returns a site_proposed_json, save it
+      // as a second draft so Preview renders both changes together.
+      let siteSaveRev: number | null = null;
+      if (res.site_proposed_json && res.site_proposed_json.trim()) {
+        const sitePretty = tryPrettyJson(res.site_proposed_json);
+        const siteSave = await websiteSaveDraft({
+          file: "site",
+          content_json: sitePretty,
+        });
+        siteSaveRev = siteSave.revision_id;
+        if (file === "contact") {
+          setSiteContent(await websiteLoadContent("site"));
+        }
+      }
       setText(pretty);
       setDirty(false);
       setContent(await websiteLoadContent(file));
@@ -205,7 +383,10 @@ export default function PageEditor() {
         summary: res.summary,
         model: res.model,
       });
-      setSaved(`Draft saved as revision #${saveRes.revision_id}`);
+      setSaved(
+        `Draft saved as revision #${saveRes.revision_id}` +
+        (siteSaveRev !== null ? ` (site draft rev #${siteSaveRev})` : "")
+      );
     } catch (e: any) {
       setAiErr(String(e?.message ?? e));
     } finally {
@@ -225,9 +406,16 @@ export default function PageEditor() {
           ← Website
         </button>
         <h1 style={{ margin: 0 }}>{FILE_LABELS[file]}</h1>
+        <button
+          className="btn"
+          onClick={() => nav(`/website/preview?page=${file}`)}
+          style={{ marginLeft: "auto", fontSize: 13, padding: "6px 14px" }}
+          title={`Preview the ${FILE_LABELS[file]} page with pending drafts`}
+        >
+          Preview →
+        </button>
         <span
           style={{
-            marginLeft: "auto",
             fontSize: 12,
             padding: "3px 8px",
             borderRadius: 6,
@@ -362,6 +550,96 @@ export default function PageEditor() {
               </p>
             </div>
           )}
+          {file === "contact" && (
+            <div
+              style={{
+                border: "1px solid rgba(0,0,0,0.1)",
+                background: "white",
+                borderRadius: 12,
+                padding: 16,
+                marginBottom: 16,
+              }}
+            >
+              <b style={{ fontSize: 14, color: "#1d3557" }}>Current contact details</b>
+              <p style={{ margin: "4px 0 14px", fontSize: 12, color: "#64748b" }}>
+                Edit any field and click <b>Submit</b> to save a draft. Preview
+                and Publish work the same as everywhere else.
+              </p>
+              <div style={{ display: "grid", gridTemplateColumns: "140px 1fr", columnGap: 12, rowGap: 10, fontSize: 13 }}>
+                <label htmlFor="contact-heading" style={{ color: "#64748b", alignSelf: "center" }}>Page heading</label>
+                <input
+                  id="contact-heading"
+                  type="text"
+                  value={contactHeading}
+                  onChange={(e) => setContactHeading(e.target.value)}
+                  disabled={contactSubmitBusy}
+                  style={{ padding: "8px 10px", border: "1px solid rgba(0,0,0,0.15)", borderRadius: 6, fontSize: 13, background: "white" }}
+                />
+                <label htmlFor="contact-address" style={{ color: "#64748b", alignSelf: "center" }}>Address</label>
+                <input
+                  id="contact-address"
+                  type="text"
+                  value={contactAddress}
+                  onChange={(e) => setContactAddress(e.target.value)}
+                  disabled={contactSubmitBusy}
+                  placeholder="575 W 8th Ave, Vancouver, BC"
+                  style={{ padding: "8px 10px", border: "1px solid rgba(0,0,0,0.15)", borderRadius: 6, fontSize: 13, background: "white" }}
+                />
+                <label htmlFor="contact-facebook" style={{ color: "#64748b", alignSelf: "center" }}>Facebook link</label>
+                <input
+                  id="contact-facebook"
+                  type="url"
+                  value={contactFacebookUrl}
+                  onChange={(e) => setContactFacebookUrl(e.target.value)}
+                  disabled={contactSubmitBusy || !siteContent}
+                  placeholder="https://www.facebook.com/echelon.daycare.5"
+                  style={{ padding: "8px 10px", border: "1px solid rgba(0,0,0,0.15)", borderRadius: 6, fontSize: 13, background: "white" }}
+                />
+              </div>
+              {contactErr && (
+                <div style={{ marginTop: 12, padding: "8px 10px", background: "#fef2f2", border: "1px solid #fecaca", borderRadius: 6, color: "#b91c1c", fontSize: 12 }}>
+                  {contactErr}
+                </div>
+              )}
+              {contactMsg && (
+                <div style={{ marginTop: 12, padding: "8px 10px", background: "#f0fdf4", border: "1px solid #bbf7d0", borderRadius: 6, color: "#166534", fontSize: 12 }}>
+                  {contactMsg}
+                </div>
+              )}
+              <div style={{ display: "flex", gap: 8, alignItems: "center", marginTop: 14 }}>
+                <button
+                  className="btn"
+                  onClick={submitContactForm}
+                  disabled={!contactDirty || contactSubmitBusy}
+                  style={{
+                    background: contactDirty ? "#1d5fa3" : undefined,
+                    color: contactDirty ? "white" : undefined,
+                    fontSize: 13,
+                    padding: "8px 18px",
+                  }}
+                >
+                  {contactSubmitBusy ? "Saving…" : "Submit"}
+                </button>
+                <button
+                  className="btn"
+                  onClick={() => nav(`/website/preview?page=contact`)}
+                  disabled={contactSubmitBusy}
+                  style={{ fontSize: 13, padding: "8px 18px" }}
+                >
+                  Preview →
+                </button>
+                <span style={{ fontSize: 12, color: "#94a3b8" }}>
+                  Address updates map + iframe title automatically. Facebook
+                  link is stored site-wide.
+                </span>
+              </div>
+              <p style={{ margin: "14px 0 0", fontSize: 12, color: "#94a3b8" }}>
+                Phone number and email live on the <b>Site (global)</b> page. For
+                anything not shown here (map aria label, layout tweaks), use the
+                AI prompt below.
+              </p>
+            </div>
+          )}
           {file === "tour" && (
             <div
               style={{
@@ -439,6 +717,8 @@ export default function PageEditor() {
               placeholder={
                 file === "tour"
                   ? "e.g. Change the intro to emphasise our outdoor play area. Rename the classroom video to 'Toddler classroom walk-through'."
+                  : file === "contact"
+                  ? "e.g. Move us to 620 W 10th Ave, Vancouver, BC V5Z 4E6 and update the map."
                   : "e.g. Post a Friday-only Cook role, casual, $22-25/hr. Also change the hiring email to careers@echelondaycare.com and remove the Cleaner posting."
               }
               disabled={aiBusy}

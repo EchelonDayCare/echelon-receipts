@@ -62,6 +62,7 @@ import { DEFAULT_LOGO_DATA_URL } from "./lib/defaults";
 import PromptHost from "./components/PromptHost";
 import NotificationBell from "./components/NotificationBell";
 import LockButton from "./components/LockButton";
+import WebsiteButton from "./components/WebsiteButton";
 import SettingsFab from "./components/SettingsFab";
 import AlertDot from "./components/AlertDot";
 import { HomeAlertsProvider, useHomeAlerts } from "./hooks/useHomeAlerts";
@@ -184,6 +185,7 @@ function Shell({ logo, name, staffEnabled }: { logo: string; name: string; staff
       <>
         <div style={{ position: "fixed", top: 20, right: 28, zIndex: 900, display: "flex", flexDirection: "column", gap: 8, alignItems: "center" }}>
           <NotificationBell size={40} />
+          <WebsiteButton size={40} />
           <LockButton size={40} />
         </div>
         <SettingsFab />

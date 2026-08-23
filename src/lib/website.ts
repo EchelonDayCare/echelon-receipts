@@ -131,6 +131,8 @@ export interface AiEditResponse {
   proposed_json: string;
   summary: string;
   model: string;
+  site_original_json?: string | null;
+  site_proposed_json?: string | null;
 }
 
 export function websiteAiEditContent(

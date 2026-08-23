@@ -63,6 +63,19 @@ fn read_tour_content(repo_dir: &Path) -> Result<Value, String> {
     serde_json::from_str::<Value>(&raw).map_err(|e| format!("parse tour.json: {e}"))
 }
 
+/// Prefer the DB draft (matches `website_load_content`); fall back to
+/// the on-disk working copy when no draft exists yet.
+async fn load_current_tour(gate: &DbGate, repo_dir: &Path) -> Result<Value, String> {
+    let draft = revisions::load_draft(gate, "tour")
+        .await
+        .map_err(|e| e.to_string())?;
+    if let Some(json) = draft {
+        return serde_json::from_str::<Value>(&json)
+            .map_err(|e| format!("parse tour draft: {e}"));
+    }
+    read_tour_content(repo_dir)
+}
+
 /// Given a tour.json Value, always return a v2-shaped object with `videos: []`.
 /// v1 (single video_src/video_poster) migrates on read.
 fn ensure_v2(mut v: Value) -> Value {
@@ -97,10 +110,13 @@ fn ensure_v2(mut v: Value) -> Value {
 }
 
 #[tauri::command]
-pub async fn website_tour_list_videos(app: AppHandle) -> Result<Vec<TourVideo>, String> {
+pub async fn website_tour_list_videos(
+    app: AppHandle,
+    db: State<'_, DbGate>,
+) -> Result<Vec<TourVideo>, String> {
     require_enabled()?;
     let wc = working_copy_from_app(&app)?;
-    let v = ensure_v2(read_tour_content(&wc.repo_dir)?);
+    let v = ensure_v2(load_current_tour(db.inner(), &wc.repo_dir).await?);
     let arr = v
         .get("videos")
         .and_then(|x| x.as_array())
@@ -167,6 +183,60 @@ fn next_id(existing: &[TourVideo]) -> String {
         }
         n += 1;
     }
+}
+
+/// Transcode a source video into `dst` as H.264 720p + AAC 128k using the
+/// bundled ffmpeg's `libopenh264` encoder (the sidecar isn't built with
+/// libx264). Keeps files well under GitHub's 100 MB push limit while
+/// preserving playback quality. Two-tier bitrate ladder if the first pass
+/// still yields > 90 MB.
+const GITHUB_MAX_MB: u64 = 90;
+
+fn transcode_video(ffmpeg: &Path, src: &Path, dst: &Path) -> Result<(), String> {
+    // (video_bitrate, max_height)
+    let attempts: &[(&str, &str)] = &[
+        ("1500k", "720"),
+        ("1000k", "720"),
+        ("700k", "540"),
+    ];
+    for (vbit, height) in attempts {
+        let vf = format!(
+            "scale='min(1280,iw)':'min({height},ih)':force_original_aspect_ratio=decrease,scale=trunc(iw/2)*2:trunc(ih/2)*2"
+        );
+        let out = std::process::Command::new(ffmpeg)
+            .args([
+                "-hide_banner",
+                "-loglevel", "error",
+                "-y",
+                "-i",
+            ])
+            .arg(src)
+            .args([
+                "-vf", vf.as_str(),
+                "-c:v", "libopenh264",
+                "-b:v", vbit,
+                "-pix_fmt", "yuv420p",
+                "-movflags", "+faststart",
+                "-c:a", "aac",
+                "-b:a", "128k",
+                "-ac", "2",
+            ])
+            .arg(dst)
+            .output()
+            .map_err(|e| format!("spawn ffmpeg (transcode): {e}"))?;
+        if !out.status.success() {
+            return Err(format!(
+                "ffmpeg transcode failed: {}",
+                String::from_utf8_lossy(&out.stderr)
+            ));
+        }
+        if let Ok(meta) = std::fs::metadata(dst) {
+            if meta.len() <= GITHUB_MAX_MB * 1024 * 1024 {
+                return Ok(());
+            }
+        }
+    }
+    Ok(())
 }
 
 fn extract_poster(
@@ -237,7 +307,7 @@ pub async fn website_tour_add_videos(
     std::fs::create_dir_all(&assets_video)
         .map_err(|e| format!("mkdir assets/video: {e}"))?;
 
-    let mut tour_val = ensure_v2(read_tour_content(&wc.repo_dir)?);
+    let mut tour_val = ensure_v2(load_current_tour(db.inner(), &wc.repo_dir).await?);
     let mut current: Vec<TourVideo> = serde_json::from_value(
         tour_val
             .get("videos")
@@ -266,8 +336,9 @@ pub async fn website_tour_add_videos(
         let video_dst = wc.repo_dir.join(&video_rel);
         let poster_dst = wc.repo_dir.join(&poster_rel);
 
-        std::fs::copy(&src, &video_dst)
-            .map_err(|e| format!("copy {} → {}: {e}", src.display(), video_dst.display()))?;
+        std::fs::create_dir_all(video_dst.parent().unwrap()).ok();
+        transcode_video(&ffmpeg, &src, &video_dst)
+            .map_err(|e| format!("transcode {} → {}: {e}", src.display(), video_dst.display()))?;
 
         if let Err(e) = extract_poster(&ffmpeg, &video_dst, &poster_dst) {
             // Poster is a soft requirement — fall back to the previous
@@ -286,10 +357,14 @@ pub async fn website_tour_add_videos(
             .and_then(|s| s.to_str())
             .unwrap_or("Untitled")
             .to_string();
+        let (title, description) = match ai_polish_video_meta(&orig_name).await {
+            Some((t, d)) => (t, d),
+            None => (title_stem, String::new()),
+        };
         let entry = TourVideo {
             id: id.clone(),
-            title: title_stem,
-            description: String::new(),
+            title,
+            description,
             src: video_rel,
             poster: if poster_dst.exists() { poster_rel } else { "assets/img/og-image.png".into() },
         };
@@ -328,7 +403,7 @@ pub async fn website_tour_delete_video(
 ) -> Result<i64, String> {
     require_enabled()?;
     let wc = working_copy_from_app(&app)?;
-    let mut tour_val = ensure_v2(read_tour_content(&wc.repo_dir)?);
+    let mut tour_val = ensure_v2(load_current_tour(db.inner(), &wc.repo_dir).await?);
     let mut current: Vec<TourVideo> = serde_json::from_value(
         tour_val
             .get("videos")
@@ -384,7 +459,7 @@ pub async fn website_tour_reorder_videos(
 ) -> Result<i64, String> {
     require_enabled()?;
     let wc = working_copy_from_app(&app)?;
-    let mut tour_val = ensure_v2(read_tour_content(&wc.repo_dir)?);
+    let mut tour_val = ensure_v2(load_current_tour(db.inner(), &wc.repo_dir).await?);
     let current: Vec<TourVideo> = serde_json::from_value(
         tour_val
             .get("videos")
@@ -417,6 +492,64 @@ pub async fn website_tour_reorder_videos(
         .await
         .map_err(|e| e.to_string())?;
     Ok(rev)
+}
+
+/// Ask AOAI to produce a friendly title (2-6 words, title case) and a
+/// one-sentence description from a raw filename. Never blocks the
+/// upload: any error, timeout, or malformed response returns `None`
+/// and the caller falls back to a stem-derived title.
+async fn ai_polish_video_meta(orig_name: &str) -> Option<(String, String)> {
+    let key = crate::secrets::get_secret("azure_ai_key").ok()?;
+    let url = format!(
+        "https://ai-nse.openai.azure.com/openai/deployments/gpt-5.4/chat/completions?api-version=2025-04-01-preview"
+    );
+    let sys = "You clean up raw video filenames for a daycare's public 'Virtual Tour' website. \
+        Return a short human-friendly title (2-6 words, Title Case, no filler like 'video' or 'demo') \
+        and a warm one-sentence description (max 20 words) suitable as caption text. \
+        Never invent facts; if the filename is opaque, describe generically.";
+    let user = format!("Filename: {orig_name}\nReturn JSON with fields `title` and `description`.");
+    let schema = json!({
+        "type": "object",
+        "properties": {
+            "title": {"type": "string"},
+            "description": {"type": "string"}
+        },
+        "required": ["title", "description"],
+        "additionalProperties": false
+    });
+    let body = json!({
+        "messages": [
+            {"role": "system", "content": sys},
+            {"role": "user", "content": user},
+        ],
+        "max_completion_tokens": 400,
+        "reasoning_effort": "low",
+        "response_format": {
+            "type": "json_schema",
+            "json_schema": {"name": "VideoMeta", "schema": schema, "strict": true}
+        }
+    });
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(20))
+        .build()
+        .ok()?;
+    let resp = client
+        .post(&url)
+        .header("api-key", &key)
+        .header("Content-Type", "application/json")
+        .json(&body)
+        .send()
+        .await
+        .ok()?;
+    if !resp.status().is_success() {
+        return None;
+    }
+    let v: Value = resp.json().await.ok()?;
+    let msg = v["choices"][0]["message"]["content"].as_str()?;
+    let parsed: Value = serde_json::from_str(msg).ok()?;
+    let title = parsed["title"].as_str()?.trim().to_string();
+    let desc = parsed["description"].as_str()?.trim().to_string();
+    if title.is_empty() { None } else { Some((title, desc)) }
 }
 
 #[cfg(test)]

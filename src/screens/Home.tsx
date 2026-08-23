@@ -6,7 +6,6 @@ import { getSettings } from "../lib/db";
 import { DEFAULT_LOGO_DATA_URL } from "../lib/defaults";
 import { checkForUpdates, type UpdateStatus } from "../lib/updateCheck";
 import { askEchelon, logQuestion, type AskResult } from "../lib/askEchelon";
-import { isWebsiteCmsEnabled } from "../lib/website";
 import { useHomeAlerts } from "../hooks/useHomeAlerts";
 import AlertDot from "../components/AlertDot";
 import TodayCard from "../components/TodayCard";
@@ -17,7 +16,6 @@ export default function Home() {
   const nav = useNavigate();
   const [s, setS] = useState<SettingsMap>({});
   const [staffEnabled, setStaffEnabled] = useState(false);
-  const [websiteCmsEnabled, setWebsiteCmsEnabled] = useState(false);
   const [update, setUpdate] = useState<UpdateStatus | null>(null);
   const [appVersion, setAppVersion] = useState<string>("");
 
@@ -60,17 +58,8 @@ export default function Home() {
       setStaffEnabled(settings.feature_staff_hours_enabled === "1");
     })();
 
-    // Website CMS tile is gated by the ECHELON_WEBSITE_CMS=1 env var,
-    // checked once at boot in Rust. This is intentional so partial UI
-    // during PR 3 build-out never shows up for the daycare owner —
-    // only when the env var is set (dev machine) does the tile appear.
-    (async () => {
-      try {
-        setWebsiteCmsEnabled(await isWebsiteCmsEnabled());
-      } catch {
-        setWebsiteCmsEnabled(false);
-      }
-    })();
+    // Website CMS shortcut moved to the top-right icon stack (WebsiteButton)
+    // in v3.22.x — no longer surfaced as a Home tile.
 
     // Read the real Cargo version at runtime and use it for both the footer
     // and the update-check gating (hardcoding was showing v0.1.0 and turning
@@ -310,14 +299,6 @@ export default function Home() {
           <h2>Graduation Day</h2>
           <p>Year-in-review reel, per-child videos, slideshow — from your photo library</p>
         </button>
-
-        {websiteCmsEnabled && (
-          <button className="home-tile website" style={{ position: "relative" }} onClick={() => nav("/website")}>
-            <div className="home-tile-icon">🌐</div>
-            <h2>Website</h2>
-            <p>Edit echelondaycare.com content, preview locally, publish to GitHub Pages</p>
-          </button>
-        )}
       </div>
 
       {update?.hasUpdate && (
