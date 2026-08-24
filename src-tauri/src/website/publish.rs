@@ -458,32 +458,42 @@ async fn run_pipeline_inner(
     })? {
         Ok(sha) => sha,
         Err(e) if e == "no changes to commit" => {
-            // Nothing to publish — advance to VerifiedLive with the
-            // existing HEAD sha and mark early completion.
+            // Nothing new to add on top of whatever HEAD already is.
+            // But HEAD might still be ahead of origin/main — e.g. the
+            // fetch-and-ff stage autosnapshotted pending template /
+            // gallery edits into a commit that hasn't been pushed
+            // yet. Detect that case and fall through to the push step;
+            // otherwise skip straight to VerifiedLive.
             let sha = git_ops::head_sha(&repo)?;
-            set_commit_sha(inputs.db, publication_id, &sha)
-                .await
-                .map_err(|e| e.to_string())?;
-            // Skip commit and push, jump straight to committed→pushed→…
-            for step in [
-                PublishState::Committed,
-                PublishState::Pushing,
-                PublishState::Pushed,
-                PublishState::PollingPages,
-                PublishState::VerifiedLive,
-            ] {
-                set_state(inputs.db, publication_id, step)
+            let ahead_of_origin = git_ops::origin_main_sha(&repo)
+                .map(|origin_sha| origin_sha != sha)
+                .unwrap_or(false);
+            if !ahead_of_origin {
+                set_commit_sha(inputs.db, publication_id, &sha)
                     .await
                     .map_err(|e| e.to_string())?;
+                for step in [
+                    PublishState::Committed,
+                    PublishState::Pushing,
+                    PublishState::Pushed,
+                    PublishState::PollingPages,
+                    PublishState::VerifiedLive,
+                ] {
+                    set_state(inputs.db, publication_id, step)
+                        .await
+                        .map_err(|e| e.to_string())?;
+                }
+                return Ok(PipelineOutcome {
+                    publication_id,
+                    final_state: "no_changes".into(),
+                    commit_sha: Some(sha),
+                    verified_url: Some(inputs.verified_url.clone()),
+                    error: None,
+                    pages_written,
+                });
             }
-            return Ok(PipelineOutcome {
-                publication_id,
-                final_state: "no_changes".into(),
-                commit_sha: Some(sha),
-                verified_url: Some(inputs.verified_url.clone()),
-                error: None,
-                pages_written,
-            });
+            // Fall through with the autosnapshot's sha so push runs.
+            sha
         }
         Err(e) => return Err(e),
     };

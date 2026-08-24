@@ -369,6 +369,13 @@ export function websiteReplaceOgImage(
   return invoke<MediaRecord>("website_replace_og_image", { sourcePath });
 }
 
+export function websiteReplaceAboutPhoto(
+  slot: 1 | 2 | 3,
+  sourcePath: string,
+): Promise<string> {
+  return invoke<string>("website_replace_about_photo", { slot, sourcePath });
+}
+
 /// Small helper: try to pretty-print a JSON blob for the editor
 /// textarea. If parse fails, hand back the raw string so the user
 /// can still salvage their edits.

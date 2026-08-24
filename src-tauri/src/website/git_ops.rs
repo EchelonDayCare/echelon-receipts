@@ -90,6 +90,15 @@ pub fn head_sha(repo: &Repository) -> Result<String, String> {
     Ok(oid.to_string())
 }
 
+/// Return the sha of `refs/remotes/origin/main` if the fetch has
+/// populated it, otherwise None.
+pub fn origin_main_sha(repo: &Repository) -> Option<String> {
+    repo.find_reference("refs/remotes/origin/main")
+        .ok()
+        .and_then(|r| r.target())
+        .map(|oid| oid.to_string())
+}
+
 /// Fetch `origin/main` and fast-forward the local branch onto it. If
 /// the local branch has diverged from origin, return
 /// `Err("non-fast-forward")` so the caller can surface a conflict.
@@ -124,13 +133,23 @@ pub fn fetch_and_ff_main(repo: &Repository) -> Result<String, String> {
         .map_err(|e| format!("merge_analysis: {e}"))?;
 
     if analysis.0.is_up_to_date() {
+        // Even when already up to date, if the working copy has
+        // pending edits in publish-managed paths we snapshot them now
+        // so the subsequent `commit_all` never sees "no changes to
+        // commit" for a purely template/gallery edit and so the ff
+        // path below stays symmetric with the fresh case.
+        autostash_publish_paths(repo)?;
         return head_sha(repo);
     }
     if analysis.0.is_fast_forward() {
-        // Refuse to fast-forward if the working tree has uncommitted
-        // changes — `checkout_head` with `force()` would silently blow
-        // away the owner's draft edits, uploaded photos not yet
-        // committed, etc.
+        // Auto-snapshot pending edits in publish-managed paths
+        // (content/, templates/, assets/) before the force-checkout
+        // that ff performs — otherwise the force-checkout would
+        // silently drop the owner's template edits, uploaded photos
+        // not yet committed, etc. Any dirty state OUTSIDE those
+        // paths is still a hard refusal: publish isn't responsible
+        // for random other files.
+        //
         // Ignore untracked files (stray .DS_Store on macOS, editor
         // swap files, etc.) — only refuse on real user-edited state.
         let mut opts = git2::StatusOptions::new();
@@ -138,13 +157,24 @@ pub fn fetch_and_ff_main(repo: &Repository) -> Result<String, String> {
         let statuses = repo
             .statuses(Some(&mut opts))
             .map_err(|e| format!("status: {e}"))?;
-        let dirty = statuses.iter().any(|s| {
+        let mut foreign_dirty: Vec<String> = Vec::new();
+        for s in statuses.iter() {
             let f = s.status();
-            !f.is_ignored() && !f.is_empty()
-        });
-        if dirty {
-            return Err("working copy has uncommitted changes; refusing to fast-forward. Publish or discard your changes first.".to_string());
+            if f.is_ignored() || f.is_empty() {
+                continue;
+            }
+            let path = s.path().unwrap_or("").to_string();
+            if !is_publish_managed_path(&path) {
+                foreign_dirty.push(path);
+            }
         }
+        if !foreign_dirty.is_empty() {
+            return Err(format!(
+                "working copy has uncommitted changes outside CMS-managed paths ({}); resolve them before publishing.",
+                foreign_dirty.join(", ")
+            ));
+        }
+        autostash_publish_paths(repo)?;
         let refname = "refs/heads/main";
         let mut r = repo
             .find_reference(refname)
@@ -157,6 +187,80 @@ pub fn fetch_and_ff_main(repo: &Repository) -> Result<String, String> {
         return head_sha(repo);
     }
     Err("non-fast-forward: local main has diverged from origin/main. Reopen the app or reclone the working copy.".to_string())
+}
+
+/// Files the publish pipeline is responsible for shipping. Any dirty
+/// state in these paths is safe to auto-stage as part of publish.
+fn is_publish_managed_path(rel: &str) -> bool {
+    let p = rel.replace('\\', "/");
+    p.starts_with("content/")
+        || p.starts_with("templates/")
+        || p.starts_with("assets/")
+        || p == "sitemap.xml"
+        || p == "robots.txt"
+        || p == "index.html"
+        || p.starts_with("pages/") && p.ends_with(".html")
+}
+
+/// Stage every dirty publish-managed path and, if any survived, drop
+/// a snapshot commit so subsequent ff / render / commit steps see a
+/// clean tree. No-op when nothing is dirty in those paths.
+fn autostash_publish_paths(repo: &Repository) -> Result<(), String> {
+    let mut opts = git2::StatusOptions::new();
+    opts.include_untracked(true).include_ignored(false);
+    let statuses = repo
+        .statuses(Some(&mut opts))
+        .map_err(|e| format!("status: {e}"))?;
+    let mut to_stage: Vec<String> = Vec::new();
+    for s in statuses.iter() {
+        let f = s.status();
+        if f.is_ignored() || f.is_empty() {
+            continue;
+        }
+        let path = match s.path() {
+            Some(p) => p.to_string(),
+            None => continue,
+        };
+        if is_publish_managed_path(&path) {
+            to_stage.push(path);
+        }
+    }
+    if to_stage.is_empty() {
+        return Ok(());
+    }
+    let mut index = repo.index().map_err(|e| format!("index: {e}"))?;
+    for rel in &to_stage {
+        // add_all handles both modifications and untracked files, and
+        // survives paths that no longer exist (deletes).
+        index
+            .add_all([rel].iter(), git2::IndexAddOption::DEFAULT, None)
+            .map_err(|e| format!("index add {rel}: {e}"))?;
+    }
+    index.write().map_err(|e| format!("index write: {e}"))?;
+
+    let tree_id = index.write_tree().map_err(|e| format!("write_tree: {e}"))?;
+    let head_ref = repo.head().map_err(|e| format!("HEAD: {e}"))?;
+    let parent = head_ref
+        .peel_to_commit()
+        .map_err(|e| format!("HEAD peel: {e}"))?;
+    if parent.tree().map_err(|e| format!("HEAD tree: {e}"))?.id() == tree_id {
+        return Ok(());
+    }
+    let tree = repo
+        .find_tree(tree_id)
+        .map_err(|e| format!("find_tree: {e}"))?;
+    let sig = Signature::now("Echelon CMS (desktop)", "cms-desktop@echelondaycare.local")
+        .map_err(|e| format!("signature: {e}"))?;
+    repo.commit(
+        Some("HEAD"),
+        &sig,
+        &sig,
+        "CMS pre-publish autosnapshot",
+        &tree,
+        &[&parent],
+    )
+    .map_err(|e| format!("autostash commit: {e}"))?;
+    Ok(())
 }
 
 /// Write `content_by_file` (keyed by `"site" | "home" | ...`) into

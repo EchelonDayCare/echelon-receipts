@@ -824,3 +824,16 @@ pub async fn website_replace_og_image(
         .await
         .map_err(to_err)
 }
+
+#[tauri::command]
+pub async fn website_replace_about_photo(
+    app: AppHandle,
+    slot: u8,
+    source_path: String,
+) -> Result<String, String> {
+    require_enabled()?;
+    let wc = ensure_working_copy(&app)?;
+    media::replace_about_photo(&wc.repo_dir, slot, Path::new(&source_path))
+        .await
+        .map_err(to_err)
+}

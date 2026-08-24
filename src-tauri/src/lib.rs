@@ -232,6 +232,7 @@ pub fn run() {
             website::commands::website_replace_logo,
             website::commands::website_replace_favicon,
             website::commands::website_replace_og_image,
+            website::commands::website_replace_about_photo,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
