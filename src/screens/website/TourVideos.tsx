@@ -128,10 +128,13 @@ export default function TourVideos() {
       setMsg(`Deleted ${selectedIds.size} video${selectedIds.size === 1 ? "" : "s"} — draft rev #${lastRev}`);
       setSelectedIds(new Set());
       setBulkPending(false);
-      await refresh();
     } catch (e: any) {
       setErr(String(e?.message ?? e));
     } finally {
+      // Always refresh, even on a partial-success bulk delete —
+      // otherwise the UI keeps showing rows the backend already
+      // removed, and the next click 404s.
+      await refresh();
       setBusy(false);
     }
   }

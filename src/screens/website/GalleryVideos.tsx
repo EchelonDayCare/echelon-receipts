@@ -125,10 +125,14 @@ export default function GalleryVideos() {
       setMsg(`Deleted ${selectedIds.size} video${selectedIds.size === 1 ? "" : "s"} — draft rev #${lastRev}`);
       setSelectedIds(new Set());
       setBulkPending(false);
-      await refresh();
     } catch (e: any) {
       setErr(String(e?.message ?? e));
     } finally {
+      // Always refresh — a partial-success bulk delete (some ids
+      // deleted, then one throws) must still reflect the new
+      // reality in the list, or the user's next click on an
+      // already-deleted row will 404.
+      await refresh();
       setBusy(false);
     }
   }

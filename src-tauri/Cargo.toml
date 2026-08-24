@@ -1,6 +1,6 @@
 [package]
 name = "echelon-receipts"
-version = "3.24.2"
+version = "3.24.3"
 description = "Echelon Daycare receipt generator"
 authors = ["Echelon Daycare Society"]
 edition = "2021"
@@ -98,6 +98,12 @@ walkdir = "2"
 # scraper parses the rendered HTML pages before publish so we fail
 # fast on template bugs rather than pushing broken HTML to Pages.
 scraper = "0.20"
+# ammonia sanitizes raw-HTML fields (about.intro_html, etc.) on
+# draft-save so an AI-authored payload or a hostile edit cannot
+# smuggle <script> or event handlers into a |safe-marked template
+# slot. Uses an allowlist-first policy — only inline formatting
+# tags survive.
+ammonia = "4"
 # ── Website media pipeline (v3.20.0 PR 3 groundwork) ────────────────────
 # img-parts: surgical EXIF/XMP/IPTC/ICC strip on JPEG/PNG/WebP without
 # re-encoding the pixel data (marker-level edits only).

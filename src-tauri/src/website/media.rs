@@ -36,6 +36,7 @@ use rusqlite::{params, OptionalExtension};
 #[cfg(test)]
 use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
+use tokio::sync::Mutex as AsyncMutex;
 
 use crate::db_gate::{DbError, DbGate};
 use crate::website_media::{
@@ -232,6 +233,12 @@ pub async fn ingest_photo(
 
     write_variants_to_working_copy(repo_dir, kind, &variants)?;
 
+    // Serialize DB write + gallery.json update. The heavy image
+    // encoding above ran concurrently across N buffered upload
+    // workers; only the last two mutation steps need to be atomic
+    // against every other in-flight mutation.
+    let _mutation_guard = gallery_mutation_lock().lock().await;
+
     let record = upsert_media_and_variants(
         db,
         &base_hash_short,
@@ -262,6 +269,7 @@ pub async fn reorder_gallery(
     repo_dir: &Path,
     ordered_media_ids: Vec<i64>,
 ) -> MediaResult<()> {
+    let _mutation_guard = gallery_mutation_lock().lock().await;
     // We only touch gallery.json — records themselves don't change.
     // But we look up the record for each id so a "reorder to a
     // record that was soft-deleted" attempt gets dropped.
@@ -304,6 +312,7 @@ pub async fn set_photo_meta(
     alt: Option<String>,
     focal: Option<(f32, f32)>,
 ) -> MediaResult<MediaRecord> {
+    let _mutation_guard = gallery_mutation_lock().lock().await;
     let (fx, fy) = match focal {
         Some((x, y)) => (Some(x as f64), Some(y as f64)),
         None => (None, None),
@@ -311,10 +320,21 @@ pub async fn set_photo_meta(
     let caption_owned = caption.clone();
     let alt_owned = alt.clone();
     db.with_conn(move |conn| {
+        // Contract: None = leave field unchanged; Some("") = clear
+        // the field to NULL; Some(non-empty) = set. The prior code
+        // used SQLite COALESCE which conflates "leave unchanged" and
+        // "clear" — so a user who deleted the caption in the UI got
+        // silently reverted to the previous value on save.
         conn.execute(
             "UPDATE site_media SET \
-                caption = COALESCE(?1, caption), \
-                alt = COALESCE(?2, alt), \
+                caption = CASE \
+                    WHEN ?1 IS NULL THEN caption \
+                    WHEN ?1 = '' THEN NULL \
+                    ELSE ?1 END, \
+                alt = CASE \
+                    WHEN ?2 IS NULL THEN alt \
+                    WHEN ?2 = '' THEN NULL \
+                    ELSE ?2 END, \
                 focal_x = COALESCE(?3, focal_x), \
                 focal_y = COALESCE(?4, focal_y) \
              WHERE id = ?5",
@@ -342,6 +362,7 @@ pub async fn soft_delete(
     repo_dir: &Path,
     media_id: i64,
 ) -> MediaResult<()> {
+    let _mutation_guard = gallery_mutation_lock().lock().await;
     db.with_conn(move |conn| {
         conn.execute(
             "UPDATE site_media SET deleted_at = datetime('now') \
@@ -371,6 +392,7 @@ pub async fn bulk_soft_delete(
     if media_ids.is_empty() {
         return Ok(0);
     }
+    let _mutation_guard = gallery_mutation_lock().lock().await;
     let ids = media_ids.clone();
     let affected = db
         .with_conn(move |conn| {
@@ -406,6 +428,7 @@ pub async fn emergency_remove(
     reason: String,
     requested_by: String,
 ) -> MediaResult<()> {
+    let _mutation_guard = gallery_mutation_lock().lock().await;
     // Verify the row exists so we don't insert a dangling audit
     // record. Use a load-and-check pattern rather than trusting the
     // FK — the FK is defined but sqlite `PRAGMA foreign_keys` is
@@ -499,6 +522,67 @@ pub async fn replace_about_photo(
     let out_dir = ensure_asset_dir(repo_dir, MediaKind::Logo)?;
     let rel = format!("assets/img/photo{slot}.jpg");
     let out_path = out_dir.join(format!("photo{slot}.jpg"));
+    std::fs::write(&out_path, &jpeg_bytes)?;
+    Ok(rel)
+}
+
+/// Replace or add a photo shown in the home page's "Gallery preview"
+/// section. Crops to 1200×800 (fits the site's card aspect), encodes
+/// JPEG q88, and writes to `assets/img/{slug}.jpg` in the working
+/// copy. The `slug` must be lowercase alphanumerics + underscores +
+/// hyphens (typically the item's `id` like `home_g1`).
+///
+/// Returns the repo-relative path (`assets/img/…`) that the caller
+/// stores back into `home.json → gallery_preview.items[].src`.
+pub async fn replace_home_gallery_photo(
+    repo_dir: &Path,
+    slug: &str,
+    source_path: &Path,
+) -> MediaResult<String> {
+    let clean: String = slug
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '-')
+        .collect();
+    if clean.is_empty() || clean.len() > 64 {
+        return Err(MediaOpError::InvalidWorkingCopy(format!(
+            "home-gallery slug must be 1–64 alphanumerics/_/- (got {slug:?})"
+        )));
+    }
+
+    let bytes = load_and_normalize_bytes(source_path)?;
+    let img = image::load_from_memory(&bytes)?;
+    let cropped = crop_to_fill(&img, 1200, 800);
+
+    let mut jpeg_bytes = Vec::new();
+    image::codecs::jpeg::JpegEncoder::new_with_quality(&mut jpeg_bytes, 88)
+        .encode_image(&cropped)?;
+
+    let out_dir = ensure_asset_dir(repo_dir, MediaKind::Logo)?;
+    let filename = format!("{clean}.jpg");
+    let rel = format!("assets/img/{filename}");
+    let out_path = out_dir.join(&filename);
+    std::fs::write(&out_path, &jpeg_bytes)?;
+    Ok(rel)
+}
+
+/// Replace the home page hero banner. Crops to 2400×1000 (12:5,
+/// matches the `.hero` 400px-tall × 100%-wide background-cover box),
+/// JPEG q88, written to `assets/img/hero-bg.jpg`.
+pub async fn replace_home_hero_banner(
+    repo_dir: &Path,
+    source_path: &Path,
+) -> MediaResult<String> {
+    let bytes = load_and_normalize_bytes(source_path)?;
+    let img = image::load_from_memory(&bytes)?;
+    let cropped = crop_to_fill(&img, 2400, 1000);
+
+    let mut jpeg_bytes = Vec::new();
+    image::codecs::jpeg::JpegEncoder::new_with_quality(&mut jpeg_bytes, 88)
+        .encode_image(&cropped)?;
+
+    let out_dir = ensure_asset_dir(repo_dir, MediaKind::Logo)?;
+    let rel = "assets/img/hero-bg.jpg".to_string();
+    let out_path = out_dir.join("hero-bg.jpg");
     std::fs::write(&out_path, &jpeg_bytes)?;
     Ok(rel)
 }
@@ -890,11 +974,18 @@ async fn upsert_media_and_variants(
 
     let media_id: i64 = db
         .with_conn(move |conn| {
+            // Wrap insert + variant DELETE + variant INSERT sequence
+            // in a single savepoint so a mid-sequence failure (disk
+            // full, unique-conflict on a stale variant row, etc.)
+            // rolls the whole thing back — otherwise we'd leave the
+            // media row with zero variants and gallery.json pointing
+            // at nonexistent filenames.
+            let tx = conn.unchecked_transaction()?;
             // Dedup key is (base_hash, kind) not base_hash alone —
             // the same bytes uploaded as a logo AND a gallery photo
             // are legitimately distinct media rows. Previously the
             // second upload would clobber the first's kind/variants.
-            let existing: Option<i64> = conn
+            let existing: Option<i64> = tx
                 .query_row(
                     "SELECT id FROM site_media WHERE base_hash = ?1 AND kind = ?2",
                     params![base_hash_owned, kind_owned],
@@ -902,7 +993,7 @@ async fn upsert_media_and_variants(
                 )
                 .optional()?;
             let id = if let Some(id) = existing {
-                conn.execute(
+                tx.execute(
                     "UPDATE site_media SET \
                         source_filename = ?1, \
                         kind = ?2, \
@@ -926,7 +1017,7 @@ async fn upsert_media_and_variants(
                 )?;
                 id
             } else {
-                conn.execute(
+                tx.execute(
                     "INSERT INTO site_media \
                         (base_hash, source_filename, kind, caption, alt, \
                          width, height, original_bytes_len, exif_stripped, created_at) \
@@ -942,23 +1033,24 @@ async fn upsert_media_and_variants(
                         original_bytes_len,
                     ],
                 )?;
-                conn.last_insert_rowid()
+                tx.last_insert_rowid()
             };
 
             // Replace all variant rows for this media id so a
             // re-ingest with a recipe bump doesn't leave stale rows.
-            conn.execute(
+            tx.execute(
                 "DELETE FROM site_media_variants WHERE media_id = ?1",
                 params![id],
             )?;
             for (w, fmt, fname, blen) in &variant_rows {
-                conn.execute(
+                tx.execute(
                     "INSERT INTO site_media_variants \
                         (media_id, width, format, filename, bytes_len) \
                      VALUES (?1, ?2, ?3, ?4, ?5)",
                     params![id, w, fmt, fname, blen],
                 )?;
             }
+            tx.commit()?;
             Ok(id)
         })
         .await?;
@@ -1078,6 +1170,27 @@ fn gallery_json_lock() -> &'static Mutex<()> {
     LOCK.get_or_init(|| Mutex::new(()))
 }
 
+/// Async mutex that serialises the *entire* DB-write + DB-snapshot +
+/// gallery.json-rewrite sequence for every mutation entrypoint
+/// (set_photo_meta, soft_delete, bulk_soft_delete, reorder_gallery,
+/// emergency_remove). Held across `.await`, so it must be a tokio
+/// mutex — std::sync::Mutex would deadlock the runtime.
+///
+/// The prior design serialised only the JSON write (see
+/// `gallery_json_lock` above), which left an interleaving race:
+///   T1: UPDATE caption=…
+///   T1: load_ordered (snapshot after T1)
+///   T2: UPDATE alt=… (same row)
+///   T2: load_ordered (snapshot after both T1+T2)
+///   T2: rewrite gallery.json ✓ (has both changes)
+///   T1: rewrite gallery.json ✗ (missing T2's alt update)
+/// Holding this async mutex from DB mutate through JSON write makes
+/// each mutation atomic against every other mutation.
+fn gallery_mutation_lock() -> &'static AsyncMutex<()> {
+    static LOCK: OnceLock<AsyncMutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| AsyncMutex::new(()))
+}
+
 /// Read gallery.json as a free-form JSON object so we can preserve
 /// site-owned top-level fields (page_heading, search_placeholder,
 /// caption_pool, total_images, photo_path_pattern, ...) that PR 1
@@ -1129,7 +1242,36 @@ fn write_gallery_root(
     if !s.ends_with('\n') {
         s.push('\n');
     }
-    std::fs::write(&p, s.as_bytes())?;
+    // Atomic write: stage bytes into a sibling tempfile, fsync, then
+    // rename over the target so a mid-write crash or power loss can
+    // never leave a truncated / half-written gallery.json — the file
+    // is the whole gallery ordering + captions + focal points, and a
+    // partial write means silent data loss on the next read.
+    let tmp_name = format!(
+        ".gallery.json.tmp.{}",
+        std::process::id()
+    );
+    let tmp = p
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join(&tmp_name);
+    {
+        use std::io::Write;
+        let mut f = std::fs::File::create(&tmp)?;
+        f.write_all(s.as_bytes())?;
+        f.sync_all()?;
+    }
+    // std::fs::rename is atomic on POSIX and (for same-volume, non-open
+    // targets) on NTFS. If the destination is held open by another
+    // reader on Windows the rename can fail EACCES — retry once.
+    if let Err(e) = std::fs::rename(&tmp, &p) {
+        if cfg!(windows) {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            std::fs::rename(&tmp, &p)?;
+        } else {
+            return Err(e.into());
+        }
+    }
     Ok(())
 }
 

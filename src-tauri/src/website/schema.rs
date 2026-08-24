@@ -52,7 +52,7 @@ pub fn is_editable(name: &str) -> bool {
 /// This is a thin wrapper around `serde_json::from_str::<Value>` +
 /// per-file `SchemaValidator::check` so unknown keys don't error.
 pub fn validate(name: &str, raw: &str) -> Result<Value, String> {
-    let v: Value =
+    let mut v: Value =
         serde_json::from_str(raw).map_err(|e| format!("{name}.json: not valid JSON — {e}"))?;
     check_schema_version(name, &v)?;
     match name {
@@ -67,7 +67,58 @@ pub fn validate(name: &str, raw: &str) -> Result<Value, String> {
         "seo" => require_object(&v, "pages")?,
         _ => return Err(format!("Unknown content file: {name}")),
     }
+    // Sanitize any raw-HTML field so a hostile draft (AI-authored or
+    // hand-edited) can't ship <script>/onerror through a |safe slot.
+    // Only the fields on the `is_safe_html_field` allowlist are
+    // permitted to contain HTML; everything else is auto-escaped by
+    // MiniJinja at render time and needs no sanitization.
+    sanitize_safe_html_fields(name, &mut v);
     Ok(v)
+}
+
+fn sanitize_safe_html_fields(file: &str, v: &mut Value) {
+    if file != "about" {
+        return;
+    }
+    // Two known fields on about.json — clean them in place.
+    if let Some(s) = v.get("intro_html").and_then(|x| x.as_str()) {
+        let cleaned = clean_html(s);
+        v["intro_html"] = Value::String(cleaned);
+    }
+    if let Some(obj) = v.get_mut("neighborhoods").and_then(|x| x.as_object_mut()) {
+        if let Some(s) = obj.get("paragraph_html").and_then(|x| x.as_str()) {
+            let cleaned = clean_html(s);
+            obj.insert("paragraph_html".to_string(), Value::String(cleaned));
+        }
+    }
+    // Defensive: the about.html.j2 template applies |safe to
+    // `sections[].paragraph` too, so sanitize that path even though
+    // it's NOT on the schema-level allowlist. That way, a hostile
+    // JSON author can still ship formatting HTML but not scripts.
+    if let Some(arr) = v.get_mut("sections").and_then(|x| x.as_array_mut()) {
+        for section in arr.iter_mut() {
+            if let Some(obj) = section.as_object_mut() {
+                if let Some(Value::String(s)) = obj.get("paragraph").cloned().as_ref() {
+                    let cleaned = clean_html(s);
+                    obj.insert("paragraph".to_string(), Value::String(cleaned));
+                }
+            }
+        }
+    }
+}
+
+fn clean_html(input: &str) -> String {
+    // Allowlist: inline formatting only. No <script>, <iframe>,
+    // <object>, <embed>, <style>, form elements, or event handlers
+    // (ammonia strips `on*` attributes by default).
+    ammonia::Builder::default()
+        .tags(std::collections::HashSet::from([
+            "p", "br", "strong", "em", "b", "i", "u", "ul", "ol", "li", "a",
+            "h2", "h3", "h4", "h5", "h6", "blockquote", "code", "span",
+        ]))
+        .url_schemes(std::collections::HashSet::from(["http", "https", "mailto", "tel"]))
+        .clean(input)
+        .to_string()
 }
 
 fn check_schema_version(name: &str, v: &Value) -> Result<(), String> {

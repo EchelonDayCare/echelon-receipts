@@ -33,6 +33,8 @@ export default function LockButton({ size = 40 }: { size?: number }) {
     }
   };
 
+  const padding = Math.max(8, Math.round(size * 0.55));
+
   return (
     <button
       type="button"
@@ -40,35 +42,31 @@ export default function LockButton({ size = 40 }: { size?: number }) {
       aria-label="Lock the app"
       title={isSetUp === false ? "PIN not configured" : "Lock app"}
       style={{
-        width: size,
-        height: size,
-        borderRadius: size / 2,
-        border: "1px solid #e3e6ee",
-        background: "#fff",
+        background: "var(--panel, #fff)",
+        border: "1px solid var(--border)",
+        borderRadius: 12,
+        padding: `${padding}px ${padding + 2}px`,
         color: isSetUp === false ? "#9aa3b2" : "#1a1f36",
         cursor: "pointer",
         display: "inline-flex",
         alignItems: "center",
         justifyContent: "center",
-        boxShadow: "0 1px 3px rgba(15,23,42,0.08)",
+        lineHeight: 1,
+        boxShadow: "0 6px 20px -8px rgba(15, 23, 42, 0.35)",
+        transition: "transform 160ms ease-out, box-shadow 160ms ease-out",
       }}
-      onMouseEnter={(e) => { (e.currentTarget as HTMLButtonElement).style.background = "#f6f7fb"; }}
-      onMouseLeave={(e) => { (e.currentTarget as HTMLButtonElement).style.background = "#fff"; }}
+      onMouseEnter={(e) => {
+        (e.currentTarget as HTMLButtonElement).style.transform = "translateY(-2px)";
+        (e.currentTarget as HTMLButtonElement).style.boxShadow =
+          "0 10px 24px -8px rgba(15, 23, 42, 0.45)";
+      }}
+      onMouseLeave={(e) => {
+        (e.currentTarget as HTMLButtonElement).style.transform = "translateY(0)";
+        (e.currentTarget as HTMLButtonElement).style.boxShadow =
+          "0 6px 20px -8px rgba(15, 23, 42, 0.35)";
+      }}
     >
-      <svg
-        width={Math.round(size * 0.5)}
-        height={Math.round(size * 0.5)}
-        viewBox="0 0 24 24"
-        fill="none"
-        stroke="currentColor"
-        strokeWidth={1.75}
-        strokeLinecap="round"
-        strokeLinejoin="round"
-        aria-hidden
-      >
-        <rect x="4" y="11" width="16" height="10" rx="2" />
-        <path d="M8 11V8a4 4 0 0 1 8 0v3" />
-      </svg>
+      <span aria-hidden style={{ fontSize: size, lineHeight: 1, opacity: isSetUp === false ? 0.45 : 1 }}>🔒</span>
     </button>
   );
 }

@@ -15,15 +15,17 @@ use serde_json::json;
 use std::path::PathBuf;
 use std::time::Duration;
 
-use tauri::{AppHandle, Manager};
+use tauri::{AppHandle, Manager, State};
 
+use crate::db_gate::DbGate;
 use crate::website::git_ops::WorkingCopy;
+use crate::website::revisions;
 
 const AZURE_OPENAI_ENDPOINT: &str = "https://ai-nse.openai.azure.com";
 const CHAT_DEPLOY: &str = "gpt-5.4";
 const CHAT_API_VER: &str = "2025-04-01-preview";
 
-const SUPPORTED_PAGES: &[&str] = &["about", "careers", "tour", "contact"];
+const SUPPORTED_PAGES: &[&str] = &["about", "careers", "tour", "contact", "services", "seo", "home", "site", "gallery-videos"];
 
 #[derive(Debug, Deserialize)]
 pub struct AiEditRequest {
@@ -52,6 +54,7 @@ pub struct AiEditResponse {
 #[tauri::command]
 pub async fn website_ai_edit_content(
     app: AppHandle,
+    db: State<'_, DbGate>,
     request: AiEditRequest,
 ) -> Result<AiEditResponse, String> {
     crate::website::commands::require_enabled()?;
@@ -70,14 +73,24 @@ pub async fn website_ai_edit_content(
         return Err("Instruction too long (>4000 chars). Split into smaller edits.".into());
     }
 
-    // Locate working copy + read current content JSON.
+    // Prefer the active draft over the working-copy file. The
+    // working copy can lag behind the DB after a save (git ops run
+    // asynchronously), so reading it means AI edits sometimes ran
+    // against stale JSON and clobbered fresh unpublished edits when
+    // the user accepted the diff. The DB draft is the durable
+    // source of truth.
     let wc = working_copy_from_app(&app)?;
     let content_path: PathBuf = wc.repo_dir.join("content").join(format!("{page}.json"));
-    if !content_path.exists() {
-        return Err(format!("{}: not found in working copy", content_path.display()));
-    }
-    let original_json = std::fs::read_to_string(&content_path)
-        .map_err(|e| format!("read {}: {e}", content_path.display()))?;
+    let original_json = match revisions::load_draft(db.inner(), &page).await {
+        Ok(Some(s)) => s,
+        _ => {
+            if !content_path.exists() {
+                return Err(format!("{}: not found in working copy", content_path.display()));
+            }
+            std::fs::read_to_string(&content_path)
+                .map_err(|e| format!("read {}: {e}", content_path.display()))?
+        }
+    };
     // Sanity: current content must parse as JSON so we know the "before" state.
     let original_value: serde_json::Value = serde_json::from_str(&original_json)
         .map_err(|e| format!("current {page}.json is not valid JSON: {e}"))?;
@@ -86,17 +99,20 @@ pub async fn website_ai_edit_content(
     // phone, email). Feed that as extra context so the AI can add / remove
     // social platforms, adjust the aria label, etc.
     let (site_original_json, site_original_value): (Option<String>, Option<serde_json::Value>) = if page == "contact" {
-        let site_path = wc.repo_dir.join("content").join("site.json");
-        if site_path.exists() {
-            match std::fs::read_to_string(&site_path) {
-                Ok(s) => match serde_json::from_str::<serde_json::Value>(&s) {
-                    Ok(v) => (Some(s), Some(v)),
-                    Err(_) => (None, None),
-                },
-                Err(_) => (None, None),
+        let from_draft = revisions::load_draft(db.inner(), "site").await.ok().flatten();
+        let src = match from_draft {
+            Some(s) => Some(s),
+            None => {
+                let site_path = wc.repo_dir.join("content").join("site.json");
+                if site_path.exists() { std::fs::read_to_string(&site_path).ok() } else { None }
             }
-        } else {
-            (None, None)
+        };
+        match src {
+            Some(s) => match serde_json::from_str::<serde_json::Value>(&s) {
+                Ok(v) => (Some(s), Some(v)),
+                Err(_) => (None, None),
+            },
+            None => (None, None),
         }
     } else {
         (None, None)
@@ -108,11 +124,48 @@ pub async fn website_ai_edit_content(
         call_content_editor(&key, &page, &original_value, site_original_value.as_ref(), prompt).await?;
 
     // Validate the proposed JSON — refuse anything that doesn't parse.
-    let _: serde_json::Value = serde_json::from_str(&proposed_json)
+    let proposed_value: serde_json::Value = serde_json::from_str(&proposed_json)
         .map_err(|e| format!("model returned invalid JSON: {e}"))?;
+    // Enforce schema-level allowlist: the proposed JSON's top-level
+    // keys must be a subset of the original's. Model can add nested
+    // fields (e.g. new job listings, new social platforms), but not
+    // introduce brand-new top-level keys — that path was how earlier
+    // sessions produced JSON that failed schema::validate at draft
+    // save time and confused the user with a late-stage error.
+    if let (Some(orig_obj), Some(prop_obj)) = (original_value.as_object(), proposed_value.as_object()) {
+        let orig_keys: std::collections::HashSet<&String> = orig_obj.keys().collect();
+        let extra: Vec<&String> = prop_obj
+            .keys()
+            .filter(|k| !orig_keys.contains(k))
+            .collect();
+        if !extra.is_empty() {
+            let names: Vec<String> = extra.iter().map(|k| (*k).clone()).collect();
+            return Err(format!(
+                "model added unknown top-level key(s): {} — retry with a narrower instruction",
+                names.join(", ")
+            ));
+        }
+    }
     if let Some(ref s) = site_proposed_json {
-        let _: serde_json::Value = serde_json::from_str(s)
+        let site_prop_val: serde_json::Value = serde_json::from_str(s)
             .map_err(|e| format!("model returned invalid site JSON: {e}"))?;
+        if let (Some(orig_obj), Some(prop_obj)) = (
+            site_original_value.as_ref().and_then(|v| v.as_object()),
+            site_prop_val.as_object(),
+        ) {
+            let orig_keys: std::collections::HashSet<&String> = orig_obj.keys().collect();
+            let extra: Vec<&String> = prop_obj
+                .keys()
+                .filter(|k| !orig_keys.contains(k))
+                .collect();
+            if !extra.is_empty() {
+                let names: Vec<String> = extra.iter().map(|k| (*k).clone()).collect();
+                return Err(format!(
+                    "model added unknown top-level key(s) to site.json: {} — retry",
+                    names.join(", ")
+                ));
+            }
+        }
     }
 
     Ok(AiEditResponse {
@@ -183,6 +236,104 @@ async fn call_content_editor(
          unrelated bullet list. If `custom_sections` is missing, create it. \
          Keep existing custom sections in the order they appear unless the \
          user asks to reorder or remove one.\n"
+    } else if page == "services" {
+        "\n\
+         SERVICES / PROGRAMS PAGE — EXTRA CONTEXT\n\
+         Schema:\n\
+           daycare_program { heading, paragraphs: [string], brochure_path, brochure_link_label }\n\
+           waiting_list { heading, form_url, form_placeholder_text, form_height }\n\
+           service_schema { name, service_type, audience_min_age (number), \
+                            audience_max_age (number), description }\n\
+         Rules:\n\
+         * `daycare_program.paragraphs` is the ONLY place for new descriptive \
+           paragraphs about the program. Append new paragraphs there; do not \
+           create new top-level keys.\n\
+         * `waiting_list.form_url` must remain a Google Forms embed URL \
+           (`docs.google.com/forms/.../viewform?embedded=true`). If the user \
+           gives a share URL, transform it to the embed form. `form_height` \
+           is a numeric string in pixels (e.g. \"1400\").\n\
+         * `service_schema` is SEO metadata (JSON-LD) — keep it terse, one \
+           sentence for `description`. Ages are numbers, not strings.\n\
+         * `brochure_link_label` is the visible text of the download link \
+           (emoji OK). `brochure_path` is the repo-relative path — only change \
+           it if the user says they've replaced the PDF at a different path.\n"
+    } else if page == "seo" {
+        "\n\
+         SEO PAGE — EXTRA CONTEXT\n\
+         Schema: { schema_version, pages: { <slug>: { path, title, description, \
+         og_title, og_description, canonical_url, breadcrumb: [{name,item}], \
+         robots? } }, sitemap_urls: [{loc, changefreq, priority}] }\n\
+         Rules:\n\
+         * `path`, `canonical_url`, `breadcrumb`, `robots` and `sitemap_urls` \
+           are infrastructural — never change them unless the user explicitly \
+           says a URL has moved.\n\
+         * Keep every existing page slug in `pages`. Never drop a page.\n\
+         * `title` is best under 60 characters (Google truncates longer). \
+           `description` is best 70–160 characters. If the user asks to \
+           shorten or lengthen, respect these targets.\n\
+         * `og_title` and `og_description` usually mirror `title` and \
+           `description`. When the user rewrites one, mirror the change to \
+           the other unless they say otherwise.\n\
+         * Match the daycare's voice: warm, factual, mention Vancouver / \
+           Vancouver BC where natural for local SEO.\n"
+    } else if page == "home" {
+        "\n\
+         HOME PAGE — EXTRA CONTEXT\n\
+         Schema: { hero { heading, subtext, cta_label, cta_href }, \
+         gallery_preview { heading, items: [{id, src, alt}] }, \
+         stats: [string], faq { heading, items: [{id, question, answer}] } }\n\
+         Rules:\n\
+         * `hero.heading` is the biggest headline on the site — keep it short, \
+           punchy, and audience-focused (parents of ages 30 months to 5 years).\n\
+         * `hero.cta_href` links into the site (`pages/services.html#waiting-list` etc). \
+           Never change it unless the user says the link target has moved.\n\
+         * `gallery_preview.items` — `id` and `src` are photo file references — \
+           NEVER change them. You may improve `alt` text (short, descriptive, \
+           accessible). Never add or remove items unless the user explicitly \
+           asks and specifies a new src path.\n\
+         * `stats` is an array of exactly 3 short claims (e.g. \"1000+ Happy Families\"). \
+           Keep count at 3 unless the user says otherwise. Each entry should be \
+           terse — 3–6 words.\n\
+         * `faq.items` — each entry needs a stable `id` (snake_case, e.g. \
+           `faq_ages`). When adding a new FAQ, mint a new `id` that describes \
+           the topic. Never drop existing FAQs the user didn't ask to remove.\n\
+         * Keep answers 1–3 sentences, factual, warm.\n"
+    } else if page == "site" {
+        "\n\
+         SITE (GLOBAL) — EXTRA CONTEXT\n\
+         Schema: { name, tagline, brand { brand_color, brand_color_strong, \
+         theme_color }, hire_link { label }, sticky_call { label }, nav: [\
+         {label, path, key}], area_served: [{type, name}], footer { \
+         copyright_holder, rights, contact_link_label }, plus MANY read-only \
+         fields (address, phone, email, socials, assets, urls, a11y, sitemap, \
+         cache_bust).\n\
+         Rules:\n\
+         * `address`, `phone`, `email`, `socials`, `same_as`, `geo` — DO NOT \
+           edit here. These are owned by the Contact editor and duplicated \
+           across the site. If the user asks to change them, tell them to use \
+           the Contact page editor.\n\
+         * `assets`, `urls`, `cache_bust`, `sitemap`, `a11y`, `robots_default`, \
+           `schema_version` — read-only. NEVER touch.\n\
+         * `brand.brand_color` and `brand.theme_color` should stay equal unless \
+           the user explicitly asks for a different theme color.\n\
+         * `brand.brand_color_strong` should be a visibly-darker shade of \
+           `brand_color` — keep them harmonious.\n\
+         * `nav[].path` and `nav[].key` are structural — only edit `label`. \
+           Never add or remove nav items unless the user explicitly asks.\n\
+         * `area_served[].type` is one of \"City\" or \"Neighborhood\". Names \
+           should read as \"<Name>, Vancouver\" for neighborhoods.\n\
+         * Keep tagline short (2–5 words) and copyright_holder = legal daycare \
+           name.\n"
+    } else if page == "gallery-videos" {
+        "\n\
+         GALLERY VIDEOS — EXTRA CONTEXT\n\
+         Schema: { heading, intro, videos: [{id, filename, poster, ...}] }\n\
+         Rules:\n\
+         * You may edit `heading` (short — 1–3 words) and `intro` (1–2 sentence \
+           caption above the playlist).\n\
+         * The `videos` array is managed by the Gallery Videos media screen. \
+           NEVER add, remove, or reorder video entries here. NEVER touch \
+           `filename`, `poster`, or `id`.\n"
     } else {
         ""
     };

@@ -70,7 +70,9 @@ async fn load_current(gate: &DbGate, repo_dir: &Path) -> Result<Value, String> {
 }
 
 fn ensure_shape(mut v: Value) -> Value {
-    let obj = v.as_object_mut().expect("root must be object");
+    let Some(obj) = v.as_object_mut() else {
+        return serde_json::json!({ "schema_version": 1, "heading": "Videos", "videos": [] });
+    };
     if !obj.get("videos").map(|x| x.is_array()).unwrap_or(false) {
         obj.insert("videos".into(), Value::Array(vec![]));
     }
@@ -242,16 +244,11 @@ pub async fn website_gallery_videos_delete(
     if current.len() == before {
         return Err(format!("no video with id={}", request.id));
     }
-    for r in &removed {
-        let still_used = current
-            .iter()
-            .any(|c| c.src == r.src || c.poster == r.poster);
-        if !still_used {
-            crate::website::tour::safe_delete_under_repo(&wc.repo_dir, &r.src, "assets/video/");
-            crate::website::tour::safe_delete_under_repo(&wc.repo_dir, &r.poster, "assets/video/");
-        }
-    }
 
+    // Save the draft FIRST — that's the durable record of the delete.
+    // Only after the DB commits do we delete files from disk. Otherwise
+    // a save_draft failure leaves orphan JSON entries pointing to files
+    // we already unlinked, and the next preview / publish serves 404s.
     root.as_object_mut()
         .unwrap()
         .insert("videos".into(), serde_json::to_value(&current).unwrap());
@@ -261,6 +258,16 @@ pub async fn website_gallery_videos_delete(
     let rev = revisions::save_draft(db.inner(), CONTENT_FILE, &pretty, None, None)
         .await
         .map_err(|e| e.to_string())?;
+
+    for r in &removed {
+        let still_used = current
+            .iter()
+            .any(|c| c.src == r.src || c.poster == r.poster);
+        if !still_used {
+            crate::website::tour::safe_delete_under_repo(&wc.repo_dir, &r.src, "assets/video/");
+            crate::website::tour::safe_delete_under_repo(&wc.repo_dir, &r.poster, "assets/video/");
+        }
+    }
     Ok(rev)
 }
 

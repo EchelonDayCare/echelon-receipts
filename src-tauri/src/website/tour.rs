@@ -79,7 +79,13 @@ async fn load_current_tour(gate: &DbGate, repo_dir: &Path) -> Result<Value, Stri
 /// Given a tour.json Value, always return a v2-shaped object with `videos: []`.
 /// v1 (single video_src/video_poster) migrates on read.
 fn ensure_v2(mut v: Value) -> Value {
-    let obj = v.as_object_mut().expect("tour.json root must be object");
+    // Defensive: if tour.json ever ships a non-object root (malformed
+    // hand-edit, mistaken array push), yield an empty v2 object rather
+    // than panicking the whole command chain — a bad JSON should
+    // surface as an editor validation error, not a Tauri crash.
+    let Some(obj) = v.as_object_mut() else {
+        return serde_json::json!({ "schema_version": 2, "videos": [] });
+    };
     let has_videos = obj
         .get("videos")
         .map(|x| x.is_array())
@@ -483,19 +489,12 @@ pub async fn website_tour_delete_video(
         return Err(format!("no video with id={}", request.id));
     }
 
-    // Best-effort delete files from working copy (only if not still
-    // referenced by another entry). Guard against path traversal /
-    // absolute paths in the JSON — src/poster are meant to be
+    // Save the draft FIRST so a save failure doesn't leave orphan JSON
+    // pointers to files we already unlinked. Only after the DB commits
+    // do we touch the working-copy files. Guard against path traversal
+    // / absolute paths in the JSON — src/poster are meant to be
     // repo-relative under assets/video/, but a hand-edited tour.json
     // could point anywhere.
-    for r in &removed {
-        let still_used = current.iter().any(|c| c.src == r.src || c.poster == r.poster);
-        if !still_used {
-            safe_delete_under_repo(&wc.repo_dir, &r.src, "assets/video/");
-            safe_delete_under_repo(&wc.repo_dir, &r.poster, "assets/video/");
-        }
-    }
-
     tour_val
         .as_object_mut()
         .unwrap()
@@ -506,6 +505,14 @@ pub async fn website_tour_delete_video(
     let rev = revisions::save_draft(db.inner(), "tour", &pretty, None, None)
         .await
         .map_err(|e| e.to_string())?;
+
+    for r in &removed {
+        let still_used = current.iter().any(|c| c.src == r.src || c.poster == r.poster);
+        if !still_used {
+            safe_delete_under_repo(&wc.repo_dir, &r.src, "assets/video/");
+            safe_delete_under_repo(&wc.repo_dir, &r.poster, "assets/video/");
+        }
+    }
     Ok(rev)
 }
 

@@ -250,15 +250,26 @@ pub async fn website_save_draft(
     }
     // Reject invalid JSON before it hits the DB.
     schema::validate(&req.file, &req.content_json)?;
-    // Fingerprint the current working-copy version of the file so a
-    // later editor session on this or another machine can detect
-    // that the working copy has moved since this draft was made.
-    // If the file isn't present yet (fresh clone, never published)
-    // we fall back to hashing the empty string.
-    let base_hash = if let Ok(wc) = ensure_working_copy(&app) {
-        Some(hash_working_copy_content(&wc.repo_dir, &req.file))
-    } else {
-        None
+    // Preserve the existing draft's base_content_hash across saves so
+    // the staleness check still catches upstream drift. Prior code
+    // re-hashed the working copy on every save, so if `git fetch` had
+    // moved the WC forward between two edits in the same session, the
+    // second save silently rebased the "before" fingerprint onto the
+    // new upstream — hiding the conflict that check_draft_staleness
+    // is supposed to detect. We only compute a fresh hash for the
+    // FIRST draft in a chain (no existing active draft).
+    let existing_hash = revisions::current_draft_base_hash(db.inner(), &req.file)
+        .await
+        .map_err(|e| e.to_string())?;
+    let base_hash = match existing_hash {
+        Some(h) => Some(h),
+        None => {
+            if let Ok(wc) = ensure_working_copy(&app) {
+                Some(hash_working_copy_content(&wc.repo_dir, &req.file))
+            } else {
+                None
+            }
+        }
     };
     let rev_id = revisions::save_draft(
         db.inner(),
@@ -317,6 +328,46 @@ fn hash_working_copy_content(repo_dir: &std::path::Path, file: &str) -> String {
     let digest = Sha256::digest(&bytes);
     let hex: String = digest.iter().map(|b| format!("{b:02x}")).collect();
     hex[..16].to_string()
+}
+
+/// True iff the working copy has un-pushed media changes — i.e. the
+/// git tree under `assets/img/` or `content/gallery.json` differs
+/// from HEAD. The Overview and Publish screens use this to badge
+/// media-dirty state alongside the pointer-tracked drafts, since
+/// media edits (photo upload/reorder/delete, logo/OG replace) live
+/// in the working copy only and don't have a `site_pointers` row.
+#[tauri::command]
+pub async fn website_has_pending_media(app: AppHandle) -> Result<bool, String> {
+    require_enabled()?;
+    let wc = match working_copy_from_app(&app) {
+        Ok(wc) => wc,
+        Err(_) => return Ok(false),
+    };
+    if !wc.repo_dir.join(".git").exists() {
+        return Ok(false);
+    }
+    let repo = match git2::Repository::open(&wc.repo_dir) {
+        Ok(r) => r,
+        Err(_) => return Ok(false),
+    };
+    let mut opts = git2::StatusOptions::new();
+    opts.include_untracked(true).recurse_untracked_dirs(true);
+    let statuses = repo
+        .statuses(Some(&mut opts))
+        .map_err(|e| format!("git status: {e}"))?;
+    for entry in statuses.iter() {
+        let path = match entry.path() {
+            Some(p) => p,
+            None => continue,
+        };
+        if path.starts_with("assets/img/")
+            || path.starts_with("assets/video/")
+            || path == "content/gallery.json"
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 // ─────────────────────────────────────────────────────────────────────
@@ -547,10 +598,14 @@ pub async fn website_publish(
     let outcome = publish::run_pipeline(inputs).await;
 
     if outcome.error.is_none() && !req.dry_run {
-        // Mark pushed + verified so the pointer table reflects reality.
-        let files: Vec<String> = drafts.iter().map(|(f, _)| f.clone()).collect();
-        let _ = revisions::mark_pushed(db.inner(), &files).await;
-        let _ = revisions::mark_verified_live(db.inner(), &files).await;
+        // Only mark verified live if the pipeline actually reached
+        // VerifiedLive. mark_pushed already happened inline in the
+        // pipeline immediately after push (see publish.rs) so
+        // last_pushed_rev is correct even on a push-success/verify-fail.
+        if outcome.final_state == "verified_live" {
+            let files: Vec<String> = drafts.iter().map(|(f, _)| f.clone()).collect();
+            let _ = revisions::mark_verified_live(db.inner(), &files).await;
+        }
     }
     Ok(outcome)
 }
@@ -834,6 +889,31 @@ pub async fn website_replace_about_photo(
     require_enabled()?;
     let wc = ensure_working_copy(&app)?;
     media::replace_about_photo(&wc.repo_dir, slot, Path::new(&source_path))
+        .await
+        .map_err(to_err)
+}
+
+#[tauri::command]
+pub async fn website_replace_home_gallery_photo(
+    app: AppHandle,
+    slug: String,
+    source_path: String,
+) -> Result<String, String> {
+    require_enabled()?;
+    let wc = ensure_working_copy(&app)?;
+    media::replace_home_gallery_photo(&wc.repo_dir, &slug, Path::new(&source_path))
+        .await
+        .map_err(to_err)
+}
+
+#[tauri::command]
+pub async fn website_replace_home_hero_banner(
+    app: AppHandle,
+    source_path: String,
+) -> Result<String, String> {
+    require_enabled()?;
+    let wc = ensure_working_copy(&app)?;
+    media::replace_home_hero_banner(&wc.repo_dir, Path::new(&source_path))
         .await
         .map_err(to_err)
 }

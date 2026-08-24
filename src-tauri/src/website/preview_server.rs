@@ -204,8 +204,18 @@ fn serve_request(
     if requested.contains("..") || requested.contains(':') {
         return not_found();
     }
-    // Try primary root first, then fallback root.
-    let candidates: [Option<&std::path::Path>; 2] = [Some(root), fallback];
+    // Try primary root first, then fallback root. The fallback is
+    // the working-copy repo directory — restrict it to `assets/` and
+    // `content/data/` so a preview URL like `/scripts/render.py` or
+    // `/.env` can't leak arbitrary repo files. The intended use of
+    // the fallback is to serve freshly-uploaded photos and jobs.json
+    // before the next render.
+    let allow_via_fallback = requested.starts_with("assets/")
+        || requested.starts_with("content/data/");
+    let candidates: [Option<&std::path::Path>; 2] = [
+        Some(root),
+        if allow_via_fallback { fallback } else { None },
+    ];
     for base in candidates.into_iter().flatten() {
         if let Some(bytes) = try_load(base, &requested) {
             let mime = mime_guess::from_path(&requested)

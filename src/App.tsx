@@ -355,22 +355,27 @@ function Shell({ logo, name, staffEnabled }: { logo: string; name: string; staff
         name={name}
         items={[
           { to: "/website", label: "Overview" },
-          { to: "", label: "Edit pages", header: true },
+
+          { to: "", label: "Configure", header: true },
           { to: "/website/site", label: "Site (global)" },
+          { to: "/website/seo", label: "SEO" },
+          { to: "/website/assets", label: "Logo & icons" },
+
+          { to: "", label: "Edit pages", header: true },
           { to: "/website/home", label: "Home" },
           { to: "/website/about", label: "About" },
           { to: "/website/services", label: "Programs & Waiting List" },
+          { to: "/website/gallery", label: "Gallery" },
           { to: "/website/contact", label: "Contact" },
           { to: "/website/tour", label: "Virtual Tour" },
           { to: "/website/careers", label: "Careers" },
-          { to: "/website/seo", label: "SEO" },
-          { to: "", label: "Media", header: true },
-          { to: "/website/gallery", label: "Gallery" },
-          { to: "/website/assets", label: "Logo / OG image" },
-          { to: "", label: "Publish", header: true },
+
+          { to: "", label: "Review & ship", header: true },
           { to: "/website/preview", label: "Preview" },
           { to: "/website/history", label: "Version history" },
           { to: "/website/publish", label: "Publish…" },
+
+          { to: "", label: "Setup", header: true },
           { to: "/website/settings", label: "GitHub connection" },
         ]}
       />

@@ -216,17 +216,23 @@ pub async fn restore_revision(
 ) -> Result<i64, DbError> {
     let author = author.map(|s| s.to_string());
     gate.with_conn(move |conn| {
-        let (file, content): (String, String) = conn.query_row(
-            "SELECT file, content_json FROM site_revisions WHERE id = ?1",
+        let (file, content, base_hash): (String, String, Option<String>) = conn.query_row(
+            "SELECT file, content_json, base_content_hash FROM site_revisions WHERE id = ?1",
             params![rev_id],
-            |r| Ok((r.get(0)?, r.get(1)?)),
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
         )?;
+        // Copy the source revision's base_content_hash forward so a
+        // restore doesn't wipe out staleness detection — otherwise the
+        // new draft would carry NULL and never trip the "working copy
+        // moved" check on publish.
         conn.execute(
-            "INSERT INTO site_revisions (file, content_json, author) VALUES (?1, ?2, ?3)",
+            "INSERT INTO site_revisions (file, content_json, author, base_content_hash) \
+             VALUES (?1, ?2, ?3, ?4)",
             params![
                 file,
                 content,
-                author.unwrap_or_else(|| format!("restored from rev {rev_id}"))
+                author.unwrap_or_else(|| format!("restored from rev {rev_id}")),
+                base_hash,
             ],
         )?;
         let new_id = conn.last_insert_rowid();

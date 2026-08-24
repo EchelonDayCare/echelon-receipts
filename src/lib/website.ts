@@ -346,6 +346,14 @@ export function websiteBulkDeleteMedia(mediaIds: number[]): Promise<number> {
   return invoke<number>("website_bulk_delete_media", { mediaIds });
 }
 
+/// True iff the working-copy git tree has un-pushed changes under
+/// `assets/img/`, `assets/video/`, or `content/gallery.json` — i.e.
+/// there are pending media edits the Overview/Publish screens should
+/// badge alongside JSON-draft rows.
+export function websiteHasPendingMedia(): Promise<boolean> {
+  return invoke<boolean>("website_has_pending_media");
+}
+
 export function websiteEmergencyRemove(
   mediaId: number,
   reason: string,
@@ -374,6 +382,19 @@ export function websiteReplaceAboutPhoto(
   sourcePath: string,
 ): Promise<string> {
   return invoke<string>("website_replace_about_photo", { slot, sourcePath });
+}
+
+export function websiteReplaceHomeGalleryPhoto(
+  slug: string,
+  sourcePath: string,
+): Promise<string> {
+  return invoke<string>("website_replace_home_gallery_photo", { slug, sourcePath });
+}
+
+export function websiteReplaceHomeHeroBanner(
+  sourcePath: string,
+): Promise<string> {
+  return invoke<string>("website_replace_home_hero_banner", { sourcePath });
 }
 
 /// Small helper: try to pretty-print a JSON blob for the editor

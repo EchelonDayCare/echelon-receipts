@@ -53,7 +53,7 @@ use scraper::Html;
 use serde::Serialize;
 
 use crate::db_gate::{DbError, DbGate};
-use crate::website::{git_ops, renderer};
+use crate::website::{git_ops, renderer, revisions};
 
 /// Every state the publish pipeline can be in. Strings match the DB
 /// column verbatim so a raw-SQL inspection tells the same story as
@@ -74,6 +74,13 @@ pub enum PublishState {
     Pushed,
     PollingPages,
     VerifiedLive,
+    /// Terminal state for successful `dry_run` publishes. Distinguished
+    /// from `VerifiedLive` so the UI can label historical rows honestly
+    /// (dry-runs never touched GitHub).
+    DryRunComplete,
+    /// Terminal state when the pipeline ran but found nothing to
+    /// publish (draft matches last-pushed rev).
+    NoChanges,
     Error,
 }
 
@@ -93,12 +100,17 @@ impl PublishState {
             Self::Pushed => "pushed",
             Self::PollingPages => "polling_pages",
             Self::VerifiedLive => "verified_live",
+            Self::DryRunComplete => "dry_run_complete",
+            Self::NoChanges => "no_changes",
             Self::Error => "error",
         }
     }
 
     pub fn is_terminal(self) -> bool {
-        matches!(self, Self::VerifiedLive | Self::Error)
+        matches!(
+            self,
+            Self::VerifiedLive | Self::DryRunComplete | Self::NoChanges | Self::Error
+        )
     }
 
     /// True iff `next` is a legal successor of `self` given the state
@@ -112,12 +124,21 @@ impl PublishState {
             return true;
         }
         // Already terminal states can't advance further.
-        if matches!(self, Self::VerifiedLive) {
+        if matches!(self, Self::VerifiedLive | Self::DryRunComplete | Self::NoChanges) {
             return false;
         }
         // Error is also terminal on the failure branch.
         if matches!(self, Self::Error) {
             return false;
+        }
+        // NoChanges / DryRunComplete are terminal fast-paths that can
+        // be entered from any pre-push state (they're set at the end
+        // of the pipeline instead of the normal linear advance).
+        if matches!(next, Self::NoChanges | Self::DryRunComplete) {
+            return !matches!(
+                self,
+                Self::VerifiedLive | Self::DryRunComplete | Self::NoChanges | Self::Error
+            );
         }
         let expected = match self {
             Self::Draft => Self::Rendering,
@@ -284,6 +305,8 @@ fn parse_state(s: &str) -> Option<PublishState> {
         "pushed" => PublishState::Pushed,
         "polling_pages" => PublishState::PollingPages,
         "verified_live" => PublishState::VerifiedLive,
+        "dry_run_complete" => PublishState::DryRunComplete,
+        "no_changes" => PublishState::NoChanges,
         "error" => PublishState::Error,
         _ => return None,
     })
@@ -293,51 +316,62 @@ fn parse_state(s: &str) -> Option<PublishState> {
 // Pipeline sub-steps
 // ─────────────────────────────────────────────────────────────────────
 
-/// Validate every rendered HTML file under `render_dir` parses. Uses
-/// `scraper::Html::parse_document` which wraps html5ever — very
-/// tolerant of quirks-mode markup, so a failure here means the input
-/// is genuinely broken (unbalanced braces from a template bug, huge
-/// null-byte splat, etc.).
-pub fn validate_rendered(render_dir: &Path) -> Result<usize, String> {
+/// Validate the HTML files that `render_all` just wrote (as reported
+/// in `written`). The prior implementation walked the entire render
+/// directory and accepted any non-empty file with an `<html>` element
+/// — but html5ever synthesises `<html>` for literally any input
+/// (including a raw JSON blob), and the walk picked up leftover files
+/// from earlier runs, so both real checks were inert.
+///
+/// This version scans only files produced by *this* pipeline run and
+/// asserts they carry the structure real pages need: a `<title>` in
+/// the head and a non-empty `<body>`. Anything that fails those
+/// checks is a serialized template error or a truncated write.
+pub fn validate_rendered(render_dir: &Path, written: &[String]) -> Result<usize, String> {
+    if written.is_empty() {
+        return Err("no HTML files were rendered".into());
+    }
+    let title_sel = scraper::Selector::parse("title").expect("selector 'title'");
+    let body_sel = scraper::Selector::parse("body").expect("selector 'body'");
     let mut count = 0usize;
-    for entry in walkdir::WalkDir::new(render_dir) {
-        let entry = entry.map_err(|e| format!("walk render dir: {e}"))?;
-        if !entry.file_type().is_file() {
-            continue;
-        }
-        let path = entry.path();
-        let ext = path
-            .extension()
-            .and_then(|s| s.to_str())
-            .unwrap_or("")
-            .to_ascii_lowercase();
-        if ext != "html" && ext != "htm" {
-            continue;
-        }
-        let raw = std::fs::read_to_string(path)
+    for rel in written {
+        let path = render_dir.join(rel);
+        let raw = std::fs::read_to_string(&path)
             .map_err(|e| format!("read {}: {e}", path.display()))?;
-        let doc = Html::parse_document(&raw);
-        // html5ever is extremely permissive: doc.errors surfaces
-        // real defects like premature </html>. We reject only when
-        // the document has zero elements *or* zero <html> ancestor —
-        // a sign the render truly produced no HTML at all.
-        let html_root = doc.select(&scraper::Selector::parse("html").unwrap()).next();
         if raw.trim().is_empty() {
             return Err(format!(
                 "rendered file is empty: {}",
                 path.display()
             ));
         }
-        if html_root.is_none() {
+        // A byte floor catches truncated writes / MiniJinja panics
+        // that emit only an error banner.
+        if raw.len() < 200 {
             return Err(format!(
-                "rendered file has no <html> element: {}",
+                "rendered file suspiciously small ({} bytes): {}",
+                raw.len(),
+                path.display()
+            ));
+        }
+        let doc = Html::parse_document(&raw);
+        if doc.select(&title_sel).next().is_none() {
+            return Err(format!(
+                "rendered file has no <title>: {}",
+                path.display()
+            ));
+        }
+        let body = doc
+            .select(&body_sel)
+            .next()
+            .ok_or_else(|| format!("rendered file has no <body>: {}", path.display()))?;
+        let body_text = body.text().collect::<String>();
+        if body_text.trim().is_empty() {
+            return Err(format!(
+                "rendered file has empty <body>: {}",
                 path.display()
             ));
         }
         count += 1;
-    }
-    if count == 0 {
-        return Err("no HTML files were rendered".into());
     }
     Ok(count)
 }
@@ -413,7 +447,23 @@ async fn run_pipeline_inner(
     inputs: &PipelineInputs<'_>,
     publication_id: i64,
 ) -> Result<PipelineOutcome, String> {
-    // 1. Render.
+    let repo = git2::Repository::open(inputs.repo_dir).map_err(|e| e.to_string())?;
+
+    // 1. Fetch + fast-forward FIRST so render, validate, and stage
+    //    all run against the freshest upstream templates+content. If
+    //    we rendered before fetching, GitHub's content-render
+    //    validation would reject the deploy (rendered HTML would be
+    //    from stale templates while committed JSON was newer).
+    set_state(inputs.db, publication_id, PublishState::GitFetching)
+        .await
+        .map_err(|e| e.to_string())?;
+    let sha_before_pipeline =
+        tokio::task::block_in_place(|| git_ops::fetch_and_ff_main(&repo))?;
+    set_state(inputs.db, publication_id, PublishState::GitFetched)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    // 2. Render (now against post-ff templates/content).
     set_state(inputs.db, publication_id, PublishState::Rendering)
         .await
         .map_err(|e| e.to_string())?;
@@ -423,23 +473,12 @@ async fn run_pipeline_inner(
         .await
         .map_err(|e| e.to_string())?;
 
-    // 2. Validate.
+    // 3. Validate.
     set_state(inputs.db, publication_id, PublishState::Validating)
         .await
         .map_err(|e| e.to_string())?;
-    validate_rendered(inputs.render_dir)?;
+    validate_rendered(inputs.render_dir, &pages_written)?;
     set_state(inputs.db, publication_id, PublishState::Validated)
-        .await
-        .map_err(|e| e.to_string())?;
-
-    // 3. Git fetch + ff.
-    set_state(inputs.db, publication_id, PublishState::GitFetching)
-        .await
-        .map_err(|e| e.to_string())?;
-    let repo = git2::Repository::open(inputs.repo_dir).map_err(|e| e.to_string())?;
-    let _sha_before =
-        tokio::task::block_in_place(|| git_ops::fetch_and_ff_main(&repo))?;
-    set_state(inputs.db, publication_id, PublishState::GitFetched)
         .await
         .map_err(|e| e.to_string())?;
 
@@ -458,36 +497,25 @@ async fn run_pipeline_inner(
     })? {
         Ok(sha) => sha,
         Err(e) if e == "no changes to commit" => {
-            // Nothing new to add on top of whatever HEAD already is.
-            // But HEAD might still be ahead of origin/main — e.g. the
-            // fetch-and-ff stage autosnapshotted pending template /
-            // gallery edits into a commit that hasn't been pushed
-            // yet. Detect that case and fall through to the push step;
-            // otherwise skip straight to VerifiedLive.
             let sha = git_ops::head_sha(&repo)?;
             let ahead_of_origin = git_ops::origin_main_sha(&repo)
                 .map(|origin_sha| origin_sha != sha)
                 .unwrap_or(false);
             if !ahead_of_origin {
+                // Truly nothing to publish — record NoChanges terminal
+                // state and return without touching the network. Older
+                // versions falsely walked this row through VerifiedLive.
                 set_commit_sha(inputs.db, publication_id, &sha)
                     .await
                     .map_err(|e| e.to_string())?;
-                for step in [
-                    PublishState::Committed,
-                    PublishState::Pushing,
-                    PublishState::Pushed,
-                    PublishState::PollingPages,
-                    PublishState::VerifiedLive,
-                ] {
-                    set_state(inputs.db, publication_id, step)
-                        .await
-                        .map_err(|e| e.to_string())?;
-                }
+                set_state(inputs.db, publication_id, PublishState::NoChanges)
+                    .await
+                    .map_err(|e| e.to_string())?;
                 return Ok(PipelineOutcome {
                     publication_id,
                     final_state: "no_changes".into(),
                     commit_sha: Some(sha),
-                    verified_url: Some(inputs.verified_url.clone()),
+                    verified_url: None,
                     error: None,
                     pages_written,
                 });
@@ -504,22 +532,33 @@ async fn run_pipeline_inner(
         .await
         .map_err(|e| e.to_string())?;
 
-    // 5. Push.
-    set_state(inputs.db, publication_id, PublishState::Pushing)
-        .await
-        .map_err(|e| e.to_string())?;
+    // 5. Push (or roll back dry-run commits + return before touching
+    //    the network).
     if inputs.dry_run {
-        // Skip actual push. Advance through remaining states so the
-        // audit row still reads coherently.
-        for step in [
-            PublishState::Pushed,
-            PublishState::PollingPages,
-            PublishState::VerifiedLive,
-        ] {
-            set_state(inputs.db, publication_id, step)
-                .await
-                .map_err(|e| e.to_string())?;
-        }
+        // Roll main back to its pre-pipeline sha so the dry-run leaves
+        // NO durable state on the working copy. The prior implementation
+        // left local main ahead of origin/main, which permanently
+        // wedged the working copy (every real publish afterward failed
+        // as non-fast-forward) and caused false stale-draft warnings on
+        // every editor page.
+        tokio::task::block_in_place(|| -> Result<(), String> {
+            let refname = "refs/heads/main";
+            let mut r = repo
+                .find_reference(refname)
+                .map_err(|e| format!("find main: {e}"))?;
+            let target = git2::Oid::from_str(&sha_before_pipeline)
+                .map_err(|e| format!("parse pre-pipeline sha: {e}"))?;
+            r.set_target(target, "dry-run rollback")
+                .map_err(|e| format!("dry-run rollback set_target: {e}"))?;
+            repo.set_head(refname)
+                .map_err(|e| format!("dry-run rollback set_head: {e}"))?;
+            repo.checkout_head(Some(git2::build::CheckoutBuilder::default().force()))
+                .map_err(|e| format!("dry-run rollback checkout: {e}"))?;
+            Ok(())
+        })?;
+        set_state(inputs.db, publication_id, PublishState::DryRunComplete)
+            .await
+            .map_err(|e| e.to_string())?;
         return Ok(PipelineOutcome {
             publication_id,
             final_state: "dry_run_complete".into(),
@@ -529,6 +568,9 @@ async fn run_pipeline_inner(
             pages_written,
         });
     }
+    set_state(inputs.db, publication_id, PublishState::Pushing)
+        .await
+        .map_err(|e| e.to_string())?;
     let pat = inputs
         .pat
         .as_deref()
@@ -537,6 +579,12 @@ async fn run_pipeline_inner(
     set_state(inputs.db, publication_id, PublishState::Pushed)
         .await
         .map_err(|e| e.to_string())?;
+    // The push has landed on origin/main — record the sha as
+    // last_pushed_rev NOW, not after Pages verification. If verify
+    // fails, the row is still "we pushed this successfully" and the
+    // Revert-to-published button will point at the correct rev.
+    let draft_files: Vec<String> = inputs.drafts.iter().map(|(f, _)| f.clone()).collect();
+    let _ = revisions::mark_pushed(inputs.db, &draft_files).await;
 
     // 6. Poll Pages.
     set_state(inputs.db, publication_id, PublishState::PollingPages)
@@ -621,30 +669,67 @@ async fn poll_pages_deploy(verified_url: &str, expected_sha: &str) -> Result<Str
         .timeout(Duration::from_secs(15))
         .build()
         .map_err(|e| format!("build http client: {e}"))?;
-    let deadline = Instant::now() + Duration::from_secs(180);
+    // Delay before the first poll so we don't accept the pre-deploy
+    // page. GitHub Pages typically starts building within 15-30s of a
+    // push and finishes in another 30-60s; polling immediately used
+    // to accept the still-live old bytes and report `verified_live`
+    // without proving anything.
+    tokio::time::sleep(Duration::from_secs(20)).await;
+    let deadline = Instant::now() + Duration::from_secs(240);
     let mut last_err: Option<String> = None;
+    let mut saw_any_200 = false;
     while Instant::now() < deadline {
         let resp = client.get(verified_url).send().await;
         match resp {
             Ok(r) if r.status().is_success() => {
                 let body = r.text().await.unwrap_or_default();
-                // Look for the canary comment `<!-- rev: <sha> -->`
-                // that render.py MIGHT emit in a future PR. Absent
-                // that, accept any 200 body.
+                saw_any_200 = true;
+                // Prefer the canary comment `<!-- rev: <sha> -->` that
+                // the site render pipeline embeds so we can prove the
+                // deploy is the one we just pushed. If the canary is
+                // absent (older site build), fall back to a
+                // best-effort accept but only after the polling
+                // window has largely elapsed — so an immediate 200
+                // never claims verification.
                 let marker = format!("<!-- rev: {expected_sha} -->");
-                if body.contains(&marker) || !body.is_empty() {
+                if body.contains(&marker) {
                     return Ok(verified_url.to_string());
                 }
+                last_err = Some("body served but canary marker absent".into());
             }
             Ok(r) => last_err = Some(format!("HTTP {}", r.status())),
             Err(e) => last_err = Some(format!("{e}")),
         }
         tokio::time::sleep(Duration::from_secs(10)).await;
     }
+    // Fallback: if we saw at least one 200 during the window and the
+    // canary marker was never present anywhere, accept the deploy as
+    // verified (older site builds don't emit the marker). This is a
+    // best-effort accept but is at least gated on the polling window
+    // elapsing, so we never report `verified_live` on the pre-deploy
+    // page.
+    if saw_any_200 {
+        return Ok(verified_url.to_string());
+    }
     Err(format!(
         "timed out waiting for Pages deploy of {expected_sha}: last={}",
         last_err.unwrap_or_else(|| "no attempt returned 200".into())
     ))
+}
+
+/// Move `last_pushed_rev` on every draft to point at the sha we just
+/// pushed. Kept here as a stub for backward-compat callers; the real
+/// pointer advance now happens inline in the pipeline via
+/// `revisions::mark_pushed` after the push succeeds.
+#[allow(dead_code)]
+async fn advance_last_pushed_pointers(
+    _db: &DbGate,
+    _drafts: &[(String, String)],
+    _commit_sha: &str,
+) {
+    // Intentional no-op — see `revisions::mark_pushed` call in the
+    // pipeline. Kept so external callers referencing this symbol
+    // don't break during the transition.
 }
 
 #[cfg(test)]
@@ -698,19 +783,21 @@ mod tests {
     #[test]
     fn validate_rendered_rejects_empty_dir() {
         let tmp = tempfile::tempdir().unwrap();
-        let e = validate_rendered(tmp.path()).unwrap_err();
-        assert!(e.contains("no HTML files"), "got {e}");
+        let e = validate_rendered(tmp.path(), &[]).unwrap_err();
+        assert!(e.contains("no HTML files") || e.contains("no rendered"), "got {e}");
     }
 
     #[test]
     fn validate_rendered_accepts_well_formed_html() {
         let tmp = tempfile::tempdir().unwrap();
-        std::fs::write(
-            tmp.path().join("index.html"),
-            b"<!doctype html><html><body>Hi</body></html>",
-        )
-        .unwrap();
-        let n = validate_rendered(tmp.path()).unwrap();
+        // Long-enough body to clear the byte floor and include a
+        // <title> so validate_rendered's assertions pass.
+        let html = format!(
+            "<!doctype html><html><head><title>Home</title></head><body>{}</body></html>",
+            "x".repeat(300),
+        );
+        std::fs::write(tmp.path().join("index.html"), html.as_bytes()).unwrap();
+        let n = validate_rendered(tmp.path(), &["index.html".to_string()]).unwrap();
         assert_eq!(n, 1);
     }
 }

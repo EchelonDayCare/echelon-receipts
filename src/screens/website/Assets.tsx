@@ -25,6 +25,10 @@ export default function Assets() {
   const [busy, setBusy] = useState<"logo" | "og" | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [msg, setMsg] = useState<string | null>(null);
+  // Cache-bust token bumped every time an asset is replaced so the
+  // WebView reloads the thumbnail instead of showing the stale
+  // pre-replace image from its internal image cache.
+  const [bust, setBust] = useState(0);
 
   const refresh = useCallback(async () => {
     setErr(null);
@@ -53,10 +57,17 @@ export default function Assets() {
     const pick = filename ?? rec?.variants[0]?.filename;
     if (!pick) return null;
     const absPath = `${repoRoot}/repo/assets/img/${pick}`;
-    return convertFileSrc(absPath);
+    return `${convertFileSrc(absPath)}?bust=${bust}`;
   }
 
   async function pickAndReplaceLogo() {
+    // Set busy BEFORE open() so a rapid double-click on the button
+    // can't open the picker twice — the second click sees the
+    // disabled state applied synchronously via the ref-check.
+    if (busy) return;
+    setBusy("logo");
+    setErr(null);
+    setMsg(null);
     const picked = await open({
       multiple: false,
       filters: [
@@ -67,13 +78,11 @@ export default function Assets() {
       ],
     });
     const path = pathFromDialog(picked);
-    if (!path) return;
-    setBusy("logo");
-    setErr(null);
-    setMsg(null);
+    if (!path) { setBusy(null); return; }
     try {
       await websiteReplaceLogo(path);
       setMsg("Logo replaced. Favicons regenerated from the same source.");
+      setBust((n) => n + 1);
       await refresh();
     } catch (e: any) {
       setErr(String(e?.message ?? e));
@@ -83,6 +92,10 @@ export default function Assets() {
   }
 
   async function pickAndReplaceOg() {
+    if (busy) return;
+    setBusy("og");
+    setErr(null);
+    setMsg(null);
     const picked = await open({
       multiple: false,
       filters: [
@@ -93,13 +106,11 @@ export default function Assets() {
       ],
     });
     const path = pathFromDialog(picked);
-    if (!path) return;
-    setBusy("og");
-    setErr(null);
-    setMsg(null);
+    if (!path) { setBusy(null); return; }
     try {
       await websiteReplaceOgImage(path);
       setMsg("OG image replaced (cropped to 1200×630).");
+      setBust((n) => n + 1);
       await refresh();
     } catch (e: any) {
       setErr(String(e?.message ?? e));

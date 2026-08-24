@@ -201,6 +201,7 @@ pub fn run() {
             website::commands::website_load_content,
             website::commands::website_save_draft,
             website::commands::website_check_draft_staleness,
+            website::commands::website_has_pending_media,
             website::ai_edit::website_ai_edit_content,
             website::tour::website_tour_list_videos,
             website::tour::website_tour_add_videos,
@@ -233,6 +234,8 @@ pub fn run() {
             website::commands::website_replace_favicon,
             website::commands::website_replace_og_image,
             website::commands::website_replace_about_photo,
+            website::commands::website_replace_home_gallery_photo,
+            website::commands::website_replace_home_hero_banner,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

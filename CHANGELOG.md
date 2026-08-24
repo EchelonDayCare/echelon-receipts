@@ -4,6 +4,46 @@ All notable changes shipped as a DMG. Only entries the owner has approved
 for release are listed here — "code-complete, awaiting ship approval" work
 lives in the session plan.md until it ships.
 
+## v3.24.3 — Website module deep-review hardening
+
+### Website module
+
+- **Serialized gallery mutations.** Photo add / reorder / rename /
+  delete / bulk-delete / emergency-remove now hold a single async
+  mutex for the whole operation, so a fast double-click, a
+  reorder-during-delete, or two windows editing at once can no longer
+  interleave the DB write, snapshot, and JSON rewrite. Data can only
+  advance one full mutation at a time.
+- **Pending photos surface on the dashboard.** The Website overview
+  banner and the Publish confirm dialog now flag uncommitted photo /
+  video / gallery changes alongside pending page edits, so replacing a
+  logo or swapping an About photo can't quietly stay behind after a
+  publish.
+- **Delete order fixed.** Deleting a gallery / tour video now saves
+  the JSON pointer first and only then removes the file from disk. If
+  the save fails, the video stays intact instead of leaving the page
+  pointing at a missing file.
+- **Restore actually restores.** Restoring a prior revision now
+  carries forward the base content hash so the next Publish can still
+  detect drift correctly.
+- **Publish stays open until it finishes.** The confirm modal no
+  longer disappears the moment publish starts — you see progress the
+  whole way through. Closing the tab or navigating away mid-publish
+  now warns first.
+- **Revert dialog focus trap.** The revert confirm dialog now traps
+  focus, closes with Escape, and returns focus to the button you came
+  from — matching the rest of the app.
+- **AI-accept warns on unsaved edits.** Accepting an AI proposal when
+  you have unsaved form edits now asks before discarding them.
+- **Fresh logo / OG image previews.** Replacing the logo or social
+  share image now updates the preview immediately instead of showing
+  the cached old file.
+- **Friendlier raw-JSON errors.** Saving raw JSON with a syntax error
+  now shows the parser message inline instead of failing through a
+  Rust roundtrip.
+- **Photo-picker reentry guard.** Double-clicking a photo picker
+  button no longer opens two OS pickers.
+
 ## v3.24.2 — About page editor + Publish reliability
 
 ### Website module

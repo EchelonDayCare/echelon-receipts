@@ -175,11 +175,41 @@ pub fn fetch_and_ff_main(repo: &Repository) -> Result<String, String> {
             ));
         }
         autostash_publish_paths(repo)?;
+
+        // FIX: The `merge_analysis` result above was computed BEFORE
+        // autostash_publish_paths committed a snapshot on top of the
+        // old main. After that snapshot, origin/main is no longer an
+        // ancestor of local main, so a naive `set_target` here would
+        // silently orphan the snapshot commit and force-checkout the
+        // upstream tree — destroying every uncommitted CMS edit.
+        // Re-analyse now that the head has moved and refuse (or, when
+        // still ff, proceed) accordingly. This turns the silent data
+        // loss into a hard error the caller must resolve.
+        let fetch_commit2 = repo
+            .reference_to_annotated_commit(
+                &repo.find_reference("FETCH_HEAD").map_err(|e| format!("FETCH_HEAD: {e}"))?,
+            )
+            .map_err(|e| format!("annotate FETCH_HEAD (post-autostash): {e}"))?;
+        let analysis2 = repo
+            .merge_analysis(&[&fetch_commit2])
+            .map_err(|e| format!("merge_analysis (post-autostash): {e}"))?;
+        if analysis2.0.is_up_to_date() {
+            // Snapshot happened to match upstream — nothing more to do.
+            return head_sha(repo);
+        }
+        if !analysis2.0.is_fast_forward() {
+            return Err(
+                "publish would overwrite local snapshot commits. \
+                 Resolve by publishing (which pushes the snapshot) or by reverting \
+                 your uncommitted edits, then retry."
+                    .to_string(),
+            );
+        }
         let refname = "refs/heads/main";
         let mut r = repo
             .find_reference(refname)
             .map_err(|e| format!("find main: {e}"))?;
-        r.set_target(fetch_commit.id(), "fast-forward")
+        r.set_target(fetch_commit2.id(), "fast-forward")
             .map_err(|e| format!("ff main: {e}"))?;
         repo.set_head(refname).map_err(|e| format!("set_head: {e}"))?;
         repo.checkout_head(Some(CheckoutBuilder::default().force()))
@@ -187,6 +217,24 @@ pub fn fetch_and_ff_main(repo: &Repository) -> Result<String, String> {
         return head_sha(repo);
     }
     Err("non-fast-forward: local main has diverged from origin/main. Reopen the app or reclone the working copy.".to_string())
+}
+
+/// OS/editor cruft that must never land in the public repo. macOS and
+/// Windows sprinkle these under `assets/` / `content/` / `templates/`
+/// silently, and prior versions of the autostash swept them into the
+/// commit that got pushed.
+fn is_junk_path(rel: &str) -> bool {
+    let name = std::path::Path::new(rel)
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("");
+    matches!(
+        name,
+        ".DS_Store" | "Thumbs.db" | "desktop.ini" | "ehthumbs.db"
+    ) || name.ends_with('~')
+        || name.ends_with(".swp")
+        || name.ends_with(".swo")
+        || name.ends_with(".tmp")
 }
 
 /// Files the publish pipeline is responsible for shipping. Any dirty
@@ -221,7 +269,7 @@ fn autostash_publish_paths(repo: &Repository) -> Result<(), String> {
             Some(p) => p.to_string(),
             None => continue,
         };
-        if is_publish_managed_path(&path) {
+        if is_publish_managed_path(&path) && !is_junk_path(&path) {
             to_stage.push(path);
         }
     }

@@ -5,6 +5,7 @@ import {
   websiteListPublications,
   websitePatStatus,
   websiteListPointers,
+  websiteHasPendingMedia,
   type PublicationRow,
   type PipelineOutcome,
   type PointerRow,
@@ -24,17 +25,21 @@ export default function Publish() {
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   const [outcome, setOutcome] = useState<PipelineOutcome | null>(null);
+  const [confirmOpen, setConfirmOpen] = useState(false);
+  const [pendingMedia, setPendingMedia] = useState(false);
 
   async function reload() {
     try {
-      const [p, pubs, pat] = await Promise.all([
+      const [p, pubs, pat, media] = await Promise.all([
         websiteListPointers(),
         websiteListPublications(20),
         websitePatStatus(),
+        websiteHasPendingMedia().catch(() => false),
       ]);
       setPointers(p);
       setPublications(pubs);
       setConnected(pat.connected);
+      setPendingMedia(media);
     } catch (e: any) {
       setErr(String(e?.message ?? e));
     }
@@ -43,6 +48,37 @@ export default function Publish() {
   useEffect(() => {
     void reload();
   }, []);
+
+  // Block navigation while a publish is in-flight — the pipeline runs
+  // in the Rust worker regardless of what the UI does, so navigating
+  // away mid-publish leaves the user without the progress indicator
+  // and can double-fire the button on return.
+  useEffect(() => {
+    if (!busy) return;
+    const beforeUnload = (e: BeforeUnloadEvent) => {
+      e.preventDefault();
+      e.returnValue = "";
+    };
+    const onAnchorClick = (ev: MouseEvent) => {
+      const target = ev.target as HTMLElement | null;
+      const anchor = target?.closest?.("a[href]") as HTMLAnchorElement | null;
+      if (!anchor) return;
+      const href = anchor.getAttribute("href") || "";
+      if (!href.startsWith("#/")) return;
+      const currentHash = window.location.hash || "#/";
+      if (href === currentHash) return;
+      if (!window.confirm("A publish is in progress. Leave anyway?")) {
+        ev.preventDefault();
+        ev.stopPropagation();
+      }
+    };
+    window.addEventListener("beforeunload", beforeUnload);
+    document.addEventListener("click", onAnchorClick, true);
+    return () => {
+      window.removeEventListener("beforeunload", beforeUnload);
+      document.removeEventListener("click", onAnchorClick, true);
+    };
+  }, [busy]);
 
   async function onPublish() {
     setBusy(true);
@@ -61,6 +97,14 @@ export default function Publish() {
     } finally {
       setBusy(false);
     }
+  }
+
+  function onPublishClick() {
+    if (!dryRun) {
+      setConfirmOpen(true);
+      return;
+    }
+    void onPublish();
   }
 
   const pendingFiles = pointers.filter(
@@ -87,9 +131,12 @@ export default function Publish() {
 
       <section style={panelStyle}>
         <h3 style={{ marginTop: 0 }}>Pending changes</h3>
-        {pendingFiles.length === 0 ? (
-          <div style={{ color: "var(--muted, #64748b)", fontSize: 13 }}>
-            No draft changes are ahead of the last published revision.
+        {pendingFiles.length === 0 && !pendingMedia ? (
+          <div style={{ display: "flex", alignItems: "center", gap: 10, color: "#166534" }}>
+            <span style={{ fontSize: 22 }}>✅</span>
+            <div style={{ fontSize: 13 }}>
+              Everything is up to date. There are no draft changes waiting to publish.
+            </div>
           </div>
         ) : (
           <ul style={{ margin: 0, paddingLeft: 20, fontSize: 14 }}>
@@ -98,6 +145,11 @@ export default function Publish() {
                 <b>{p.file}</b> — draft rev {p.active_draft_rev} · last pushed {p.last_pushed_rev ?? "never"}
               </li>
             ))}
+            {pendingMedia && (
+              <li key="__media__">
+                <b>Photos &amp; assets</b> — uncommitted media in the working copy
+              </li>
+            )}
           </ul>
         )}
       </section>
@@ -123,16 +175,25 @@ export default function Publish() {
             style={inputStyle}
           />
         </label>
-        <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13 }}>
-          <input type="checkbox" checked={dryRun} onChange={(e) => setDryRun(e.target.checked)} />
+        <label style={{ display: "flex", alignItems: "flex-start", gap: 8, fontSize: 13, padding: 10, background: dryRun ? "#f1f5f9" : "#fef3c7", borderRadius: 6 }}>
+          <input type="checkbox" checked={dryRun} onChange={(e) => setDryRun(e.target.checked)} style={{ marginTop: 3 }} />
           <span>
-            <b>Dry run</b> — render & commit locally but DO NOT push to GitHub. Recommended for
-            PR 2 until you have manually confirmed the workflow.
+            <b>{dryRun ? "Dry run (safe)" : "Real publish (LIVE)"}</b>
+            <div style={{ fontSize: 12, color: "#475569", marginTop: 2 }}>
+              {dryRun
+                ? "Render and commit locally only — nothing is pushed to GitHub. Use this to check the build before going live."
+                : "Push to GitHub and update the live site at echelondaycare.com. Visitors will see the changes."}
+            </div>
           </span>
         </label>
         <div style={{ marginTop: 12, display: "flex", gap: 8 }}>
-          <button className="btn" onClick={onPublish} disabled={busy}>
-            {busy ? "Publishing…" : dryRun ? "Run dry publish" : "Publish for real"}
+          <button
+            className="btn"
+            onClick={onPublishClick}
+            disabled={busy}
+            style={!dryRun ? { background: "#1d5fa3", color: "white" } : undefined}
+          >
+            {busy ? "Publishing…" : dryRun ? "Run dry publish" : "Publish to live site →"}
           </button>
         </div>
       </section>
@@ -190,7 +251,7 @@ export default function Publish() {
                 <tr key={p.id}>
                   <td style={td}>{p.id}</td>
                   <td style={td}>{p.started_at}</td>
-                  <td style={td}>{p.state}</td>
+                  <td style={td}><StateChip state={p.state} error={p.error} /></td>
                   <td style={td}>{p.commit_sha ? p.commit_sha.slice(0, 8) : "—"}</td>
                   <td style={td}>{p.error ?? ""}</td>
                 </tr>
@@ -199,7 +260,103 @@ export default function Publish() {
           </table>
         )}
       </section>
+
+      {confirmOpen && (
+        <div
+          style={{
+            position: "fixed", inset: 0, background: "rgba(15,23,42,0.55)",
+            display: "flex", alignItems: "center", justifyContent: "center", zIndex: 1000,
+          }}
+          onClick={() => !busy && setConfirmOpen(false)}
+        >
+          <div
+            onClick={(e) => e.stopPropagation()}
+            style={{
+              background: "white", borderRadius: 12, padding: 24,
+              maxWidth: 520, width: "90%", boxShadow: "0 25px 50px -12px rgba(0,0,0,0.4)",
+            }}
+          >
+            <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 8 }}>
+              <span style={{ fontSize: 28 }}>🚀</span>
+              <h2 style={{ margin: 0, fontSize: 18 }}>Publish to the live site?</h2>
+            </div>
+            <p style={{ fontSize: 13, color: "#475569", marginTop: 0 }}>
+              This will commit your draft changes to GitHub and update{" "}
+              <b>echelondaycare.com</b> within a minute or two. Visitors will
+              see the new content immediately.
+            </p>
+
+            <div style={{ background: "#f8fafc", border: "1px solid #e2e8f0", borderRadius: 8, padding: 12, marginTop: 12 }}>
+              <div style={{ fontSize: 12, fontWeight: 600, color: "#334155", marginBottom: 6 }}>
+                {pendingFiles.length === 0 && !pendingMedia
+                  ? "No pending changes"
+                  : `${pendingFiles.length}${pendingMedia ? " + media" : ""} change${pendingFiles.length === 1 && !pendingMedia ? "" : "s"} will publish:`}
+              </div>
+              {(pendingFiles.length > 0 || pendingMedia) && (
+                <ul style={{ margin: 0, paddingLeft: 18, fontSize: 13, color: "#475569" }}>
+                  {pendingFiles.map((p) => <li key={p.file}><b>{p.file}</b></li>)}
+                  {pendingMedia && <li key="__media__"><b>Photos &amp; assets</b></li>}
+                </ul>
+              )}
+              <div style={{ marginTop: 10, fontSize: 12, color: "#64748b" }}>
+                Commit message: <i>{commitMsg.trim() || "CMS content update"}</i>
+              </div>
+            </div>
+
+            {!connected && (
+              <div className="home-alert tone-danger" style={{ marginTop: 12, fontSize: 12 }}>
+                ⚠ No GitHub token connected — publish will fail. Connect one from Settings first.
+              </div>
+            )}
+
+            <div style={{ display: "flex", gap: 8, justifyContent: "flex-end", marginTop: 20 }}>
+              <button className="btn" disabled={busy} onClick={() => setConfirmOpen(false)}>
+                Cancel
+              </button>
+              <button
+                className="btn"
+                disabled={busy || !connected}
+                onClick={async () => {
+                  // Keep the confirm modal mounted while the pipeline
+                  // runs so the user can watch state progress and
+                  // cannot accidentally re-trigger publish via the
+                  // outer button. The modal auto-closes only after
+                  // onPublish resolves (or the user cancels post-run).
+                  await onPublish();
+                  setConfirmOpen(false);
+                }}
+                style={{ background: "#1d5fa3", color: "white" }}
+              >
+                {busy ? "Publishing…" : "Yes, publish to live site"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
+  );
+}
+
+function StateChip({ state, error }: { state: string; error: string | null }) {
+  const color = error ? "#b91c1c"
+    : state === "verified_live" ? "#166534"
+    : state === "dry_run_complete" ? "#7c3aed"
+    : state === "no_changes" ? "#334155"
+    : "#334155";
+  const bg = error ? "#fee2e2"
+    : state === "verified_live" ? "#dcfce7"
+    : state === "dry_run_complete" ? "#ede9fe"
+    : "#f1f5f9";
+  const label = error ? "failed"
+    : state === "verified_live" ? "live"
+    : state === "dry_run_complete" ? "dry run"
+    : state === "no_changes" ? "no changes"
+    : state;
+  return (
+    <span style={{
+      display: "inline-block", padding: "2px 8px", borderRadius: 999,
+      fontSize: 11, fontWeight: 600, color, background: bg,
+    }}>{label}</span>
   );
 }
 

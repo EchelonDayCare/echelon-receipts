@@ -698,10 +698,14 @@ function EditPanel({
   async function onSave() {
     setSaving(true);
     try {
+      // Send empty string (not undefined) when the field is cleared,
+      // so the backend can distinguish "clear this field" from "leave
+      // unchanged". Prior behavior sent undefined for both, so
+      // clearing a caption was silently reverted by COALESCE.
       await websiteEditMedia(
         rec.id,
-        caption || undefined,
-        alt || undefined,
+        caption,
+        alt,
         focal ? [focal.x, focal.y] : null,
       );
       await onSaved();

@@ -20,6 +20,8 @@ export default function WebsiteButton({ size = 40 }: { size?: number }) {
 
   if (!enabled) return null;
 
+  const padding = Math.max(8, Math.round(size * 0.55));
+
   return (
     <button
       type="button"
@@ -27,38 +29,31 @@ export default function WebsiteButton({ size = 40 }: { size?: number }) {
       aria-label="Open Website CMS"
       title="Website"
       style={{
-        width: size,
-        height: size,
-        borderRadius: size / 2,
-        border: "1px solid #e3e6ee",
-        background: "#fff",
+        background: "var(--panel, #fff)",
+        border: "1px solid var(--border)",
+        borderRadius: 12,
+        padding: `${padding}px ${padding + 2}px`,
         color: "#1a1f36",
         cursor: "pointer",
         display: "inline-flex",
         alignItems: "center",
         justifyContent: "center",
-        boxShadow: "0 1px 3px rgba(15,23,42,0.08)",
-        transition: "background 160ms ease-out, transform 160ms ease-out",
+        lineHeight: 1,
+        boxShadow: "0 6px 20px -8px rgba(15, 23, 42, 0.35)",
+        transition: "transform 160ms ease-out, box-shadow 160ms ease-out, background 160ms ease-out",
       }}
-      onMouseEnter={(e) => { (e.currentTarget as HTMLButtonElement).style.background = "#f6f7fb"; }}
-      onMouseLeave={(e) => { (e.currentTarget as HTMLButtonElement).style.background = "#fff"; }}
+      onMouseEnter={(e) => {
+        (e.currentTarget as HTMLButtonElement).style.transform = "translateY(-2px)";
+        (e.currentTarget as HTMLButtonElement).style.boxShadow =
+          "0 10px 24px -8px rgba(15, 23, 42, 0.45)";
+      }}
+      onMouseLeave={(e) => {
+        (e.currentTarget as HTMLButtonElement).style.transform = "translateY(0)";
+        (e.currentTarget as HTMLButtonElement).style.boxShadow =
+          "0 6px 20px -8px rgba(15, 23, 42, 0.35)";
+      }}
     >
-      <svg
-        width={Math.round(size * 0.55)}
-        height={Math.round(size * 0.55)}
-        viewBox="0 0 24 24"
-        fill="none"
-        stroke="currentColor"
-        strokeWidth="1.8"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-        aria-hidden="true"
-      >
-        <circle cx="12" cy="12" r="9" />
-        <path d="M3 12h18" />
-        <path d="M12 3a14 14 0 0 1 0 18" />
-        <path d="M12 3a14 14 0 0 0 0 18" />
-      </svg>
+      <span aria-hidden style={{ fontSize: size, lineHeight: 1 }}>🌐</span>
     </button>
   );
 }
