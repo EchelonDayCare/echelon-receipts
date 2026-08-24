@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { useBlocker, useNavigate, useParams } from "react-router-dom";
 import {
   websiteAiEditContent,
+  websiteCheckDraftStaleness,
   websiteLoadContent,
   websiteSaveDraft,
   tryPrettyJson,
@@ -85,18 +86,34 @@ export default function PageEditor() {
     model: string;
   } | null>(null);
 
+  // Draft-staleness banner. Set on load when the working-copy
+  // version of this file has moved since the current active draft
+  // was saved — e.g. a publish from another machine, or a
+  // `rayfin sync` — so the user can decide whether to discard the
+  // stale draft before overwriting the upstream changes.
+  const [staleDraft, setStaleDraft] = useState(false);
+
   useEffect(() => {
     let cancelled = false;
     setContent(null);
     setErr(null);
     setSaved(null);
     setDirty(false);
+    setStaleDraft(false);
     (async () => {
       try {
         const c = await websiteLoadContent(file);
         if (cancelled) return;
         setContent(c);
         setText(tryPrettyJson(c.content_json));
+        if (c.source === "draft") {
+          try {
+            const stale = await websiteCheckDraftStaleness(file);
+            if (!cancelled) setStaleDraft(stale);
+          } catch {
+            // best-effort — pre-migration DB or missing working copy
+          }
+        }
       } catch (e: any) {
         if (cancelled) return;
         setErr(String(e?.message ?? e));
@@ -546,6 +563,31 @@ export default function PageEditor() {
       {err && (
         <div className="home-alert tone-danger" style={{ margin: "12px 0" }}>
           ⚠ {err}
+        </div>
+      )}
+      {staleDraft && (
+        <div
+          className="home-alert tone-warning"
+          style={{
+            margin: "12px 0",
+            display: "flex",
+            alignItems: "center",
+            gap: 12,
+            flexWrap: "wrap",
+          }}
+        >
+          <span>
+            ⚠ The live site has been updated since this draft was saved.
+            Saving now may overwrite those changes. Consider discarding
+            the draft and re-editing on top of the current version.
+          </span>
+          <button
+            className="btn"
+            style={{ marginLeft: "auto", fontSize: 13, padding: "4px 12px" }}
+            onClick={() => nav(`/website/history?file=${file}`)}
+          >
+            Open version history
+          </button>
         </div>
       )}
       {saved && (

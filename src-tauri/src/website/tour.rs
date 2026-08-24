@@ -440,7 +440,7 @@ pub async fn website_tour_add_videos(
         .map_err(|e| format!("serialize tour.json: {e}"))?
         + "\n";
 
-    let rev = revisions::save_draft(db.inner(), "tour", &pretty, None)
+    let rev = revisions::save_draft(db.inner(), "tour", &pretty, None, None)
         .await
         .map_err(|e| e.to_string())?;
 
@@ -503,7 +503,7 @@ pub async fn website_tour_delete_video(
     let pretty = serde_json::to_string_pretty(&tour_val)
         .map_err(|e| format!("serialize tour.json: {e}"))?
         + "\n";
-    let rev = revisions::save_draft(db.inner(), "tour", &pretty, None)
+    let rev = revisions::save_draft(db.inner(), "tour", &pretty, None, None)
         .await
         .map_err(|e| e.to_string())?;
     Ok(rev)
@@ -551,7 +551,7 @@ pub async fn website_tour_reorder_videos(
     let pretty = serde_json::to_string_pretty(&tour_val)
         .map_err(|e| format!("serialize tour.json: {e}"))?
         + "\n";
-    let rev = revisions::save_draft(db.inner(), "tour", &pretty, None)
+    let rev = revisions::save_draft(db.inner(), "tour", &pretty, None, None)
         .await
         .map_err(|e| e.to_string())?;
     Ok(rev)

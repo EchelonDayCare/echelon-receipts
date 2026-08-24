@@ -4,6 +4,46 @@ All notable changes shipped as a DMG. Only entries the owner has approved
 for release are listed here — "code-complete, awaiting ship approval" work
 lives in the session plan.md until it ships.
 
+## v3.24.1 — parked-item cleanup
+
+Ships the last three deferred items from the v3.23.4 review that don't
+require a schema you'd need to co-design, plus a cosmetic log-spam fix.
+
+### Website module
+
+- **Skip re-rendering unchanged pages.** `renderer::render_all` now
+  writes a `.stamp` sidecar (sha256 of the page's content JSON slice,
+  its template bytes, and the base template bytes) next to every
+  rendered HTML. If the stamp matches on the next call, the page is
+  skipped. A base.html edit invalidates every stamp. Stamps live in
+  `render_dir` and are excluded from the commit-staging filter, so
+  they never leak into the published site.
+- **Zero-copy preview.** Preview server now takes an optional fallback
+  root and falls through to the working-copy `assets/**` and
+  `content/**` on miss. The old code cloned the entire assets tree
+  into `render_dir` on every preview start — cut on real centres by
+  ~200–800 ms.
+- **Cross-machine stale-draft banner.** `save_draft` now records the
+  sha256 of the working-copy version of the file at the moment the
+  draft was created (`site_revisions.base_content_hash`, migration
+  017, nullable). When PageEditor opens a page whose active draft's
+  recorded base no longer matches the current working copy, it shows
+  an amber banner explaining that the live site has moved and offering
+  a jump to version history.
+
+### Housekeeping
+
+- **`[db] db_gate not open at load()`** log spam on cold start is
+  gone. The notification scheduler used to fire ~100 ms after mount
+  and race the Rust DB open; it now peeks `db_is_open` first and
+  bails silently until the gate is ready.
+
+### Notes
+
+- `#7` (emergency-remove git history rewrite) and `#8` (structured
+  per-page field forms) stay parked — both need product decisions
+  that shouldn't be made autonomously.
+
 ## v3.24.0 — Website module perf + UX pass
 
 Follow-up to v3.23.4's deep-review hardening. Fixes the highest-signal

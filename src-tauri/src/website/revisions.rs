@@ -45,19 +45,28 @@ pub struct PointerRow {
 /// run [`crate::website::schema::validate`] first. This function
 /// stores the raw bytes unchanged so an accidental re-serialize
 /// doesn't strip a trailing newline or reorder keys.
+///
+/// `base_content_hash` is a fingerprint of the working-copy version
+/// of `file` at the moment the user opened the editor. Stored so a
+/// subsequent editor session can detect that the working copy has
+/// moved (git pull, cross-machine publish) since — see
+/// [`current_draft_base_hash`].
 pub async fn save_draft(
     gate: &DbGate,
     file: &str,
     content_json: &str,
     author: Option<&str>,
+    base_content_hash: Option<&str>,
 ) -> Result<i64, DbError> {
     let file = file.to_string();
     let content_json = content_json.to_string();
     let author = author.map(|s| s.to_string());
+    let base_hash = base_content_hash.map(|s| s.to_string());
     gate.with_conn(move |conn| {
         conn.execute(
-            "INSERT INTO site_revisions (file, content_json, author) VALUES (?1, ?2, ?3)",
-            params![file, content_json, author],
+            "INSERT INTO site_revisions (file, content_json, author, base_content_hash) \
+             VALUES (?1, ?2, ?3, ?4)",
+            params![file, content_json, author, base_hash],
         )?;
         let new_id = conn.last_insert_rowid();
         conn.execute(
@@ -69,6 +78,34 @@ pub async fn save_draft(
             params![file, new_id],
         )?;
         Ok(new_id)
+    })
+    .await
+}
+
+/// Return the `base_content_hash` recorded on the current active
+/// draft for `file`, or `Ok(None)` if there is no active draft or
+/// the row predates the base_content_hash column.
+pub async fn current_draft_base_hash(
+    gate: &DbGate,
+    file: &str,
+) -> Result<Option<String>, DbError> {
+    let file = file.to_string();
+    gate.with_conn(move |conn| {
+        let row: Result<Option<Option<String>>, _> = conn
+            .query_row(
+                "SELECT r.base_content_hash \
+                 FROM site_pointers p \
+                 JOIN site_revisions r ON r.id = p.active_draft_rev \
+                 WHERE p.file = ?1",
+                params![file],
+                |r| r.get::<_, Option<String>>(0),
+            )
+            .map(Some)
+            .or_else(|e| match e {
+                rusqlite::Error::QueryReturnedNoRows => Ok(None),
+                other => Err(other),
+            });
+        Ok(row?.flatten())
     })
     .await
 }

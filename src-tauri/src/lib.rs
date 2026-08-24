@@ -50,6 +50,7 @@ pub fn embedded_migrations() -> Vec<(i64, &'static str, &'static str)> {
         (14, "add_website_cms_tables", include_str!("../migrations/014_website_cms.sql")),
         (15, "add_website_media", include_str!("../migrations/015_website_media.sql")),
         (16, "site_media_kind_unique_and_sort", include_str!("../migrations/016_site_media_kind_unique.sql")),
+        (17, "site_revisions_base_hash", include_str!("../migrations/017_site_revisions_base_hash.sql")),
     ]
 }
 
@@ -199,6 +200,7 @@ pub fn run() {
             website::commands::website_working_copy_pull,
             website::commands::website_load_content,
             website::commands::website_save_draft,
+            website::commands::website_check_draft_staleness,
             website::ai_edit::website_ai_edit_content,
             website::tour::website_tour_list_videos,
             website::tour::website_tour_add_videos,

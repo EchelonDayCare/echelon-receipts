@@ -51,11 +51,33 @@ impl PreviewHandle {
     /// The server refuses to serve anything outside `root` — paths
     /// containing `..` or absolute components are rejected with 404.
     pub fn start(root: PathBuf) -> Result<Self, String> {
+        Self::start_with_fallback(root, None)
+    }
+
+    /// Same as [`start`] but with an optional secondary root. A
+    /// request that misses in `root` is retried against `fallback`
+    /// before returning 404. Used by the preview to serve rendered
+    /// HTML from `render_dir` while pulling `assets/**` directly out
+    /// of the working copy — saving an expensive tree copy on every
+    /// preview startup, and letting a freshly-uploaded photo show up
+    /// in preview without re-rendering the entire site.
+    pub fn start_with_fallback(
+        root: PathBuf,
+        fallback: Option<PathBuf>,
+    ) -> Result<Self, String> {
         if !root.is_dir() {
             return Err(format!(
                 "preview root {} is not a directory",
                 root.display()
             ));
+        }
+        if let Some(fb) = fallback.as_ref() {
+            if !fb.is_dir() {
+                return Err(format!(
+                    "preview fallback {} is not a directory",
+                    fb.display()
+                ));
+            }
         }
         let server = Server::http("127.0.0.1:0")
             .map_err(|e| format!("bind preview server: {e}"))?;
@@ -69,8 +91,14 @@ impl PreviewHandle {
         let server_arc = Arc::new(server);
         let server_for_thread = Arc::clone(&server_arc);
         let root_for_thread = root.clone();
+        let fallback_for_thread = fallback.clone();
         let thread = thread::spawn(move || {
-            serve_loop(&server_for_thread, &root_for_thread, stop_rx);
+            serve_loop(
+                &server_for_thread,
+                &root_for_thread,
+                fallback_for_thread.as_deref(),
+                stop_rx,
+            );
         });
         Ok(Self {
             url,
@@ -94,7 +122,12 @@ impl Drop for PreviewHandle {
     }
 }
 
-fn serve_loop(server: &Arc<Server>, root: &std::path::Path, stop_rx: mpsc::Receiver<()>) {
+fn serve_loop(
+    server: &Arc<Server>,
+    root: &std::path::Path,
+    fallback: Option<&std::path::Path>,
+    stop_rx: mpsc::Receiver<()>,
+) {
     loop {
         if stop_rx.try_recv().is_ok() {
             return;
@@ -109,7 +142,7 @@ fn serve_loop(server: &Arc<Server>, root: &std::path::Path, stop_rx: mpsc::Recei
             .iter()
             .find(|h| h.field.equiv("Range"))
             .map(|h| h.value.as_str().to_string());
-        let response = serve_request(&url, root, range.as_deref());
+        let response = serve_request(&url, root, fallback, range.as_deref());
         let _ = req.respond(response);
     }
 }
@@ -157,6 +190,7 @@ fn parse_range(header: &str, file_len: u64) -> Option<(u64, u64)> {
 fn serve_request(
     url: &str,
     root: &std::path::Path,
+    fallback: Option<&std::path::Path>,
     range: Option<&str>,
 ) -> Response<std::io::Cursor<Vec<u8>>> {
     // Strip query / fragment, then normalise to `<root>/<path>`.
@@ -170,32 +204,45 @@ fn serve_request(
     if requested.contains("..") || requested.contains(':') {
         return not_found();
     }
-    let mut full = root.to_path_buf();
+    // Try primary root first, then fallback root.
+    let candidates: [Option<&std::path::Path>; 2] = [Some(root), fallback];
+    for base in candidates.into_iter().flatten() {
+        if let Some(bytes) = try_load(base, &requested) {
+            let mime = mime_guess::from_path(&requested)
+                .first_or_octet_stream()
+                .to_string();
+            return respond_with_bytes(bytes, mime, range);
+        }
+    }
+    not_found()
+}
+
+fn try_load(base: &std::path::Path, requested: &str) -> Option<Vec<u8>> {
+    let mut full = base.to_path_buf();
     for part in requested.split('/') {
         if part.is_empty() || part == "." || part == ".." {
-            return not_found();
+            return None;
         }
         full.push(part);
     }
-    // Path traversal defense: canonicalize and re-check.
-    let (root_canon, full_canon) = match (root.canonicalize(), full.canonicalize()) {
+    let (root_canon, full_canon) = match (base.canonicalize(), full.canonicalize()) {
         (Ok(r), Ok(f)) => (r, f),
-        _ => return not_found(),
+        _ => return None,
     };
     if !full_canon.starts_with(&root_canon) {
-        return not_found();
+        return None;
     }
-    let mut file = match std::fs::File::open(&full_canon) {
-        Ok(f) => f,
-        Err(_) => return not_found(),
-    };
+    let mut file = std::fs::File::open(&full_canon).ok()?;
     let mut buf = Vec::new();
-    if file.read_to_end(&mut buf).is_err() {
-        return not_found();
-    }
-    let mime = mime_guess::from_path(&full_canon)
-        .first_or_octet_stream()
-        .to_string();
+    file.read_to_end(&mut buf).ok()?;
+    Some(buf)
+}
+
+fn respond_with_bytes(
+    buf: Vec<u8>,
+    mime: String,
+    range: Option<&str>,
+) -> Response<std::io::Cursor<Vec<u8>>> {
     let file_len = buf.len() as u64;
 
     // Honour Range headers. WKWebView refuses to play `<video>`
