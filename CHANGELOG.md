@@ -4,6 +4,14 @@ All notable changes shipped as a DMG. Only entries the owner has approved
 for release are listed here — "code-complete, awaiting ship approval" work
 lives in the session plan.md until it ships.
 
+## v3.24.5 — Communications template correction
+
+- Adds the **New Family Welcome** built-in message template to existing
+  installations through the idempotent template-seeding path, not only to
+  newly created databases.
+- Adds the optional `{{start_date}}` merge token to Compose with a localized
+  date field for welcome messages.
+
 ## v3.24.4 — App-wide deep-review hardening (code-complete, awaiting ship approval)
 
 Follow-up to v3.24.3. Six parallel deep-review passes (Claude Opus 4.7,

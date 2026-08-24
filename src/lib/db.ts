@@ -504,6 +504,9 @@ async function ensureSchema(d: Database): Promise<void> {
       ["Field Trip Notice", "Field trip permission: {{trip_name}} on {{trip_date}}",
         "Hi {{parent_name}},\n\nWe've planned a field trip to {{trip_name}} on {{trip_date}}. Departure: {{depart_time}}, return: {{return_time}}. Transportation: {{transport}}. Additional cost: $ .\n\nPlease sign and return the attached permission form by {{signup_deadline}} so {{student_name}} can join.\n\nThank you,\n{{daycare_name}}",
         "general"],
+      ["New Family Welcome", "Welcome to {{daycare_name}}, {{student_name}}!",
+        "Hi {{parent_name}},\n\nWelcome to the {{daycare_name}} family! We are delighted to welcome you and {{student_name}} as of {{start_date}}.\n\nThank you for choosing us to be part of {{student_name}}'s early learning journey. We have attached the documents you will need to help make the first week a smooth and positive start.\n\nBefore the first day, please review the attached information and let us know if there is anything we should be aware of, including allergies, dietary needs, routines, or questions about your child's care.\n\nWe look forward to getting to know {{student_name}} and your family. If you need anything before the start date, please reply to this email or contact us at {{contact_phone}}.\n\nWarmly,\n{{daycare_name}}\n{{contact_email}} | {{contact_phone}}",
+        "general"],
       ["Waitlist – Spot Offered", "Great news — a spot is available for {{student_name}} at {{daycare_name}}",
         "Hi {{parent_name}},\n\nWe're delighted to let you know that a spot has opened up for {{student_name}} at {{daycare_name}}. Based on your application we can offer a start date of [proposed start date].\n\nTo accept, please reply to this email by [reply-by date] and we'll send you the enrollment paperwork and first-month invoice. If we don't hear back by that date the spot will be released to the next family on the waitlist.\n\nHappy to answer any questions before you decide — just reply here or call {{contact_phone}}.\n\nWarmly,\n{{daycare_name}}\n{{contact_email}} | {{contact_phone}}",
         "waitlist"],
@@ -513,6 +516,9 @@ async function ensureSchema(d: Database): Promise<void> {
       ["Waitlist – No Spot Available", "Update on {{student_name}}'s waitlist application",
         "Hi {{parent_name}},\n\nThank you for your patience while we worked through the waitlist. Unfortunately we don't have a spot for {{student_name}} available at this time and, given our current enrollment, we don't expect one to open in the short term.\n\nIf you'd like we can keep {{student_name}} on the list in case something changes, or archive the application if you've already made other arrangements. Just reply and let us know.\n\nWe wish you the very best in finding great care for {{student_name}}.\n\nWarmly,\n{{daycare_name}}\n{{contact_email}} | {{contact_phone}}",
         "waitlist"],
+      ["New Family Welcome", "Welcome to {{daycare_name}}, {{student_name}}!",
+        "Hi {{parent_name}},\n\nWelcome to the {{daycare_name}} family! We are delighted to welcome you and {{student_name}} as of {{start_date}}.\n\nThank you for choosing us to be part of {{student_name}}'s early learning journey. We have attached the documents you will need to help make the first week a smooth and positive start.\n\nBefore the first day, please review the attached information and let us know if there is anything we should be aware of, including allergies, dietary needs, routines, or questions about your child's care.\n\nWe look forward to getting to know {{student_name}} and your family. If you need anything before the start date, please reply to this email or contact us at {{contact_phone}}.\n\nWarmly,\n{{daycare_name}}\n{{contact_email}} | {{contact_phone}}",
+        "general"],
     ];
     for (const [name, subject, body, kind] of seeds) {
       await d.execute(
@@ -535,6 +541,9 @@ async function ensureSchema(d: Database): Promise<void> {
     ["Waitlist – No Spot Available", "Update on {{student_name}}'s waitlist application",
       "Hi {{parent_name}},\n\nThank you for your patience while we worked through the waitlist. Unfortunately we don't have a spot for {{student_name}} available at this time and, given our current enrollment, we don't expect one to open in the short term.\n\nIf you'd like we can keep {{student_name}} on the list in case something changes, or archive the application if you've already made other arrangements. Just reply and let us know.\n\nWe wish you the very best in finding great care for {{student_name}}.\n\nWarmly,\n{{daycare_name}}\n{{contact_email}} | {{contact_phone}}",
       "waitlist"],
+    ["New Family Welcome", "Welcome to {{daycare_name}}, {{student_name}}!",
+      "Hi {{parent_name}},\n\nWelcome to the {{daycare_name}} family! We are delighted to welcome you and {{student_name}} as of {{start_date}}.\n\nThank you for choosing us to be part of {{student_name}}'s early learning journey. We have attached the documents you will need to help make the first week a smooth and positive start.\n\nBefore the first day, please review the attached information and let us know if there is anything we should be aware of, including allergies, dietary needs, routines, or questions about your child's care.\n\nWe look forward to getting to know {{student_name}} and your family. If you need anything before the start date, please reply to this email or contact us at {{contact_phone}}.\n\nWarmly,\n{{daycare_name}}\n{{contact_email}} | {{contact_phone}}",
+      "general"],
   ];
   for (const [name, subject, body, kind] of laterBuiltins) {
     const existing = await d.select<{ n: number }[]>(
@@ -2506,4 +2515,3 @@ export async function listAnnualReceiptsForPersonYear(personId: string, year: nu
     [personId, year]
   );
 }
-

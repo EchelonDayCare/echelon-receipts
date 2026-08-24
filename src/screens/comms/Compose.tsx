@@ -26,6 +26,7 @@ export default function Compose() {
 
   const [subject, setSubject] = useState("");
   const [body, setBody] = useState("");
+  const [startDate, setStartDate] = useState("");
   const [attachments, setAttachments] = useState<CommAttachment[]>([]);
   const [bccSelf, setBccSelf] = useState(true);
   const [adhoc, setAdhoc] = useState<AdhocRecipient[]>([]);
@@ -150,8 +151,9 @@ export default function Compose() {
     return buildMergeContext(
       { student: first, parentName: [first.father_name, first.mother_name].filter(Boolean).join(" & ") || "Parent", emails: parseRecipients(first.email) },
       settings,
+      { start_date: startDate ? new Date(`${startDate}T12:00:00`).toLocaleDateString(undefined, { year: "numeric", month: "long", day: "numeric" }) : "[start date]" },
     );
-  }, [filteredStudents, settings]);
+  }, [filteredStudents, settings, startDate]);
 
   async function onSend() {
     if (!subject.trim() || !body.trim()) { await showAlert("Enter a subject and body first.", { kind: "warning" }); return; }
@@ -166,6 +168,11 @@ export default function Compose() {
       const res = await sendGroupEmail({
         subject, body, recipients, attachments,
         settings: s,
+        extraContext: {
+          start_date: startDate
+            ? new Date(`${startDate}T12:00:00`).toLocaleDateString(undefined, { year: "numeric", month: "long", day: "numeric" })
+            : "[start date]",
+        },
         onProgress: (p) => setProgress((prev) => [...prev, p]),
       });
       if (res.failed === 0) await showAlert(`Sent to ${res.sent} recipient${res.sent === 1 ? "" : "s"}.`);
@@ -269,9 +276,13 @@ export default function Compose() {
             {templates.map((t) => <option key={t.id} value={t.id}>{t.name}{t.is_builtin ? " (built-in)" : ""}</option>)}
           </select>
           <div style={{ marginLeft: "auto", color: "var(--muted)", fontSize: 12 }}>
-            Tokens: {"{{parent_name}} {{student_name}} {{daycare_name}} {{contact_email}} {{contact_phone}} {{month}} {{year}} {{date}}"}
+            Tokens: {"{{parent_name}} {{student_name}} {{daycare_name}} {{contact_email}} {{contact_phone}} {{month}} {{year}} {{date}} {{start_date}}"}
           </div>
         </div>
+        <label style={{ display: "block", marginBottom: 6, fontWeight: 600 }}>
+          Start date <span style={{ fontWeight: 400, color: "var(--muted)" }}>(optional; used by <code>{"{{start_date}}"}</code>)</span>
+        </label>
+        <input type="date" value={startDate} onChange={(e) => setStartDate(e.target.value)} style={{ padding: 8, marginBottom: 12 }} />
         <label style={{ display: "block", marginBottom: 6, fontWeight: 600 }}>Subject</label>
         <input value={subject} onChange={(e) => setSubject(e.target.value)} style={{ width: "100%", padding: 8, marginBottom: 12 }} placeholder="Reminder about pickup — {{student_name}}" />
         <label style={{ display: "block", marginBottom: 6, fontWeight: 600 }}>Body</label>
