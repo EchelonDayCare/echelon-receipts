@@ -358,7 +358,43 @@ pub async fn soft_delete(
     Ok(())
 }
 
-/// Soft-delete + insert an audit row into `site_emergency_removes`.
+/// Bulk soft-delete: flag every id in a single transaction and
+/// rewrite `content/gallery.json` once. Beats a per-id loop over
+/// `soft_delete` on both DB traffic (one tx, one gallery re-read)
+/// and gallery.json atomicity — a partial failure never leaves the
+/// working copy referring to already-deleted rows.
+pub async fn bulk_soft_delete(
+    db: &DbGate,
+    repo_dir: &Path,
+    media_ids: Vec<i64>,
+) -> MediaResult<usize> {
+    if media_ids.is_empty() {
+        return Ok(0);
+    }
+    let ids = media_ids.clone();
+    let affected = db
+        .with_conn(move |conn| {
+            let tx = conn.unchecked_transaction()?;
+            let mut updated: usize = 0;
+            {
+                let mut stmt = tx.prepare(
+                    "UPDATE site_media SET deleted_at = datetime('now') \
+                     WHERE id = ?1 AND deleted_at IS NULL",
+                )?;
+                for id in &ids {
+                    updated += stmt.execute(params![id])?;
+                }
+            }
+            tx.commit()?;
+            Ok(updated)
+        })
+        .await?;
+    let items = load_ordered_photo_records(db).await?;
+    rewrite_gallery_items(repo_dir, &items)?;
+    Ok(affected)
+}
+
+
 ///
 /// The actual git history rewrite is deferred to the publish-time
 /// pipeline (a separate PR). Callers should surface a warning to the
@@ -569,39 +605,114 @@ pub async fn list_media(
     kind: Option<MediaKind>,
 ) -> MediaResult<Vec<MediaRecord>> {
     let kind_str = kind.map(|k| k.as_str().to_string());
-    let base_rows: Vec<i64> = db
+    let records = db
         .with_conn(move |conn| {
+            // Load the base rows and their variants in a single conn
+            // handoff so we avoid one round-trip per record (the old
+            // per-id `load_media_record` loop was quadratic in wall
+            // time once a centre uploaded a few hundred photos).
+            let base_sql = if kind_str.is_some() {
+                "SELECT id, base_hash, source_filename, kind, caption, alt, \
+                        focal_x, focal_y, width, height, original_bytes_len, \
+                        exif_stripped, created_at, deleted_at \
+                 FROM site_media \
+                 WHERE deleted_at IS NULL AND kind = ?1 \
+                 ORDER BY sort_order ASC, id ASC"
+            } else {
+                "SELECT id, base_hash, source_filename, kind, caption, alt, \
+                        focal_x, focal_y, width, height, original_bytes_len, \
+                        exif_stripped, created_at, deleted_at \
+                 FROM site_media \
+                 WHERE deleted_at IS NULL \
+                 ORDER BY sort_order ASC, id ASC"
+            };
+            let mut stmt = conn.prepare(base_sql)?;
+            let mut records: Vec<MediaRecord> = Vec::new();
             let mut ids: Vec<i64> = Vec::new();
-            if let Some(k) = &kind_str {
-                let mut stmt = conn.prepare(
-                    "SELECT id FROM site_media \
-                     WHERE deleted_at IS NULL AND kind = ?1 \
-                     ORDER BY sort_order ASC, id ASC",
-                )?;
-                let rows = stmt.query_map(params![k], |r| r.get::<_, i64>(0))?;
+            let map_row = |r: &rusqlite::Row| {
+                Ok(MediaRecord {
+                    id: r.get(0)?,
+                    base_hash: r.get(1)?,
+                    source_filename: r.get(2)?,
+                    kind: r.get(3)?,
+                    caption: r.get(4)?,
+                    alt: r.get(5)?,
+                    focal_x: r.get(6)?,
+                    focal_y: r.get(7)?,
+                    width: r.get(8)?,
+                    height: r.get(9)?,
+                    original_bytes_len: r.get(10)?,
+                    exif_stripped: r.get::<_, i64>(11)? != 0,
+                    created_at: r.get(12)?,
+                    deleted_at: r.get(13)?,
+                    variants: Vec::new(),
+                })
+            };
+            if let Some(k) = kind_str.as_deref() {
+                let rows = stmt.query_map(params![k], map_row)?;
                 for r in rows {
-                    ids.push(r?);
+                    let rec = r?;
+                    ids.push(rec.id);
+                    records.push(rec);
                 }
             } else {
-                let mut stmt = conn.prepare(
-                    "SELECT id FROM site_media \
-                     WHERE deleted_at IS NULL \
-                     ORDER BY sort_order ASC, id ASC",
-                )?;
-                let rows = stmt.query_map([], |r| r.get::<_, i64>(0))?;
+                let rows = stmt.query_map([], map_row)?;
                 for r in rows {
-                    ids.push(r?);
+                    let rec = r?;
+                    ids.push(rec.id);
+                    records.push(rec);
                 }
             }
-            Ok(ids)
+            if records.is_empty() {
+                return Ok(records);
+            }
+            // Batch-fetch all variants for these ids and group by
+            // media_id. SQLite's default max host params is 999 —
+            // chunk to stay well under that even on the largest
+            // gallery.
+            use std::collections::HashMap;
+            let mut variants_by_media: HashMap<i64, Vec<VariantRecord>> =
+                HashMap::with_capacity(records.len());
+            const CHUNK: usize = 500;
+            for chunk in ids.chunks(CHUNK) {
+                let placeholders = std::iter::repeat("?")
+                    .take(chunk.len())
+                    .collect::<Vec<_>>()
+                    .join(",");
+                let sql = format!(
+                    "SELECT media_id, id, width, format, filename, bytes_len \
+                     FROM site_media_variants \
+                     WHERE media_id IN ({placeholders}) \
+                     ORDER BY media_id ASC, width ASC, format ASC",
+                );
+                let mut vstmt = conn.prepare(&sql)?;
+                let params_iter =
+                    rusqlite::params_from_iter(chunk.iter().copied());
+                let rows = vstmt.query_map(params_iter, |r| {
+                    let media_id: i64 = r.get(0)?;
+                    let v = VariantRecord {
+                        id: r.get(1)?,
+                        width: r.get(2)?,
+                        format: r.get(3)?,
+                        filename: r.get(4)?,
+                        bytes_len: r.get(5)?,
+                    };
+                    Ok((media_id, v))
+                })?;
+                for row in rows {
+                    let (media_id, v) = row?;
+                    variants_by_media.entry(media_id).or_default().push(v);
+                }
+            }
+            for rec in &mut records {
+                if let Some(vs) = variants_by_media.remove(&rec.id) {
+                    rec.variants = vs;
+                }
+            }
+            Ok(records)
         })
         .await?;
-
-    let mut out = Vec::with_capacity(base_rows.len());
-    for id in base_rows {
-        out.push(load_media_record(db, id).await?);
-    }
-    Ok(out)
+    Ok(records)
 }
 
 // ─────────────────────────────────────────────────────────────────────

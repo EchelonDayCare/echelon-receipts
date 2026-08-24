@@ -336,6 +336,10 @@ export function websiteDeleteMedia(mediaId: number): Promise<void> {
   return invoke("website_delete_media", { mediaId });
 }
 
+export function websiteBulkDeleteMedia(mediaIds: number[]): Promise<number> {
+  return invoke<number>("website_bulk_delete_media", { mediaIds });
+}
+
 export function websiteEmergencyRemove(
   mediaId: number,
   reason: string,

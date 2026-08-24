@@ -696,6 +696,19 @@ pub async fn website_delete_media(
 }
 
 #[tauri::command]
+pub async fn website_bulk_delete_media(
+    app: AppHandle,
+    db: State<'_, DbGate>,
+    media_ids: Vec<i64>,
+) -> Result<usize, String> {
+    require_enabled()?;
+    let wc = ensure_working_copy(&app)?;
+    media::bulk_soft_delete(db.inner(), &wc.repo_dir, media_ids)
+        .await
+        .map_err(to_err)
+}
+
+#[tauri::command]
 pub async fn website_emergency_remove(
     app: AppHandle,
     db: State<'_, DbGate>,

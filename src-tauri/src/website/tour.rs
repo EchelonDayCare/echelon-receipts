@@ -385,19 +385,31 @@ pub async fn website_tour_add_videos(
         let poster_dst = wc.repo_dir.join(&poster_rel);
 
         std::fs::create_dir_all(video_dst.parent().unwrap()).ok();
-        transcode_video(&ffmpeg, &src, &video_dst)
-            .map_err(|e| format!("transcode {} → {}: {e}", src.display(), video_dst.display()))?;
-
-        if let Err(e) = extract_poster(&ffmpeg, &video_dst, &poster_dst) {
-            // Poster is a soft requirement — fall back to the previous
-            // video's poster or the site's og-image so the entry is
-            // still usable. Log the error via the returned message
-            // downstream (we surface a warning).
-            let _ = std::fs::write(
-                poster_dst.with_extension("txt"),
-                format!("ffmpeg poster extraction skipped: {e}"),
-            );
-        }
+        // ffmpeg is CPU + IO bound and can take tens of seconds per
+        // clip — offload onto the blocking pool so we don't stall
+        // Tauri's async runtime (progress events, other commands).
+        let ffmpeg_c = ffmpeg.clone();
+        let src_c = src.clone();
+        let video_dst_c = video_dst.clone();
+        let poster_dst_c = poster_dst.clone();
+        tokio::task::spawn_blocking(move || {
+            transcode_video(&ffmpeg_c, &src_c, &video_dst_c).map_err(|e| {
+                format!(
+                    "transcode {} → {}: {e}",
+                    src_c.display(),
+                    video_dst_c.display()
+                )
+            })?;
+            if let Err(e) = extract_poster(&ffmpeg_c, &video_dst_c, &poster_dst_c) {
+                let _ = std::fs::write(
+                    poster_dst_c.with_extension("txt"),
+                    format!("ffmpeg poster extraction skipped: {e}"),
+                );
+            }
+            Ok::<(), String>(())
+        })
+        .await
+        .map_err(|e| format!("transcode join: {e}"))??;
 
         let id = next_id(&current);
         let title_stem = Path::new(&orig_name)

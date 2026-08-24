@@ -4,6 +4,57 @@ All notable changes shipped as a DMG. Only entries the owner has approved
 for release are listed here — "code-complete, awaiting ship approval" work
 lives in the session plan.md until it ships.
 
+## v3.24.0 — Website module perf + UX pass
+
+Follow-up to v3.23.4's deep-review hardening. Fixes the highest-signal
+performance and UX items from the same review that were deferred out of
+that release.
+
+### Performance
+
+- **`list_media` no longer does N+1 variant queries.** The Gallery tab
+  called one `SELECT … FROM site_media_variants WHERE media_id = ?` per
+  photo; on centres with 300+ uploads that meant 300+ round-trips through
+  the async DB gate on every refresh. Now runs one `IN (…)` batch per
+  chunk of 500 ids, grouped in a `HashMap` and attached in-memory.
+- **`spawn_blocking` / `block_in_place` around long-running native work.**
+  `run_pipeline` (git fetch/commit/push, render step) and
+  `website_tour_add_videos` (ffmpeg transcode + poster extraction) no
+  longer starve Tokio's async runtime; other Tauri commands stay
+  responsive during a publish or a long transcode.
+- **Gallery grid images lazy-load.** Every thumbnail got
+  `loading="lazy" decoding="async" width height`, cutting decode CPU on
+  Gallery open by an order of magnitude on centres with 100+ photos.
+
+### UX
+
+- **AI proposal review queue.** Prompt-driven page edits used to
+  auto-save as a draft revision the moment the AI came back — visitors
+  had to open Revisions and roll back if the copy landed wrong. Now the
+  proposal renders inline with **Accept & save draft** / **Reject**
+  buttons; nothing is written until Accept.
+- **Unsaved-edits guard covers react-router navigation.** The existing
+  `beforeunload` handler only caught window close and refresh — sidebar
+  clicks (e.g. jumping from Contact editor to Careers) silently dropped
+  in-progress edits. Added `useBlocker` with a confirm prompt.
+- **Preview "Home" opens the site root (`/`)** instead of the redundant
+  `/pages/home.html`, matching how visitors actually land on the site.
+- **Native OS drag-drop wiring extracted into a reusable
+  `useTauriDragDrop` hook.** Same StrictMode-safe behavior as before,
+  now shareable across future upload targets.
+- **Bulk delete goes to the backend in one command.** Selecting 50
+  photos and hitting *Delete selected* used to fire 50 sequential
+  `website_delete_media` invocations (each rewriting `gallery.json`).
+  New `website_bulk_delete_media` command wraps every soft-delete in a
+  single transaction and does one gallery.json rewrite.
+
+### Notes
+
+- Deferred to a follow-up: cross-machine draft reconcile, incremental
+  render skip for unchanged pages, and zero-copy preview from the
+  working copy. Each needs a schema addition and larger refactor;
+  packaging them here would have delayed this bundle.
+
 ## v3.23.4 — Website module deep-review hardening
 
 Consolidated fixes from a 4-agent parallel review (code review, functionality
