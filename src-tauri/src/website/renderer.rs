@@ -489,27 +489,47 @@ pub fn render_all(
 ) -> Result<Vec<(String, PathBuf)>, String> {
     let env = make_env(&inputs.templates_dir());
     let mut written = Vec::new();
+    // Read the base template bytes once — every page inherits from it,
+    // so a base.html edit invalidates every page's cached stamp.
+    let base_bytes = std::fs::read(inputs.templates_dir().join("base.html"))
+        .unwrap_or_default();
     for page in ALL_PAGES {
         let tmpl_path = inputs.templates_dir().join(page.template);
         if !tmpl_path.exists() {
             continue;
         }
-        let tmpl = env
-            .get_template(page.template)
-            .map_err(|e| format!("load template {}: {e}", page.template))?;
-        let ctx = build_page_context(page.key, &inputs.content)?;
-        let mj_ctx: MjValue = MjValue::from_serialize(&ctx);
-        let html = tmpl
-            .render(mj_ctx)
-            .map_err(|e| format!("render {}: {e}", page.template))?;
-        let html = normalize_lf(&html);
         let out_path = out_dir.join(page.output);
-        if let Some(parent) = out_path.parent() {
-            std::fs::create_dir_all(parent)
-                .map_err(|e| format!("mkdir {}: {e}", parent.display()))?;
+        // Fingerprint the inputs this page depends on: its content
+        // JSON slice, its template bytes, and the shared base
+        // template bytes. If a matching `.stamp` sits next to a
+        // previously-rendered HTML, skip the (expensive) minijinja
+        // render + write. We still record the page in `written` so
+        // downstream consumers (publish staging, preview list) see
+        // a stable output regardless of cache hits.
+        let ctx = build_page_context(page.key, &inputs.content)?;
+        let stamp = compute_render_stamp(page.key, &ctx, &tmpl_path, &base_bytes);
+        let stamp_path = out_path.with_extension("stamp");
+        let cache_hit = out_path.exists()
+            && std::fs::read_to_string(&stamp_path)
+                .map(|s| s.trim() == stamp)
+                .unwrap_or(false);
+        if !cache_hit {
+            let tmpl = env
+                .get_template(page.template)
+                .map_err(|e| format!("load template {}: {e}", page.template))?;
+            let mj_ctx: MjValue = MjValue::from_serialize(&ctx);
+            let html = tmpl
+                .render(mj_ctx)
+                .map_err(|e| format!("render {}: {e}", page.template))?;
+            let html = normalize_lf(&html);
+            if let Some(parent) = out_path.parent() {
+                std::fs::create_dir_all(parent)
+                    .map_err(|e| format!("mkdir {}: {e}", parent.display()))?;
+            }
+            std::fs::write(&out_path, html.as_bytes())
+                .map_err(|e| format!("write {}: {e}", out_path.display()))?;
+            let _ = std::fs::write(&stamp_path, stamp.as_bytes());
         }
-        std::fs::write(&out_path, html.as_bytes())
-            .map_err(|e| format!("write {}: {e}", out_path.display()))?;
         written.push((page.key.to_string(), PathBuf::from(page.output)));
     }
     // Mirror `content/careers.json`'s `jobs` array out to
@@ -521,6 +541,27 @@ pub fn render_all(
         written.push(("careers_jobs".to_string(), jobs_path));
     }
     Ok(written)
+}
+
+fn compute_render_stamp(
+    page_key: &str,
+    ctx: &serde_json::Value,
+    tmpl_path: &Path,
+    base_bytes: &[u8],
+) -> String {
+    use sha2::{Digest, Sha256};
+    let ctx_bytes = serde_json::to_vec(ctx).unwrap_or_default();
+    let tmpl_bytes = std::fs::read(tmpl_path).unwrap_or_default();
+    let mut h = Sha256::new();
+    h.update(page_key.as_bytes());
+    h.update([0u8]);
+    h.update(&ctx_bytes);
+    h.update([0u8]);
+    h.update(&tmpl_bytes);
+    h.update([0u8]);
+    h.update(base_bytes);
+    let digest = h.finalize();
+    digest.iter().map(|b| format!("{b:02x}")).collect()
 }
 
 /// Emit `assets/data/jobs.json` from `content.careers.jobs`. Field order

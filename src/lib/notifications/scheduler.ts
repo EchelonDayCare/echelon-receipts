@@ -13,6 +13,7 @@ import {
   type Severity,
 } from "../../repo/notificationsRepo";
 import { setSetting, getSettings as getAppSettings } from "../db";
+import { invoke } from "@tauri-apps/api/core";
 
 let running = false;
 let pending: Promise<void> | null = null;
@@ -52,6 +53,17 @@ export function runScanSoon(): Promise<void> {
 /** Run all scanners synchronously (awaitable). */
 export async function runScanNow(): Promise<void> {
   if (running) return;
+  // Cold-start guard: the notification scheduler used to fire ~100ms
+  // after mount and race the Rust DB open, throwing
+  // "[db] db_gate not open at load()" into the console until the
+  // 10-minute retry landed. Peek the gate first; if it's not ready
+  // yet, silently bail — the setInterval will retry.
+  try {
+    const open = await invoke<boolean>("db_is_open");
+    if (!open) return;
+  } catch {
+    return;
+  }
   running = true;
   try {
     const settings = await getNotifSettings();

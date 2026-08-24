@@ -118,6 +118,12 @@ export function websiteLoadContent(file: EditableFile): Promise<ContentFile> {
   return invoke<ContentFile>("website_load_content", { file });
 }
 
+export function websiteCheckDraftStaleness(
+  file: EditableFile,
+): Promise<boolean> {
+  return invoke<boolean>("website_check_draft_staleness", { file });
+}
+
 export function websiteSaveDraft(req: {
   file: EditableFile;
   content_json: string;

@@ -209,7 +209,7 @@ pub async fn website_gallery_videos_add(
     let pretty = serde_json::to_string_pretty(&root)
         .map_err(|e| format!("serialize {CONTENT_FILE}.json: {e}"))?
         + "\n";
-    let rev = revisions::save_draft(db.inner(), CONTENT_FILE, &pretty, None)
+    let rev = revisions::save_draft(db.inner(), CONTENT_FILE, &pretty, None, None)
         .await
         .map_err(|e| e.to_string())?;
     Ok(AddVideosResponse {
@@ -258,7 +258,7 @@ pub async fn website_gallery_videos_delete(
     let pretty = serde_json::to_string_pretty(&root)
         .map_err(|e| format!("serialize {CONTENT_FILE}.json: {e}"))?
         + "\n";
-    let rev = revisions::save_draft(db.inner(), CONTENT_FILE, &pretty, None)
+    let rev = revisions::save_draft(db.inner(), CONTENT_FILE, &pretty, None, None)
         .await
         .map_err(|e| e.to_string())?;
     Ok(rev)
@@ -296,7 +296,7 @@ pub async fn website_gallery_videos_reorder(
     let pretty = serde_json::to_string_pretty(&root)
         .map_err(|e| format!("serialize {CONTENT_FILE}.json: {e}"))?
         + "\n";
-    let rev = revisions::save_draft(db.inner(), CONTENT_FILE, &pretty, None)
+    let rev = revisions::save_draft(db.inner(), CONTENT_FILE, &pretty, None, None)
         .await
         .map_err(|e| e.to_string())?;
     Ok(rev)
