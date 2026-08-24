@@ -465,6 +465,44 @@ pub async fn replace_favicon(
     regenerate_favicons_from_source(db, repo_dir, source_path).await
 }
 
+/// Replace one of the three About-page hero photo slots
+/// (`assets/img/photo1.jpg` / `photo2.jpg` / `photo3.jpg`).
+///
+/// Crop-to-fill 1400×900 (~1.55:1, matches the CSS 280×180 slot ratio),
+/// re-encode as JPEG q88, overwrite the file in place. Filenames are
+/// fixed so `content/about.json.image_grid[*].src` never needs updating
+/// — the site template already references `photo1/2/3.jpg`.
+///
+/// `slot` must be 1, 2, or 3; any other value returns an error.
+/// Returns the relative repo path that was written, e.g. `"assets/img/photo1.jpg"`.
+pub async fn replace_about_photo(
+    repo_dir: &Path,
+    slot: u8,
+    source_path: &Path,
+) -> MediaResult<String> {
+    if !(1..=3).contains(&slot) {
+        return Err(MediaOpError::InvalidWorkingCopy(format!(
+            "about-photo slot must be 1, 2, or 3 (got {slot})"
+        )));
+    }
+
+    let bytes = load_and_normalize_bytes(source_path)?;
+    let img = image::load_from_memory(&bytes)?;
+    let cropped = crop_to_fill(&img, 1400, 900);
+
+    let mut jpeg_bytes = Vec::new();
+    image::codecs::jpeg::JpegEncoder::new_with_quality(&mut jpeg_bytes, 88)
+        .encode_image(&cropped)?;
+
+    // Non-photo asset root: assets/img/ (asset_subdir returns "" for
+    // anything not MediaKind::Photo).
+    let out_dir = ensure_asset_dir(repo_dir, MediaKind::Logo)?;
+    let rel = format!("assets/img/photo{slot}.jpg");
+    let out_path = out_dir.join(format!("photo{slot}.jpg"));
+    std::fs::write(&out_path, &jpeg_bytes)?;
+    Ok(rel)
+}
+
 /// Replace the OG image. 1200×630 crop-to-fill using the `image`
 /// crate, written to `assets/img/og-image.png`. DB row `kind=og_image`.
 pub async fn replace_og_image(

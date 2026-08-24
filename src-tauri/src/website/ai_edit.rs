@@ -23,7 +23,7 @@ const AZURE_OPENAI_ENDPOINT: &str = "https://ai-nse.openai.azure.com";
 const CHAT_DEPLOY: &str = "gpt-5.4";
 const CHAT_API_VER: &str = "2025-04-01-preview";
 
-const SUPPORTED_PAGES: &[&str] = &["careers", "tour", "contact"];
+const SUPPORTED_PAGES: &[&str] = &["about", "careers", "tour", "contact"];
 
 #[derive(Debug, Deserialize)]
 pub struct AiEditRequest {
@@ -166,6 +166,23 @@ async fn call_content_editor(
            didn't ask to change.\n\
          * If the user's request only affects `contact.json` (heading, map, \
            aria labels), leave `site_content_json` empty (null).\n"
+    } else if page == "about" {
+        "\n\
+         ABOUT PAGE — EXTRA CONTEXT\n\
+         The About page supports an OPEN array `custom_sections` for any \
+         extra headings the owner wants (e.g. Business Hours, Awards, \
+         Testimonials, Enrolment steps). Each entry is:\n\
+           { \"heading\": string,\n\
+             \"type\": \"paragraph\" | \"bullets\",\n\
+             \"paragraph\": string   // when type = paragraph\n\
+             \"bullets\": [string]   // when type = bullets\n\
+           }\n\
+         When the user asks to add a new section that doesn't fit an \
+         existing key (Vision, Mission, Team, Why choose us, Neighbourhoods), \
+         APPEND a new entry to `custom_sections` — do NOT stuff it into an \
+         unrelated bullet list. If `custom_sections` is missing, create it. \
+         Keep existing custom sections in the order they appear unless the \
+         user asks to reorder or remove one.\n"
     } else {
         ""
     };

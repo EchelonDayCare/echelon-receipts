@@ -1,10 +1,14 @@
-import { useEffect, useMemo, useState } from "react";
-import { useBlocker, useNavigate, useParams } from "react-router-dom";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { useNavigate, useParams } from "react-router-dom";
+import { open } from "@tauri-apps/plugin-dialog";
+import { convertFileSrc } from "@tauri-apps/api/core";
 import {
   websiteAiEditContent,
   websiteCheckDraftStaleness,
   websiteLoadContent,
   websiteSaveDraft,
+  websiteReplaceAboutPhoto,
+  websiteWorkingCopyStatus,
   tryPrettyJson,
   EDITABLE_FILES,
   type EditableFile,
@@ -57,24 +61,35 @@ export default function PageEditor() {
   }, [dirty]);
 
   // Block react-router navigation (sidebar clicks, back/preview/history
-  // buttons) while there are unsaved edits — `beforeunload` above only
-  // fires for full page reloads and window close, not for client-side
-  // route changes.
-  const blocker = useBlocker(
-    ({ currentLocation, nextLocation }) =>
-      dirty && currentLocation.pathname !== nextLocation.pathname,
-  );
+  // buttons) while there are unsaved edits. We can't use `useBlocker`
+  // here because the app mounts a non-data `HashRouter`; instead we
+  // intercept anchor clicks in the capture phase and confirm with the
+  // user before allowing the hash to change.
+  const dirtyRef = useRef(dirty);
+  useEffect(() => { dirtyRef.current = dirty; }, [dirty]);
   useEffect(() => {
-    if (blocker.state !== "blocked") return;
-    if (window.confirm("You have unsaved edits. Discard and leave this page?")) {
-      blocker.proceed();
-    } else {
-      blocker.reset();
-    }
-  }, [blocker]);
+    const onClick = (ev: MouseEvent) => {
+      if (!dirtyRef.current) return;
+      if (ev.defaultPrevented || ev.button !== 0) return;
+      if (ev.metaKey || ev.ctrlKey || ev.shiftKey || ev.altKey) return;
+      const target = ev.target as HTMLElement | null;
+      const anchor = target?.closest?.("a[href]") as HTMLAnchorElement | null;
+      if (!anchor) return;
+      const href = anchor.getAttribute("href") || "";
+      if (!href.startsWith("#/")) return;
+      const currentHash = window.location.hash || "#/";
+      if (href === currentHash) return;
+      if (!window.confirm("You have unsaved edits. Discard and leave this page?")) {
+        ev.preventDefault();
+        ev.stopPropagation();
+      }
+    };
+    document.addEventListener("click", onClick, true);
+    return () => document.removeEventListener("click", onClick, true);
+  }, []);
 
   // AI edit state — only rendered when the current page supports it.
-  const AI_EDIT_PAGES: EditableFile[] = ["careers", "tour", "contact"];
+  const AI_EDIT_PAGES: EditableFile[] = ["about", "careers", "tour", "contact"];
   const aiEnabled = AI_EDIT_PAGES.includes(file);
   const [aiPrompt, setAiPrompt] = useState("");
   const [aiBusy, setAiBusy] = useState(false);
@@ -364,8 +379,281 @@ export default function PageEditor() {
     }
   }
 
+  // ─────────────────────────────────────────────────────────────────
+  // About: structured field form (v3.24.2). Mirrors Contact pattern —
+  // load about.json, expose heading + intro + vision/mission/team/why
+  // as individual inputs, save the reconstructed JSON on Submit.
+  //
+  // The user sees plain text everywhere: HTML tags in intro_html are
+  // stripped for display and re-applied on save. The daycare name in
+  // the intro stays wrapped in <span class="highlight"> automatically.
+  // Extra whitespace from JSON indentation is collapsed to single
+  // spaces so paragraphs read naturally in the textarea.
+  // ─────────────────────────────────────────────────────────────────
+  type CustomSectionType = "paragraph" | "bullets";
+  type CustomSection = {
+    heading: string;
+    type: CustomSectionType;
+    paragraph: string;
+    bullets: string; // one bullet per line (edit UX)
+  };
+  type AboutForm = {
+    heading: string;
+    intro_html: string;
+    vision_heading: string;
+    vision_paragraph: string;
+    mission_heading: string;
+    mission_bullets: string;   // one bullet per line
+    team_heading: string;
+    team_paragraph: string;
+    why_heading: string;
+    why_bullets: string;       // one bullet per line
+    custom_sections: CustomSection[];
+  };
+  const stripToPlain = (s: string): string => {
+    // Remove HTML tags, decode a small set of common entities, and
+    // collapse runs of whitespace so JSON-indented copy renders as
+    // clean sentences instead of a jagged column.
+    const noTags = s.replace(/<[^>]+>/g, "");
+    const decoded = noTags
+      .replace(/&nbsp;/g, " ")
+      .replace(/&amp;/g, "&")
+      .replace(/&lt;/g, "<")
+      .replace(/&gt;/g, ">")
+      .replace(/&quot;/g, '"')
+      .replace(/&#39;/g, "'")
+      .replace(/&ndash;/g, "–")
+      .replace(/&mdash;/g, "—");
+    return decoded.replace(/\s+/g, " ").trim();
+  };
+  const extractHighlightTerm = (html: string): string => {
+    const m = html.match(/<span[^>]*class=["'][^"']*highlight[^"']*["'][^>]*>([\s\S]*?)<\/span>/i);
+    if (!m) return "";
+    return stripToPlain(m[1]);
+  };
+  const escapeHtml = (s: string): string =>
+    s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  const applyHighlight = (plainText: string, term: string): string => {
+    // Case-insensitively wrap the first occurrence of `term` in
+    // <span class="highlight">…</span>, escaping HTML in the surrounding
+    // text so a user typing "<" doesn't accidentally emit markup.
+    if (!term) return escapeHtml(plainText);
+    const idx = plainText.toLowerCase().indexOf(term.toLowerCase());
+    if (idx < 0) return escapeHtml(plainText);
+    const before = plainText.slice(0, idx);
+    const match = plainText.slice(idx, idx + term.length);
+    const after = plainText.slice(idx + term.length);
+    return `${escapeHtml(before)}<span class="highlight">${escapeHtml(match)}</span>${escapeHtml(after)}`;
+  };
+  const parseAbout = (raw: string): AboutForm => {
+    try {
+      const p = JSON.parse(raw);
+      return {
+        heading: String(p?.heading ?? ""),
+        intro_html: stripToPlain(String(p?.intro_html ?? "")),
+        vision_heading: String(p?.vision?.heading ?? ""),
+        vision_paragraph: stripToPlain(String(p?.vision?.paragraph ?? "")),
+        mission_heading: String(p?.mission?.heading ?? ""),
+        mission_bullets: Array.isArray(p?.mission?.bullets)
+          ? p.mission.bullets.map((b: unknown) => String(b)).join("\n")
+          : "",
+        team_heading: String(p?.team?.heading ?? ""),
+        team_paragraph: stripToPlain(String(p?.team?.paragraph ?? "")),
+        why_heading: String(p?.why_choose_us?.heading ?? ""),
+        why_bullets: Array.isArray(p?.why_choose_us?.bullets)
+          ? p.why_choose_us.bullets.map((b: unknown) => String(b)).join("\n")
+          : "",
+        custom_sections: Array.isArray(p?.custom_sections)
+          ? p.custom_sections.map((s: any): CustomSection => {
+              const t: CustomSectionType = s?.type === "bullets" ? "bullets" : "paragraph";
+              return {
+                heading: String(s?.heading ?? ""),
+                type: t,
+                paragraph: stripToPlain(String(s?.paragraph ?? "")),
+                bullets: Array.isArray(s?.bullets)
+                  ? s.bullets.map((b: unknown) => String(b)).join("\n")
+                  : "",
+              };
+            })
+          : [],
+      };
+    } catch {
+      return {
+        heading: "", intro_html: "",
+        vision_heading: "", vision_paragraph: "",
+        mission_heading: "", mission_bullets: "",
+        team_heading: "", team_paragraph: "",
+        why_heading: "", why_bullets: "",
+        custom_sections: [],
+      };
+    }
+  };
+  const currentAbout = useMemo<AboutForm | null>(() => {
+    if (file !== "about" || !content) return null;
+    return parseAbout(content.content_json);
+  }, [file, content]);
+
+  // Highlight term detected from the raw JSON — kept alongside form
+  // state so Submit can re-wrap it in the intro even after the user
+  // has rewritten the sentence.
+  const highlightTerm = useMemo<string>(() => {
+    if (file !== "about" || !content) return "";
+    try {
+      const p = JSON.parse(content.content_json);
+      return extractHighlightTerm(String(p?.intro_html ?? ""));
+    } catch { return ""; }
+  }, [file, content]);
+
+  const [aboutForm, setAboutForm] = useState<AboutForm>(() => parseAbout(""));
+  const [aboutSubmitBusy, setAboutSubmitBusy] = useState(false);
+  const [aboutMsg, setAboutMsg] = useState<string | null>(null);
+  const [aboutErr, setAboutErr] = useState<string | null>(null);
+  const [photoRepoRoot, setPhotoRepoRoot] = useState<string | null>(null);
+  const [photoBusySlot, setPhotoBusySlot] = useState<1 | 2 | 3 | null>(null);
+  const [photoBust, setPhotoBust] = useState(0);
+
   useEffect(() => {
-    // Prune stale selections when jobs list changes (e.g. after AI edit).
+    if (file !== "about") return;
+    void (async () => {
+      try {
+        const wc = await websiteWorkingCopyStatus();
+        setPhotoRepoRoot(wc.root);
+      } catch { /* ignore — repo lookup is only for thumbnail preview */ }
+    })();
+  }, [file]);
+
+  async function pickAndReplaceAboutPhoto(slot: 1 | 2 | 3) {
+    setAboutErr(null);
+    setAboutMsg(null);
+    const picked = await open({
+      multiple: false,
+      filters: [{ name: "Images", extensions: ["jpg", "jpeg", "png", "heic", "webp", "avif"] }],
+    });
+    if (!picked || typeof picked !== "string") return;
+    setPhotoBusySlot(slot);
+    try {
+      await websiteReplaceAboutPhoto(slot, picked);
+      setPhotoBust((n) => n + 1);
+      setAboutMsg(`Photo ${slot} replaced. Preview to check, then Publish.`);
+    } catch (e: any) {
+      setAboutErr(`Photo ${slot} replace failed: ${String(e?.message ?? e)}`);
+    } finally {
+      setPhotoBusySlot(null);
+    }
+  }
+
+  function aboutPhotoThumbUrl(slot: 1 | 2 | 3): string | null {
+    if (!photoRepoRoot) return null;
+    const abs = `${photoRepoRoot}/repo/assets/img/photo${slot}.jpg`;
+    return `${convertFileSrc(abs)}?bust=${photoBust}`;
+  }
+
+  useEffect(() => {
+    if (file !== "about" || !currentAbout) return;
+    setAboutForm(currentAbout);
+  }, [file, currentAbout]);
+
+  useEffect(() => {
+    setAboutMsg(null);
+    setAboutErr(null);
+  }, [file]);
+
+  const aboutDirty = useMemo(() => {
+    if (file !== "about" || !currentAbout) return false;
+    const scalarKeys: (keyof AboutForm)[] = [
+      "heading", "intro_html",
+      "vision_heading", "vision_paragraph",
+      "mission_heading", "mission_bullets",
+      "team_heading", "team_paragraph",
+      "why_heading", "why_bullets",
+    ];
+    if (scalarKeys.some((k) => aboutForm[k] !== currentAbout[k])) return true;
+    const a = aboutForm.custom_sections;
+    const b = currentAbout.custom_sections;
+    if (a.length !== b.length) return true;
+    return a.some((sec, i) => (
+      sec.heading !== b[i].heading ||
+      sec.type !== b[i].type ||
+      sec.paragraph !== b[i].paragraph ||
+      sec.bullets !== b[i].bullets
+    ));
+  }, [file, aboutForm, currentAbout]);
+
+  function setAboutField<K extends keyof AboutForm>(key: K, value: AboutForm[K]) {
+    setAboutForm((prev) => ({ ...prev, [key]: value }));
+  }
+
+  async function submitAboutForm() {
+    if (!content) return;
+    const heading = aboutForm.heading.trim();
+    if (!heading) { setAboutErr("Page heading can't be empty."); return; }
+    setAboutSubmitBusy(true);
+    setAboutErr(null);
+    setAboutMsg(null);
+    try {
+      const obj = JSON.parse(content.content_json);
+      obj.heading = heading;
+      obj.intro_html = applyHighlight(aboutForm.intro_html.trim(), highlightTerm);
+      obj.vision = {
+        ...(obj.vision ?? {}),
+        heading: aboutForm.vision_heading.trim(),
+        paragraph: aboutForm.vision_paragraph.trim(),
+      };
+      const missionBullets = aboutForm.mission_bullets
+        .split("\n").map((s) => s.trim()).filter(Boolean);
+      obj.mission = {
+        ...(obj.mission ?? {}),
+        heading: aboutForm.mission_heading.trim(),
+        bullets: missionBullets,
+      };
+      obj.team = {
+        ...(obj.team ?? {}),
+        heading: aboutForm.team_heading.trim(),
+        paragraph: aboutForm.team_paragraph.trim(),
+      };
+      const whyBullets = aboutForm.why_bullets
+        .split("\n").map((s) => s.trim()).filter(Boolean);
+      obj.why_choose_us = {
+        ...(obj.why_choose_us ?? {}),
+        heading: aboutForm.why_heading.trim(),
+        bullets: whyBullets,
+      };
+      // Custom sections — filter out empty entries so a half-typed row
+      // doesn't render as an empty <h3> on the live page.
+      obj.custom_sections = aboutForm.custom_sections
+        .map((sec) => {
+          const heading = sec.heading.trim();
+          if (!heading) return null;
+          if (sec.type === "bullets") {
+            const bullets = sec.bullets
+              .split("\n").map((s) => s.trim()).filter(Boolean);
+            if (bullets.length === 0) return null;
+            return { heading, type: "bullets" as const, bullets };
+          }
+          const paragraph = sec.paragraph.trim();
+          if (!paragraph) return null;
+          return { heading, type: "paragraph" as const, paragraph };
+        })
+        .filter((s): s is Exclude<typeof s, null> => s !== null);
+      const rev = await websiteSaveDraft({
+        file: "about",
+        content_json: JSON.stringify(obj, null, 2) + "\n",
+      });
+      const c = await websiteLoadContent("about");
+      setContent(c);
+      setText(tryPrettyJson(c.content_json));
+      setDirty(false);
+      setAboutMsg(
+        `Saved — about draft rev #${rev.revision_id}. Click Preview to see it, then Publish to go live.`
+      );
+    } catch (e: any) {
+      setAboutErr(String(e?.message ?? e));
+    } finally {
+      setAboutSubmitBusy(false);
+    }
+  }
+
+  useEffect(() => {
     setSelectedJobIds((prev) => {
       const ids = new Set(currentJobs.map((j) => j.id));
       const next = new Set<string>();
@@ -488,6 +776,10 @@ export default function PageEditor() {
       );
       setAiProposed(null);
       setAiPrompt("");
+      // Ensure the confirmation banner at the top of the page is
+      // visible — otherwise users clicking Accept at the bottom of a
+      // long form never see it.
+      try { window.scrollTo({ top: 0, behavior: "smooth" }); } catch {}
     } catch (e: any) {
       setAiErr(String(e?.message ?? e));
     } finally {
@@ -673,6 +965,367 @@ export default function PageEditor() {
               </ul>
               <p style={{ margin: "12px 0 0", fontSize: 12, color: "#94a3b8" }}>
                 Tip: to add or edit a posting, use the AI prompt below.
+              </p>
+            </div>
+          )}
+          {file === "about" && (
+            <div
+              style={{
+                border: "1px solid rgba(0,0,0,0.1)",
+                background: "white",
+                borderRadius: 12,
+                padding: 16,
+                marginBottom: 16,
+              }}
+            >
+              <b style={{ fontSize: 14, color: "#1d3557" }}>Edit About page</b>
+              <p style={{ margin: "4px 0 14px", fontSize: 12, color: "#64748b" }}>
+                Edit any field and click <b>Submit</b> to save a draft.
+                Bullets: one per line. Preview shows exactly how the live
+                page will look.
+              </p>
+              <div style={{ display: "grid", gridTemplateColumns: "160px 1fr", columnGap: 12, rowGap: 10, fontSize: 13 }}>
+                <label htmlFor="about-heading" style={{ color: "#64748b", alignSelf: "center" }}>Page heading</label>
+                <input
+                  id="about-heading"
+                  type="text"
+                  value={aboutForm.heading}
+                  onChange={(e) => setAboutField("heading", e.target.value)}
+                  disabled={aboutSubmitBusy}
+                  style={{ padding: "8px 10px", border: "1px solid rgba(0,0,0,0.15)", borderRadius: 6, fontSize: 13, background: "white" }}
+                />
+
+                <label htmlFor="about-intro" style={{ color: "#64748b", alignSelf: "start", marginTop: 8 }}>Intro paragraph</label>
+                <textarea
+                  id="about-intro"
+                  value={aboutForm.intro_html}
+                  onChange={(e) => setAboutField("intro_html", e.target.value)}
+                  disabled={aboutSubmitBusy}
+                  rows={4}
+                  style={{ padding: "8px 10px", border: "1px solid rgba(0,0,0,0.15)", borderRadius: 6, fontSize: 13, background: "white", fontFamily: "inherit", resize: "vertical" }}
+                />
+
+                <label htmlFor="about-vision-h" style={{ color: "#64748b", alignSelf: "center" }}>Vision heading</label>
+                <input
+                  id="about-vision-h"
+                  type="text"
+                  value={aboutForm.vision_heading}
+                  onChange={(e) => setAboutField("vision_heading", e.target.value)}
+                  disabled={aboutSubmitBusy}
+                  style={{ padding: "8px 10px", border: "1px solid rgba(0,0,0,0.15)", borderRadius: 6, fontSize: 13, background: "white" }}
+                />
+                <label htmlFor="about-vision-p" style={{ color: "#64748b", alignSelf: "start", marginTop: 8 }}>Vision paragraph</label>
+                <textarea
+                  id="about-vision-p"
+                  value={aboutForm.vision_paragraph}
+                  onChange={(e) => setAboutField("vision_paragraph", e.target.value)}
+                  disabled={aboutSubmitBusy}
+                  rows={3}
+                  style={{ padding: "8px 10px", border: "1px solid rgba(0,0,0,0.15)", borderRadius: 6, fontSize: 13, background: "white", fontFamily: "inherit", resize: "vertical" }}
+                />
+
+                <label htmlFor="about-mission-h" style={{ color: "#64748b", alignSelf: "center" }}>Mission heading</label>
+                <input
+                  id="about-mission-h"
+                  type="text"
+                  value={aboutForm.mission_heading}
+                  onChange={(e) => setAboutField("mission_heading", e.target.value)}
+                  disabled={aboutSubmitBusy}
+                  style={{ padding: "8px 10px", border: "1px solid rgba(0,0,0,0.15)", borderRadius: 6, fontSize: 13, background: "white" }}
+                />
+                <label htmlFor="about-mission-b" style={{ color: "#64748b", alignSelf: "start", marginTop: 8 }}>Mission bullets<br/><span style={{ fontSize: 11, color: "#94a3b8" }}>one per line</span></label>
+                <textarea
+                  id="about-mission-b"
+                  value={aboutForm.mission_bullets}
+                  onChange={(e) => setAboutField("mission_bullets", e.target.value)}
+                  disabled={aboutSubmitBusy}
+                  rows={4}
+                  style={{ padding: "8px 10px", border: "1px solid rgba(0,0,0,0.15)", borderRadius: 6, fontSize: 13, background: "white", fontFamily: "inherit", resize: "vertical" }}
+                />
+
+                <label htmlFor="about-team-h" style={{ color: "#64748b", alignSelf: "center" }}>Team heading</label>
+                <input
+                  id="about-team-h"
+                  type="text"
+                  value={aboutForm.team_heading}
+                  onChange={(e) => setAboutField("team_heading", e.target.value)}
+                  disabled={aboutSubmitBusy}
+                  style={{ padding: "8px 10px", border: "1px solid rgba(0,0,0,0.15)", borderRadius: 6, fontSize: 13, background: "white" }}
+                />
+                <label htmlFor="about-team-p" style={{ color: "#64748b", alignSelf: "start", marginTop: 8 }}>Team paragraph</label>
+                <textarea
+                  id="about-team-p"
+                  value={aboutForm.team_paragraph}
+                  onChange={(e) => setAboutField("team_paragraph", e.target.value)}
+                  disabled={aboutSubmitBusy}
+                  rows={3}
+                  style={{ padding: "8px 10px", border: "1px solid rgba(0,0,0,0.15)", borderRadius: 6, fontSize: 13, background: "white", fontFamily: "inherit", resize: "vertical" }}
+                />
+
+                <label htmlFor="about-why-h" style={{ color: "#64748b", alignSelf: "center" }}>“Why choose us” heading</label>
+                <input
+                  id="about-why-h"
+                  type="text"
+                  value={aboutForm.why_heading}
+                  onChange={(e) => setAboutField("why_heading", e.target.value)}
+                  disabled={aboutSubmitBusy}
+                  style={{ padding: "8px 10px", border: "1px solid rgba(0,0,0,0.15)", borderRadius: 6, fontSize: 13, background: "white" }}
+                />
+                <label htmlFor="about-why-b" style={{ color: "#64748b", alignSelf: "start", marginTop: 8 }}>“Why choose us” bullets<br/><span style={{ fontSize: 11, color: "#94a3b8" }}>one per line</span></label>
+                <textarea
+                  id="about-why-b"
+                  value={aboutForm.why_bullets}
+                  onChange={(e) => setAboutField("why_bullets", e.target.value)}
+                  disabled={aboutSubmitBusy}
+                  rows={4}
+                  style={{ padding: "8px 10px", border: "1px solid rgba(0,0,0,0.15)", borderRadius: 6, fontSize: 13, background: "white", fontFamily: "inherit", resize: "vertical" }}
+                />
+              </div>
+
+              {/* Three-photo grid slots — overwrite assets/img/photoN.jpg
+                  in the working copy. Filenames stay fixed so about.json
+                  never needs re-pointing. Publish autostash picks up the
+                  file change. */}
+              <div style={{ marginTop: 20, paddingTop: 16, borderTop: "1px dashed rgba(0,0,0,0.15)" }}>
+                <div style={{ display: "flex", alignItems: "baseline", gap: 10, marginBottom: 8 }}>
+                  <b style={{ fontSize: 13, color: "#1d3557" }}>Photo grid</b>
+                  <span style={{ fontSize: 11, color: "#94a3b8" }}>
+                    Three landscape photos shown after Why choose us. Replace any slot with a new picture.
+                  </span>
+                </div>
+                <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 12 }}>
+                  {[1, 2, 3].map((n) => {
+                    const slot = n as 1 | 2 | 3;
+                    const thumb = aboutPhotoThumbUrl(slot);
+                    const busy = photoBusySlot === slot;
+                    return (
+                      <div key={slot} style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                        <div style={{
+                          width: "100%",
+                          aspectRatio: "1400 / 900",
+                          border: "1px solid rgba(0,0,0,0.15)",
+                          borderRadius: 6,
+                          background: "#f8fafc",
+                          overflow: "hidden",
+                          display: "flex",
+                          alignItems: "center",
+                          justifyContent: "center",
+                        }}>
+                          {thumb ? (
+                            <img
+                              src={thumb}
+                              alt={`About photo slot ${slot}`}
+                              style={{ width: "100%", height: "100%", objectFit: "cover", display: "block" }}
+                            />
+                          ) : (
+                            <span style={{ fontSize: 11, color: "#94a3b8" }}>Slot {slot}</span>
+                          )}
+                        </div>
+                        <button
+                          className="btn"
+                          onClick={() => void pickAndReplaceAboutPhoto(slot)}
+                          disabled={busy || aboutSubmitBusy}
+                          style={{ fontSize: 12, padding: "6px 10px" }}
+                        >
+                          {busy ? "Uploading…" : `Replace photo ${slot}`}
+                        </button>
+                      </div>
+                    );
+                  })}
+                </div>
+                <p style={{ margin: "8px 0 0", fontSize: 11, color: "#94a3b8" }}>
+                  Photos are auto-cropped to 1400×900 landscape (matches the site grid). Any format works (JPG, PNG, HEIC, WebP, AVIF).
+                </p>
+              </div>
+
+              {/* Custom sections — user-defined headings that render on the
+                  live page after Why choose us, in the order shown here. */}
+              <div style={{ marginTop: 20, paddingTop: 16, borderTop: "1px dashed rgba(0,0,0,0.15)" }}>
+                <div style={{ display: "flex", alignItems: "baseline", gap: 10, marginBottom: 8 }}>
+                  <b style={{ fontSize: 13, color: "#1d3557" }}>Extra sections</b>
+                  <span style={{ fontSize: 11, color: "#94a3b8" }}>
+                    Add your own headings (e.g. Business Hours, Awards) — they render below Why choose us.
+                  </span>
+                </div>
+                {aboutForm.custom_sections.length === 0 && (
+                  <p style={{ fontSize: 12, color: "#94a3b8", margin: "0 0 8px" }}>
+                    No extra sections yet. Click <b>+ Add section</b> to create one.
+                  </p>
+                )}
+                {aboutForm.custom_sections.map((sec, idx) => (
+                  <div
+                    key={idx}
+                    style={{
+                      border: "1px solid rgba(0,0,0,0.12)",
+                      borderRadius: 8,
+                      padding: 12,
+                      marginBottom: 10,
+                      background: "#f8fafc",
+                    }}
+                  >
+                    <div style={{ display: "grid", gridTemplateColumns: "120px 1fr auto", columnGap: 10, rowGap: 8, fontSize: 13, alignItems: "center" }}>
+                      <label style={{ color: "#64748b" }}>Heading</label>
+                      <input
+                        type="text"
+                        value={sec.heading}
+                        onChange={(e) => setAboutForm((prev) => {
+                          const next = [...prev.custom_sections];
+                          next[idx] = { ...next[idx], heading: e.target.value };
+                          return { ...prev, custom_sections: next };
+                        })}
+                        disabled={aboutSubmitBusy}
+                        placeholder="e.g. Business hours"
+                        style={{ padding: "8px 10px", border: "1px solid rgba(0,0,0,0.15)", borderRadius: 6, fontSize: 13, background: "white" }}
+                      />
+                      <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+                        <button
+                          type="button"
+                          className="btn"
+                          onClick={() => setAboutForm((prev) => {
+                            if (idx === 0) return prev;
+                            const next = [...prev.custom_sections];
+                            [next[idx - 1], next[idx]] = [next[idx], next[idx - 1]];
+                            return { ...prev, custom_sections: next };
+                          })}
+                          disabled={aboutSubmitBusy || idx === 0}
+                          title="Move up"
+                          style={{ padding: "4px 8px", fontSize: 12 }}
+                        >↑</button>
+                        <button
+                          type="button"
+                          className="btn"
+                          onClick={() => setAboutForm((prev) => {
+                            if (idx === prev.custom_sections.length - 1) return prev;
+                            const next = [...prev.custom_sections];
+                            [next[idx + 1], next[idx]] = [next[idx], next[idx + 1]];
+                            return { ...prev, custom_sections: next };
+                          })}
+                          disabled={aboutSubmitBusy || idx === aboutForm.custom_sections.length - 1}
+                          title="Move down"
+                          style={{ padding: "4px 8px", fontSize: 12 }}
+                        >↓</button>
+                        <button
+                          type="button"
+                          className="btn"
+                          onClick={() => setAboutForm((prev) => ({
+                            ...prev,
+                            custom_sections: prev.custom_sections.filter((_, i) => i !== idx),
+                          }))}
+                          disabled={aboutSubmitBusy}
+                          title="Remove section"
+                          style={{ padding: "4px 10px", fontSize: 12 }}
+                        >Remove</button>
+                      </div>
+
+                      <label style={{ color: "#64748b" }}>Format</label>
+                      <div style={{ display: "flex", gap: 14, fontSize: 13 }}>
+                        <label style={{ display: "inline-flex", gap: 5, alignItems: "center", cursor: "pointer" }}>
+                          <input
+                            type="radio"
+                            checked={sec.type === "paragraph"}
+                            onChange={() => setAboutForm((prev) => {
+                              const next = [...prev.custom_sections];
+                              next[idx] = { ...next[idx], type: "paragraph" };
+                              return { ...prev, custom_sections: next };
+                            })}
+                            disabled={aboutSubmitBusy}
+                          />
+                          Paragraph
+                        </label>
+                        <label style={{ display: "inline-flex", gap: 5, alignItems: "center", cursor: "pointer" }}>
+                          <input
+                            type="radio"
+                            checked={sec.type === "bullets"}
+                            onChange={() => setAboutForm((prev) => {
+                              const next = [...prev.custom_sections];
+                              next[idx] = { ...next[idx], type: "bullets" };
+                              return { ...prev, custom_sections: next };
+                            })}
+                            disabled={aboutSubmitBusy}
+                          />
+                          Bullet list
+                        </label>
+                      </div>
+                      <span />
+
+                      <label style={{ color: "#64748b", alignSelf: "start", marginTop: 6 }}>
+                        {sec.type === "bullets" ? (<>Bullets<br/><span style={{ fontSize: 11, color: "#94a3b8" }}>one per line</span></>) : "Paragraph"}
+                      </label>
+                      <textarea
+                        value={sec.type === "bullets" ? sec.bullets : sec.paragraph}
+                        onChange={(e) => setAboutForm((prev) => {
+                          const next = [...prev.custom_sections];
+                          if (next[idx].type === "bullets") {
+                            next[idx] = { ...next[idx], bullets: e.target.value };
+                          } else {
+                            next[idx] = { ...next[idx], paragraph: e.target.value };
+                          }
+                          return { ...prev, custom_sections: next };
+                        })}
+                        disabled={aboutSubmitBusy}
+                        rows={sec.type === "bullets" ? 4 : 3}
+                        placeholder={sec.type === "bullets"
+                          ? "Best Daycare 2025\nBC Family Choice Award\n…"
+                          : "Open Monday to Friday, 8 AM to 9 PM."}
+                        style={{ padding: "8px 10px", border: "1px solid rgba(0,0,0,0.15)", borderRadius: 6, fontSize: 13, background: "white", fontFamily: "inherit", resize: "vertical" }}
+                      />
+                      <span />
+                    </div>
+                  </div>
+                ))}
+                <button
+                  type="button"
+                  className="btn"
+                  onClick={() => setAboutForm((prev) => ({
+                    ...prev,
+                    custom_sections: [
+                      ...prev.custom_sections,
+                      { heading: "", type: "paragraph", paragraph: "", bullets: "" },
+                    ],
+                  }))}
+                  disabled={aboutSubmitBusy}
+                  style={{ fontSize: 13, padding: "6px 14px" }}
+                >
+                  + Add section
+                </button>
+              </div>
+
+              {aboutErr && (
+                <div style={{ marginTop: 12, padding: "8px 10px", background: "#fef2f2", border: "1px solid #fecaca", borderRadius: 6, color: "#b91c1c", fontSize: 12 }}>
+                  {aboutErr}
+                </div>
+              )}
+              {aboutMsg && (
+                <div style={{ marginTop: 12, padding: "8px 10px", background: "#f0fdf4", border: "1px solid #bbf7d0", borderRadius: 6, color: "#166534", fontSize: 12 }}>
+                  {aboutMsg}
+                </div>
+              )}
+              <div style={{ display: "flex", gap: 8, alignItems: "center", marginTop: 14 }}>
+                <button
+                  className="btn"
+                  onClick={submitAboutForm}
+                  disabled={!aboutDirty || aboutSubmitBusy}
+                  style={{
+                    background: aboutDirty ? "#1d5fa3" : undefined,
+                    color: aboutDirty ? "white" : undefined,
+                    fontSize: 13,
+                    padding: "8px 18px",
+                  }}
+                >
+                  {aboutSubmitBusy ? "Saving…" : "Submit"}
+                </button>
+                <button
+                  className="btn"
+                  onClick={() => nav(`/website/preview?page=about`)}
+                  disabled={aboutSubmitBusy}
+                  style={{ fontSize: 13, padding: "8px 18px" }}
+                >
+                  Preview →
+                </button>
+              </div>
+              <p style={{ margin: "14px 0 0", fontSize: 12, color: "#94a3b8" }}>
+                For photo grid, neighbourhoods copy, or layout tweaks, use the
+                AI prompt below.
               </p>
             </div>
           )}
@@ -956,6 +1609,32 @@ export default function PageEditor() {
                 style={{ marginTop: 12, fontSize: 13 }}
               >
                 ⚠ {aiErr}
+              </div>
+            )}
+            {saved && !aiProposed && !aiErr && (
+              <div
+                style={{
+                  marginTop: 14,
+                  padding: "10px 14px",
+                  background: "#f0fdf4",
+                  border: "1px solid #bbf7d0",
+                  borderRadius: 8,
+                  color: "#166534",
+                  fontSize: 13,
+                  display: "flex",
+                  alignItems: "center",
+                  gap: 10,
+                }}
+              >
+                <span style={{ fontSize: 16 }}>✓</span>
+                <div>
+                  <b>{saved}</b>
+                  <div style={{ marginTop: 4, color: "#166534" }}>
+                    Nothing is live yet. Click <b>Preview →</b> at the top-right
+                    to see how it looks, then open <b>Publish…</b> in the
+                    sidebar to send it to your live website.
+                  </div>
+                </div>
               </div>
             )}
             {aiProposed && !aiErr && (

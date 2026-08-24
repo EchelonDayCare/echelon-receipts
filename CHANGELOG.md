@@ -4,6 +4,54 @@ All notable changes shipped as a DMG. Only entries the owner has approved
 for release are listed here — "code-complete, awaiting ship approval" work
 lives in the session plan.md until it ships.
 
+## v3.24.2 — About page editor + Publish reliability
+
+### Website module
+
+- **Structured About-page editor.** The About page now has the same
+  no-JSON form UI as Careers / Contact / Tour: heading, welcome intro,
+  Vision / Mission / Team / Why-choose-us blocks, Neighbourhoods copy.
+  HTML tags (`<span class="highlight">…</span>`) are stripped from
+  every input so non-technical users see plain text, and the brand-name
+  highlight is transparently re-applied on save. AI edit ("Ask AI to
+  update the About page") is enabled for About too.
+- **Extra sections (custom headings).** New "Extra sections" block on
+  the About form lets the owner add / reorder / remove any number of
+  named sections (e.g. Business Hours, Awards, Enrolment steps).
+  Each section is a `paragraph` or `bullets` list; the site template
+  loops over `about.custom_sections` and renders them with the same
+  `<h3>` + body markup as the built-in sections. The AI edit prompt
+  knows to append new sections here instead of stuffing them into
+  Why-choose-us.
+- **Replace the 3 About photos from the app.** New "Photo grid" block
+  on the About form shows the three current landscape photos and lets
+  the owner swap any slot with a fresh image. Any format works
+  (JPG / PNG / HEIC / WebP / AVIF); pictures are auto-cropped to
+  1400×900 landscape (matches the site grid) and saved over
+  `assets/img/photo1.jpg` / `photo2.jpg` / `photo3.jpg`. The next
+  Publish pushes them to GitHub automatically.
+- **Publish auto-stashes dirty CMS files.** Publish used to fail with
+  "working copy has uncommitted changes; refusing to fast-forward"
+  whenever multiple pages had draft edits or the owner had swapped a
+  photo. Publish now scans the working copy before fast-forwarding
+  and auto-commits any dirty files inside the CMS-managed paths
+  (`content/`, `templates/`, `assets/`, `index.html`, `sitemap.xml`,
+  `robots.txt`, `pages/*.html`) as a single "CMS pre-publish
+  autosnapshot" commit. Editing About + Careers + a gallery photo,
+  then hitting Publish once, now ships all three together. Files
+  outside the managed paths still hard-refuse with a specific error
+  listing them.
+- **Fixes a blank-window crash on cold start.** If the last editor
+  route the app was on used the browser router's `useBlocker`
+  (About / Careers / Contact / Tour page editor), the whole window
+  rendered blank the next launch because HashRouter isn't a data
+  router. The unsaved-changes guard now uses a click-capture anchor
+  intercept that works with either router.
+- **Accept & save draft feedback.** After Accept & save draft in the
+  AI panel, the green "saved as revision #N" confirmation now shows
+  inline in the panel with a "Preview → Publish" hint, and the page
+  scrolls to the top so the banner is always visible.
+
 ## v3.24.1 — parked-item cleanup
 
 Ships the last three deferred items from the v3.23.4 review that don't
