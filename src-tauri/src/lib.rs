@@ -225,6 +225,7 @@ pub fn run() {
             website::commands::website_reorder_gallery,
             website::commands::website_edit_media,
             website::commands::website_delete_media,
+            website::commands::website_bulk_delete_media,
             website::commands::website_emergency_remove,
             website::commands::website_replace_logo,
             website::commands::website_replace_favicon,

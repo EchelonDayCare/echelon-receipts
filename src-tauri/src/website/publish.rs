@@ -417,7 +417,8 @@ async fn run_pipeline_inner(
     set_state(inputs.db, publication_id, PublishState::Rendering)
         .await
         .map_err(|e| e.to_string())?;
-    let pages_written = render_step(inputs)?;
+    let pages_written =
+        tokio::task::block_in_place(|| render_step(inputs))?;
     set_state(inputs.db, publication_id, PublishState::Rendered)
         .await
         .map_err(|e| e.to_string())?;
@@ -436,7 +437,8 @@ async fn run_pipeline_inner(
         .await
         .map_err(|e| e.to_string())?;
     let repo = git2::Repository::open(inputs.repo_dir).map_err(|e| e.to_string())?;
-    let _sha_before = git_ops::fetch_and_ff_main(&repo)?;
+    let _sha_before =
+        tokio::task::block_in_place(|| git_ops::fetch_and_ff_main(&repo))?;
     set_state(inputs.db, publication_id, PublishState::GitFetched)
         .await
         .map_err(|e| e.to_string())?;
@@ -445,17 +447,15 @@ async fn run_pipeline_inner(
     set_state(inputs.db, publication_id, PublishState::Committing)
         .await
         .map_err(|e| e.to_string())?;
-    let _touched = git_ops::stage_content_writes(&repo, &inputs.drafts)?;
-    // Also stage the rendered HTML (+ sitemap, robots, assets/data)
-    // and any newly-uploaded media variants under assets/img/**.
-    // Without this the GH content-render-validation workflow blocks
-    // the Pages deploy because committed HTML lags committed JSON.
-    let _rendered = git_ops::stage_rendered_html_and_assets(&repo, inputs.render_dir)?;
-    let commit_sha = match git_ops::commit_all(
-        &repo,
-        &inputs.commit_message,
-        inputs.author_display.as_deref(),
-    ) {
+    let commit_sha = match tokio::task::block_in_place(|| -> Result<Result<String, String>, String> {
+        let _touched = git_ops::stage_content_writes(&repo, &inputs.drafts)?;
+        let _rendered = git_ops::stage_rendered_html_and_assets(&repo, inputs.render_dir)?;
+        Ok(git_ops::commit_all(
+            &repo,
+            &inputs.commit_message,
+            inputs.author_display.as_deref(),
+        ))
+    })? {
         Ok(sha) => sha,
         Err(e) if e == "no changes to commit" => {
             // Nothing to publish — advance to VerifiedLive with the
@@ -523,7 +523,7 @@ async fn run_pipeline_inner(
         .pat
         .as_deref()
         .ok_or_else(|| "PAT is required for a real (non-dry-run) publish".to_string())?;
-    git_ops::push_main_with_pat(&repo, pat)?;
+    tokio::task::block_in_place(|| git_ops::push_main_with_pat(&repo, pat))?;
     set_state(inputs.db, publication_id, PublishState::Pushed)
         .await
         .map_err(|e| e.to_string())?;

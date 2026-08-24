@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { useNavigate, useParams } from "react-router-dom";
+import { useBlocker, useNavigate, useParams } from "react-router-dom";
 import {
   websiteAiEditContent,
   websiteLoadContent,
@@ -55,6 +55,23 @@ export default function PageEditor() {
     return () => window.removeEventListener("beforeunload", handler);
   }, [dirty]);
 
+  // Block react-router navigation (sidebar clicks, back/preview/history
+  // buttons) while there are unsaved edits — `beforeunload` above only
+  // fires for full page reloads and window close, not for client-side
+  // route changes.
+  const blocker = useBlocker(
+    ({ currentLocation, nextLocation }) =>
+      dirty && currentLocation.pathname !== nextLocation.pathname,
+  );
+  useEffect(() => {
+    if (blocker.state !== "blocked") return;
+    if (window.confirm("You have unsaved edits. Discard and leave this page?")) {
+      blocker.proceed();
+    } else {
+      blocker.reset();
+    }
+  }, [blocker]);
+
   // AI edit state — only rendered when the current page supports it.
   const AI_EDIT_PAGES: EditableFile[] = ["careers", "tour", "contact"];
   const aiEnabled = AI_EDIT_PAGES.includes(file);
@@ -63,6 +80,7 @@ export default function PageEditor() {
   const [aiErr, setAiErr] = useState<string | null>(null);
   const [aiProposed, setAiProposed] = useState<{
     text: string;
+    site_text: string | null;
     summary: string;
     model: string;
   } | null>(null);
@@ -403,40 +421,56 @@ export default function PageEditor() {
     try {
       const res = await websiteAiEditContent(file, aiPrompt.trim());
       const pretty = tryPrettyJson(res.proposed_json);
-      // Simplified flow: auto-save the proposal as a draft revision so
-      // the Preview screen immediately renders the AI's version. The
-      // JSON textarea (advanced view) picks it up too.
+      const sitePretty =
+        res.site_proposed_json && res.site_proposed_json.trim()
+          ? tryPrettyJson(res.site_proposed_json)
+          : null;
+      // Do not touch the working copy or the draft store — the user
+      // reviews the proposal against the current content, then Accept
+      // saves it as a draft revision or Reject discards it.
+      setAiProposed({
+        text: pretty,
+        site_text: sitePretty,
+        summary: res.summary,
+        model: res.model,
+      });
+    } catch (e: any) {
+      setAiErr(String(e?.message ?? e));
+    } finally {
+      setAiBusy(false);
+    }
+  }
+
+  async function onAiAccept() {
+    if (!aiProposed) return;
+    setAiBusy(true);
+    setAiErr(null);
+    setSaved(null);
+    try {
       const saveRes = await websiteSaveDraft({
         file,
-        content_json: pretty,
+        content_json: aiProposed.text,
       });
-      // Contact-page prompts may also affect site.json (socials, address,
-      // phone, email). When the AI returns a site_proposed_json, save it
-      // as a second draft so Preview renders both changes together.
       let siteSaveRev: number | null = null;
-      if (res.site_proposed_json && res.site_proposed_json.trim()) {
-        const sitePretty = tryPrettyJson(res.site_proposed_json);
+      if (aiProposed.site_text) {
         const siteSave = await websiteSaveDraft({
           file: "site",
-          content_json: sitePretty,
+          content_json: aiProposed.site_text,
         });
         siteSaveRev = siteSave.revision_id;
         if (file === "contact") {
           setSiteContent(await websiteLoadContent("site"));
         }
       }
-      setText(pretty);
+      setText(aiProposed.text);
       setDirty(false);
       setContent(await websiteLoadContent(file));
-      setAiProposed({
-        text: pretty,
-        summary: res.summary,
-        model: res.model,
-      });
       setSaved(
-        `Draft saved as revision #${saveRes.revision_id}` +
-        (siteSaveRev !== null ? ` (site draft rev #${siteSaveRev})` : "")
+        `Accepted — saved as revision #${saveRes.revision_id}` +
+          (siteSaveRev !== null ? ` (site draft rev #${siteSaveRev})` : ""),
       );
+      setAiProposed(null);
+      setAiPrompt("");
     } catch (e: any) {
       setAiErr(String(e?.message ?? e));
     } finally {
@@ -446,8 +480,8 @@ export default function PageEditor() {
 
   function onAiDiscard() {
     setAiProposed(null);
+    setAiErr(null);
   }
-  void onAiDiscard;
 
   return (
     <div style={{ padding: 24, maxWidth: 1200, margin: "0 auto" }}>
@@ -848,19 +882,30 @@ export default function PageEditor() {
                 </button>
               )}
               {aiProposed && !aiBusy && (
-                <button
-                  className="btn"
-                  onClick={() => nav(`/website/preview?page=${file}`)}
-                  style={{
-                    marginLeft: "auto",
-                    background: "#059669",
-                    color: "white",
-                    fontSize: 14,
-                    padding: "8px 20px",
-                  }}
-                >
-                  Preview →
-                </button>
+                <>
+                  <button
+                    className="btn"
+                    onClick={onAiAccept}
+                    style={{
+                      marginLeft: "auto",
+                      background: "#059669",
+                      color: "white",
+                      fontSize: 14,
+                      padding: "8px 20px",
+                    }}
+                    title="Save the AI proposal as a draft revision"
+                  >
+                    Accept & save draft
+                  </button>
+                  <button
+                    className="btn"
+                    onClick={onAiDiscard}
+                    style={{ fontSize: 14, padding: "8px 20px" }}
+                    title="Discard this proposal — working copy is unchanged"
+                  >
+                    Reject
+                  </button>
+                </>
               )}
             </div>
             {aiErr && (
@@ -889,8 +934,8 @@ export default function PageEditor() {
                     marginBottom: 6,
                   }}
                 >
-                  <span style={{ color: "#059669", fontSize: 16 }}>✓</span>
-                  <b style={{ fontSize: 14 }}>Ready to preview</b>
+                  <span style={{ color: "#059669", fontSize: 16 }}>✎</span>
+                  <b style={{ fontSize: 14 }}>Proposed change (not yet saved)</b>
                 </div>
                 <p
                   style={{

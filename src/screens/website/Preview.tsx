@@ -29,6 +29,9 @@ export default function Preview() {
     // "site" JSON is shared globals used by all pages, and "seo" is
     // metadata read into every page. Land the user on the site home.
     if (page === "site" || page === "seo") return "";
+    // Home is rendered as the site index (index.html at repo root),
+    // not `pages/home.html`. `pages/home.html` would 404.
+    if (page === "home") return "";
     return `/pages/${page}.html`;
   }, [page]);
 

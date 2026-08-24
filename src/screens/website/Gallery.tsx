@@ -2,8 +2,9 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { open } from "@tauri-apps/plugin-dialog";
 import { convertFileSrc } from "@tauri-apps/api/core";
-import { getCurrentWebview } from "@tauri-apps/api/webview";
+import { useTauriDragDrop } from "../../hooks/useTauriDragDrop";
 import {
+  websiteBulkDeleteMedia,
   websiteDeleteMedia,
   websiteEditMedia,
   websiteEmergencyRemove,
@@ -80,76 +81,34 @@ export default function Gallery() {
     void refresh();
   }, [refresh]);
 
-  // Tauri v2 intercepts native OS drag-drop at the webview layer and
-  // fires `onDragDropEvent` — the DOM `dataTransfer.files` is empty
-  // by the time our HTML `onDrop` handler runs. Subscribe here and
-  // route dropped paths straight into the upload command.
+  // Native OS drag-drop routed via the shared Tauri v2 hook.
   const busyRef = useRef(false);
   useEffect(() => {
     busyRef.current = busy;
   }, [busy]);
-  useEffect(() => {
-    let unlisten: (() => void) | undefined;
-    let cancelled = false;
-    (async () => {
+  useTauriDragDrop({
+    extensions: /\.(jpe?g|png|webp|heic|heif)$/i,
+    multi: true,
+    onEnter: () => setUploadDragActive(true),
+    onLeave: () => setUploadDragActive(false),
+    onWrongType: () => setErr("Drop image files (jpg, png, webp, heic)."),
+    onDrop: async (images) => {
+      if (busyRef.current) return;
+      setBusy(true);
+      setErr(null);
       try {
-        const wv = getCurrentWebview();
-        const un = await wv.onDragDropEvent(async (event) => {
-          const t = event.payload.type;
-          if (t === "over" || t === "enter") {
-            setUploadDragActive(true);
-            return;
-          }
-          if (t === "leave") {
-            setUploadDragActive(false);
-            return;
-          }
-          if (t === "drop") {
-            setUploadDragActive(false);
-            const paths = (event.payload as { paths?: string[] }).paths ?? [];
-            if (paths.length === 0) return;
-            const images = paths.filter((p) =>
-              /\.(jpe?g|png|webp|heic|heif)$/i.test(p),
-            );
-            if (images.length === 0) {
-              setErr("Drop image files (jpg, png, webp, heic).");
-              return;
-            }
-            if (busyRef.current) return;
-            setBusy(true);
-            setErr(null);
-            try {
-              await websiteUploadPhotos(images);
-              setMsg(
-                `Uploaded ${images.length} photo${images.length === 1 ? "" : "s"}`,
-              );
-              await refresh();
-            } catch (e: any) {
-              setErr(String(e?.message ?? e));
-            } finally {
-              setBusy(false);
-            }
-          }
-        });
-        // If the effect was already torn down while we were awaiting
-        // the subscription (StrictMode double-mount, fast route
-        // change), immediately release the listener instead of
-        // leaking it — otherwise a subsequent OS drop double-fires.
-        if (cancelled) {
-          un();
-        } else {
-          unlisten = un;
-        }
-      } catch {
-        // Non-Tauri host (test runner) — silently no-op.
+        await websiteUploadPhotos(images);
+        setMsg(
+          `Uploaded ${images.length} photo${images.length === 1 ? "" : "s"}`,
+        );
+        await refresh();
+      } catch (e: any) {
+        setErr(String(e?.message ?? e));
+      } finally {
+        setBusy(false);
       }
-    })();
-    return () => {
-      cancelled = true;
-      if (unlisten) unlisten();
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [refresh]);
+    },
+  });
 
   const thumbUrl = useCallback(
     (rec: MediaRecord): string | null => {
@@ -281,24 +240,14 @@ export default function Gallery() {
     if (targets.length === 0) return;
     setBusy(true);
     setErr(null);
-    let ok = 0;
-    let fail = 0;
-    for (const id of targets) {
-      try {
-        await websiteDeleteMedia(id);
-        ok += 1;
-      } catch (e: any) {
-        fail += 1;
-        setErr(String(e?.message ?? e));
-      }
+    try {
+      const affected = await websiteBulkDeleteMedia(targets);
+      setSelectedIds(new Set());
+      setSelected(null);
+      setMsg(`Deleted ${affected} photo${affected === 1 ? "" : "s"}.`);
+    } catch (e: any) {
+      setErr(String(e?.message ?? e));
     }
-    setSelectedIds(new Set());
-    setSelected(null);
-    setMsg(
-      fail === 0
-        ? `Deleted ${ok} photo${ok === 1 ? "" : "s"}.`
-        : `Deleted ${ok}, failed ${fail}. See error above.`,
-    );
     await refresh();
     setBusy(false);
   }
@@ -508,6 +457,10 @@ export default function Gallery() {
                 <img
                   src={src}
                   alt={it.alt ?? ""}
+                  loading="lazy"
+                  decoding="async"
+                  width={320}
+                  height={180}
                   style={{ width: "100%", height: 180, objectFit: "cover", display: "block" }}
                 />
               ) : (
