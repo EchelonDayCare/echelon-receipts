@@ -93,20 +93,22 @@ export default function Reports() {
   const quarterLabel = mode === "fiscal_sep_aug" ? FISCAL_QUARTER_LABEL[quarter] : CAL_QUARTER_LABEL[quarter];
 
   function exportCsv() {
-    const header = ["receipt_no","date","student","description","amount_paid","pending","gross","ccfri","accb","comments","voided","refund"];
+    const header = ["receipt_no","date","student","description","amount_paid","signed_amount","pending","gross","ccfri","accb","comments","voided","refund"];
     const lines = [header.join(",")].concat(
       all.map((r) => [
         r.receipt_no, r.date,
         `"${(r.student_name_snapshot || "").replace(/"/g, '""')}"`,
         `"${(r.description || "").replace(/"/g, '""')}"`,
-        r.amount.toFixed(2), r.pending_amount.toFixed(2),
+        r.amount.toFixed(2),
+        (r.is_refund ? -r.amount : r.amount).toFixed(2),
+        r.pending_amount.toFixed(2),
         (r.gross_amount ?? 0).toFixed(2),
         (r.ccfri_amount ?? 0).toFixed(2),
         (r.accb_amount  ?? 0).toFixed(2),
         `"${(r.comments || "").replace(/"/g, '""')}"`, r.voided, r.is_refund,
       ].join(","))
     );
-    const blob = new Blob([lines.join("\n")], { type: "text/csv" });
+    const blob = new Blob(["\uFEFF" + lines.join("\n")], { type: "text/csv;charset=utf-8" });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url; a.download = `receipts-${fileSuffix}.csv`; a.click();

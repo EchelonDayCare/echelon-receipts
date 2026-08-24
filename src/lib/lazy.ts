@@ -7,10 +7,14 @@ export function loadHtml2Pdf(): Promise<any> {
   return html2pdfPromise;
 }
 
-let xlsxPromise: Promise<typeof import("xlsx")> | null = null;
-export function loadXLSX(): Promise<typeof import("xlsx")> {
+// SheetJS is loaded from the maintained fork `@e965/xlsx` (v0.20.x). The
+// community-npm `xlsx@0.18.5` is frozen at a version with two published
+// CVEs (prototype pollution CVE-2023-30533 and ReDoS CVE-2024-22363);
+// `@e965/xlsx` is the same API with the fixes backported.
+let xlsxPromise: Promise<typeof import("@e965/xlsx")> | null = null;
+export function loadXLSX(): Promise<typeof import("@e965/xlsx")> {
   if (!xlsxPromise) {
-    xlsxPromise = import("xlsx");
+    xlsxPromise = import("@e965/xlsx");
   }
   return xlsxPromise;
 }

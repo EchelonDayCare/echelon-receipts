@@ -67,13 +67,13 @@ pub async fn send_email(args: SendEmailArgs) -> Result<(), String> {
             builder = builder.reply_to(parsed);
         }
         for t in &args.to {
-            builder = builder.to(t.parse().map_err(|e: lettre::address::AddressError| format!("to {t}: {e}"))?);
+            builder = builder.to(t.parse().map_err(|e: lettre::address::AddressError| format!("to <redacted>: {e}"))?);
         }
         for c in &args.cc {
-            builder = builder.cc(c.parse().map_err(|e: lettre::address::AddressError| format!("cc {c}: {e}"))?);
+            builder = builder.cc(c.parse().map_err(|e: lettre::address::AddressError| format!("cc <redacted>: {e}"))?);
         }
         for b in &args.bcc {
-            builder = builder.bcc(b.parse().map_err(|e: lettre::address::AddressError| format!("bcc {b}: {e}"))?);
+            builder = builder.bcc(b.parse().map_err(|e: lettre::address::AddressError| format!("bcc <redacted>: {e}"))?);
         }
 
         let bytes_result: Result<Vec<(String, Vec<u8>, ContentType)>, String> = (|| {

@@ -63,7 +63,12 @@ export default function History() {
   }, []);
 
   const total = useMemo(
-    () => rows.filter((r) => !r.voided).reduce((acc, r) => acc + r.amount, 0),
+    () => rows
+      .filter((r) => !r.voided)
+      // Refunds are stored as positive amounts with is_refund=1. Sum them
+      // as negatives so the header total reflects net revenue, not the
+      // sum of absolute values (which double-counts every reversal).
+      .reduce((acc, r) => acc + (r.is_refund ? -r.amount : r.amount), 0),
     [rows]
   );
   const years = useMemo(() => {

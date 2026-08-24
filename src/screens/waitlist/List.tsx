@@ -157,7 +157,13 @@ export default function WaitlistList() {
       if (sortKey === "priority") {
         const as = priorityScore(a, weights, ctx);
         const bs = priorityScore(b, weights, ctx);
-        return as < bs ? -1 * dirMul : as > bs ? 1 * dirMul : 0;
+        if (as !== bs) return as < bs ? -1 * dirMul : 1 * dirMul;
+        // Stable tie-breaker: earlier submission wins, so families never
+        // shuffle positions on refresh when their priority scores match.
+        const av = a.submitted_at || "";
+        const bv = b.submitted_at || "";
+        if (av !== bv) return av < bv ? -1 : 1;
+        return a.id - b.id;
       }
       if (sortKey === "dob") {
         // Nulls always last regardless of direction

@@ -1,6 +1,7 @@
 import type { SettingsMap } from "../types";
 import type { AnnualGroup } from "./db";
 import { mkdir, writeFile, exists } from "@tauri-apps/plugin-fs";
+import { appDataDir } from "@tauri-apps/api/path";
 import { DEFAULT_LOGO_DATA_URL, DEFAULT_SIGNATURE_DATA_URL } from "./defaults";
 import { loadHtml2Pdf } from "./lazy";
 import { h, sanitizeImageDataUrl } from "./html";
@@ -29,14 +30,59 @@ export function buildAnnualReceiptHtml(opts: {
   issuedOn?: string;
   supersededNote?: string | null;
   issuerSnapshotJson?: string | null;
+  /** v3.24.4 (#1): frozen renderable payload from the AR record. When
+   *  present, this overrides `group`, `recipientLabel`, `issuedOn`, and
+   *  the settings for content-side fields (student name, receipts, totals)
+   *  so reissue produces the exact same PDF as the original issue. */
+  renderPayloadJson?: string | null;
 }): string {
-  const { group, year, arNumber, recipientLabel } = opts;
+  let { group, year, arNumber, recipientLabel } = opts;
   // Merge snapshot over live settings so historical re-renders stay correct.
   let s = opts.settings;
   if (opts.issuerSnapshotJson) {
     try { s = { ...opts.settings, ...JSON.parse(opts.issuerSnapshotJson) }; } catch { /* ignore */ }
   }
-  const issuedOn = opts.issuedOn || todayIso();
+  let issuedOn = opts.issuedOn || todayIso();
+  // v3.24.4 (#1): apply frozen render payload when available. Anything
+  // unspecified in the payload falls through to live data.
+  if (opts.renderPayloadJson) {
+    try {
+      const p = JSON.parse(opts.renderPayloadJson) as {
+        v?: number;
+        issued_on?: string;
+        student_name?: string;
+        father_name?: string | null;
+        mother_name?: string | null;
+        recipient_label?: string;
+        total?: number;
+        receipts?: Array<{ id: number; receipt_no?: number | null; date: string; description?: string | null; amount: number; is_refund?: number }>;
+        settings_snapshot?: Record<string, string>;
+      };
+      if (p && (p.v ?? 1) === 1) {
+        if (p.issued_on) issuedOn = p.issued_on;
+        if (p.recipient_label) recipientLabel = p.recipient_label;
+        if (p.settings_snapshot) s = { ...s, ...p.settings_snapshot };
+        if (Array.isArray(p.receipts)) {
+          group = {
+            ...group,
+            student_name: p.student_name ?? group.student_name,
+            father_name: p.father_name ?? group.father_name,
+            mother_name: p.mother_name ?? group.mother_name,
+            total: p.total ?? group.total,
+            count: p.receipts.length,
+            receipts: p.receipts.map((r) => ({
+              id: r.id,
+              receipt_no: r.receipt_no ?? 0,
+              date: r.date,
+              description: r.description ?? "",
+              amount: r.amount,
+              is_refund: r.is_refund ?? 0,
+            })) as any,
+          };
+        }
+      }
+    } catch { /* corrupt payload — fall back to live data */ }
+  }
   const logo = sanitizeImageDataUrl(s.logo_data_url) || DEFAULT_LOGO_DATA_URL;
   const sig = sanitizeImageDataUrl(s.signature_data_url) || DEFAULT_SIGNATURE_DATA_URL;
   const directorName = s.director_name || "";
@@ -172,13 +218,28 @@ export async function saveAnnualReceiptPdf(opts: {
   settings: SettingsMap;
   supersededNote?: string | null;
 }): Promise<string | null> {
-  const folder = (opts.settings.pdf_folder || "").trim();
-  if (!folder) return null;
   const html = buildAnnualReceiptHtml(opts);
   const bytes = await renderAnnualPdfBytes(html);
+  const fname = `${opts.arNumber}_${safeName(opts.group.student_name)}.pdf`;
+
+  // v3.24.4 (#12): always write a durable copy to app-data
+  // (`archives/<year>/Annual/`) so the AR PDF is retrievable even if
+  // the user never configured a pdf_folder. This is defense-in-depth
+  // against Downloads/save-dialog dismissal + a paper trail for CRA.
+  try {
+    const base = await appDataDir();
+    const archiveDir = `${base.replace(/[\\/]+$/, "")}/archives/${opts.year}/Annual`;
+    if (!(await exists(archiveDir))) await mkdir(archiveDir, { recursive: true });
+    await writeFile(`${archiveDir}/${fname}`, bytes);
+  } catch (e) {
+    console.warn("[annualReceipt] app-data archive write failed:", e);
+  }
+
+  // Legacy user-configured pdf_folder — only writes if set.
+  const folder = (opts.settings.pdf_folder || "").trim();
+  if (!folder) return null;
   const subdir = `${folder.replace(/[\\/]+$/, "")}/${opts.year}/Annual`;
   if (!(await exists(subdir))) await mkdir(subdir, { recursive: true });
-  const fname = `${opts.arNumber}_${safeName(opts.group.student_name)}.pdf`;
   const full = `${subdir}/${fname}`;
   await writeFile(full, bytes);
   return full;

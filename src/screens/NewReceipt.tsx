@@ -8,6 +8,8 @@ import type { Student, SettingsMap, FeeBreakdown, Receipt } from "../types";
 import { printReceipt, saveReceiptPdf, buildReceiptHtml } from "../lib/receipt";
 import { sendReceiptEmail, parseRecipients } from "../lib/email";
 import { markEmailed } from "../lib/db";
+import { todayLocalIso } from "../lib/localDate";
+import { useUnsavedGuard } from "../lib/useUnsavedGuard";
 
 const MONTHS = ["January","February","March","April","May","June","July","August","September","October","November","December"];
 
@@ -18,7 +20,7 @@ export default function NewReceipt() {
   const [students, setStudents] = useState<Student[]>([]);
   const [studentId, setStudentId] = useState<number | "">("");
   const [receiptNo, setReceiptNo] = useState<number>(1001);
-  const [date, setDate] = useState<string>(today.toISOString().slice(0, 10));
+  const [date, setDate] = useState<string>(todayLocalIso());
   const [month, setMonth] = useState<string>(MONTHS[today.getMonth()]);
   const [feeYear, setFeeYear] = useState<number>(today.getFullYear());
   const [amount, setAmount] = useState<string>("485");
@@ -65,6 +67,19 @@ export default function NewReceipt() {
   }, [month, feeYear, descTouched, isRefund]);
 
   const student = useMemo(() => students.find((s) => s.id === studentId) || null, [students, studentId]);
+
+  // v3.24.4 (#6): unsaved-changes guard — warns on route change / window
+  // close if the user has entered any receipt data. Reset naturally when
+  // save() clears these fields at the end of a successful create.
+  const isDirty = useMemo(() => {
+    return studentId !== "" ||
+      (comments || "").trim() !== "" ||
+      amountTouched ||
+      descTouched ||
+      isRefund ||
+      (pending || "").trim() !== "" && (pending || "").trim() !== "0";
+  }, [studentId, comments, amountTouched, descTouched, isRefund, pending]);
+  const blocker = useUnsavedGuard(isDirty && !saving);
 
   // ACCB lookup whenever student / fee month / fee year changes
   useEffect(() => {
@@ -205,6 +220,31 @@ export default function NewReceipt() {
 
   return (
     <div>
+      {blocker.state === "blocked" && (
+        <div
+          role="dialog"
+          aria-modal="true"
+          style={{
+            position: "fixed", inset: 0, background: "rgba(0,0,0,.4)",
+            display: "flex", alignItems: "center", justifyContent: "center", zIndex: 1000,
+          }}
+        >
+          <div className="card" style={{ maxWidth: 440, padding: 24 }}>
+            <h2 style={{ marginTop: 0 }}>Unsaved receipt</h2>
+            <p>You've started a new receipt but haven't saved it. If you leave now, this data will be lost.</p>
+            <div style={{ display: "flex", gap: 8, justifyContent: "flex-end", marginTop: 16 }}>
+              <button className="btn" onClick={() => blocker.reset?.()}>Stay on page</button>
+              <button
+                className="btn"
+                style={{ borderColor: "#dc2626", color: "#dc2626" }}
+                onClick={() => blocker.proceed?.()}
+              >
+                Discard and leave
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
       <h1>New Receipt</h1>
       <p className="subtitle">Creates an entry in Receipt History and opens the macOS print dialog (use "Save as PDF" to keep a copy).</p>
 

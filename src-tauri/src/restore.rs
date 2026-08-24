@@ -20,8 +20,16 @@ fn app_db_paths(app: &tauri::AppHandle) -> Result<(PathBuf, PathBuf, PathBuf), S
 pub fn stage_restore(
     src_path: String,
     app: tauri::AppHandle,
+    auth: tauri::State<'_, crate::auth::AuthState>,
     passphrase: Option<String>,
 ) -> Result<String, String> {
+    // Restore rewrites the live DB and can permanently lock out an
+    // encrypted install if triggered from a compromised renderer. Require
+    // the app to already be unlocked (owner has proven ownership this
+    // session) before staging a restore.
+    if !auth.has_mdk() {
+        return Err("Unlock the app before restoring a backup.".into());
+    }
     // H-8: don't trust an arbitrary caller-supplied path — constrain reads
     // to the app data dir / Documents / Downloads and reject symlinks.
     let src = crate::path_guard::validate_existing_file(&app, &src_path)?;
@@ -31,13 +39,20 @@ pub fn stage_restore(
     // envelope magic. Decrypt them here; anything else is treated as a
     // legacy pre-migration plaintext `.db` dump (still supported so older
     // backups remain restorable).
-    let db_bytes: Vec<u8> = if crate::backup_crypto::is_encrypted(&raw) {
+    //
+    // v3.24.4 (#3): if the source was plaintext AND this install is now
+    // encrypted (has an MDK), we CANNOT just drop a plaintext SQLite file
+    // into `pending_restore.db` — the SQL plugin will attempt to open it
+    // with `PRAGMA key = ...` and fail with "file is not a database" (or
+    // worse, corrupt it). Re-encrypt the plaintext into a fresh
+    // SQLCipher-keyed file using the current MDK before staging.
+    let (db_bytes, was_plaintext): (Vec<u8>, bool) = if crate::backup_crypto::is_encrypted(&raw) {
         let pass = passphrase
             .filter(|p| !p.is_empty())
             .ok_or_else(|| "This backup is encrypted — a passphrase is required to restore it.".to_string())?;
-        crate::backup_crypto::decrypt(&pass, &raw)?
+        (crate::backup_crypto::decrypt(&pass, &raw)?, false)
     } else {
-        raw
+        (raw, true)
     };
 
     if db_bytes.len() < 16 || &db_bytes[..16] != SQLITE_HEADER {
@@ -48,6 +63,39 @@ pub fn stage_restore(
     if let Some(parent) = pending.parent() {
         fs::create_dir_all(parent).map_err(|e| format!("mkdir: {e}"))?;
     }
+
+    // If the incoming payload is plaintext AND we currently hold an MDK,
+    // re-encrypt on the way in so pending → live doesn't leave a plaintext
+    // file where SQLCipher expects an encrypted one.
+    if was_plaintext {
+        // Stage the plaintext to a temp file so we can (a) run integrity
+        // checks on the plaintext (`run_integrity_checks` opens without
+        // a key, which only works on a plaintext file), then (b) re-encrypt
+        // into `pending` under the current MDK.
+        let tmp_plain = pending.with_extension("plain.tmp");
+        fs::write(&tmp_plain, &db_bytes).map_err(|e| format!("write tmp plain: {e}"))?;
+        if let Err(e) = run_integrity_checks(&tmp_plain) {
+            let _ = fs::remove_file(&tmp_plain);
+            return Err(e);
+        }
+        let mdk = auth
+            .clone_mdk()
+            .ok_or_else(|| "Cannot re-encrypt restore: MDK not loaded. Unlock the app and retry.".to_string())?;
+        let hex = mdk.as_pragma_hex();
+        if pending.exists() {
+            fs::remove_file(&pending).map_err(|e| format!("remove stale pending: {e}"))?;
+        }
+        let enc_result = {
+            use crate::db_migration::Encryptor;
+            crate::auth::SqlCipherExporter.encrypt_new(&tmp_plain, &pending, &hex)
+        };
+        // Always wipe the plaintext scratch file, success or fail.
+        let _ = fs::remove_file(&tmp_plain);
+        enc_result.map_err(|e| format!("re-encrypt restore with current MDK: {e}"))?;
+        // Plaintext already passed integrity checks above — return early.
+        return Ok(pending.to_string_lossy().to_string());
+    }
+
     fs::write(&pending, &db_bytes).map_err(|e| format!("write pending: {e}"))?;
 
     // C-7: a header match alone doesn't rule out a truncated/corrupted or
@@ -97,8 +145,14 @@ fn run_integrity_checks(path: &Path) -> Result<(), String> {
 }
 
 #[tauri::command]
-pub fn restart_app(app: tauri::AppHandle) {
-    app.restart();
+pub fn restart_app(
+    app: tauri::AppHandle,
+    auth: tauri::State<'_, crate::auth::AuthState>,
+) -> Result<(), String> {
+    if !auth.has_mdk() {
+        return Err("Unlock the app before restarting.".into());
+    }
+    app.restart()
 }
 
 // Called from .setup() BEFORE the frontend opens any DB connection.

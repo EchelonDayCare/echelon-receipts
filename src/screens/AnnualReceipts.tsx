@@ -183,6 +183,7 @@ export default function AnnualReceipts() {
         group: r.group, year, arNumber, recipientLabel, settings,
         supersededNote: r.ar ? `Original AR ${r.ar.ar_number}` : null,
         issuerSnapshotJson: r.ar?.issuer_snapshot_json ?? null,
+        renderPayloadJson: r.ar?.render_payload_json ?? null,
       });
       const subjTpl = settings.annual_email_subject || "Annual Child Care Receipt {{year}} - {{student}}";
       const bodyTpl = settings.annual_email_body || "Please find your annual receipt attached.";
@@ -245,6 +246,7 @@ export default function AnnualReceipts() {
         group: r.group, year, arNumber: r.ar.ar_number, recipientLabel, settings,
         supersededNote: note,
         issuerSnapshotJson: r.ar.issuer_snapshot_json ?? null,
+        renderPayloadJson: r.ar.render_payload_json ?? null,
       });
       const dir = await join(await tempDir(), "echelon-receipts");
       if (!(await exists(dir))) await mkdir(dir, { recursive: true });

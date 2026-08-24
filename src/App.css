@@ -243,7 +243,7 @@ table.data tr.voided td { color: #9ca3af; text-decoration: line-through; }
    typical desktop viewport (>=800 CSS-px tall) without needing a scrollbar. */
 .content-home-shell {
   padding: 0;
-  overflow: hidden;
+  overflow-y: auto;
   overscroll-behavior: none;
 }
 .home { padding: 28px 0 20px; }

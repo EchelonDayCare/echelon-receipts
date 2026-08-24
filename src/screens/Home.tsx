@@ -53,9 +53,16 @@ export default function Home() {
     refreshAlerts();
 
     (async () => {
-      const settings = await getSettings();
-      setS(settings);
-      setStaffEnabled(settings.feature_staff_hours_enabled === "1");
+      try {
+        const settings = await getSettings();
+        setS(settings);
+        setStaffEnabled(settings.feature_staff_hours_enabled === "1");
+      } catch (e) {
+        // Settings load is best-effort — Home still renders with defaults.
+        // Log so silent DB failures are visible in the diagnostic log
+        // instead of quietly leaving Home stuck with placeholder branding.
+        console.warn("[Home] getSettings failed:", e);
+      }
     })();
 
     // Website CMS shortcut moved to the top-right icon stack (WebsiteButton)

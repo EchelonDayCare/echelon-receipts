@@ -122,26 +122,38 @@ export default function Settings() {
 
   async function clearStoredPassword() {
     if (!await showConfirm("Remove the stored SMTP password from the OS keychain?")) return;
-    await invoke("keychain_delete", { key: "smtp_password" });
-    await setSetting("smtp_password_set", "");
-    setHasStoredPassword(false);
-    void showAlert("Password removed.");
+    try {
+      await invoke("keychain_delete", { key: "smtp_password" });
+      await setSetting("smtp_password_set", "");
+      setHasStoredPassword(false);
+      void showAlert("Password removed.");
+    } catch (e) {
+      void showAlert("Could not remove password from keychain: " + e);
+    }
   }
 
   async function clearAzureKey() {
     if (!await showConfirm("Remove the stored Azure AI Foundry key from the OS keychain?")) return;
-    await invoke("keychain_delete", { key: "azure_ai_key" });
-    await setSetting("azure_ai_key_set", "");
-    setHasAzureKey(false);
-    void showAlert("Azure AI key removed.");
+    try {
+      await invoke("keychain_delete", { key: "azure_ai_key" });
+      await setSetting("azure_ai_key_set", "");
+      setHasAzureKey(false);
+      void showAlert("Azure AI key removed.");
+    } catch (e) {
+      void showAlert("Could not remove Azure AI key from keychain: " + e);
+    }
   }
 
   async function clearWhisperKey() {
     if (!await showConfirm("Remove the stored Azure Whisper key from the OS keychain?")) return;
-    await invoke("keychain_delete", { key: "azure_whisper_key" });
-    await setSetting("azure_whisper_key_set", "");
-    setHasWhisperKey(false);
-    void showAlert("Whisper key removed.");
+    try {
+      await invoke("keychain_delete", { key: "azure_whisper_key" });
+      await setSetting("azure_whisper_key_set", "");
+      setHasWhisperKey(false);
+      void showAlert("Whisper key removed.");
+    } catch (e) {
+      void showAlert("Could not remove Whisper key from keychain: " + e);
+    }
   }
 
   // ── C-1: encrypted cloud backup passphrase ──────────────────────────
@@ -334,7 +346,6 @@ export default function Settings() {
 
   const { tab: tabParam } = useParams<{ tab?: string }>();
   const nav = useNavigate();
-  const activeTab = tabParam || "identity";
 
   const TABS: { key: string; label: string }[] = [
     { key: "identity", label: "Identity" },
@@ -348,6 +359,12 @@ export default function Settings() {
     { key: "waitlist", label: "Waitlist" },
     { key: "about", label: "About" },
   ];
+
+  // Reject unknown /config/:tab URLs — the router is otherwise happy to
+  // render Settings with an arbitrary string and silently fall back to
+  // Identity, which hides typos in bookmarks / deep-links behind a
+  // wrong-looking tab.
+  const activeTab = TABS.some((t) => t.key === tabParam) ? (tabParam as string) : "identity";
 
   const SaveBar = (
     <div style={{ marginTop: 20, display: "flex", gap: 10, alignItems: "center" }}>

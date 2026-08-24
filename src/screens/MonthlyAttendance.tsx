@@ -284,17 +284,26 @@ export default function MonthlyAttendance() {
       const statDaysArr: number[] = [];
       const closedDaysArr: number[] = [];
       const effDaysInMonth = daysInMonth(effYear, effMonth);
+      // When QR overrides the UI-selected month, `closedByIso` still
+      // reflects the UI's month. Rebuild the closed-day set for the QR's
+      // effective month so custom-closed hints don't silently vanish (or
+      // worse, get grafted onto the wrong month).
+      const effClosedByIso = (effYear === year && effMonth === month)
+        ? closedByIso
+        : await (async () => {
+            const cal = await calendarForMonth(effYear, effMonth).catch(() => [] as typeof calendar);
+            const m = new Map<string, CalendarDay>();
+            for (const c of cal) if (!c.is_open) m.set(c.day, c);
+            return m;
+          })();
       for (let d = 1; d <= effDaysInMonth; d++) {
         const iso = isoDay(effYear, effMonth, d);
         const dow = new Date(effYear, effMonth - 1, d).getDay();
         if (dow === 0 || dow === 6) weekendDays.push(d);
         if (liveStatSet.has(iso)) statDaysArr.push(d);
-        // closedByIso is a Map<string, closureReason>; only truly custom-
-        // closed non-weekend/non-stat days are "closed" hints. Skip
-        // weekend/stat to avoid double-counting. Note: closedByIso was
-        // computed for the UI year/month, so it only contributes hints
-        // when QR agrees with the UI selection.
-        if (closedByIso.has(iso) && !(dow === 0 || dow === 6) && !liveStatSet.has(iso)) {
+        // Only truly custom-closed non-weekend/non-stat days are "closed"
+        // hints. Skip weekend/stat to avoid double-counting.
+        if (effClosedByIso.has(iso) && !(dow === 0 || dow === 6) && !liveStatSet.has(iso)) {
           closedDaysArr.push(d);
         }
       }

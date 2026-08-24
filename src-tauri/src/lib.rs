@@ -51,6 +51,9 @@ pub fn embedded_migrations() -> Vec<(i64, &'static str, &'static str)> {
         (15, "add_website_media", include_str!("../migrations/015_website_media.sql")),
         (16, "site_media_kind_unique_and_sort", include_str!("../migrations/016_site_media_kind_unique.sql")),
         (17, "site_revisions_base_hash", include_str!("../migrations/017_site_revisions_base_hash.sql")),
+        (18, "annual_receipt_render_payload", include_str!("../migrations/018_annual_receipt_render_payload.sql")),
+        (19, "receipts_settled_tracking", include_str!("../migrations/019_receipts_settled_tracking.sql")),
+        (20, "students_audit", include_str!("../migrations/020_students_audit.sql")),
     ]
 }
 

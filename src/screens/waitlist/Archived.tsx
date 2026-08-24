@@ -2,7 +2,8 @@
 // Shows withdrawn + archived entries, with a Restore action.
 
 import { useEffect, useMemo, useState } from "react";
-import { listWaitlist, syncOnScreenOpen, updateWaitlistStatus, waitDays, type WaitlistEntry } from "../../lib/waitlist";
+import { deleteWaitlistEntry, listWaitlist, syncOnScreenOpen, updateWaitlistStatus, waitDays, type WaitlistEntry } from "../../lib/waitlist";
+import { showConfirm, showAlert } from "../../lib/dialogs";
 import DetailDrawer from "./DetailDrawer";
 
 type ArchFilter = "all" | "aged" | "sheet" | "withdrawn";
@@ -22,6 +23,19 @@ export default function WaitlistArchived() {
   const restore = async (id: number) => {
     await updateWaitlistStatus(id, "new", null);
     await refresh();
+  };
+
+  const hardDelete = async (id: number, childName: string) => {
+    const ok = await showConfirm(
+      `Are you sure you want to delete ${childName}?\n\nThis permanently removes the waitlist record. It cannot be undone.`
+    );
+    if (!ok) return;
+    try {
+      await deleteWaitlistEntry(id);
+      await refresh();
+    } catch (e: any) {
+      void showAlert("Delete failed: " + (e?.message || e));
+    }
   };
 
   const filtered = useMemo(() => {
@@ -81,7 +95,16 @@ export default function WaitlistArchived() {
                   {e.status === "withdrawn" ? "Withdrawn" : (e.status_note || "Removed from sheet")}
                 </td>
                 <td style={td}>
-                  <button className="btn" onClick={() => restore(e.id)}>Restore</button>
+                  <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                    <button className="btn" onClick={() => restore(e.id)}>Restore</button>
+                    <button
+                      className="btn"
+                      onClick={() => hardDelete(e.id, e.child_name)}
+                      style={{ borderColor: "#dc2626", color: "#dc2626" }}
+                    >
+                      Delete
+                    </button>
+                  </div>
                 </td>
               </tr>
             ))}

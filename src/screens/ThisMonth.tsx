@@ -32,10 +32,18 @@ function descriptionFor(month: string, year: number): string {
 // Match a receipt to a fee month by description token, fallback to date YYYY-MM
 function receiptMatchesFeeMonth(r: Receipt, month: string, year: number): boolean {
   if (r.voided) return false;
+  // Refunds live in the same month/date as the receipt they reverse — treating
+  // them as "already issued this month" would suppress the real tuition receipt
+  // and understate revenue.
+  if (r.is_refund) return false;
   if (r.description && r.description.toLowerCase().includes(`${month.toLowerCase()} ${year}`)) return true;
-  // fallback: same Jan-Dec
+  // fallback: same Jan-Dec, tuition-shaped description only. Excluding refunds
+  // above already covers the main case; the fallback here also refuses to match
+  // an unrelated ad-hoc receipt (e.g. supplies) that happens to fall in-month.
   const ymPrefix = `${year}-${String(MONTHS.indexOf(month) + 1).padStart(2, "0")}`;
-  return r.date.startsWith(ymPrefix);
+  if (!r.date.startsWith(ymPrefix)) return false;
+  const d = (r.description || "").toLowerCase();
+  return d.includes("tuition") || d.includes("fee");
 }
 
 export default function ThisMonth() {
@@ -109,6 +117,12 @@ export default function ThisMonth() {
     setRows(cur => cur.map((r, i) => i === idx ? { ...r, busy: true, lastResult: null } : r));
     try {
       const r = rows[idx]; const stu = r.student;
+      // Guard: non-refund receipts must be finite and > 0. A stray keystroke
+      // (empty input, "-100", NaN) would otherwise slip a negative or zero
+      // tuition through createReceipt and understate monthly/annual revenue.
+      if (!Number.isFinite(r.computedAmount) || r.computedAmount <= 0) {
+        throw new Error(`Invalid amount for ${stu.name}: ${r.computedAmount}. Enter a positive dollar amount.`);
+      }
       const monthIdx = MONTHS.indexOf(month);
       const receiptNo = await nextReceiptNo();
       const date = new Date(year, monthIdx, 1).toISOString().slice(0, 10);

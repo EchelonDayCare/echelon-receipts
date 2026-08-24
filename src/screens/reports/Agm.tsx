@@ -16,10 +16,77 @@ interface YearRow {
   accb: number;
   paid: number;
   refunds: number;
+  // v3.24.4 (#10): true when this row's roster count was reconstructed
+  // from the students_audit log (accurate as of FY-end). false when it
+  // fell back to today's live student count (best-effort — may reflect
+  // post-FY-end deletions/deactivations).
+  reconstructed: boolean;
 }
 
 function fmt(n: number): string {
   return n.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+}
+
+// v3.24.4 (#10): Reconstruct the roster count for a given school year as
+// it was at fiscal-year-end, by replaying the students_audit log up to
+// `asOfIso`. When the audit log has no entries for this student on/before
+// the boundary (i.e. was created BEFORE the audit table existed) we fall
+// back to today's live count and flag the row so the UI can show the
+// caveat.
+async function reconstructRoster(
+  d: Awaited<ReturnType<typeof db>>,
+  rosterYear: number,
+  asOfIso: string,
+): Promise<{ active: number; total: number; reconstructed: boolean }> {
+  // Ensure audit table exists (migration 020). If the DB was opened
+  // pre-migration, the query throws — caught and treated as fallback.
+  let auditRows: Array<{ student_id: number; op: string; active_before: number | null; active_after: number | null; at_utc: string }> = [];
+  try {
+    auditRows = await d.select(
+      `SELECT student_id, op, active_before, active_after, at_utc
+         FROM students_audit
+        WHERE year = ? AND date(at_utc) <= date(?)
+        ORDER BY at_utc ASC, id ASC`,
+      [rosterYear, asOfIso],
+    );
+  } catch {
+    auditRows = [];
+  }
+
+  // For students with NO audit rows at all (pre-migration data), we can't
+  // reconstruct — use today's live count and flag the row.
+  const currentLive = await d.select<{ active: number; total: number }[]>(
+    "SELECT SUM(CASE WHEN active=1 THEN 1 ELSE 0 END) AS active, COUNT(*) AS total FROM students WHERE year=?",
+    [rosterYear],
+  );
+  const live = currentLive[0] || { active: 0, total: 0 };
+
+  if (auditRows.length === 0) {
+    return { active: live.active || 0, total: live.total || 0, reconstructed: false };
+  }
+
+  // Replay audit trail to compute {existed?, active?} per student at boundary.
+  const state = new Map<number, { existed: boolean; active: boolean }>();
+  for (const r of auditRows) {
+    const cur = state.get(r.student_id) ?? { existed: false, active: false };
+    if (r.op === "insert") {
+      state.set(r.student_id, { existed: true, active: (r.active_after ?? 1) === 1 });
+    } else if (r.op === "update_active") {
+      cur.existed = true;
+      cur.active = (r.active_after ?? 0) === 1;
+      state.set(r.student_id, cur);
+    } else if (r.op === "delete") {
+      state.set(r.student_id, { existed: false, active: false });
+    }
+  }
+  let total = 0, active = 0;
+  for (const s of state.values()) {
+    if (s.existed) {
+      total++;
+      if (s.active) active++;
+    }
+  }
+  return { active, total, reconstructed: true };
 }
 
 export default function Agm() {
@@ -96,10 +163,7 @@ function BoardPackage() {
         label = String(y); dateFrom = `${y}-01-01`; dateTo = `${y}-12-31`; rosterYear = y;
       }
       const [studentAgg, receiptAgg] = await Promise.all([
-        d.select<{ active: number; total: number }[]>(
-          "SELECT SUM(CASE WHEN active=1 THEN 1 ELSE 0 END) AS active, COUNT(*) AS total FROM students WHERE year=?",
-          [rosterYear]
-        ),
+        reconstructRoster(d, rosterYear, dateTo),
         d.select<{ receipts: number; gross: number; ccfri: number; accb: number; paid: number; refunds: number }[]>(
           `SELECT COUNT(*) AS receipts,
                   COALESCE(SUM(CASE WHEN is_refund=1 THEN -COALESCE(gross_amount, amount) ELSE COALESCE(gross_amount, amount) END),0) AS gross,
@@ -112,9 +176,14 @@ function BoardPackage() {
           [dateFrom, dateTo]
         ),
       ]);
-      const sa = studentAgg[0] || { active: 0, total: 0 };
       const ra = receiptAgg[0] || { receipts: 0, gross: 0, ccfri: 0, accb: 0, paid: 0, refunds: 0 };
-      out.push({ label, active: sa.active || 0, total: sa.total || 0, ...ra });
+      out.push({
+        label,
+        active: studentAgg.active,
+        total: studentAgg.total,
+        reconstructed: studentAgg.reconstructed,
+        ...ra,
+      });
     }
     setRows(out);
   }
@@ -180,7 +249,17 @@ function BoardPackage() {
           <tbody>
             {rows.map((r) => (
               <tr key={r.label}>
-                <td style={{ padding: 6, border: "1px solid var(--border)" }}>{r.label}</td>
+                <td style={{ padding: 6, border: "1px solid var(--border)" }}>
+                  {r.label}
+                  {!r.reconstructed && (
+                    <span
+                      title="Roster count is from today's live student list, not a fiscal-year-end snapshot. Post-FY-end deletions or deactivations may distort this number. Future years will be reconstructed from the audit log."
+                      style={{ marginLeft: 6, fontSize: 10, color: "var(--muted)" }}
+                    >
+                      (live)
+                    </span>
+                  )}
+                </td>
                 <td style={{ padding: 6, border: "1px solid var(--border)", textAlign: "right" }}>{r.active}</td>
                 <td style={{ padding: 6, border: "1px solid var(--border)", textAlign: "right" }}>{r.total}</td>
               </tr>

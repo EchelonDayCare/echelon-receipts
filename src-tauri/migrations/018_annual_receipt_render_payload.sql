@@ -1,0 +1,38 @@
+-- v3.24.4 (#1) — annual receipt render-payload snapshot.
+--
+-- Freezes the full renderable payload for a CRA Annual Receipt at issue
+-- time so that reissue / reopen / resend always produces the exact same
+-- PDF, even after upstream data (voided receipts, changed student
+-- demographics, changed settings) has shifted.
+--
+-- Nullable — pre-existing ARs stay unfrozen; the frontend falls back to
+-- live data with a UI note ("original render data not captured; showing
+-- current values").
+--
+-- Shape of the JSON blob (v1 — versioned so we can extend later):
+--   {
+--     "v": 1,
+--     "issued_on": "YYYY-MM-DD",
+--     "student_name": "...",
+--     "father_name": "..." | null,
+--     "mother_name": "..." | null,
+--     "recipient_label": "...",
+--     "total": 1234.56,
+--     "receipts": [
+--       { "id": 42, "receipt_no": 1001, "date": "YYYY-MM-DD",
+--         "description": "...", "amount": 485.00, "is_refund": 0 },
+--       ...
+--     ],
+--     "settings_snapshot": {
+--       "daycare_name": "...", "daycare_address": "...",
+--       "business_number": "...", "director_name": "...",
+--       "director_title": "...", "contact_email": "...",
+--       "contact_phone": "..."
+--     }
+--   }
+--
+-- `issuer_snapshot_json` (already present) is not duplicated here — it
+-- carries just the letterhead-side identity. `render_payload_json` is
+-- the receipt body (student + line items + totals).
+
+ALTER TABLE annual_receipts ADD COLUMN render_payload_json TEXT;

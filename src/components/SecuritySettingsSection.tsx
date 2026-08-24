@@ -50,6 +50,7 @@ type V2State = {
 
 export default function SecuritySettingsSection() {
   const [state, setState] = useState<V2State | null>(null);
+  const [loadFailed, setLoadFailed] = useState<string | null>(null);
   const [wizardOpen, setWizardOpen] = useState(false);
   const [changeOpen, setChangeOpen] = useState(false);
   const [recoveryOpen, setRecoveryOpen] = useState(false);
@@ -57,13 +58,36 @@ export default function SecuritySettingsSection() {
   const [proofOpen, setProofOpen] = useState(false);
 
   const refresh = () => {
-    invoke<V2State>("v2_state").then(setState).catch((e) =>
-      console.warn("[security] v2_state:", e)
-    );
+    setLoadFailed(null);
+    invoke<V2State>("v2_state").then(setState).catch((e) => {
+      console.warn("[security] v2_state:", e);
+      setLoadFailed(String(e));
+    });
   };
   useEffect(refresh, []);
 
-  if (!state) return null;
+  if (!state) {
+    // Explicit loading / error surface — silently returning null used to
+    // hide backend faults so the owner couldn't tell whether Security
+    // was disabled, still loading, or failing to initialise.
+    return (
+      <div className="card" style={{ padding: 20 }}>
+        {loadFailed ? (
+          <>
+            <div style={{ fontWeight: 600, color: "#b91c1c", marginBottom: 6 }}>
+              Security settings couldn't load.
+            </div>
+            <div style={{ fontSize: 12, color: "#64748b", marginBottom: 12 }}>
+              {loadFailed}
+            </div>
+            <button className="btn" onClick={refresh}>Retry</button>
+          </>
+        ) : (
+          <div style={{ color: "#64748b" }}>Loading security state…</div>
+        )}
+      </div>
+    );
+  }
 
   const lock = async () => {
     if (!(await showConfirm("Lock the app now? You'll need to enter your PIN to continue."))) return;

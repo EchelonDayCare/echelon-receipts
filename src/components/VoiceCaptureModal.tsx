@@ -39,6 +39,10 @@ export default function VoiceCaptureModal({ open, onClose, onSaved }: Props) {
 
   const recRef = useRef<Recorder | null>(null);
   const timerRef = useRef<number | null>(null);
+  const maxTimerRef = useRef<number | null>(null);
+  // Auto-stop an unattended capture at 2 minutes so buffered audio blobs
+  // don't grow unbounded and freeze the app or exceed Azure payload limits.
+  const MAX_RECORDING_SEC = 120;
 
   // Reset + config check on open.
   useEffect(() => {
@@ -54,6 +58,7 @@ export default function VoiceCaptureModal({ open, onClose, onSaved }: Props) {
   useEffect(() => {
     return () => {
       if (timerRef.current !== null) window.clearInterval(timerRef.current);
+      if (maxTimerRef.current !== null) window.clearTimeout(maxTimerRef.current);
       recRef.current?.cancel();
     };
   }, []);
@@ -73,6 +78,7 @@ export default function VoiceCaptureModal({ open, onClose, onSaved }: Props) {
     recRef.current?.cancel();
     recRef.current = null;
     if (timerRef.current !== null) { window.clearInterval(timerRef.current); timerRef.current = null; }
+    if (maxTimerRef.current !== null) { window.clearTimeout(maxTimerRef.current); maxTimerRef.current = null; }
     onClose();
   }
 
@@ -82,6 +88,11 @@ export default function VoiceCaptureModal({ open, onClose, onSaved }: Props) {
       recRef.current = await startRecording();
       setStage("recording");
       timerRef.current = window.setInterval(() => setRecSecs((s) => s + 1), 1000);
+      // Hard cap on capture duration — a forgotten open modal would
+      // otherwise buffer audio until the tab OOMs.
+      maxTimerRef.current = window.setTimeout(() => {
+        if (recRef.current) { void stopAndProcess(); }
+      }, MAX_RECORDING_SEC * 1000);
     } catch (e: any) {
       setStage("error");
       setErrMsg(e?.message ? String(e.message) : "Microphone permission denied.");
@@ -91,6 +102,7 @@ export default function VoiceCaptureModal({ open, onClose, onSaved }: Props) {
   async function stopAndProcess() {
     if (!recRef.current) return;
     if (timerRef.current !== null) { window.clearInterval(timerRef.current); timerRef.current = null; }
+    if (maxTimerRef.current !== null) { window.clearTimeout(maxTimerRef.current); maxTimerRef.current = null; }
     setStage("transcribing");
     try {
       const { blob, mimeType } = await recRef.current.stop();

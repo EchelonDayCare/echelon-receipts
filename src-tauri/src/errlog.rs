@@ -39,8 +39,25 @@ fn write_line(path: &PathBuf, level: &str, msg: &str) {
         }
     }
     let ts = chrono_like_now();
-    if let Ok(mut f) = OpenOptions::new().create(true).append(true).open(path) {
+    // Create (if absent) with owner-only perms on Unix — the log can
+    // contain diagnostic text with PII / stack traces / partial state
+    // fragments. On Windows the ACL inherited from the app-log dir is
+    // already user-scoped; nothing more to do there.
+    let mut open = OpenOptions::new();
+    open.create(true).append(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        open.mode(0o600);
+    }
+    if let Ok(mut f) = open.open(path) {
         let _ = writeln!(f, "[{ts}] [{level}] {msg}");
+        // If the file existed pre-init with looser perms, tighten now.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = fs::set_permissions(path, fs::Permissions::from_mode(0o600));
+        }
     }
 }
 

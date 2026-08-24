@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { _bindPromptHost } from "../lib/dialogs";
+import { useFocusTrap } from "../lib/focusTrap";
 
 // Global overlay that services showPrompt() calls. Mounted once at the app
 // root so any screen can await user text input without relying on
@@ -12,6 +13,7 @@ export default function PromptHost() {
   } | null>(null);
   const [value, setValue] = useState("");
   const inputRef = useRef<HTMLInputElement>(null);
+  const trapRef = useFocusTrap<HTMLDivElement>(req !== null);
 
   useEffect(() => {
     _bindPromptHost((r) => {
@@ -40,7 +42,7 @@ export default function PromptHost() {
         paddingTop: 120, zIndex: 2000,
       }}
     >
-      <div className="card" style={{ width: "min(480px, 92vw)", margin: 0 }}>
+      <div className="card" ref={trapRef} style={{ width: "min(480px, 92vw)", margin: 0 }}>
         <div style={{ whiteSpace: "pre-wrap", marginBottom: 12 }}>{req.message}</div>
         <input
           ref={inputRef}

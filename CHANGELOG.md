@@ -4,6 +4,243 @@ All notable changes shipped as a DMG. Only entries the owner has approved
 for release are listed here — "code-complete, awaiting ship approval" work
 lives in the session plan.md until it ships.
 
+## v3.24.4 — App-wide deep-review hardening (code-complete, awaiting ship approval)
+
+Follow-up to v3.24.3. Six parallel deep-review passes (Claude Opus 4.7,
+GPT-5.3-Codex, GPT-5.6 Sol, Gemini 3.1 Pro, Grok 4.6) across OCR, receipts,
+security, comms/vault, graduation, and frontend surfaced ~15 P0 / 25 P1
+findings. This release addresses the mechanical / low-risk P0s and a batch
+of the high-leverage P1s. Architectural items (Annual Receipt payload
+immutability, Staff wipe-then-upsert transaction, restore.rs plaintext-
+into-encrypted install recovery, aging historical-sum model) are noted for
+follow-up releases so they get the design attention they need.
+
+### Data integrity (P0)
+
+- **Deposits are now transactional.** `createDeposit` wraps the eligibility
+  recheck + header INSERT + receipt linkage UPDATE in `BEGIN IMMEDIATE`.
+  A crash between INSERT and UPDATE used to leave a funded deposit header
+  with no linked receipts (or receipts marked deposited with no header);
+  now either both apply or neither does. Also adds a `rowsAffected`
+  invariant so a concurrent modification aborts cleanly.
+- **`voidDeposit` is now transactional.** Same rationale — receipt detach
+  and header flag are wrapped in `BEGIN IMMEDIATE` so a crash can't leave
+  a "live" deposit whose receipts have already gone back to undeposited.
+- **Force-void now reconciles the deposit slip.** When a supervisor
+  force-voids a receipt that's part of an active (not-voided) deposit,
+  the deposit's `cheque_count` and `total_amount` are now decremented
+  and the receipt is detached, so the printed slip stays internally
+  consistent with the bank statement. The deposit-adjustment record is
+  captured inside the same `audit_log` entry for CRA forensics.
+
+### Security & safety (P0)
+
+- **PINs are zero-wiped on drop.** `v2_unlock`, `v2_change_pin`, and
+  `v2_reset_pin` now wrap the incoming PIN string in `Zeroizing<String>`
+  so the byte buffer is wiped on every return path (including errors)
+  instead of sitting on the heap until the allocator reuses it.
+- **Error log is owner-read-only on Unix.** `errlog::write_line` opens
+  the log with `mode(0o600)` and re-`set_permissions` to 0600 on write,
+  so a shared macOS/Linux account can no longer read another user's
+  diagnostic log (which may contain stack traces or partial state
+  fragments). Windows ACL from the app-log dir already scopes access.
+- **`v2_change_pin` is now rate-limited.** Previously the change-PIN
+  endpoint didn't call `check_rate_limit`, so a compromised renderer
+  could brute-force the current PIN through it without triggering the
+  lockout that guards `v2_unlock`. Now shares the same rate-limit
+  window and records failures on wrong PIN.
+- **Backup / restore commands are gated on unlock.** `backup_set_passphrase`,
+  `backup_clear_passphrase`, `export_plaintext_backup`,
+  `export_encrypted_backup`, `stage_restore`, and `restart_app` now all
+  require the app to be unlocked (session has an MDK) before running. A
+  compromised renderer can no longer trigger a plaintext export or a live
+  restore without proving ownership this session.
+- **Backup destination path guarded.** Plaintext and encrypted backup
+  writes are constrained to app-data / Documents / Downloads via
+  `path_guard::validate_new_file_dest` and reject symlinks.
+- **Placebo zero-write fixed.** The pre-delete overwrite of temp backup
+  files now actually writes zero-bytes for the full length of the file
+  (in 64 KiB chunks), instead of a single 64 KiB block regardless of
+  size.
+- **OCR image-decoder DoS caps.** `consensus::normalize_image` and
+  `azure_ai::downscale_for_vision` now enforce a 30 MB byte cap and
+  40 MP pixel limit (via `image::Limits`) before decoding, so a
+  crafted image can't blow up memory during OCR.
+- **Prompt-injection guard on Ask Echelon summarize.** The `summarize`
+  system prompt now instructs the model to treat SQL result rows
+  strictly as data and ignore any embedded instructions.
+- **Email error redaction.** Address parse failures no longer echo the
+  raw recipient into the log — they render as `<redacted>`.
+- **@e965/xlsx replaces vulnerable `xlsx@0.18.5`.** Community fork,
+  drop-in API, no functional change. Removes exposure to
+  CVE-2023-30533 (prototype pollution) and CVE-2024-22363 (ReDoS).
+
+### Correctness (OCR / classification)
+
+- **`providers[]` metadata reports the right model.** When primary hard-
+  failed and secondary was promoted, the diagnostic used to show
+  primary's row/mark count as the actual work and zero for secondary —
+  now correctly attributes the returned rows to the model that produced
+  them so the debug dump matches reality.
+- **UTF-8 emoji-safe month sniff.** `consensus::sniff_month_year`
+  previously panicked when the OCR text began with a non-ASCII glyph;
+  now walks characters rather than bytes.
+- **Non-panicking perspective warp.** `perspective_warp` returns a blank
+  canvas instead of `panic!` when the source quad is degenerate.
+- **Attendance closed-day hints match QR month.** When the sheet's
+  embedded QR overrides the UI-selected month, closed-day hints are now
+  rebuilt for the QR's effective month instead of silently reusing the
+  UI month's calendar.
+- **Kid-name normalization no longer strips bare `s`.** Chris, James,
+  Ross, Alexis, Iris etc. previously matched an over-eager possessive
+  stripper. Now only literal `'s`, `s'`, or a trailing apostrophe are
+  removed.
+
+### Frontend correctness
+
+- **Focus trap on modals.** New `useFocusTrap` hook wires PromptHost and
+  TodayDrawer so keyboard Tab / Shift+Tab cycle stays inside the open
+  modal instead of escaping into off-screen widgets in the main app.
+  Also restores focus to the launch element on close.
+- **Migration self-heal knows all 17 migrations.** `migration_heal`'s
+  `expected_checksums` was frozen at 13 migrations, so if it were ever
+  activated it would silently ignore any modification to migrations
+  14–17 (Website CMS + media). Now enumerates all shipped migrations.
+- **Keychain-delete surfaces failures.** SMTP, Azure AI, and Whisper key
+  removal in Settings now wrap the invoke in try/catch so an OS-keychain
+  error is shown to the owner instead of silently claiming success while
+  the credential remained on disk.
+- **Home settings load logs on failure.** `getSettings()` in Home is
+  wrapped in try/catch — a DB read failure no longer silently leaves
+  Home stuck on placeholder branding.
+- **Security settings visible loading & error state.** The Security tab
+  now shows an explicit "Loading…" placeholder and, on error, a Retry
+  button instead of returning `null` — which made it impossible to tell
+  whether the tab was still initialising or the backend had failed.
+- **Refund-aware totals & CSV signed amount.** History totals now use
+  `is_refund ? -amount : amount`. Reports CSV and the annual master
+  archive CSV gain a `signed_amount` column and are written with a UTF-8
+  BOM so Excel on Windows decodes them correctly.
+- **DST-safe day math.** New `src/lib/localDate.ts` helper computes day
+  differences via `Date.UTC(y, m-1, d)`, killing the 23-hour spring-forward
+  bug in aging + monthly generation. Aging report and new-receipt/expense
+  default dates now use `todayLocalIso()`.
+- **Reject negative computed amounts.** Monthly tuition generation
+  refuses to persist an invoice with a non-finite or zero/negative
+  computed amount instead of silently writing a refund-shaped row.
+- **Refund-excluding fee-month match.** `receiptMatchesFeeMonth`
+  ignores refunds and requires the fallback description to contain
+  "tuition" or "fee", so a random reimbursement no longer double-counts
+  as this month's tuition.
+- **Email recipient dedupe.** `comms.resolveRecipients` collapses
+  duplicate parent-email sets so a family isn't emailed twice when a
+  child is enrolled in two programs.
+- **Waitlist priority tie-break.** Ties now break by `submitted_at ASC`
+  then `id ASC` instead of undefined order.
+- **Voice capture max 120 s.** The recorder auto-stops after two minutes
+  so an accidentally-left-open modal can't grow an unbounded blob.
+- **Voice transcript honors `storeRaw`.** `logOrganizerAiEvent` no
+  longer writes the response body into the log when raw storage is
+  disabled.
+- **Idle-lock survives minimize.** Replaces `visibilitychange → reset`
+  with an anchor-on-hide pattern; on visible, elapsed hidden time counts
+  toward the idle timeout so a backgrounded app still locks on time
+  (WebView2/WKWebView throttle `setTimeout` while hidden).
+- **PIN unlock reentry guard.** Auto-submit debounce raised from 350 ms
+  to 900 ms and gated by a ref so a 6-char prefix of a longer PIN can't
+  fire mid-typing.
+- **Root error boundary.** A single React error no longer white-screens
+  the whole app; a recoverable card offers Reload and logs the stack.
+- **Home viewport scrolls again.** `.content-home-shell` uses
+  `overflow-y: auto` so short viewports (or added alert cards) don't
+  clip content.
+- **Notification desktop-alert spam fix.** `upsertByDedupKey` now returns
+  `{ isNew, escalated }` and the scheduler only fires a desktop alert
+  when the notification is genuinely new or its severity was just
+  escalated — persistent alerts no longer re-notify every 10-minute
+  scan tick.
+- **Settings `/config/:tab` validated.** Unknown tab keys fall through
+  to Identity instead of silently rendering a wrong-looking tab.
+
+### Round 2 — Ambiguity-resolved batch (2026-08-02)
+
+After a 15-issue design walkthrough, the following P0/P1s were resolved
+one-by-one with owner-approved options and shipped in the same v3.24.4
+window.
+
+- **Annual-receipt render-payload immutability (#1).** New `render_payload_json`
+  column on `annual_receipts` (migration 018). At issue time we snapshot the
+  student, recipient label, receipt list, and daycare-identity settings into
+  a versioned JSON blob; reissues render from the frozen payload instead of
+  today's mutated settings. Backward-compatible: rows with NULL payload fall
+  back to live data with no user-visible change.
+- **Staff OCR month replace is now atomic (#2).** New
+  `replaceStaffMonthHours` helper wraps the wipe-then-upsert loop in a
+  single `BEGIN IMMEDIATE` transaction. A crash between wipe and upsert
+  previously left staff buckets empty. On any error the whole batch
+  rolls back — original data is preserved intact.
+- **Restore.rs re-encrypts plaintext backups (#3).** When the staged
+  restore file is a plaintext SQLite DB, it's now re-encrypted with the
+  live install's MDK via `SqlCipherExporter.encrypt_new` before commit.
+  Previously the app would refuse to open a plaintext backup at all;
+  now the owner can restore a legitimate plaintext backup safely.
+- **OCR ambiguous-cell "unknown" state (#4).** New `CellKind::Unknown`
+  variant. Cells that don't confidently look like P or A are no longer
+  force-classified — they're surfaced to the reviewer via the existing
+  `uncertainDays` highlight instead of writing a wrong mark.
+- **Aging historical-sum model (#5).** New `settled_at` /
+  `settled_by_receipt_id` columns (migration 019). Aging query now
+  includes receipts that were settled AFTER the as-of date, so historical
+  aging reports for closed months are no longer distorted by later
+  payments. New "Settle" button in AgingReport marks a family's balance
+  as paid off with a confirm modal.
+- **Unsaved-changes guard on receipt & expense forms (#6).** New
+  `useUnsavedGuard` hook combines `beforeunload` (window close / reload)
+  with react-router `useBlocker` (nav-away) and shows an inline confirm
+  modal. Wired into NewReceipt and ExpenseForm; forms clear the flag on
+  successful save.
+- **Waitlist archive delete + confirm (#7).** Archived waitlist entries
+  can now be permanently deleted from the UI with an "Are you sure?" gate.
+  Previously only reactivation was available and orphaned entries
+  accumulated.
+- **HW encoder failure retry-on-error (#8).** New
+  `RenderState.encoder_cache` + `probe_encoder_ok()` helper. Renders
+  first try the OS-default hardware encoder; on probe failure the app
+  falls back to the software encoder for the current job and caches the
+  choice so subsequent segments don't re-probe.
+- **Grid interpolation weighted blend (#9).** `class_reel` / kid-sheet grid
+  detection now blends detected peaks with the interpolated grid at
+  70/30 when a detected peak lies within tolerance of the interpolated
+  position. Reduces jitter on real printed sheets without giving up
+  interpolation's structural correctness.
+- **AGM roster reconstruction from audit log (#10).** New
+  `students_audit` table + triggers on INSERT / UPDATE(active) / DELETE
+  (migration 020). AGM report reconstructs each fiscal year's roster
+  count by replaying the audit trail up to FY-end. Pre-migration years
+  fall back to live counts with a `(live)` marker in the UI so
+  auditors can see which rows are trusted.
+- **Import statement is transactional (#13).** The bank-statement
+  import batch now runs inside a single `BEGIN IMMEDIATE` with
+  `ROLLBACK` on error. Partial imports on crash are no longer possible.
+- **Annual PDF archive to app-data (#12).** Every generated Annual
+  Receipt PDF now also writes a silent copy to
+  `appDataDir/archives/YYYY/Annual/`, on top of the user's chosen
+  `pdf_folder`. Recovery no longer depends on the folder being
+  reachable at the time of loss.
+- **Azure URL allowlist verified (#14).** Existing `azure_url_guard`
+  already enforces the strict allowlist; verified during review — no
+  code change required.
+
+### Deferred to a follow-up release
+
+Documented follow-ups (design-heavy or intentionally deferred by owner):
+
+- Fiscal-year enrollment counts pre-audit-log data reconstruction
+  (impossible without prior audit rows; forward-looking only).
+- Complete owner-only cross-signal weighting (#11) — kept current
+  ranking.
+- Future roadmap capacity item (#15) — deferred per owner.
+
 ## v3.24.3 — Website module deep-review hardening
 
 ### Website module

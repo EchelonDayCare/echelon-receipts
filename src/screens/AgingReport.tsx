@@ -1,15 +1,18 @@
 import { useEffect, useState } from "react";
-import { computeAging, agingToCsv, type AgingReport } from "../lib/aging";
+import { computeAging, agingToCsv, settleAllForStudent, type AgingReport } from "../lib/aging";
 import { getSettings } from "../lib/db";
 import { h } from "../lib/html";
 import { printHtmlDocument } from "../lib/print";
+import { todayLocalIso } from "../lib/localDate";
 
-function todayIso() { return new Date().toISOString().slice(0, 10); }
+function todayIso() { return todayLocalIso(); }
 
 export default function AgingReportScreen() {
   const [asOf, setAsOf] = useState(todayIso());
   const [rep, setRep] = useState<AgingReport | null>(null);
   const [daycareName, setDaycareName] = useState<string>("");
+  const [settlingId, setSettlingId] = useState<number | null>(null);
+  const [confirmSettle, setConfirmSettle] = useState<{ studentId: number; name: string; total: number } | null>(null);
 
   async function refresh() {
     setRep(await computeAging(asOf));
@@ -19,7 +22,7 @@ export default function AgingReportScreen() {
 
   function exportCsv() {
     if (!rep) return;
-    const blob = new Blob([agingToCsv(rep)], { type: "text/csv" });
+    const blob = new Blob(["\uFEFF" + agingToCsv(rep)], { type: "text/csv;charset=utf-8" });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url; a.download = `aging-${asOf}.csv`; a.click();
@@ -123,6 +126,7 @@ export default function AgingReportScreen() {
             <th style={{ textAlign: "right" }}>61-90</th>
             <th style={{ textAlign: "right" }}>90+</th>
             <th style={{ textAlign: "right" }}>Total</th>
+            <th></th>
           </tr></thead>
           <tbody>
             {rep.rows.map((r) => (
@@ -144,6 +148,17 @@ export default function AgingReportScreen() {
                   ${r.bucket.d90plus.toFixed(2)}
                 </td>
                 <td style={{ textAlign: "right", fontWeight: 600 }}>${r.bucket.total.toFixed(2)}</td>
+                <td>
+                  <button
+                    className="btn secondary"
+                    style={{ fontSize: 11, padding: "2px 8px" }}
+                    disabled={settlingId === r.student_id}
+                    onClick={() => setConfirmSettle({ studentId: r.student_id, name: r.student_name, total: r.bucket.total })}
+                    title="Mark this family's pending balances as settled (as of today)"
+                  >
+                    Settle
+                  </button>
+                </td>
               </tr>
             ))}
             <tr style={{ borderTop: "2px solid #111", fontWeight: 700 }}>
@@ -154,9 +169,58 @@ export default function AgingReportScreen() {
               <td style={{ textAlign: "right" }}>${rep.totals.d61_90.toFixed(2)}</td>
               <td style={{ textAlign: "right", color: rep.totals.d90plus > 0 ? "#b91c1c" : undefined }}>${rep.totals.d90plus.toFixed(2)}</td>
               <td style={{ textAlign: "right" }}>${rep.totals.total.toFixed(2)}</td>
+              <td></td>
             </tr>
           </tbody>
         </table>
+      )}
+
+      {confirmSettle && (
+        <div
+          role="dialog"
+          aria-modal="true"
+          style={{
+            position: "fixed", inset: 0, background: "rgba(0,0,0,0.4)",
+            display: "flex", alignItems: "center", justifyContent: "center", zIndex: 1000,
+          }}
+          onClick={() => setConfirmSettle(null)}
+        >
+          <div
+            onClick={(e) => e.stopPropagation()}
+            style={{ background: "#fff", borderRadius: 8, padding: 20, maxWidth: 460, boxShadow: "0 12px 40px rgba(0,0,0,0.2)" }}
+          >
+            <h3 style={{ marginTop: 0 }}>Mark ${confirmSettle.total.toFixed(2)} as settled?</h3>
+            <p style={{ fontSize: 13, color: "var(--muted)" }}>
+              This will clear the pending balance for <strong>{confirmSettle.name}</strong> across
+              all of their currently-outstanding receipts. The receipts themselves will remain
+              in the archive with a <code>settled_at</code> stamp of today so historical
+              aging reports for past dates stay accurate.
+            </p>
+            <div style={{ display: "flex", gap: 8, justifyContent: "flex-end", marginTop: 16 }}>
+              <button className="btn secondary" onClick={() => setConfirmSettle(null)}>Cancel</button>
+              <button
+                className="btn"
+                disabled={settlingId !== null}
+                onClick={async () => {
+                  const t = confirmSettle;
+                  setSettlingId(t.studentId);
+                  try {
+                    await settleAllForStudent(t.studentId);
+                    await refresh();
+                  } catch (e) {
+                    console.error("[aging] settle failed", e);
+                    alert("Failed to settle balance — see console for details.");
+                  } finally {
+                    setSettlingId(null);
+                    setConfirmSettle(null);
+                  }
+                }}
+              >
+                Yes, mark settled
+              </button>
+            </div>
+          </div>
+        </div>
       )}
     </div>
   );

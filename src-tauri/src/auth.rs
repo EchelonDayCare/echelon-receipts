@@ -179,14 +179,14 @@ impl AuthState {
         g.mdk.take()
     }
 
-    fn has_mdk(&self) -> bool {
+    pub fn has_mdk(&self) -> bool {
         self.inner.lock().unwrap().mdk.is_some()
     }
 
     /// Return a copy of the currently-loaded MDK, if any. Used by the
     /// "change PIN while unlocked" flow (e.g. after unlocking via recovery
     /// code when the user has forgotten their PIN).
-    fn clone_mdk(&self) -> Option<Mdk> {
+    pub(crate) fn clone_mdk(&self) -> Option<Mdk> {
         let g = self.inner.lock().unwrap();
         g.mdk.as_ref().map(|m| Mdk::from_bytes(*m.as_bytes()))
     }
@@ -603,6 +603,10 @@ pub async fn v2_unlock(
     gate: tauri::State<'_, DbGate>,
     pin: String,
 ) -> Result<(), AuthError> {
+    // Wrap the incoming PIN in Zeroizing so the byte buffer is wiped
+    // on drop even on error-return paths — otherwise the PIN sits on
+    // the heap until the allocator recycles it.
+    let pin = Zeroizing::new(pin);
     auth.check_rate_limit()?;
 
     let env_path = envelope_path(&app)?;
@@ -649,6 +653,13 @@ pub async fn v2_change_pin(
     old_pin: String,
     new_pin: String,
 ) -> Result<(), AuthError> {
+    // Wipe both PINs on drop regardless of return path (see v2_unlock).
+    let old_pin = Zeroizing::new(old_pin);
+    let new_pin = Zeroizing::new(new_pin);
+    // Guard against brute-forcing `old_pin` here — v2_unlock is rate-limited,
+    // so a compromised renderer would otherwise use this command as an
+    // unmetered oracle for the current PIN.
+    auth.check_rate_limit()?;
     if new_pin.chars().count() < 6 {
         return Err(AuthError::PinTooShort);
     }
@@ -663,7 +674,10 @@ pub async fn v2_change_pin(
     // Verify old PIN by unwrapping.
     let mdk = match security::unwrap_mdk(&slot, old_pin.as_bytes(), &device_secret) {
         Ok(m) => m,
-        Err(SecurityError::Authentication) => return Err(AuthError::WrongPin),
+        Err(SecurityError::Authentication) => {
+            auth.record_failure();
+            return Err(AuthError::WrongPin);
+        }
         Err(e) => return Err(e.into()),
     };
     // Wrap same MDK under new PIN and persist.
@@ -699,6 +713,7 @@ pub async fn v2_reset_pin(
     proof: StepUpProof,
     new_pin: String,
 ) -> Result<(), AuthError> {
+    let new_pin = Zeroizing::new(new_pin);
     if new_pin.chars().count() < 6 {
         return Err(AuthError::PinTooShort);
     }

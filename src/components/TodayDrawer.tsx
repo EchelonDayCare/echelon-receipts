@@ -4,6 +4,7 @@ import { loadTodaySummary, type TodaySummary, type TodayAttentionItem, type Toda
 import { setCalendarDay } from "../lib/monthAttendance";
 import { runClosureImpact } from "./ClosureImpactDialog";
 import { showPrompt } from "../lib/dialogs";
+import { useFocusTrap } from "../lib/focusTrap";
 
 // TodayDrawer — right-side non-blocking panel that answers the owner's
 // "what's happening today?" in three owner-oriented buckets:
@@ -58,6 +59,7 @@ function sourceLabel(source: string): string {
 }
 
 export default function TodayDrawer({ isoDate, onClose, onDateChange }: Props) {
+  const trapRef = useFocusTrap<HTMLElement>(true);
   const nav = useNavigate();
   const [summary, setSummary] = useState<TodaySummary | null>(null);
   const [loading, setLoading] = useState(true);
@@ -147,6 +149,7 @@ export default function TodayDrawer({ isoDate, onClose, onDateChange }: Props) {
         }}
       />
       <aside
+        ref={trapRef}
         role="dialog"
         aria-label="Today"
         style={{

@@ -244,13 +244,26 @@ export async function resolveRecipients(f: RecipientFilter, activeYear?: number)
     const ids = new Set(f.studentIds);
     students = all.filter((s) => ids.has(s.id));
   }
-  return students
+  const resolved = students
     .map((s) => {
       const emails = parseRecipients(s.email);
       const parentName = [s.father_name, s.mother_name].filter(Boolean).join(" & ") || "Parent";
       return { student: s, parentName, emails };
     })
     .filter((r) => r.emails.length > 0);
+  // Dedupe by parent email address so a family enrolled across multiple
+  // years (or with the same email attached to siblings) receives exactly
+  // one message per broadcast. Keeps the first match — usually the most
+  // recent/active enrollment because listStudents returns newest first.
+  const seen = new Set<string>();
+  const deduped: ResolvedRecipient[] = [];
+  for (const r of resolved) {
+    const key = r.emails.map((e) => e.toLowerCase().trim()).sort().join("|");
+    if (seen.has(key)) continue;
+    seen.add(key);
+    deduped.push(r);
+  }
+  return deduped;
 }
 
 // ---------------- Merge template ----------------

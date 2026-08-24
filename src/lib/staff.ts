@@ -1,5 +1,5 @@
 // Staff hours helpers.
-import { db, execRetry } from "./db";
+import { db, execRetry, serializeWrite } from "./db";
 import type { Staff, StaffHour } from "../types";
 
 function hoursBetween(inT: string | null, outT: string | null): number {
@@ -204,6 +204,78 @@ export async function deleteHoursForStaffMonth(staffId: number, ym: string): Pro
     [staffId, ym]
   );
   return before;
+}
+
+/**
+ * v3.24.4 (#2): Atomically REPLACE all staff_hours entries for a set of
+ * (staff_id, YYYY-MM) buckets with a new batch of rows, inside a single
+ * transaction. Fixes the historic hazard where the OCR import would DELETE
+ * old data then INSERT new rows in a plain loop — a crash between DELETE
+ * and INSERT left buckets wiped with no replacement.
+ *
+ * `buckets`: which (staff_id, ym) combos to wipe first.
+ * `rows`: the replacement rows. Each must match `upsertHour` parameters.
+ *
+ * The whole operation runs in one BEGIN IMMEDIATE / COMMIT. On any error
+ * the transaction rolls back and NO buckets are wiped (and no rows are
+ * inserted) — original data is preserved intact.
+ */
+export interface StaffHourReplaceRow {
+  staff_id: number;
+  work_date: string;
+  in_time: string | null;
+  out_time: string | null;
+  source: "manual" | "ocr";
+  sheet_image_path: string | null;
+  notes: string | null;
+  no_lunch: boolean;
+}
+export async function replaceStaffMonthHours(
+  buckets: Array<{ staffId: number; ym: string }>,
+  rows: StaffHourReplaceRow[],
+): Promise<{ wiped: number; inserted: number }> {
+  return serializeWrite(async () => {
+    const d = await db();
+    await d.execute("BEGIN IMMEDIATE");
+    try {
+      let wiped = 0;
+      for (const b of buckets) {
+        const before = await d.select<Array<{ n: number }>>(
+          "SELECT COUNT(*) AS n FROM staff_hours WHERE staff_id=? AND substr(work_date,1,7)=?",
+          [b.staffId, b.ym],
+        );
+        wiped += before?.[0]?.n ?? 0;
+        await d.execute(
+          "DELETE FROM staff_hours WHERE staff_id=? AND substr(work_date,1,7)=?",
+          [b.staffId, b.ym],
+        );
+      }
+      let inserted = 0;
+      for (const r of rows) {
+        const hours = paidHours(r.in_time, r.out_time, r.no_lunch);
+        await d.execute(
+          `INSERT INTO staff_hours(staff_id, work_date, in_time, out_time, hours_decimal, source, sheet_image_path, notes, no_lunch)
+           VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)
+           ON CONFLICT(staff_id, work_date) DO UPDATE SET
+             in_time=excluded.in_time,
+             out_time=excluded.out_time,
+             hours_decimal=excluded.hours_decimal,
+             source=excluded.source,
+             sheet_image_path=COALESCE(excluded.sheet_image_path, staff_hours.sheet_image_path),
+             notes=COALESCE(excluded.notes, staff_hours.notes),
+             no_lunch=excluded.no_lunch`,
+          [r.staff_id, r.work_date, r.in_time, r.out_time, hours, r.source,
+           r.sheet_image_path, r.notes, r.no_lunch ? 1 : 0],
+        );
+        inserted++;
+      }
+      await d.execute("COMMIT");
+      return { wiped, inserted };
+    } catch (e) {
+      try { await d.execute("ROLLBACK"); } catch { /* fine */ }
+      throw e;
+    }
+  });
 }
 
 /**

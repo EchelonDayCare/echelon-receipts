@@ -1413,8 +1413,19 @@ fn perspective_warp(
     out_h: u32,
 ) -> GrayImage {
     // We compute the INVERSE homography (dst → src) directly, so for each
-    // canonical output pixel we look up its source coordinate.
-    let h_inv = homography_from_quads(dst_quad, src_quad).expect("degenerate quad");
+    // canonical output pixel we look up its source coordinate. If the quad
+    // is degenerate (near-collinear anchors from the fiducial fallback),
+    // return a blank canonical page instead of panicking — downstream grid
+    // detection will fail cleanly and the caller can retry with a coarser
+    // fallback.
+    let h_inv = match homography_from_quads(dst_quad, src_quad) {
+        Some(h) => h,
+        None => {
+            let mut blank = GrayImage::new(out_w, out_h);
+            for px in blank.pixels_mut() { *px = Luma([255]); }
+            return blank;
+        }
+    };
     let mut out = GrayImage::new(out_w, out_h);
     let (sw, sh) = (src.width() as f64, src.height() as f64);
     for y in 0..out_h {
@@ -1618,12 +1629,57 @@ fn detect_grid(warped: &GrayImage, roster_size: usize, target_month: &str) -> Re
     // obscuring the line beneath) can be perfectly synthesised — top and
     // bottom + expected count = exact interior positions. This turns a
     // "found 24, need 27" fail into a clean 27-line grid.
-    let row_ys = interpolate_lines(*row_ys.first().unwrap(), *row_ys.last().unwrap(), expected_rows + 1);
-    let col_xs = interpolate_lines(*col_xs.first().unwrap(), *col_xs.last().unwrap(), expected_cols + 1);
-    eprintln!("[kid-ocr-local] grid: interpolated to {} horizontal × {} vertical lines from detected outer borders",
-        row_ys.len(), col_xs.len());
+    //
+    // v3.24.4 (#9): weighted blend with detected peaks. Uniform
+    // interpolation alone throws away positional information from the
+    // interior lines we DID detect — on slightly-warped or paper-stretched
+    // scans, real print positions can drift ±1–2 px from the uniform
+    // ideal, causing edge-cell classification errors. For each
+    // interpolated line index, if there's a detected peak within a
+    // tolerance window (~30% of a cell span), blend 70% detected + 30%
+    // interpolated. If no detected peak is within tolerance, fall back to
+    // pure interpolation.
+    let detected_row_ys = row_ys.clone();
+    let detected_col_xs = col_xs.clone();
+    let interp_row_ys = interpolate_lines(*row_ys.first().unwrap(), *row_ys.last().unwrap(), expected_rows + 1);
+    let interp_col_xs = interpolate_lines(*col_xs.first().unwrap(), *col_xs.last().unwrap(), expected_cols + 1);
+    let row_ys = blend_lines(&interp_row_ys, &detected_row_ys);
+    let col_xs = blend_lines(&interp_col_xs, &detected_col_xs);
+    eprintln!("[kid-ocr-local] grid: interpolated to {} horizontal × {} vertical lines from detected outer borders (blended with {} + {} detected peaks)",
+        row_ys.len(), col_xs.len(), detected_row_ys.len(), detected_col_xs.len());
 
     Ok(GridSpec { row_ys, col_xs })
+}
+
+/// Blend interpolated line positions with detected peaks (v3.24.4 #9).
+/// For each interpolated position, find the nearest detected peak within
+/// a tolerance window (30% of the mean spacing) and blend
+/// 70% detected + 30% interpolated. Positions with no nearby detected
+/// peak keep the pure-interpolated value.
+fn blend_lines(interp: &[u32], detected: &[u32]) -> Vec<u32> {
+    if interp.len() < 2 || detected.is_empty() {
+        return interp.to_vec();
+    }
+    // Mean spacing derived from the interpolation span.
+    let span = (*interp.last().unwrap() as f64) - (*interp.first().unwrap() as f64);
+    let mean_spacing = span / (interp.len() as f64 - 1.0).max(1.0);
+    let tolerance = (mean_spacing * 0.30).max(2.0);
+    interp.iter().map(|&ip| {
+        // Find the detected peak with min |dp - ip| within tolerance.
+        let mut best: Option<(u32, f64)> = None;
+        for &dp in detected {
+            let dist = (dp as f64 - ip as f64).abs();
+            if dist <= tolerance {
+                if best.map(|(_, d)| dist < d).unwrap_or(true) {
+                    best = Some((dp, dist));
+                }
+            }
+        }
+        match best {
+            Some((dp, _)) => ((dp as f64) * 0.7 + (ip as f64) * 0.3).round() as u32,
+            None => ip,
+        }
+    }).collect()
 }
 
 /// Generate `count` uniformly-spaced line positions from `first` to `last`
@@ -1740,6 +1796,22 @@ fn classify_cells(
                         });
                     }
                 }
+                // v3.24.4 (#4): classifier can now honestly emit
+                // `Unknown` for ambiguous-shape ink instead of guessing
+                // P or A with 0.40 confidence. Don't set a mark at all —
+                // just surface as an uncertain cell so the reviewer UI
+                // shows an unset day highlighted for manual decision.
+                // (Adding "?" to `marks` would violate the MonthMark
+                // "P"|"A" contract that the frontend enforces.)
+                CellKind::Unknown => {
+                    uncertain.push(UncertainCell {
+                        child_name: roster[ri].student_name.clone(),
+                        day: day.to_string(),
+                        picked: "?".to_string(),
+                        votes: vec!["P".to_string(), "A".to_string(), "?".to_string()],
+                        confidence,
+                    });
+                }
             }
         }
         rows.push(ExtractedRow {
@@ -1750,7 +1822,7 @@ fn classify_cells(
     (rows, uncertain)
 }
 
-enum CellKind { Blank, P, A }
+enum CellKind { Blank, P, A, Unknown }
 
 /// Classify a single cell based on ink density + stroke shape.
 ///
@@ -1812,13 +1884,16 @@ fn classify_one_cell(img: &GrayImage, x0: u32, y0: u32, x1: u32, y1: u32, thr: u
         let conf = h_ext.min(1.0) * (1.0 - v_ext);
         (CellKind::A, conf.clamp(0.0, 1.0))
     } else if density > 0.10 {
-        // Non-trivial ink but ambiguous shape — call it P (safer default:
-        // present > absent; the reviewer can flip if wrong) but mark it
-        // low-confidence so the UI flags it.
-        (CellKind::P, 0.40)
+        // v3.24.4 (#4): non-trivial ink but ambiguous shape — no longer
+        // guess "P" as a safer default. Emit Unknown so the reviewer UI
+        // shows "?" and the human explicitly decides. Silent-P guesses
+        // corrupted downstream attendance totals when the sheet had an
+        // unrelated smudge.
+        (CellKind::Unknown, 0.40)
     } else {
         // Ambiguous low-ink — could be smudge or a tentative dash.
-        (CellKind::A, 0.40)
+        // Same story as above — surface as Unknown for review.
+        (CellKind::Unknown, 0.40)
     }
 }
 

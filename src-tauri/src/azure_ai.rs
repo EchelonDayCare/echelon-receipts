@@ -44,6 +44,7 @@ fn redact(s: String, secret: &str) -> String {
 fn downscale_for_vision(image_b64: &str, mime_type: &str) -> (String, String) {
     const MAX_DIM: u32 = 1600;
     const JPEG_QUALITY: u8 = 85;
+    const MAX_BYTES: usize = 30 * 1024 * 1024;
     if !mime_type.starts_with("image/") {
         return (image_b64.to_string(), mime_type.to_string());
     }
@@ -51,8 +52,26 @@ fn downscale_for_vision(image_b64: &str, mime_type: &str) -> (String, String) {
         Ok(b) => b,
         Err(_) => return (image_b64.to_string(), mime_type.to_string()),
     };
+    if bytes.len() > MAX_BYTES {
+        eprintln!(
+            "[month-ocr] downscale: image bytes {} > {} cap — passing through",
+            bytes.len(), MAX_BYTES,
+        );
+        return (image_b64.to_string(), mime_type.to_string());
+    }
     let orig_size = bytes.len();
-    let img = match image::load_from_memory(&bytes) {
+    let mut reader = match image::ImageReader::new(std::io::Cursor::new(&bytes))
+        .with_guessed_format()
+    {
+        Ok(r) => r,
+        Err(_) => return (image_b64.to_string(), mime_type.to_string()),
+    };
+    let mut limits = image::Limits::default();
+    limits.max_image_width = Some(40_000_000);
+    limits.max_image_height = Some(40_000_000);
+    limits.max_alloc = Some((MAX_BYTES as u64) * 4);
+    reader.limits(limits);
+    let img = match reader.decode() {
         Ok(i) => i,
         Err(e) => {
             eprintln!("[month-ocr] downscale: image decode failed ({e}) — sending original bytes");
@@ -472,11 +491,17 @@ fn parse_month_annotation(
 
 // Case-insensitive name normalisation for matching child rows across
 // providers ("Adella Buitrago" vs "adella buitrago's" vs "  Adella  Buitrago ").
+// Only strips a literal possessive suffix ("'s" or "s'") — never a bare
+// trailing 's', which would corrupt every child whose real name ends in
+// 's' (Chris, James, Ross, Alexis, Iris) and silently drop their marks.
 fn norm_child_name(s: &str) -> String {
-    s.trim()
-        .trim_end_matches('\'')
-        .trim_end_matches('s')
-        .trim_end_matches('\'')
+    let trimmed = s.trim();
+    let stripped = trimmed
+        .strip_suffix("'s")
+        .or_else(|| trimmed.strip_suffix("s'"))
+        .or_else(|| trimmed.strip_suffix('\''))
+        .unwrap_or(trimmed);
+    stripped
         .split_whitespace()
         .collect::<Vec<_>>()
         .join(" ")
@@ -799,7 +824,9 @@ pub async fn extract_month_attendance(args: ExtractMonthAttendanceArgs) -> Resul
             .map_err(|e| redact(e, &key))?;
 
     // Secondary is best-effort — degrade to primary-only if it failed OR if
-    // we already promoted secondary into primary above.
+    // we already promoted secondary into primary above. When we DID promote,
+    // capture the secondary's real row/mark count for `providers[]` metadata
+    // so the diagnostic doesn't misreport it as zero.
     let (secondary_model_rows, secondary_err): (Vec<ExtractedMonthAttendanceRow>, Option<String>) = if primary_ok {
         match s_res {
             Ok(ann) => match parse_month_annotation(&ann, &args.target_month) {
@@ -813,11 +840,29 @@ pub async fn extract_month_attendance(args: ExtractMonthAttendanceArgs) -> Resul
         (Vec::new(), Some("primary timed out; no second opinion available".to_string()))
     };
 
-    // Raw per-model counts BEFORE any swap — used for `providers[]` metadata.
-    let primary_model_row_count = primary_model_rows.len();
-    let primary_model_mark_count: usize = primary_model_rows.iter().map(|r| r.marks.len()).sum();
-    let secondary_model_row_count = secondary_model_rows.len();
-    let secondary_model_mark_count: usize = secondary_model_rows.iter().map(|r| r.marks.len()).sum();
+    // Raw per-model counts. When primary hard-failed and secondary was
+    // promoted, primary_model_rows actually holds the secondary's output;
+    // reassign so providers[0] (primary) reports 0 and providers[1]
+    // (secondary) reports the real secondary count for both `row_count`
+    // and `mark_count`.
+    let primary_model_row_count = if primary_ok { primary_model_rows.len() } else { 0 };
+    let primary_model_mark_count: usize = if primary_ok {
+        primary_model_rows.iter().map(|r| r.marks.len()).sum()
+    } else {
+        0
+    };
+    let (secondary_model_row_count, secondary_model_mark_count) = if primary_ok {
+        (
+            secondary_model_rows.len(),
+            secondary_model_rows.iter().map(|r| r.marks.len()).sum::<usize>(),
+        )
+    } else {
+        // primary_model_rows holds promoted secondary content in this branch.
+        (
+            primary_model_rows.len(),
+            primary_model_rows.iter().map(|r| r.marks.len()).sum::<usize>(),
+        )
+    };
 
     // ── v3.0.7 consensus row-count sanity check ─────────────────────────
     // Silent primary failures are the single most damaging OCR bug: the
@@ -919,13 +964,13 @@ pub async fn extract_month_attendance(args: ExtractMonthAttendanceArgs) -> Resul
             provider: VISION_DEPLOY_PRIMARY.to_string(),
             ok: primary_ok,
             latency_ms: p_ms,
-            row_count: if primary_ok { primary_model_row_count } else { 0 },
-            mark_count: if primary_ok { primary_model_mark_count } else { 0 },
+            row_count: primary_model_row_count,
+            mark_count: primary_model_mark_count,
             error: primary_err_str,
         },
         MonthProviderMeta {
             provider: VISION_DEPLOY_SECONDARY.to_string(),
-            ok: primary_ok && secondary_err.is_none(),
+            ok: !primary_ok || secondary_err.is_none(),
             latency_ms: s_ms,
             row_count: secondary_model_row_count,
             mark_count: secondary_model_mark_count,

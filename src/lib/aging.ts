@@ -4,6 +4,7 @@
 // "Pending" comes from the receipt.pending_amount column the user already
 // captures when issuing receipts; voided receipts are excluded.
 import { db } from "./db";
+import { todayLocalIso } from "./localDate";
 
 export interface AgingBucket {
   future: number;    // dated after as_of — likely a data-entry error
@@ -32,24 +33,32 @@ export interface AgingReport {
 }
 
 function daysBetween(fromIso: string, toIso: string): number {
-  const a = new Date(fromIso + "T00:00:00").getTime();
-  const b = new Date(toIso + "T00:00:00").getTime();
-  return Math.floor((b - a) / (1000 * 60 * 60 * 24));
+  // DST-safe: anchor both dates at UTC midnight so a 31-day span crossing
+  // the spring-forward transition doesn't lose an hour and floor to 30
+  // (which used to bump balances from "31-60 days" back into "Current").
+  const [fy, fm, fd] = fromIso.split("-").map(Number);
+  const [ty, tm, td] = toIso.split("-").map(Number);
+  const a = Date.UTC(fy, (fm || 1) - 1, fd || 1);
+  const b = Date.UTC(ty, (tm || 1) - 1, td || 1);
+  return Math.round((b - a) / 86_400_000);
 }
 
 export async function computeAging(asOfIso?: string): Promise<AgingReport> {
   const d = await db();
-  const asOf = asOfIso || new Date().toISOString().slice(0, 10);
+  const asOf = asOfIso || todayLocalIso();
 
-  // Pull every receipt with a positive pending balance, joined with student
-  // identity so we can group by family.
+  // v3.24.4 (#5): include receipts that were settled AFTER the as-of
+  // date — historically they were still outstanding on that date.
+  // (settled_at is NULL for currently-pending; those always show.)
   const rows = await d.select<any[]>(
     `SELECT r.id, r.date, r.pending_amount, r.amount, r.student_id,
             s.name AS student_name, s.father_name, s.mother_name, s.email
        FROM receipts r
        JOIN students s ON s.id = r.student_id
       WHERE r.voided = 0 AND r.pending_amount > 0
-      ORDER BY r.date ASC`
+        AND (r.settled_at IS NULL OR r.settled_at > ?)
+      ORDER BY r.date ASC`,
+    [asOf]
   );
 
   // Group by student so a family's outstanding rolls up to one row.
@@ -130,4 +139,58 @@ export function agingToCsv(rep: AgingReport): string {
   const tot = rep.totals;
   const totLine = `"TOTAL","","","","","",${tot.future.toFixed(2)},${tot.current.toFixed(2)},${tot.d31_60.toFixed(2)},${tot.d61_90.toFixed(2)},${tot.d90plus.toFixed(2)},${tot.total.toFixed(2)}`;
   return [head, ...lines, totLine].join("\n");
+}
+
+/**
+ * v3.24.4 (#5): Mark a receipt's pending balance as settled. Sets
+ * pending_amount to 0 and stamps settled_at + optionally settled_by_receipt_id
+ * so historical aging reports remain accurate.
+ *
+ * Called when the family pays off an outstanding balance — either as part
+ * of a subsequent receipt (pass `settledByReceiptId`) or as a manual
+ * write-off ("Mark settled" button).
+ */
+export async function settleReceipt(
+  receiptId: number,
+  settledByReceiptId: number | null = null,
+  settledAtIso?: string,
+): Promise<void> {
+  const { execRetry } = await import("./db");
+  const stamp = settledAtIso || todayLocalIso();
+  await execRetry(
+    `UPDATE receipts
+        SET pending_amount = 0,
+            settled_at = ?,
+            settled_by_receipt_id = ?
+      WHERE id = ? AND voided = 0 AND pending_amount > 0`,
+    [stamp, settledByReceiptId, receiptId],
+  );
+}
+
+/**
+ * Settle every currently-pending receipt for a student in one call.
+ * Used by the Aging screen's "Mark family settled" affordance.
+ */
+export async function settleAllForStudent(
+  studentId: number,
+  settledByReceiptId: number | null = null,
+  settledAtIso?: string,
+): Promise<number> {
+  const { execRetry } = await import("./db");
+  const stamp = settledAtIso || todayLocalIso();
+  const d = await db();
+  const before = await d.select<Array<{ n: number }>>(
+    `SELECT COUNT(*) AS n FROM receipts
+       WHERE student_id = ? AND voided = 0 AND pending_amount > 0`,
+    [studentId],
+  );
+  await execRetry(
+    `UPDATE receipts
+        SET pending_amount = 0,
+            settled_at = ?,
+            settled_by_receipt_id = ?
+      WHERE student_id = ? AND voided = 0 AND pending_amount > 0`,
+    [stamp, settledByReceiptId, studentId],
+  );
+  return before?.[0]?.n ?? 0;
 }

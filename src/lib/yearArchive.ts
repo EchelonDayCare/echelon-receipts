@@ -61,18 +61,18 @@ export async function exportYearArchive(opts: {
   log(`Writing master CSV (${all.length} rows)…`);
   const header = [
     "receipt_no","date","student_name","father_name","mother_name",
-    "description","amount","is_refund","pending_amount","comments","voided",
+    "description","amount","signed_amount","is_refund","pending_amount","comments","voided",
     "emailed_at","emailed_to","created_at",
   ];
   const csvLines = [header.join(",")];
   for (const r of all) {
     csvLines.push([
       r.receipt_no, r.date, r.student_name_snapshot, r.father_name_snapshot, r.mother_name_snapshot,
-      r.description, r.amount, r.is_refund, r.pending_amount, r.comments, r.voided,
+      r.description, r.amount, (r.is_refund ? -r.amount : r.amount), r.is_refund, r.pending_amount, r.comments, r.voided,
       r.emailed_at, r.emailed_to, r.created_at,
     ].map(csvEscape).join(","));
   }
-  await writeTextFile(`${root}/Receipts_${year}.csv`, csvLines.join("\n"));
+  await writeTextFile(`${root}/Receipts_${year}.csv`, "\uFEFF" + csvLines.join("\n"));
 
   // 3) Voided log
   const voided = all.filter((r) => r.voided);

@@ -3,14 +3,14 @@ import { useNavigate } from "react-router-dom";
 import { open } from "@tauri-apps/plugin-dialog";
 import { readFile } from "@tauri-apps/plugin-fs";
 import { showConfirm } from "../../lib/dialogs";
-import { getSettings } from "../../lib/db";
+import { getSettings, db, serializeWrite, roundMoney } from "../../lib/db";
 import {
   extractVisaStatement, guessCategory, PAYMENT_SENTINEL,
   type ExtractedVisaTxn, type ExtractVisaResult,
 } from "../../lib/visaImport";
 import {
   EXPENSE_CATEGORIES, PAYMENT_METHODS,
-  saveExpense, listExpenses, deleteImportBatch, listImportBatches,
+  listExpenses, deleteImportBatch, listImportBatches,
 } from "../../lib/expenses";
 
 function fileMime(path: string): string {
@@ -203,48 +203,65 @@ export default function ImportStatement() {
     setBusy(true); setErr("");
     const batchId = crypto.randomUUID();
     try {
+      // v3.24.4 (#13): whole-batch atomic import. Previously each row was
+      // committed independently; a mid-batch error left rows 1..(k-1)
+      // committed and rows k..N missing with no clear recovery path.
+      // Now: single BEGIN IMMEDIATE + inline inserts + COMMIT, so either
+      // every eligible row is imported or none are (rollback on error).
+      // UNIQUE(source_txn_hash) collisions are still treated as
+      // "already imported" and skip that row without aborting.
       let n = 0;
       const updated = [...rows];
-      for (let i = 0; i < updated.length; i++) {
-        const r = updated[i];
-        if (!r.include || r.isPayment || r.imported) continue;
-        // Final defense: recompute hash from current field values in case an
-        // edit slipped past the updateRow live-recompute.
-        const freshHash = txnHashFromFields(cardLast4, r.date, r.amount, r.merchant);
+      let failedIdx: number | null = null;
+      let failedErr: any = null;
+      await serializeWrite(async () => {
+        const d = await db();
+        await d.execute("BEGIN IMMEDIATE");
         try {
-          await saveExpense({
-            date: r.date,
-            category: r.category,
-            subcategory: null,
-            vendor: r.merchant,
-            amount: r.amount,
-            payment_method: payment,
-            reference: meta?.card_last4 ? `Visa ****${meta.card_last4}` : "Visa statement import",
-            notes: [
+          for (let i = 0; i < updated.length; i++) {
+            const r = updated[i];
+            if (!r.include || r.isPayment || r.imported) continue;
+            const freshHash = txnHashFromFields(cardLast4, r.date, r.amount, r.merchant);
+            const amt = roundMoney(r.amount);
+            const notes = [
               r.isRefund ? "Merchant refund (contra-expense)" : null,
               r.foreign_amount ? `Foreign: ${r.foreign_amount}` : null,
-            ].filter(Boolean).join(" · ") || null,
-            import_batch_id: batchId,
-            source_txn_hash: freshHash,
-          });
-          updated[i] = { ...r, imported: true, hash: freshHash };
-          n++;
-        } catch (e: any) {
-          const msg = String(e?.message || e);
-          // Unique-index collision on source_txn_hash → row already imported previously.
-          if (/UNIQUE constraint failed/i.test(msg) && /source_txn_hash/i.test(msg)) {
-            updated[i] = { ...r, imported: true, duplicate: true };
-          } else {
-            throw e;
+            ].filter(Boolean).join(" · ") || null;
+            const reference = meta?.card_last4 ? `Visa ****${meta.card_last4}` : "Visa statement import";
+            try {
+              await d.execute(
+                `INSERT INTO expenses(date, category, subcategory, vendor, amount, payment_method, reference, notes, recurring_id, import_batch_id, source_txn_hash)
+                 VALUES(?,?,?,?,?,?,?,?,?,?,?)`,
+                [r.date, r.category, null, r.merchant, amt, payment, reference, notes, null, batchId, freshHash],
+              );
+              updated[i] = { ...r, imported: true, hash: freshHash };
+              n++;
+            } catch (e: any) {
+              const msg = String(e?.message || e);
+              if (/UNIQUE constraint failed/i.test(msg) && /source_txn_hash/i.test(msg)) {
+                // Row was already imported in a prior batch — mark and skip.
+                updated[i] = { ...r, imported: true, duplicate: true };
+              } else {
+                failedIdx = i;
+                failedErr = e;
+                throw e;
+              }
+            }
           }
+          await d.execute("COMMIT");
+        } catch (e) {
+          try { await d.execute("ROLLBACK"); } catch { /* fine */ }
+          throw e;
         }
-      }
+      });
       setRows(updated);
       setLastBatchId(batchId);
       setStatus(`Imported ${n} transaction${n === 1 ? "" : "s"} as batch ${batchId.slice(0, 8)}. Use "Undo last import" below if you spot a mistake.`);
       await refreshBatches();
+      // Signal that we finished cleanly if failedIdx was never set.
+      void failedIdx; void failedErr;
     } catch (e: any) {
-      setErr(String(e?.message || e));
+      setErr(`Import rolled back — no changes saved. Fix and retry. Error: ${String(e?.message || e)}`);
     } finally {
       setBusy(false);
     }

@@ -83,8 +83,20 @@ async function logEvent(
   );
 }
 
-/** Insert or update by dedup_key. Returns the resulting row. */
-export async function upsertByDedupKey(input: NotificationInput): Promise<Notification> {
+/** Result of an upsert — the resulting row plus whether this was a
+ * newly-created row (or a severity escalation), so callers can decide
+ * whether to fire a fresh desktop notification rather than spamming for
+ * every scan tick. */
+export interface UpsertResult {
+  row: Notification;
+  isNew: boolean;
+  escalated: boolean;
+}
+
+/** Insert or update by dedup_key. Returns the resulting row plus a flag
+ * indicating whether this was a first-time insertion (or a severity
+ * escalation on an existing row). */
+export async function upsertByDedupKey(input: NotificationInput): Promise<UpsertResult> {
   const d = await db();
   const existing = await d.select<Notification[]>(
     "SELECT * FROM notifications WHERE dedup_key = ? AND deleted_at IS NULL",
@@ -106,11 +118,16 @@ export async function upsertByDedupKey(input: NotificationInput): Promise<Notifi
       // dismissed/read it concurrently) — refetch rather than return a
       // guessed object built from stale data.
       const fresh = await d.select<Notification[]>("SELECT * FROM notifications WHERE id = ?", [row.id]);
-      if (fresh.length) return fresh[0];
+      if (fresh.length) return { row: fresh[0], isNew: false, escalated: false };
       throw new StaleWriteError("Notification");
     }
     await logEvent(row.id, "updated", { category: input.category, severity: input.severity });
-    return { ...row, title: input.title, body: input.body ?? null, severity: input.severity, action_route: input.action_route ?? null, updated_at: now, version: row.version + 1 };
+    const escalated = severityGte(input.severity, row.severity) && input.severity !== row.severity;
+    return {
+      row: { ...row, title: input.title, body: input.body ?? null, severity: input.severity, action_route: input.action_route ?? null, updated_at: now, version: row.version + 1 },
+      isNew: false,
+      escalated,
+    };
   }
   const id = uuidv4();
   const now = nowIso();
@@ -126,10 +143,14 @@ export async function upsertByDedupKey(input: NotificationInput): Promise<Notifi
   );
   await logEvent(id, "created", { category: input.category, severity: input.severity });
   return {
-    id, category: input.category, severity: input.severity, title: input.title, body: input.body ?? null,
-    source_kind: input.source_kind ?? null, source_id: input.source_id ?? null, action_route: input.action_route ?? null,
-    dedup_key: input.dedup_key, created_at: now, read_at: null, dismissed_at: null, snoozed_until: null,
-    version: 1, deleted_at: null, updated_at: now, updated_by: "owner",
+    row: {
+      id, category: input.category, severity: input.severity, title: input.title, body: input.body ?? null,
+      source_kind: input.source_kind ?? null, source_id: input.source_id ?? null, action_route: input.action_route ?? null,
+      dedup_key: input.dedup_key, created_at: now, read_at: null, dismissed_at: null, snoozed_until: null,
+      version: 1, deleted_at: null, updated_at: now, updated_by: "owner",
+    },
+    isNew: true,
+    escalated: false,
   };
 }
 

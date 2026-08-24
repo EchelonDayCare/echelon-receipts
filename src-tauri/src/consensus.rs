@@ -70,15 +70,39 @@ pub struct ConsensusArgs {
 //   • Re-encode as JPEG at JPEG_QUALITY (drops HEIC/PNG variance)
 // Returns (new_base64, "image/jpeg") on success; falls back to the original
 // bytes/mime silently if decoding fails so we never block OCR entirely.
+// Max raw bytes we'll accept for a single OCR image. 30 MB comfortably
+// covers a 24 MP DSLR JPEG but stops a maliciously-crafted 20k×20k PNG
+// or a zip-bomb-style payload before we hand it to the decoder.
+const MAX_IMAGE_BYTES: usize = 30 * 1024 * 1024;
+// Pixel-count cap passed to the image crate's decoder Limits, so a
+// small file that decompresses into billions of pixels is rejected too.
+const MAX_IMAGE_PIXELS: u32 = 40_000_000; // ~40 MP
+
+fn image_limits() -> image::Limits {
+    let mut l = image::Limits::default();
+    l.max_image_width = Some(MAX_IMAGE_PIXELS);
+    l.max_image_height = Some(MAX_IMAGE_PIXELS);
+    l.max_alloc = Some((MAX_IMAGE_BYTES as u64) * 4);
+    l
+}
+
 fn normalize_image(orig_b64: &str, orig_mime: &str) -> (String, String) {
     let bytes = match base64::engine::general_purpose::STANDARD.decode(orig_b64.as_bytes()) {
         Ok(b) => b,
         Err(_) => return (orig_b64.to_string(), orig_mime.to_string()),
     };
-    let reader = match image::ImageReader::new(Cursor::new(&bytes)).with_guessed_format() {
+    if bytes.len() > MAX_IMAGE_BYTES {
+        eprintln!(
+            "[ocr] image too large ({} bytes > {} cap) — passing through",
+            bytes.len(), MAX_IMAGE_BYTES,
+        );
+        return (orig_b64.to_string(), orig_mime.to_string());
+    }
+    let mut reader = match image::ImageReader::new(Cursor::new(&bytes)).with_guessed_format() {
         Ok(r) => r,
         Err(_) => return (orig_b64.to_string(), orig_mime.to_string()),
     };
+    reader.limits(image_limits());
     // Pull EXIF orientation from the decoder before decoding pixels.
     let mut decoder = match reader.into_decoder() {
         Ok(d) => d,
@@ -967,7 +991,8 @@ fn sniff_month_year(md: &str) -> Option<String> {
     for line in md.lines().take(30) {
         let s = line.trim();
         if s.len() >= 7 {
-            let head = &s[..7.min(s.len())];
+            let head: String = s.chars().take(7).collect();
+            let head = head.as_str();
             if let (Some(y), Some(m)) = (head.get(0..4).and_then(|x| x.parse::<u32>().ok()),
                                           head.get(5..7).and_then(|x| x.parse::<u32>().ok())) {
                 if (2000..=2100).contains(&y) && (1..=12).contains(&m) && head.chars().nth(4) == Some('-') {

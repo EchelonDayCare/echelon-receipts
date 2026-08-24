@@ -180,7 +180,13 @@ pub struct SetPassphraseArgs {
 }
 
 #[tauri::command]
-pub fn backup_set_passphrase(args: SetPassphraseArgs) -> Result<String, String> {
+pub fn backup_set_passphrase(
+    auth: tauri::State<'_, crate::auth::AuthState>,
+    args: SetPassphraseArgs,
+) -> Result<String, String> {
+    if !auth.has_mdk() {
+        return Err("Unlock the app before changing the backup passphrase.".into());
+    }
     if args.passphrase.len() < 8 {
         return Err("Passphrase must be at least 8 characters.".into());
     }
@@ -191,7 +197,12 @@ pub fn backup_set_passphrase(args: SetPassphraseArgs) -> Result<String, String> 
 }
 
 #[tauri::command]
-pub fn backup_clear_passphrase() -> Result<(), String> {
+pub fn backup_clear_passphrase(
+    auth: tauri::State<'_, crate::auth::AuthState>,
+) -> Result<(), String> {
+    if !auth.has_mdk() {
+        return Err("Unlock the app before clearing the backup passphrase.".into());
+    }
     let entry = keyring::Entry::new("org.echelondaycare.receipts", "backup_passphrase")
         .map_err(|e| e.to_string())?;
     match entry.delete_credential() {
@@ -293,10 +304,15 @@ pub struct ExportBackupArgs {
 
 #[tauri::command]
 pub async fn export_plaintext_backup(
+    app: tauri::AppHandle,
+    auth: tauri::State<'_, crate::auth::AuthState>,
     gate: tauri::State<'_, crate::db_gate::DbGate>,
     args: ExportBackupArgs,
 ) -> Result<(), String> {
-    let dst = std::path::PathBuf::from(&args.dst_path);
+    if !auth.has_mdk() {
+        return Err("Unlock the app before exporting a backup.".into());
+    }
+    let dst = crate::path_guard::validate_new_file_dest(&app, &args.dst_path)?;
     // Create parent dir off the tokio runtime — sync fs on hot path stalls IPC.
     let parent = dst.parent().map(|p| p.to_path_buf());
     if let Some(parent) = parent {
@@ -329,13 +345,18 @@ pub async fn export_plaintext_backup(
 
 #[tauri::command]
 pub async fn export_encrypted_backup(
+    app: tauri::AppHandle,
+    auth: tauri::State<'_, crate::auth::AuthState>,
     gate: tauri::State<'_, crate::db_gate::DbGate>,
     args: ExportBackupArgs,
 ) -> Result<(), String> {
+    if !auth.has_mdk() {
+        return Err("Unlock the app before exporting a backup.".into());
+    }
     // Step 1: export to a scratch plaintext file next to the target, so
     // we can encrypt in one shot without keeping arbitrary-sized bytes
     // pinned in memory longer than needed.
-    let dst = std::path::PathBuf::from(&args.dst_path);
+    let dst = crate::path_guard::validate_new_file_dest(&app, &args.dst_path)?;
     let parent = dst.parent().map(|p| p.to_path_buf());
     if let Some(parent) = parent {
         tokio::task::spawn_blocking(move || std::fs::create_dir_all(&parent))
@@ -359,8 +380,27 @@ pub async fn export_encrypted_backup(
     let dst_for_task = dst.clone();
     tokio::task::spawn_blocking(move || -> Result<(), String> {
         let plaintext = std::fs::read(&tmp_for_task).map_err(|e| format!("read tmp: {e}"))?;
-        // Zero the file before removing so plaintext bytes don't linger.
-        let _ = std::fs::write(&tmp_for_task, vec![0u8; plaintext.len().min(64 * 1024)]);
+        let tmp_len = plaintext.len();
+        // Zero the file contents in-place before deleting, so the freed
+        // blocks don't retain plaintext bytes. Best-effort — filesystem
+        // may still copy-on-write behind our back; FDE remains the real
+        // mitigation.
+        if let Ok(mut f) = std::fs::OpenOptions::new()
+            .write(true)
+            .truncate(false)
+            .open(&tmp_for_task)
+        {
+            use std::io::{Seek, SeekFrom, Write};
+            let _ = f.seek(SeekFrom::Start(0));
+            let zero = vec![0u8; 64 * 1024];
+            let mut remaining = tmp_len;
+            while remaining > 0 {
+                let n = remaining.min(zero.len());
+                if f.write_all(&zero[..n]).is_err() { break; }
+                remaining -= n;
+            }
+            let _ = f.flush();
+        }
         let _ = std::fs::remove_file(&tmp_for_task);
         let enc = encrypt(&passphrase, &plaintext)?;
         drop(plaintext);

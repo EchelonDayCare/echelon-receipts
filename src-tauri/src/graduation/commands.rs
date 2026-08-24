@@ -152,6 +152,15 @@ pub struct RenderState {
     /// of running to completion. Kept in sync with `RenderInner.cancelled`
     /// — every write to one must write the other under the mutex.
     pub cancel_flag: Arc<AtomicBool>,
+    /// Cached result of the HW encoder probe. `None` = not yet probed
+    /// this session, `Some(enc)` = use `enc` for the rest of the session.
+    /// v3.24.4 (#8): if the OS default HW codec (`h264_videotoolbox` on
+    /// macOS, `h264_mf` on Windows) isn't actually available at runtime
+    /// (missing Media Feature Pack on Windows, some VMs), we probe with
+    /// a cheap encode and cache the fallback (`libopenh264`) so every
+    /// subsequent render uses software transparently. The probe runs
+    /// lazily on first render, not at boot.
+    pub encoder_cache: Mutex<Option<engine::HwEncoder>>,
 }
 
 #[derive(Default)]
@@ -682,7 +691,7 @@ pub async fn graduation_render_child(
         total_duration_sec: spec_total_duration(rendered_photo_count.max(1), req.avg_photo_sec, 0.6),
         fps: 30,
         video_bitrate_kbps: 2000,
-        encoder: engine::HwEncoder::for_current_os(),
+        encoder: resolve_encoder(&app, &state),
         emit_progress: true,
     };
     let filter_text = engine::build_filter_script(&per_child_spec);
@@ -1268,7 +1277,7 @@ pub async fn graduation_render_class_reel(
             height: req.height,
             fps: class_reel::CLASS_REEL_FPS,
             video_bitrate_kbps: if req.height >= 1080 { 5000 } else { 2500 },
-            encoder: engine::HwEncoder::for_current_os(),
+            encoder: resolve_encoder(&app, &state),
             emit_progress: true,
         };
         let filter_text = class_reel::build_segment_filter(&spec);
@@ -1350,7 +1359,7 @@ pub async fn graduation_render_class_reel(
         fps: class_reel::CLASS_REEL_FPS,
         transition_sec: class_reel::CLASS_REEL_XFADE_SEC,
         video_bitrate_kbps: if req.height >= 1080 { 6000 } else { 3000 },
-        encoder: engine::HwEncoder::for_current_os(),
+        encoder: resolve_encoder(&app, &state),
         emit_progress: true,
     };
     let concat_text = class_reel::build_concat_filter(&concat_spec);
@@ -1543,6 +1552,89 @@ fn reset_cancelled(state: &State<'_, RenderState>) {
         g.cancelled = false;
     }
     state.cancel_flag.store(false, Ordering::SeqCst);
+}
+
+/// Resolve the HW encoder to use for this session, probing the OS
+/// default lazily on first render and caching the result. v3.24.4 (#8):
+/// if the OS default codec (`h264_videotoolbox` / `h264_mf`) isn't
+/// actually available on this machine, fall back to `libopenh264` for
+/// every subsequent render — a stripped-down Windows install missing
+/// the Media Feature Pack, a Mac VM without VT hooks, or a broken FFmpeg
+/// build would otherwise fail every render with a cryptic codec error.
+fn resolve_encoder(app: &AppHandle, state: &State<'_, RenderState>) -> engine::HwEncoder {
+    if let Ok(guard) = state.encoder_cache.lock() {
+        if let Some(enc) = *guard {
+            return enc;
+        }
+    }
+    let default = engine::HwEncoder::for_current_os();
+    // If the OS default is already OpenH264, no probe needed.
+    let chosen = if matches!(default, engine::HwEncoder::OpenH264) {
+        default
+    } else if probe_encoder_ok(app, default) {
+        default
+    } else {
+        eprintln!(
+            "[graduation] HW encoder {} failed probe; falling back to libopenh264 for this session",
+            default.ffmpeg_codec_name(),
+        );
+        engine::HwEncoder::OpenH264
+    };
+    if let Ok(mut guard) = state.encoder_cache.lock() {
+        *guard = Some(chosen);
+    }
+    chosen
+}
+
+/// Quick 100 ms synthetic-input encode to verify the codec actually
+/// initialises on this machine. Uses lavfi color source so no input
+/// file is required. Returns true on exit code 0, false otherwise
+/// (including probe timeout).
+fn probe_encoder_ok(app: &AppHandle, encoder: engine::HwEncoder) -> bool {
+    let Ok(ffmpeg) = sidecar_binary_path(app) else {
+        return false;
+    };
+    use std::process::{Command, Stdio};
+    let mut child = match Command::new(ffmpeg)
+        .args([
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-f",
+            "lavfi",
+            "-i",
+            "color=black:s=64x64:d=0.1:r=30",
+            "-c:v",
+            encoder.ffmpeg_codec_name(),
+            "-frames:v",
+            "3",
+            "-f",
+            "null",
+            "-",
+        ])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .stdin(Stdio::null())
+        .spawn()
+    {
+        Ok(c) => c,
+        Err(_) => return false,
+    };
+    // 5-second cap on the probe — well past typical VT/MF init cost.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return status.success(),
+            Ok(None) => {
+                if std::time::Instant::now() >= deadline {
+                    let _ = child.kill();
+                    return false;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            Err(_) => return false,
+        }
+    }
 }
 
 /// Resolve the FFmpeg sidecar path relative to the app bundle. Used by

@@ -180,6 +180,7 @@ function IdleLockWrapper({
   children: ReactNode;
 }) {
   const timerRef = useRef<number | null>(null);
+  const hiddenAtRef = useRef<number | null>(null);
 
   useEffect(() => {
     if (!enabled) return;
@@ -187,16 +188,31 @@ function IdleLockWrapper({
       if (timerRef.current !== null) window.clearTimeout(timerRef.current);
       timerRef.current = window.setTimeout(() => onIdle(), timeoutMs);
     };
+    // Activity events restart the idle timer as before. Window hide / focus
+    // are treated separately: while the window is hidden the WebView
+    // throttles setTimeout (a laptop lid closed overnight fires no ticks
+    // at all), so we anchor the "last active" moment and, on return, lock
+    // immediately if the timeout has elapsed rather than restart it.
     const events: Array<keyof WindowEventMap> = [
-      "mousemove", "keydown", "pointerdown", "wheel", "touchstart", "focus",
+      "mousemove", "keydown", "pointerdown", "wheel", "touchstart",
     ];
     events.forEach((e) => window.addEventListener(e, reset, { passive: true } as AddEventListenerOptions));
-    document.addEventListener("visibilitychange", reset);
+    const onVisibility = () => {
+      if (document.visibilityState === "hidden") {
+        hiddenAtRef.current = Date.now();
+      } else {
+        const elapsed = hiddenAtRef.current ? Date.now() - hiddenAtRef.current : 0;
+        hiddenAtRef.current = null;
+        if (elapsed >= timeoutMs) { onIdle(); return; }
+        reset();
+      }
+    };
+    document.addEventListener("visibilitychange", onVisibility);
     reset();
     return () => {
       if (timerRef.current !== null) window.clearTimeout(timerRef.current);
       events.forEach((e) => window.removeEventListener(e, reset));
-      document.removeEventListener("visibilitychange", reset);
+      document.removeEventListener("visibilitychange", onVisibility);
     };
   }, [enabled, timeoutMs, onIdle]);
 
@@ -295,6 +311,7 @@ function UnlockScreen({
   const [pin, setPin] = useState("");
   const [showPin, setShowPin] = useState(false);
   const [busy, setBusy] = useState(false);
+  const busyRef = useRef(false);
   const [err, setErr] = useState<string | null>(null);
   const [mode, setMode] = useState<"pin" | "recovery">("pin");
   const [recoveryCode, setRecoveryCode] = useState("");
@@ -314,6 +331,8 @@ function UnlockScreen({
 
   const submitPin = useCallback(async (pinValue: string) => {
     if (disabled || pinValue.length < 6) return;
+    if (busyRef.current) return; // reentry guard: an in-flight unlock is running
+    busyRef.current = true;
     setBusy(true);
     setErr(null);
     try {
@@ -331,6 +350,7 @@ function UnlockScreen({
       }
       setPin("");
     } finally {
+      busyRef.current = false;
       setBusy(false);
     }
   }, [disabled, onUnlocked]);
@@ -340,14 +360,14 @@ function UnlockScreen({
     void submitPin(pin);
   };
 
-  // v3.0.3: auto-unlock 350ms after the user stops typing (once PIN is 6+
-  // chars). Removes the extra Enter/Submit tap for the common case where
-  // the PIN they typed is correct. If they're still typing a longer PIN,
-  // the timer resets on each keystroke. On wrong PIN the input is cleared
-  // and they can retype — same as the manual submit flow.
+  // v3.24.4: auto-unlock 900ms after the user stops typing (once PIN is 6+
+  // chars). Increased from 350ms so a slow typist entering a longer-than-6
+  // PIN doesn't have the first 6 characters auto-submitted as a wrong-PIN
+  // attempt (which trips the rate limiter). Submit is still reentry-guarded
+  // via busyRef so an Enter + timer double-fire only issues one unlock.
   useEffect(() => {
     if (pin.length < 6 || disabled) return;
-    const t = window.setTimeout(() => { void submitPin(pin); }, 350);
+    const t = window.setTimeout(() => { void submitPin(pin); }, 900);
     return () => window.clearTimeout(t);
   }, [pin, disabled, submitPin]);
 

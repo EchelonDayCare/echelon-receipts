@@ -2123,6 +2123,14 @@ export async function logAudit(entry: {
 // emergency corrections. Caller MUST have already verified the supervisor
 // PIN via v2_verify_supervisor_pin. Writes a full audit_log entry with
 // the pre-void receipt row for CRA/reconciliation forensics.
+//
+// If the receipt is a member of an *active* (not-voided) deposit slip we
+// also detach it and adjust the deposit's cheque_count / total_amount so
+// the printed slip stays internally consistent (previously the header
+// total stayed unchanged while the receipt list shrank, breaking bank
+// reconciliation). The detachment is recorded in the same audit_log
+// entry via the after_json snapshot; the deposit itself is not voided
+// — a partial correction is a legitimate ops flow.
 export async function voidReceiptWithOverride(
   id: number,
   reason: string,
@@ -2132,23 +2140,63 @@ export async function voidReceiptWithOverride(
   if (trimmed.length < 5) {
     throw new Error("Override reason must be at least 5 characters.");
   }
-  const d = await db();
-  const before = await d.select<any[]>("SELECT * FROM receipts WHERE id=?", [id]);
-  const beforeRow = before[0];
-  if (!beforeRow) throw new Error(`Receipt #${id} not found.`);
-  await execRetry(
-    "UPDATE receipts SET voided=1, void_reason=?, voided_at=datetime('now') WHERE id=?",
-    [trimmed, id],
-  );
-  const after = await d.select<any[]>("SELECT * FROM receipts WHERE id=?", [id]);
-  await logAudit({
-    actor,
-    action: "void_receipt_deposited_override",
-    target_type: "receipt",
-    target_id: String(id),
-    before_json: JSON.stringify(beforeRow),
-    after_json: JSON.stringify(after[0] ?? null),
-    reason: trimmed,
+  await serializeWrite(async () => {
+    const d = await db();
+    const before = await d.select<any[]>("SELECT * FROM receipts WHERE id=?", [id]);
+    const beforeRow = before[0];
+    if (!beforeRow) throw new Error(`Receipt #${id} not found.`);
+
+    await d.execute("BEGIN IMMEDIATE");
+    try {
+      await d.execute(
+        "UPDATE receipts SET voided=1, void_reason=?, voided_at=datetime('now') WHERE id=?",
+        [trimmed, id],
+      );
+
+      // Deposit reconciliation adjustment. Only touch active (non-voided)
+      // deposits — a voided deposit's totals are historical and must not
+      // shift after the fact.
+      let depositAdjusted: { deposit_id: number; new_count: number; new_total: number } | null = null;
+      if (beforeRow.deposit_id != null && beforeRow.deposited_at != null) {
+        const dep = await d.select<any[]>(
+          "SELECT id, voided, cheque_count, total_amount FROM deposits WHERE id=?",
+          [beforeRow.deposit_id],
+        );
+        if (dep[0] && dep[0].voided !== 1) {
+          const amt = Number(beforeRow.amount || 0);
+          const newCount = Math.max(0, Number(dep[0].cheque_count || 0) - 1);
+          const newTotal = roundMoney(Number(dep[0].total_amount || 0) - amt);
+          await d.execute(
+            "UPDATE deposits SET cheque_count=?, total_amount=? WHERE id=?",
+            [newCount, newTotal, dep[0].id],
+          );
+          await d.execute(
+            "UPDATE receipts SET deposit_id=NULL, deposited_at=NULL WHERE id=?",
+            [id],
+          );
+          depositAdjusted = { deposit_id: dep[0].id, new_count: newCount, new_total: newTotal };
+        }
+      }
+
+      const after = await d.select<any[]>("SELECT * FROM receipts WHERE id=?", [id]);
+      await d.execute(
+        `INSERT INTO audit_log (ts, actor, action, target_type, target_id, before_json, after_json, reason)
+         VALUES (datetime('now'), ?, ?, ?, ?, ?, ?, ?)`,
+        [
+          actor,
+          "void_receipt_deposited_override",
+          "receipt",
+          String(id),
+          JSON.stringify(beforeRow),
+          JSON.stringify({ receipt: after[0] ?? null, deposit_adjusted: depositAdjusted }),
+          trimmed,
+        ],
+      );
+      await d.execute("COMMIT");
+    } catch (e) {
+      try { await d.execute("ROLLBACK"); } catch { /* best effort */ }
+      throw e;
+    }
   });
 }
 export async function markEmailed(id: number, recipients: string[]) {
@@ -2173,33 +2221,49 @@ export async function createDeposit(
   notes: string | null
 ): Promise<number> {
   if (receiptIds.length === 0) throw new Error("Deposit must include at least one receipt");
-  const d = await db();
-  // Compute totals from the receipts themselves so the deposit header is
-  // guaranteed to match the sum of its members.
-  const placeholders = receiptIds.map(() => "?").join(",");
-  const rows = await d.select<{ n: number; total: number }[]>(
-    `SELECT COUNT(*) AS n, COALESCE(SUM(amount), 0) AS total
-     FROM receipts
-     WHERE id IN (${placeholders}) AND voided=0 AND deposited_at IS NULL AND is_refund=0`,
-    receiptIds
-  );
-  const { n, total } = rows[0] ?? { n: 0, total: 0 };
-  if (n !== receiptIds.length) {
-    throw new Error(
-      `One or more selected receipts are no longer eligible (voided, refunded, or already deposited). Refresh the list and try again.`
-    );
-  }
-  const ins = await execRetry(
-    "INSERT INTO deposits (deposit_date, cheque_count, total_amount, notes) VALUES (?, ?, ?, ?)",
-    [depositDate, n, roundMoney(total), notes]
-  );
-  const depositId = ins.lastInsertId;
-  await execRetry(
-    `UPDATE receipts SET deposit_id=?, deposited_at=datetime('now')
-     WHERE id IN (${placeholders})`,
-    [depositId, ...receiptIds]
-  );
-  return depositId;
+  // Wrap the eligibility recheck + INSERT + linkage UPDATE in a single
+  // BEGIN IMMEDIATE / COMMIT so a failure anywhere in the workflow can't
+  // leave a funded deposit header with no linked receipts (or the reverse,
+  // where receipts are marked deposited but no header exists).
+  return serializeWrite(async () => {
+    const d = await db();
+    const placeholders = receiptIds.map(() => "?").join(",");
+    await d.execute("BEGIN IMMEDIATE");
+    try {
+      const rows = await d.select<{ n: number; total: number }[]>(
+        `SELECT COUNT(*) AS n, COALESCE(SUM(amount), 0) AS total
+         FROM receipts
+         WHERE id IN (${placeholders}) AND voided=0 AND deposited_at IS NULL AND is_refund=0`,
+        receiptIds
+      );
+      const { n, total } = rows[0] ?? { n: 0, total: 0 };
+      if (n !== receiptIds.length) {
+        throw new Error(
+          `One or more selected receipts are no longer eligible (voided, refunded, or already deposited). Refresh the list and try again.`
+        );
+      }
+      const ins = await d.execute(
+        "INSERT INTO deposits (deposit_date, cheque_count, total_amount, notes) VALUES (?, ?, ?, ?)",
+        [depositDate, n, roundMoney(total), notes]
+      );
+      const depositId = ins.lastInsertId as number;
+      const upd = await d.execute(
+        `UPDATE receipts SET deposit_id=?, deposited_at=datetime('now')
+         WHERE id IN (${placeholders}) AND voided=0 AND deposited_at IS NULL AND is_refund=0`,
+        [depositId, ...receiptIds]
+      );
+      if (upd.rowsAffected !== receiptIds.length) {
+        throw new Error(
+          "Concurrent modification: some receipts became ineligible during the deposit. Aborting.",
+        );
+      }
+      await d.execute("COMMIT");
+      return depositId;
+    } catch (e) {
+      try { await d.execute("ROLLBACK"); } catch { /* rollback best-effort */ }
+      throw e;
+    }
+  });
 }
 
 export async function listDeposits(): Promise<Deposit[]> {
@@ -2223,16 +2287,29 @@ export async function getDepositWithReceipts(
 
 // Reverse a deposit — clears the deposit_id/deposited_at on member receipts so
 // they reappear in the undeposited list, and flags the deposit voided (never
-// deleted, per data-retention rule).
+// deleted, per data-retention rule). Wrapped in BEGIN IMMEDIATE so the
+// receipt-detach and the header-flag either both apply or neither does; a
+// crash between the two used to leave a "live" deposit whose receipts had
+// silently detached back to undeposited.
 export async function voidDeposit(id: number, reason?: string): Promise<void> {
-  await execRetry(
-    "UPDATE receipts SET deposit_id=NULL, deposited_at=NULL WHERE deposit_id=?",
-    [id]
-  );
-  await execRetry(
-    "UPDATE deposits SET voided=1, voided_at=datetime('now'), void_reason=? WHERE id=?",
-    [reason ?? null, id]
-  );
+  await serializeWrite(async () => {
+    const d = await db();
+    await d.execute("BEGIN IMMEDIATE");
+    try {
+      await d.execute(
+        "UPDATE receipts SET deposit_id=NULL, deposited_at=NULL WHERE deposit_id=?",
+        [id],
+      );
+      await d.execute(
+        "UPDATE deposits SET voided=1, voided_at=datetime('now'), void_reason=? WHERE id=?",
+        [reason ?? null, id],
+      );
+      await d.execute("COMMIT");
+    } catch (e) {
+      try { await d.execute("ROLLBACK"); } catch { /* best effort */ }
+      throw e;
+    }
+  });
 }
 
 // ---------- Reports ----------
@@ -2344,6 +2421,38 @@ export async function recordAnnualReceipt(opts: {
   const hash = annualPayloadHash(group);
   const settings = await getSettings();
   const snap = JSON.stringify(buildIssuerSnapshot(settings));
+  // v3.24.4 (#1): freeze the full renderable payload at issue time so
+  // any subsequent reissue / open / resend produces the exact same PDF
+  // even if source data (voided receipts, changed student demographics,
+  // changed settings) has shifted downstream. Migration 018 adds the
+  // column nullable so historic ARs keep working (frontend falls back
+  // to live group data + a "unfrozen — showing current" UI note).
+  const renderPayload = JSON.stringify({
+    v: 1,
+    issued_on: new Date().toISOString().slice(0, 10),
+    student_name: group.student_name,
+    father_name: group.father_name,
+    mother_name: group.mother_name,
+    recipient_label: recipientLabel,
+    total: roundMoney(group.total),
+    receipts: group.receipts.map((r) => ({
+      id: r.id,
+      receipt_no: (r as any).receipt_no ?? null,
+      date: r.date,
+      description: (r as any).description ?? null,
+      amount: roundMoney(r.amount),
+      is_refund: r.is_refund ?? 0,
+    })),
+    settings_snapshot: {
+      daycare_name: settings.daycare_name ?? "",
+      daycare_address: settings.daycare_address ?? "",
+      business_number: settings.business_number ?? "",
+      director_name: settings.director_name ?? "",
+      director_title: settings.director_title ?? "",
+      contact_email: settings.contact_email ?? "",
+      contact_phone: settings.contact_phone ?? "",
+    },
+  });
   // Serialize + wrap in BEGIN IMMEDIATE / COMMIT so the INSERT and the
   // supersede UPDATE either both apply or neither does. Without the tx,
   // an app crash between the two statements would leave two "current"
@@ -2357,13 +2466,15 @@ export async function recordAnnualReceipt(opts: {
         `INSERT INTO annual_receipts
           (ar_number, person_id, student_name, father_name, mother_name,
            calendar_year, recipient_label, total_amount, receipt_count,
-           receipt_ids_json, payload_hash, notes, issuer_snapshot_json)
-         VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+           receipt_ids_json, payload_hash, notes, issuer_snapshot_json,
+           render_payload_json)
+         VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
         [
           arNumber, group.person_id, group.student_name,
           group.father_name, group.mother_name,
           year, recipientLabel, roundMoney(group.total), group.count,
           JSON.stringify(ids), hash, opts.notes ?? null, snap,
+          renderPayload,
         ]
       );
       const newId = res.lastInsertId as number;

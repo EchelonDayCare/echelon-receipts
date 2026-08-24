@@ -90,6 +90,9 @@ export interface AnnualReceipt {
   superseded_by: number | null;
   notes: string | null;
   issuer_snapshot_json?: string | null;
+  /** v3.24.4 (#1): frozen renderable payload for reissue immutability.
+   *  Nullable for ARs issued before migration 018. */
+  render_payload_json?: string | null;
 }
 
 export type SettingsMap = Record<string, string>;

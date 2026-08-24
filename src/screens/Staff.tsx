@@ -9,7 +9,8 @@ import { getSettings } from "../lib/db";
 import {
   listStaff, createStaff, updateStaff, archiveStaff, hardDeleteStaff,
   listHoursForMonth, upsertHour, deleteHour, hoursBetween, paidHours,
-  assertStaffHoursSchema,   countHoursForStaffMonth, listMonthsForStaff, deleteHoursForStaffMonth, countMeetingActionsForStaff,
+  assertStaffHoursSchema,   countHoursForStaffMonth, listMonthsForStaff, countMeetingActionsForStaff,
+  replaceStaffMonthHours, type StaffHourReplaceRow,
 } from "../lib/staff";
 import { listShiftsForMonth, shiftHours } from "../repo/scheduleRepo";
 import { fileToMime } from "../lib/ai";
@@ -808,20 +809,17 @@ export default function StaffScreen() {
         `\n\nAll prior data (including any manual edits) for these staff/month combinations will be wiped and replaced with the new OCR results.\n\nContinue?`
       );
       if (!ok) return;
-      for (const b of buckets) {
-        try {
-          await deleteHoursForStaffMonth(b.staffId, b.ym);
-        } catch (e) {
-          console.error(`[importOcr] wipe failed for ${b.label} ${b.ym}:`, e);
-          notify(`Failed to wipe old data for ${b.label} ${b.ym} — aborting import.`, "err");
-          return;
-        }
-      }
+      // v3.24.4 (#2): wipe+upsert used to run as sequential per-staff
+      // DELETEs then per-row INSERTs. A crash between DELETE and INSERT
+      // (or a rejected row after N successes) left buckets partially
+      // wiped with no replacement. Now: gather everything eligible,
+      // then run one atomic replaceStaffMonthHours transaction.
     }
     // ─────────────────────────────────────────────────────────────────────
 
     let saved = 0, blocked = 0, flaggedSkipped = 0, dbErrors = 0, unresolvedSkipped = 0;
     let lastError: unknown = null;
+    const replaceRows: StaffHourReplaceRow[] = [];
     for (const r of consensus.align.rows) {
       // v2 projector uses negative staff_id for unresolved columns —
       // never write these to the DB regardless of force mode.
@@ -831,17 +829,32 @@ export default function StaffScreen() {
       // Skip rows with no times captured (e.g. calendar-synth fillers where
       // nobody worked that day). Nothing to upsert — even in force mode.
       if (!r.in_time.value && !r.out_time.value) { continue; }
-      try {
-        await upsertHour(
-          r.staff_id, r.work_date, r.in_time.value, r.out_time.value,
-          "ocr", null, null, r.no_lunch.value === "true",
-        );
-        saved++;
-      } catch (e) {
-        dbErrors++;
-        lastError = e;
-        console.error(`[importOcr] upsertHour failed for ${r.staff_name_canonical} @ ${r.work_date}:`, e);
-      }
+      replaceRows.push({
+        staff_id: r.staff_id,
+        work_date: r.work_date,
+        in_time: r.in_time.value,
+        out_time: r.out_time.value,
+        source: "ocr",
+        sheet_image_path: null,
+        notes: null,
+        no_lunch: r.no_lunch.value === "true",
+      });
+    }
+    try {
+      const result = await replaceStaffMonthHours(
+        buckets.map((b) => ({ staffId: b.staffId, ym: b.ym })),
+        replaceRows,
+      );
+      saved = result.inserted;
+    } catch (e) {
+      dbErrors = replaceRows.length;
+      lastError = e;
+      console.error("[importOcr] atomic replaceStaffMonthHours failed:", e);
+      notify(
+        "Import rolled back — no data changed. Please retry or fix flagged rows.",
+        "err",
+      );
+      return;
     }
     setConsensus(null);
     await refresh();

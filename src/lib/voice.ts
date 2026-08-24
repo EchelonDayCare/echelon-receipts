@@ -493,7 +493,11 @@ export async function logOrganizerAiEvent(entry: {
         entry.kind,
         hash,
         storeRaw ? entry.prompt : null,
-        entry.response ?? null,
+        // The parser's rawJson often echoes the transcript verbatim in
+        // fields like `notes` — writing it here bypasses the privacy
+        // toggle. Only persist the LLM response when the owner has
+        // explicitly opted into transcript storage.
+        storeRaw ? (entry.response ?? null) : null,
         entry.latencyMs ?? null,
         entry.error ?? null,
       ],

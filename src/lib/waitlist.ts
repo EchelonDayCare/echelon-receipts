@@ -705,6 +705,13 @@ export async function markConverted(id: number, studentId: number): Promise<void
   );
 }
 
+export async function deleteWaitlistEntry(id: number): Promise<void> {
+  // Hard-delete a waitlist entry. Only used from the Archived screen after
+  // an explicit "Are you sure?" confirmation. Any child_sync_state row for
+  // this entry is orphaned (harmless — sync reconciles by dedupe key).
+  await execRetry(`DELETE FROM waitlist_entries WHERE id = ?`, [id]);
+}
+
 export interface PriorityFields {
   full_time: number | null;
   days_per_week: number | null;

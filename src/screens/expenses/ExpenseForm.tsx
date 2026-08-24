@@ -8,6 +8,7 @@ import { showConfirm } from "../../lib/dialogs";
 import { isAiTextConfigured } from "../../lib/voice";
 import { getSettings } from "../../lib/db";
 import ExpenseAiTextPanel from "./ExpenseAiTextPanel";
+import { useUnsavedGuard } from "../../lib/useUnsavedGuard";
 
 function todayStr(): string {
   const d = new Date();
@@ -30,6 +31,17 @@ export default function ExpenseForm() {
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
   const [aiEnabled, setAiEnabled] = useState(false);
+  // v3.24.4 (#6): unsaved-changes guard. For "add" mode, dirty = any
+  // significant field filled. For "edit" mode, we can't cheaply diff
+  // against the original without re-fetching, so mark dirty whenever the
+  // user has focused the form (approximate: amount or notes filled).
+  const [saved, setSaved] = useState(false);
+  const isDirty = !saved && !busy && (
+    editing
+      ? (amount !== "" || notes !== "" || vendor !== "" || reference !== "")
+      : (amount !== "" || vendor !== "" || notes !== "" || subcategory !== "" || reference !== "")
+  );
+  const blocker = useUnsavedGuard(isDirty);
 
   useEffect(() => {
     getSettings().then((s) => setAiEnabled(isAiTextConfigured(s))).catch(() => setAiEnabled(false));
@@ -64,6 +76,7 @@ export default function ExpenseForm() {
         date, category, subcategory, vendor, amount: amt,
         payment_method: paymentMethod, reference, notes,
       });
+      setSaved(true);
       nav("/expenses/list");
     } catch (e: any) {
       setErr(String(e?.message || e));
@@ -81,6 +94,31 @@ export default function ExpenseForm() {
 
   return (
     <div style={{ padding: 24, maxWidth: 720 }}>
+      {blocker.state === "blocked" && (
+        <div
+          role="dialog"
+          aria-modal="true"
+          style={{
+            position: "fixed", inset: 0, background: "rgba(0,0,0,.4)",
+            display: "flex", alignItems: "center", justifyContent: "center", zIndex: 1000,
+          }}
+        >
+          <div className="card" style={{ maxWidth: 440, padding: 24 }}>
+            <h2 style={{ marginTop: 0 }}>Unsaved expense</h2>
+            <p>You have unsaved changes on this expense. If you leave now, they will be lost.</p>
+            <div style={{ display: "flex", gap: 8, justifyContent: "flex-end", marginTop: 16 }}>
+              <button className="btn" onClick={() => blocker.reset?.()}>Stay on page</button>
+              <button
+                className="btn"
+                style={{ borderColor: "#dc2626", color: "#dc2626" }}
+                onClick={() => blocker.proceed?.()}
+              >
+                Discard and leave
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
       <h1 style={{ marginTop: 0 }}>{editing ? "Edit Expense" : "Add Expense"}</h1>
       {!editing && aiEnabled && <ExpenseAiTextPanel onSaved={() => nav("/expenses/list")} />}
       {err && <div style={{ background: "#fee2e2", border: "1px solid #ef4444", color: "#991b1b", padding: 10, borderRadius: 6, marginBottom: 12 }}>{err}</div>}

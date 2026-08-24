@@ -96,14 +96,17 @@ export async function runScanNow(): Promise<void> {
       for (const inp of inputs) {
         if (!severityGte(inp.severity, minSev)) continue;
         try {
-          await upsertByDedupKey(inp);
+          const upserted = await upsertByDedupKey(inp);
           const list = perCategory.get(inp.category) ?? [];
           list.push(inp.dedup_key);
           perCategory.set(inp.category, list);
           // Desktop alert channel — per-category opt-in, suppressed during
           // quiet hours (the notification itself is still stored above).
+          // Only fire when the alert is first created or its severity was
+          // just escalated, so a persistent issue doesn't re-notify on
+          // every 10-minute scan tick.
           const catSetting = settings.get(inp.category);
-          if (!quietNow && catSetting?.desktop_enabled === 1) {
+          if (!quietNow && catSetting?.desktop_enabled === 1 && (upserted.isNew || upserted.escalated)) {
             void maybeSendDesktopNotification(inp.title, inp.body ?? "");
           }
         } catch (e) {
