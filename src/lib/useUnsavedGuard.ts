@@ -1,11 +1,12 @@
 // v3.24.4 (#6): unsaved-changes guard for forms that own significant
-// user work. Combines two mechanisms:
+// user work. This app uses a non-data `HashRouter`, so we cannot call
+// `useBlocker` here — that hook only works for data routers. Instead we
+// fall back to the same pattern the website editor already uses:
 //   1. `beforeunload` — catches the whole browser tab / desktop window
-//      being closed while dirty. Browser shows the native confirm.
-//   2. `useBlocker` (react-router v6.20+) — catches in-app navigation
-//      (route change from a Link, back button, sidebar click) while
-//      dirty. Renders a `<ConfirmLeaveModal>` via the returned blocker
-//      state so the form can render its own prompt.
+//      being closed while dirty.
+//   2. custom hash-link interception — catches in-app route changes from
+//      sidebar links / `#` navigation while dirty and asks the user to
+//      confirm before leaving.
 //
 // Usage:
 //   const isDirty = useMemo(() => amount !== "" || comments !== "" || ...);
@@ -15,33 +16,73 @@
 //     <ConfirmLeave onStay={blocker.reset} onLeave={blocker.proceed} />
 //   )}
 
-import { useEffect } from "react";
-import { useBlocker, type Blocker } from "react-router-dom";
+import { useEffect, useState } from "react";
+
+export type Blocker = {
+  state: "idle" | "blocked";
+  reset: () => void;
+  proceed: () => void;
+};
 
 export function useUnsavedGuard(isDirty: boolean): Blocker {
-  // Blocks any in-app navigation attempt while dirty. `useBlocker` needs
-  // a stable predicate to avoid re-subscribing every render — closing
-  // over `isDirty` in a lambda is fine here because react-router reads
-  // the latest closure each nav attempt.
-  const blocker = useBlocker(({ currentLocation, nextLocation }) => {
-    if (!isDirty) return false;
-    // Same-URL navigations (e.g. React StrictMode double-invoke) should
-    // never prompt.
-    return currentLocation.pathname !== nextLocation.pathname;
-  });
+  const [state, setState] = useState<"idle" | "blocked">("idle");
+  const [pendingHash, setPendingHash] = useState<string | null>(null);
 
-  // Native beforeunload for window-close / OS-level tab close.
   useEffect(() => {
-    if (!isDirty) return;
-    const handler = (e: BeforeUnloadEvent) => {
+    if (!isDirty) {
+      setState("idle");
+      setPendingHash(null);
+      return;
+    }
+
+    const onBeforeUnload = (e: BeforeUnloadEvent) => {
       e.preventDefault();
       // Chrome/Edge require returnValue to be truthy to show the prompt.
       e.returnValue = "";
       return "";
     };
-    window.addEventListener("beforeunload", handler);
-    return () => window.removeEventListener("beforeunload", handler);
+
+    const onClick = (e: MouseEvent) => {
+      if (e.defaultPrevented || e.button !== 0) return;
+      if (e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
+
+      const target = e.target as HTMLElement | null;
+      const anchor = target?.closest?.("a[href]") as HTMLAnchorElement | null;
+      if (!anchor) return;
+
+      const href = anchor.getAttribute("href") || "";
+      if (!href.startsWith("#/")) return;
+
+      const currentHash = window.location.hash || "#/";
+      if (href === currentHash) return;
+
+      e.preventDefault();
+      e.stopPropagation();
+      setPendingHash(href);
+      setState("blocked");
+    };
+
+    window.addEventListener("beforeunload", onBeforeUnload);
+    document.addEventListener("click", onClick, true);
+
+    return () => {
+      window.removeEventListener("beforeunload", onBeforeUnload);
+      document.removeEventListener("click", onClick, true);
+    };
   }, [isDirty]);
 
-  return blocker;
+  const reset = () => {
+    setState("idle");
+    setPendingHash(null);
+  };
+
+  const proceed = () => {
+    if (pendingHash) {
+      const next = pendingHash.startsWith("#") ? pendingHash : `#${pendingHash}`;
+      window.location.hash = next;
+    }
+    reset();
+  };
+
+  return { state, reset, proceed };
 }

@@ -4,6 +4,20 @@ All notable changes shipped as a DMG. Only entries the owner has approved
 for release are listed here — "code-complete, awaiting ship approval" work
 lives in the session plan.md until it ships.
 
+## v3.24.6 — Critical crash fix: New Receipt / Add Expense
+
+- **Fixes a 100%-reproducible crash on New Receipt and Add/Edit Expense**,
+  live in production since v3.24.4, on every OS (Windows and macOS alike —
+  this was a pure JS logic bug, not an environment issue). `useUnsavedGuard`
+  called react-router's `useBlocker`, which only works with a data router;
+  the app mounts a plain `HashRouter`, so the hook threw on mount and the
+  root error boundary caught it, showing "Something went wrong on this
+  screen." on every visit to either form.
+- Replaced with a hash-router-safe custom guard (same pattern already used
+  by the Website page editor): intercepts in-app hash-link navigation and
+  `beforeunload` directly, with no dependency on data-router APIs. Unsaved-
+  change warning behavior is unchanged for the user.
+
 ## v3.24.5 — Communications template correction
 
 - Adds the **New Family Welcome** built-in message template to existing
