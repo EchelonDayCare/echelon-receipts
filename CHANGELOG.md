@@ -4,6 +4,43 @@ All notable changes shipped as a DMG. Only entries the owner has approved
 for release are listed here — "code-complete, awaiting ship approval" work
 lives in the session plan.md until it ships.
 
+## v3.25.0 — Data Cleanup tool (permanent delete of test/dummy data)
+
+- New **top-right Data Cleanup button** (🧹, below the lock icon) opens a
+  guided tool to permanently remove dummy/test data before a real launch,
+  or later prune old real data year-by-year.
+- **Two modes:** whole categories (receipts, expenses, deposits, attendance,
+  ACCB, annual tax receipts, waitlist, communications, students+everything)
+  or a single **year, optionally scoped to one month**.
+- **Mandatory automatic backup** (including WAL/SHM if present, verified
+  byte-for-byte) is taken immediately before every delete, inside the same
+  write-serialization lock as the delete itself — no other write can land
+  in between.
+- Live record-count preview per category, recomputed on every scope change;
+  the confirmation phrase restates the exact scope (e.g. "DELETE 2026-09")
+  so a stale confirmation can never apply to a different year/month than
+  the one on screen.
+- Deleting a category cascades FK-safely (e.g. deleting students also
+  deletes their receipts/attendance/ACCB/annual receipts/deposits — the
+  preview count reflects the full cascade, not just the one table).
+- Month-scoped mode never deletes a whole year of Annual Tax Receipts (CRA
+  T778 documents) — these are year-level records and are explicitly
+  skipped with an on-screen explanation when only a month is selected.
+- If any Annual Tax Receipts in scope were already emailed to parents, an
+  extra acknowledgment checkbox is required before the Delete button
+  unlocks.
+- After deletion, deposit totals, waitlist sync counters, and cross-table
+  references (converted student links, communication log links) are
+  automatically repaired so nothing is left stale or dangling.
+- Every cleanup (success or failure) is written to the audit log with the
+  real per-resource counts and the backup path, so there is always a
+  record of what was removed and where the safety backup lives.
+- Independently reviewed by a second AI model prior to release; the
+  review's 5 blocking issues and 6 of 7 non-blocking issues were fixed
+  before shipping (backup race condition, month-scope over-deletion,
+  preview/delete count mismatch, stale confirmation on scope change, date-
+  format inconsistency, and more).
+
 ## v3.24.6 — Critical crash fix: New Receipt / Add Expense
 
 - **Fixes a 100%-reproducible crash on New Receipt and Add/Edit Expense**,

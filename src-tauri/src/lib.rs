@@ -150,6 +150,7 @@ pub fn run() {
             email::keychain_delete,
             restore::stage_restore,
             restore::restart_app,
+            restore::backup_before_data_cleanup,
             azure_ai::extract_attendance,
             azure_ai::extract_month_attendance,
             azure_ai::extract_visa_statement,

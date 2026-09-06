@@ -155,6 +155,65 @@ pub fn restart_app(
     app.restart()
 }
 
+// v3.25.0 (Data Cleanup tool): mandatory safety copy of the live,
+// still-encrypted DB before the frontend runs a bulk category delete
+// (top-right Data Cleanup button). This is a plain file copy — no
+// decrypt/re-encrypt round-trip — so it's safe to run even though we
+// don't hold the passphrase here, and it's restorable later via the
+// normal stage_restore path. Caller (frontend) must checkpoint the WAL
+// first (`PRAGMA wal_checkpoint(TRUNCATE)`) so this single-file copy is
+// a complete, consistent snapshot rather than missing uncheckpointed
+// writes that are still sitting in -wal. We ALSO copy any leftover
+// -wal/-shm sidecar files (belt-and-suspenders: a fully truncated
+// checkpoint leaves nothing meaningful in them, but if the OS hasn't
+// finished flushing them to zero length yet, a restore must still see
+// a self-consistent trio, not a lone main file next to a stale -wal).
+// Finally we verify the destination file size matches the source before
+// declaring success — a short/partial copy must fail loudly here, not
+// silently produce a truncated "backup."
+#[tauri::command]
+pub fn backup_before_data_cleanup(
+    app: tauri::AppHandle,
+    auth: tauri::State<'_, crate::auth::AuthState>,
+) -> Result<String, String> {
+    if !auth.has_mdk() {
+        return Err("Unlock the app before running a data cleanup.".into());
+    }
+    let (live, _pending, backups) = app_db_paths(&app)?;
+    if !live.exists() {
+        return Err("Live database not found.".into());
+    }
+    fs::create_dir_all(&backups).map_err(|e| format!("mkdir backups: {e}"))?;
+    let stamp = chrono::Local::now().format("%Y-%m-%dT%H-%M-%S").to_string();
+    let dest_dir = backups.join(format!("pre-cleanup-{stamp}"));
+    fs::create_dir_all(&dest_dir).map_err(|e| format!("mkdir pre-cleanup backup dir: {e}"))?;
+
+    let dest = dest_dir.join("echelon.db");
+    fs::copy(&live, &dest).map_err(|e| format!("safety backup copy: {e}"))?;
+    let src_len = fs::metadata(&live).map_err(|e| format!("stat live db: {e}"))?.len();
+    let dest_len = fs::metadata(&dest).map_err(|e| format!("stat backup copy: {e}"))?.len();
+    if src_len != dest_len {
+        let _ = fs::remove_file(&dest);
+        return Err(format!(
+            "Safety backup copy looked incomplete ({dest_len} of {src_len} bytes) — aborting cleanup without deleting anything. Try again."
+        ));
+    }
+
+    for ext in ["-wal", "-shm"] {
+        let mut sidecar = live.clone().into_os_string();
+        sidecar.push(ext);
+        let sidecar = PathBuf::from(sidecar);
+        if sidecar.exists() {
+            let mut dest_sidecar = dest.clone().into_os_string();
+            dest_sidecar.push(ext);
+            fs::copy(&sidecar, PathBuf::from(dest_sidecar))
+                .map_err(|e| format!("safety backup copy ({ext}): {e}"))?;
+        }
+    }
+
+    Ok(dest_dir.to_string_lossy().into_owned())
+}
+
 // Called from .setup() BEFORE the frontend opens any DB connection.
 // If a pending restore file is present, back up the live DB and swap.
 pub fn apply_pending_restore(app: &tauri::AppHandle) -> Result<Option<String>, String> {

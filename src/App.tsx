@@ -65,6 +65,7 @@ import PromptHost from "./components/PromptHost";
 import NotificationBell from "./components/NotificationBell";
 import LockButton from "./components/LockButton";
 import WebsiteButton from "./components/WebsiteButton";
+import DataCleanupButton from "./components/DataCleanupButton";
 import SettingsFab from "./components/SettingsFab";
 import AlertDot from "./components/AlertDot";
 import { HomeAlertsProvider, useHomeAlerts } from "./hooks/useHomeAlerts";
@@ -189,6 +190,7 @@ function Shell({ logo, name, staffEnabled }: { logo: string; name: string; staff
           <NotificationBell size={40} />
           <WebsiteButton size={40} />
           <LockButton size={40} />
+          <DataCleanupButton size={40} />
         </div>
         <SettingsFab />
         <main className="content content-home-shell">

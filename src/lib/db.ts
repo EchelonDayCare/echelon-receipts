@@ -95,9 +95,18 @@ export async function execRetry(sql: string, args: any[] = []): Promise<{ lastIn
 // Force WAL checkpoint — call before any file-level backup of the .db so the
 // snapshot is complete. Otherwise recent commits live only in echelon.db-wal
 // and a restore from the backup silently loses them.
-export async function checkpointWal(): Promise<void> {
-  try { await (await db()).execute("PRAGMA wal_checkpoint(TRUNCATE)"); }
-  catch (e) { console.warn("[db] wal_checkpoint failed:", e); }
+// v3.25.0: Data Cleanup's mandatory safety backup needs to know for certain
+// that the checkpoint actually happened — a silently swallowed failure here
+// means the file-copy backup taken right after is missing committed rows
+// that are still sitting in -wal. Returns the raw PRAGMA result row so the
+// caller can decide whether "busy" is acceptable for its use case.
+export async function checkpointWal(): Promise<{ busy: number; log: number; checkpointed: number }> {
+  const rows = await (await db()).select<{ busy: number; log: number; checkpointed: number }[]>(
+    "PRAGMA wal_checkpoint(TRUNCATE)",
+  );
+  const r = rows[0] ?? { busy: 0, log: 0, checkpointed: 0 };
+  if (r.busy) console.warn("[db] wal_checkpoint returned busy=1 — a reader/writer blocked a full checkpoint");
+  return r;
 }
 
 export async function db(): Promise<Database> {
