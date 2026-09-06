@@ -1,6 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import type { Receipt, SettingsMap } from "../types";
-import { buildReceiptHtml } from "./receipt";
+import { buildReceiptHtml, receiptDisplayNo } from "./receipt";
 import { loadHtml2Pdf } from "./lazy";
 
 export const SMTP_PRESETS: Record<string, { host: string; port: number }> = {
@@ -82,7 +82,7 @@ export function renderTemplate(tpl: string, r: Receipt, s: SettingsMap): string 
   const amountLabel = isRefund ? "Refund Amount" : "Amount";
   const refundPrefix = isRefund ? "Refund " : "";
   const map: Record<string, string> = {
-    receipt_no: String(r.receipt_no),
+    receipt_no: receiptDisplayNo(r),
     student: r.student_name_snapshot,
     description: descForEmail,
     amount: fmtAmount(r.amount),
@@ -213,7 +213,7 @@ export async function sendReceiptEmail(opts: {
   const b64 = bytesToBase64(pdf);
   const subject = renderSubject(s.email_subject || "Receipt #{{receipt_no}}", r, s);
   const body = renderTemplate(s.email_body || "Receipt attached.", r, s);
-  const filename = `Receipt-${r.receipt_no}-${r.student_name_snapshot.replace(/[^\w]+/g, "_")}.pdf`;
+  const filename = `Receipt-${receiptDisplayNo(r)}-${r.student_name_snapshot.replace(/[^\w]+/g, "_")}.pdf`;
 
   let logErr: string | null = null;
   try {

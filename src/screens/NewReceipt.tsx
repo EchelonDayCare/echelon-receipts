@@ -1,4 +1,4 @@
-import { showAlert } from "../lib/dialogs";
+import { showAlert, showConfirm } from "../lib/dialogs";
 import { useEffect, useMemo, useState } from "react";
 import {
   listStudents, listYears, nextReceiptNo, createReceipt, getSettings,
@@ -12,6 +12,13 @@ import { todayLocalIso } from "../lib/localDate";
 import { useUnsavedGuard } from "../lib/useUnsavedGuard";
 
 const MONTHS = ["January","February","March","April","May","June","July","August","September","October","November","December"];
+
+// v3.25.1: cash receipts get an editable "EDCxxx" label shown to parents
+// instead of the internal sequential receipt number. Purely cosmetic.
+function genCashLabel(): string {
+  const n = Math.floor(100 + Math.random() * 900); // 3 digits, 100-999
+  return `EDC${n}`;
+}
 
 export default function NewReceipt() {
   const today = new Date();
@@ -29,12 +36,19 @@ export default function NewReceipt() {
   const [description, setDescription] = useState<string>("");
   const [descTouched, setDescTouched] = useState(false);
   const [isRefund, setIsRefund] = useState<boolean>(false);
+  const [isCash, setIsCash] = useState<boolean>(false);
+  const [cashLabel, setCashLabel] = useState<string>("");
   const [settings, setSettings] = useState<SettingsMap>({});
   const [accbThisMonth, setAccbThisMonth] = useState<number>(0);
   const [amountTouched, setAmountTouched] = useState(false);
-  const [preview, setPreview] = useState<{ html: string; receipt: Receipt; recipients: string[]; settings: SettingsMap } | null>(null);
+  const [preview, setPreview] = useState<{ html: string; receipt: Receipt; recipients: string[]; settings: SettingsMap; mode: "send" | "view" } | null>(null);
   const [sending, setSending] = useState(false);
   const [saving, setSaving] = useState(false);
+
+  function onToggleCash(checked: boolean) {
+    setIsCash(checked);
+    if (checked && !cashLabel.trim()) setCashLabel(genCashLabel());
+  }
 
   async function refresh() {
     const ys = await listYears();
@@ -77,8 +91,9 @@ export default function NewReceipt() {
       amountTouched ||
       descTouched ||
       isRefund ||
+      isCash ||
       (pending || "").trim() !== "" && (pending || "").trim() !== "0";
-  }, [studentId, comments, amountTouched, descTouched, isRefund, pending]);
+  }, [studentId, comments, amountTouched, descTouched, isRefund, isCash, pending]);
   const blocker = useUnsavedGuard(isDirty && !saving);
 
   // ACCB lookup whenever student / fee month / fee year changes
@@ -104,12 +119,16 @@ export default function NewReceipt() {
     }
   }, [breakdown, isRefund]); // eslint-disable-line
 
-  async function onSave(action: "print" | "email" | "save") {
+  async function onSave(action: "print" | "email" | "save" | "print_email") {
     if (saving || sending) return;
     if (!student) { void showAlert("Pick a student first."); return; }
     if (!description.trim()) { void showAlert("Description is required."); return; }
     if (isRefund && !comments.trim()) {
       void showAlert("Please add a reason for the refund in the Comments box — it will appear on the receipt and in the email to the parent.");
+      return;
+    }
+    if (isCash && !cashLabel.trim()) {
+      void showAlert("Enter a cash receipt label (e.g. EDC482), or untick Cash payment.");
       return;
     }
     const amt = parseFloat(amount); if (!(amt >= 0)) { void showAlert("Invalid amount."); return; }
@@ -119,6 +138,7 @@ export default function NewReceipt() {
     }
     const pen = parseFloat(pending || "0") || 0;
     const bk = (breakdown && !isRefund) ? breakdown : null;
+    const cashLabelValue = isCash ? cashLabel.trim() : null;
 
     // Refund receipts appear on the parent's CRA tax summary and reduce
     // the annual total, so parents need a reason on the printed PDF. The
@@ -130,16 +150,19 @@ export default function NewReceipt() {
     }
 
     // CRA-correctness guard: if subsidies are enabled and a breakdown is
-    // computed, the parent-pays amount on the receipt must equal the breakdown,
-    // otherwise the printed PDF shows an inconsistent total vs. the breakdown
-    // table. Block the save and tell the user to use the Refund flow.
+    // computed, the parent-pays amount on the receipt should equal the
+    // breakdown, otherwise the printed PDF's breakdown table and the entered
+    // amount disagree. This is a WARNING, not a hard stop — the owner may
+    // have a legitimate reason (subsidy figures not yet entered for this
+    // month, a manual correction, etc.) and can explicitly proceed.
     if (bk && Math.abs(amt - bk.parent_pays) > 0.01) {
-      void showAlert(
+      const proceed = await showConfirm(
         `Amount ($${amt.toFixed(2)}) does not match the subsidy breakdown (parent pays $${bk.parent_pays.toFixed(2)}).\n\n` +
-        `When subsidies are enabled, the receipt amount must equal gross − CCFRI − ACCB.\n\n` +
-        `To record a different amount, issue a Refund receipt instead.`
+        `When subsidies are enabled, the receipt amount is expected to equal gross − CCFRI − ACCB.\n\n` +
+        `If this is intentional (e.g. subsidy not yet on file, or a manual correction), you can proceed anyway — otherwise cancel and issue a Refund receipt, or fix the amount/subsidy figures first.`,
+        { title: "Amount doesn't match subsidy breakdown", okLabel: "Proceed anyway", cancelLabel: "Cancel", kind: "warning" }
       );
-      return;
+      if (!proceed) return;
     }
 
     setSaving(true);
@@ -154,6 +177,7 @@ export default function NewReceipt() {
         gross_amount: bk ? bk.gross : null,
         ccfri_amount: bk ? bk.ccfri : null,
         accb_amount:  bk ? bk.accb : null,
+        cash_receipt_label: cashLabelValue,
       });
       const settingsLatest = await getSettings();
       const r = {
@@ -171,12 +195,14 @@ export default function NewReceipt() {
         void_reason: null,
         voided_at: null,
         issuer_snapshot_json: null,
+        cash_receipt_label: cashLabelValue,
       };
       let savedPath: string | null = null;
       try { savedPath = await saveReceiptPdf(r, settingsLatest); }
       catch (e) { console.error(e); void showAlert("Receipt saved, but PDF auto-save failed:\n" + e); }
 
-      if (action === "email") {
+      if (action === "email" || action === "print_email") {
+        if (action === "print_email") printReceipt(r, settingsLatest);
         const recipients = parseRecipients(student.email);
         if (recipients.length === 0) {
           // Belt-and-suspenders: the button is disabled in the UI when no
@@ -186,24 +212,54 @@ export default function NewReceipt() {
         } else {
           // Show preview modal; actual send happens from confirmSendEmail().
           const html = buildReceiptHtml(r, settingsLatest);
-          setPreview({ html, receipt: r, recipients, settings: settingsLatest });
+          setPreview({ html, receipt: r, recipients, settings: settingsLatest, mode: "send" });
         }
         setReceiptNo((n) => n + 1);
         setComments(""); setPending(""); setIsRefund(false); setAmountTouched(false);
+        setIsCash(false); setCashLabel("");
         return;
       }
 
       if (action === "print") printReceipt(r, settingsLatest);
       setReceiptNo((n) => n + 1);
       setComments(""); setPending(""); setIsRefund(false); setAmountTouched(false);
+      setIsCash(false); setCashLabel("");
       void showAlert(`Receipt #${receiptNo} saved.${savedPath ? "\nPDF: " + savedPath : ""}`);
     } finally {
       setSaving(false);
     }
   }
 
+  // v3.25.1: non-committing preview — shows the receipt exactly as it would
+  // render (including the live-editable receipt #/cash label), without
+  // creating a receipt row, consuming a receipt number, or sending anything.
+  function onPreview() {
+    if (!student) { void showAlert("Pick a student first to preview the receipt."); return; }
+    const amt = parseFloat(amount);
+    const bk = (breakdown && !isRefund) ? breakdown : null;
+    const fake: Receipt = {
+      id: 0, receipt_no: receiptNo, date, student_id: student.id,
+      student_name_snapshot: student.name,
+      father_name_snapshot: student.father_name,
+      mother_name_snapshot: student.mother_name,
+      description, amount: isNaN(amt) ? 0 : amt,
+      pending_amount: parseFloat(pending || "0") || 0,
+      comments: comments || null,
+      voided: 0, created_at: new Date().toISOString(),
+      emailed_at: null, emailed_to: null,
+      is_refund: isRefund ? 1 : 0,
+      gross_amount: bk ? bk.gross : null,
+      ccfri_amount: bk ? bk.ccfri : null,
+      accb_amount:  bk ? bk.accb : null,
+      void_reason: null, voided_at: null, issuer_snapshot_json: null,
+      cash_receipt_label: isCash ? (cashLabel.trim() || null) : null,
+    };
+    const html = buildReceiptHtml(fake, settings);
+    setPreview({ html, receipt: fake, recipients: [], settings, mode: "view" });
+  }
+
   async function confirmSendEmail() {
-    if (!preview || sending) return;
+    if (!preview || sending || preview.mode !== "send") return;
     setSending(true);
     try {
       await sendReceiptEmail({ receipt: preview.receipt, recipients: preview.recipients, settings: preview.settings });
@@ -217,6 +273,7 @@ export default function NewReceipt() {
       setSending(false);
     }
   }
+
 
   return (
     <div>
@@ -252,7 +309,20 @@ export default function NewReceipt() {
         <div className="row">
           <div className="field">
             <label>Receipt #</label>
-            <input value={receiptNo} onChange={(e) => setReceiptNo(parseInt(e.target.value || "0", 10))} />
+            {isCash ? (
+              <input value={cashLabel} onChange={(e) => setCashLabel(e.target.value)} placeholder="EDC482" />
+            ) : (
+              <input value={receiptNo} onChange={(e) => setReceiptNo(parseInt(e.target.value || "0", 10))} />
+            )}
+            <label style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 6, fontWeight: 400, cursor: "pointer" }}>
+              <input type="checkbox" checked={isCash} onChange={(e) => onToggleCash(e.target.checked)} />
+              <span style={{ fontSize: 12 }}>Cash payment (editable receipt label)</span>
+            </label>
+            {isCash && (
+              <small style={{ color: "var(--muted)" }}>
+                Internal record #{receiptNo} is kept for bookkeeping; parents see "{cashLabel || "EDC…"}" on the receipt.
+              </small>
+            )}
           </div>
           <div className="field">
             <label>Date</label>
@@ -357,7 +427,10 @@ export default function NewReceipt() {
               : "Optional notes (e.g., Pending Fees CAD120)"} />
         </div>
 
-        <div style={{ display: "flex", gap: 10, marginTop: 8, alignItems: "center" }}>
+        <div style={{ display: "flex", gap: 10, marginTop: 8, alignItems: "center", flexWrap: "wrap" }}>
+          <button className="btn secondary" onClick={onPreview} disabled={saving || sending}>
+            Preview
+          </button>
           <button className="btn" onClick={() => onSave("print")} disabled={saving || sending}>
             {saving ? "Saving…" : "Save & Print"}
           </button>
@@ -369,6 +442,13 @@ export default function NewReceipt() {
           <button className="btn secondary" onClick={() => onSave("save")} disabled={saving || sending}>
             {saving ? "Saving…" : "Save Only"}
           </button>
+          {isCash && (
+            <button className="btn" onClick={() => onSave("print_email")}
+              disabled={saving || sending || !student || parseRecipients(student?.email).length === 0}
+              title={!student ? "Pick a student" : parseRecipients(student.email).length === 0 ? "No email on file for this student — use Save & Print, or add an email on the Students tab." : ""}>
+              {saving ? "Saving…" : "Print & Email"}
+            </button>
+          )}
           {student && parseRecipients(student.email).length === 0 && (
             <span style={{ fontSize: 12, color: "var(--muted)" }}>
               (no email on file — Save & Email is disabled)
@@ -396,10 +476,12 @@ export default function NewReceipt() {
           >
             <div style={{ padding: "12px 16px", borderBottom: "1px solid var(--border)", display: "flex", alignItems: "center", justifyContent: "space-between" }}>
               <div>
-                <strong>Preview before sending</strong>
-                <div style={{ fontSize: 12, color: "var(--muted)" }}>
-                  To: {preview.recipients.join(", ")}
-                </div>
+                <strong>{preview.mode === "view" ? "Preview (not saved)" : "Preview before sending"}</strong>
+                {preview.mode === "send" && (
+                  <div style={{ fontSize: 12, color: "var(--muted)" }}>
+                    To: {preview.recipients.join(", ")}
+                  </div>
+                )}
               </div>
               <button className="btn ghost" onClick={() => setPreview(null)} disabled={sending}>✕</button>
             </div>
@@ -409,10 +491,16 @@ export default function NewReceipt() {
               style={{ flex: 1, border: 0, background: "white", minHeight: 400 }}
             />
             <div style={{ padding: 12, borderTop: "1px solid var(--border)", display: "flex", gap: 10, justifyContent: "flex-end" }}>
-              <button className="btn secondary" onClick={() => setPreview(null)} disabled={sending}>Cancel</button>
-              <button className="btn" onClick={confirmSendEmail} disabled={sending}>
-                {sending ? "Sending…" : `Send to ${preview.recipients.length} recipient${preview.recipients.length === 1 ? "" : "s"}`}
-              </button>
+              {preview.mode === "view" ? (
+                <button className="btn" onClick={() => setPreview(null)}>Close</button>
+              ) : (
+                <>
+                  <button className="btn secondary" onClick={() => setPreview(null)} disabled={sending}>Cancel</button>
+                  <button className="btn" onClick={confirmSendEmail} disabled={sending}>
+                    {sending ? "Sending…" : `Send to ${preview.recipients.length} recipient${preview.recipients.length === 1 ? "" : "s"}`}
+                  </button>
+                </>
+              )}
             </div>
           </div>
         </div>

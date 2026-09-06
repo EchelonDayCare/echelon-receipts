@@ -6,6 +6,7 @@ import {
 } from "../lib/db";
 import type { Receipt, Deposit, SettingsMap } from "../types";
 import { printDepositSlip } from "../lib/depositSlip";
+import { receiptDisplayNo } from "../lib/receipt";
 import { showAlert, showConfirm, showPrompt } from "../lib/dialogs";
 
 function fmtMoney(n: number): string {
@@ -129,7 +130,7 @@ export default function Deposits() {
                       <input type="checkbox" checked={selected.has(r.id)} onChange={() => toggle(r.id)} />
                     </td>
                     <td style={{ padding: 6 }}>{r.date}</td>
-                    <td style={{ padding: 6 }}>{r.receipt_no}</td>
+                    <td style={{ padding: 6 }}>{receiptDisplayNo(r)}</td>
                     <td style={{ padding: 6 }}>{r.student_name_snapshot}</td>
                     <td style={{ padding: 6 }}>{r.father_name_snapshot || r.mother_name_snapshot || ""}</td>
                     <td style={{ padding: 6, textAlign: "right" }}>{fmtMoney(r.amount)}</td>

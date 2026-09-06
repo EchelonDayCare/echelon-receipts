@@ -1934,8 +1934,8 @@ export async function createReceipt(r: Omit<Receipt, "id" | "created_at" | "void
   const res = await execRetry(
     `INSERT INTO receipts(receipt_no,date,student_id,student_name_snapshot,
       father_name_snapshot,mother_name_snapshot,description,amount,pending_amount,comments,is_refund,
-      gross_amount,ccfri_amount,accb_amount,issuer_snapshot_json)
-     VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+      gross_amount,ccfri_amount,accb_amount,issuer_snapshot_json,cash_receipt_label)
+     VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
     [
       r.receipt_no, r.date, r.student_id, r.student_name_snapshot,
       r.father_name_snapshot, r.mother_name_snapshot,
@@ -1945,6 +1945,7 @@ export async function createReceipt(r: Omit<Receipt, "id" | "created_at" | "void
       r.ccfri_amount == null ? null : roundMoney(r.ccfri_amount),
       r.accb_amount  == null ? null : roundMoney(r.accb_amount),
       snap,
+      r.cash_receipt_label || null,
     ]
   );
   return Number(res.lastInsertId);

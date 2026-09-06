@@ -4,6 +4,28 @@ All notable changes shipped as a DMG. Only entries the owner has approved
 for release are listed here — "code-complete, awaiting ship approval" work
 lives in the session plan.md until it ships.
 
+## v3.25.1 — New Receipt: Preview button, Cash receipts, safer subsidy warning
+
+- **Preview button** on New Receipt: shows exactly how the PDF/print will
+  look with everything you've currently typed — no receipt number is
+  consumed and nothing is saved to Receipt History until you actually
+  choose Save & Print / Save & Email / Save Only.
+- **Cash payment checkbox**: when ticked, the receipt shown to parents
+  gets an editable label like "EDC482" instead of the normal sequential
+  receipt number (which is still tracked quietly underneath for
+  bookkeeping/search). Applies to the printed/emailed PDF, the email
+  subject line, the saved PDF filename, and the Receipt History / Deposits
+  list. Only cosmetic — never affects sorting, search, or uniqueness.
+- **Print & Email button**: appears next to the existing three buttons
+  only when Cash payment is checked, for the common case of handing a
+  parent a printed cash receipt and emailing them a copy in one click.
+- **Subsidy-mismatch check downgraded from a hard block to a warning**:
+  if the entered amount doesn't match the auto-computed CCFRI/ACCB
+  breakdown, you now get a warning dialog with "Proceed anyway" /
+  "Cancel" instead of being forced to redo the entry — useful when a
+  subsidy figure isn't on file yet for that month or a manual correction
+  is genuinely needed.
+
 ## v3.25.0 — Data Cleanup tool (permanent delete of test/dummy data)
 
 - New **top-right Data Cleanup button** (🧹, below the lock icon) opens a

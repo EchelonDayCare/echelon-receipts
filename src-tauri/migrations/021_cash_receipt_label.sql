@@ -1,0 +1,12 @@
+-- v3.25.1: Cash receipts get a distinct, editable "EDCxxx" label instead of
+-- showing the normal sequential receipt number to parents.
+--
+-- Design: the underlying `receipt_no` column stays INTEGER NOT NULL UNIQUE
+-- and keeps being assigned sequentially exactly as before — every existing
+-- report, sort order, search, aging query, deposit-slip linking and CRA
+-- annual receipt join keys off it unchanged. `cash_receipt_label` is a new,
+-- purely cosmetic, nullable TEXT column: when present, the PDF, printed
+-- receipt, email subject/history list show this label instead of the
+-- numeric receipt_no. It carries no uniqueness constraint (the owner can
+-- freely retype it) since it is never used for joins or lookups.
+ALTER TABLE receipts ADD COLUMN cash_receipt_label TEXT;

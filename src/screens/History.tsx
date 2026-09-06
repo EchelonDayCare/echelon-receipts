@@ -7,7 +7,7 @@ import { tempDir, join } from "@tauri-apps/api/path";
 import { invoke } from "@tauri-apps/api/core";
 import { getSettings, listReceipts, voidReceipt, voidReceiptWithOverride, ReceiptInDepositError, markEmailed, listStudents } from "../lib/db";
 import type { Receipt, SettingsMap, Student } from "../types";
-import { printReceipt, saveReceiptPdf } from "../lib/receipt";
+import { printReceipt, saveReceiptPdf, receiptDisplayNo } from "../lib/receipt";
 import { sendReceiptEmail, parseRecipients, sendSubsidyStatementEmail } from "../lib/email";
 import {
   renderSubsidyStatementPdf, saveSubsidyStatementPdf,
@@ -144,7 +144,7 @@ export default function History() {
               };
 
               const doEmailSubsidy = async () => {
-                if (!await showConfirm(`Email subsidy statement for receipt #${r.receipt_no} to:\n  ${recipients.join("\n  ")}`)) return;
+                if (!await showConfirm(`Email subsidy statement for receipt #${receiptDisplayNo(r)} to:\n  ${recipients.join("\n  ")}`)) return;
                 try {
                   const bytes = await renderSubsidyStatementPdf(r, settings);
                   const { year: y, label } = monthLabelFromDate(r.date);
@@ -162,7 +162,7 @@ export default function History() {
               };
 
               const doEmail = async () => {
-                if (!await showConfirm(`Email receipt #${r.receipt_no} to:\n  ${recipients.join("\n  ")}`)) return;
+                if (!await showConfirm(`Email receipt #${receiptDisplayNo(r)} to:\n  ${recipients.join("\n  ")}`)) return;
                 try {
                   await sendReceiptEmail({ receipt: r, recipients, settings });
                   await markEmailed(r.id, recipients);
@@ -173,7 +173,7 @@ export default function History() {
 
               const doVoid = async () => {
                 const reason = await showPrompt(
-                  `Void receipt #${r.receipt_no}?\n\nThis marks the receipt as cancelled. The record stays in your history for audit but parents will see it is voided.\n\nReason (required):`,
+                  `Void receipt #${receiptDisplayNo(r)}?\n\nThis marks the receipt as cancelled. The record stays in your history for audit but parents will see it is voided.\n\nReason (required):`,
                   ""
                 );
                 if (reason == null) return; // cancelled
@@ -222,7 +222,7 @@ export default function History() {
 
               return (
               <tr key={r.id} className={r.voided ? "voided" : ""}>
-                <td>{r.receipt_no}</td>
+                <td>{receiptDisplayNo(r)}</td>
                 <td>{r.date}</td>
                 <td>
                   {r.student_name_snapshot}

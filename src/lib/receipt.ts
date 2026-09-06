@@ -19,6 +19,14 @@ function safeName(s: string): string {
   return s.replace(/[\\/:*?"<>|']+/g, "").replace(/\s+/g, "_").slice(0, 60);
 }
 
+// v3.25.1: cash receipts show a cosmetic "EDCxxx" label instead of the
+// internal sequential receipt_no. The numeric receipt_no is always still
+// assigned and used for storage/sorting/joins — this only changes what
+// the parent sees on the PDF/email/history row.
+export function receiptDisplayNo(r: Pick<Receipt, "receipt_no" | "cash_receipt_label">): string {
+  return (r.cash_receipt_label && r.cash_receipt_label.trim()) || String(r.receipt_no);
+}
+
 export function buildReceiptHtml(r: Receipt, settings: SettingsMap): string {
   // Prefer the issuer snapshot taken at receipt-issue time so historical PDFs
   // stay consistent even if the daycare's address / signer / BN changed later.
@@ -38,7 +46,7 @@ export function buildReceiptHtml(r: Receipt, settings: SettingsMap): string {
     </tbody>
   </table>` : "";
 
-  return `<!doctype html><html><head><meta charset="utf-8"><title>Receipt ${r.receipt_no}</title>
+  return `<!doctype html><html><head><meta charset="utf-8"><title>Receipt ${receiptDisplayNo(r)}</title>
 <style>
   @page { size: Letter; margin: 0.5in; }
   body { font-family: Georgia, "Times New Roman", serif; color: #111; margin: 0; }
@@ -87,7 +95,7 @@ export function buildReceiptHtml(r: Receipt, settings: SettingsMap): string {
   </div>
 
   <div class="meta">
-    <div><b>Receipt #</b> ${h(r.receipt_no)}${r.voided ? ' <span class="voided">(VOIDED)</span>' : ""}</div>
+    <div><b>Receipt #</b> ${h(receiptDisplayNo(r))}${r.voided ? ' <span class="voided">(VOIDED)</span>' : ""}</div>
     <div style="text-align:right"><b>Date:</b> ${h(fmtDate(r.date))}</div>
   </div>
 
@@ -185,7 +193,7 @@ export async function saveReceiptPdf(r: Receipt, s: SettingsMap): Promise<string
   const subdir = `${folder.replace(/[\\/]+$/, "")}/${yy}/${mm}`;
   if (!(await exists(subdir))) await mkdir(subdir, { recursive: true });
 
-  const fname = `${r.receipt_no}_${r.date}_${safeName(r.student_name_snapshot)}.pdf`;
+  const fname = `${receiptDisplayNo(r)}_${r.date}_${safeName(r.student_name_snapshot)}.pdf`;
   const fullPath = `${subdir}/${fname}`;
   await writeFile(fullPath, bytes);
   return fullPath;

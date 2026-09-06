@@ -39,6 +39,9 @@ export interface Receipt {
   issuer_snapshot_json: string | null;
   deposited_at?: string | null;
   deposit_id?: number | null;
+  // v3.25.1: cosmetic label shown instead of receipt_no on cash receipts,
+  // e.g. "EDC482". Never used for joins/sorting/uniqueness.
+  cash_receipt_label?: string | null;
 }
 
 export interface Deposit {
