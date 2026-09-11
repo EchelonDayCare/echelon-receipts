@@ -475,8 +475,8 @@ async fn howto_answer(api_key: &str, question: &str) -> Result<(String, String),
          - Use the arrow notation for menus, e.g. 'Students → Roster → + Add Student'.\n\
          - Reference real button labels in quotes when they help ('Save', 'Upload sheet', '✨ Amend with AI').\n\
          - If the requested feature is NOT in the app map, say so plainly and suggest the closest existing feature — do not guess.\n\
-         - If the question has NOTHING to do with this daycare app (general knowledge, world facts, unrelated software, jokes, personal questions), reply with EXACTLY this sentence and nothing else: \"I can only help with features of this Echelon Receipts app. Try 'how do I add a student?' or 'how do I email a receipt?'.\"\n\
-         - Do NOT mention SQL, tables, columns, JSON, or code. This is an end-user answer.\n\
+         - If the question is NOT about this app (general knowledge, world facts, coding help, writing help, jokes, personal questions, etc.), just answer it normally and helpfully using your own knowledge — you are also a general-purpose assistant, not limited to app topics.\n\
+         - Do NOT mention SQL, tables, columns, JSON, or code (unless the user's own question is a coding question). This is an end-user answer.\n\
          - No preamble. Start directly with step 1.\n\
          \n\
          APP MAP:\n{}",
@@ -493,6 +493,31 @@ async fn howto_answer(api_key: &str, question: &str) -> Result<(String, String),
     let raw = call_chat(api_key, body).await?;
     let cleaned = strip_code_fence(&raw).trim().to_string();
     Ok((cleaned, "none".to_string()))
+}
+
+// v3.26.0: general-purpose fallback. Reached when a question is neither a
+// grounded "how do I…" app question nor a data question that resolves to a
+// real table in this app's schema (see the scope check in `ask_echelon`).
+// By design this call carries NO topic restriction — it behaves like a
+// general AI assistant (general knowledge, coding help, writing help,
+// etc.), same as e.g. GitHub Copilot Chat. It never touches the SQL/DB
+// path, so widening it here cannot be used to coax the model into
+// generating or leaking data queries outside the app's own schema.
+async fn general_answer(api_key: &str, question: &str) -> Result<String, String> {
+    let system = "You are Ask Echelon, a helpful general-purpose AI assistant built into the Echelon Receipts desktop app. \
+        Answer the user's question directly and helpfully, drawing on your general knowledge, the same way a general assistant like GitHub Copilot Chat would. \
+        You may write code, explain concepts, help with writing, answer trivia, etc. \
+        Keep answers reasonably concise unless the question calls for more detail. No unnecessary preamble.";
+    let body = json!({
+        "messages": [
+            {"role":"system","content": system},
+            {"role":"user","content": question}
+        ],
+        "temperature": 0.4,
+        "max_completion_tokens": 1200
+    });
+    let raw = call_chat(api_key, body).await?;
+    Ok(strip_code_fence(&raw).trim().to_string())
 }
 
 // ─── LLM: SQL generation ────────────────────────────────────────────────

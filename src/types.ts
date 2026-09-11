@@ -10,6 +10,7 @@ export interface Student {
   created_at: string;
   person_id: string | null;
   gross_override: number | null;
+  subsidy_profile_id: number | null;
   graduation_year: number | null;
   graduation_note: string | null;
 }
@@ -72,6 +73,15 @@ export interface FeeBreakdown {
   accb: number;
   parent_pays: number;
   enabled: boolean;
+}
+
+export interface SubsidyProfile {
+  id: number;
+  name: string;
+  gross_monthly_fee: number;
+  ccfri_monthly_reduction: number;
+  active: number;
+  created_at: string;
 }
 
 export interface AnnualReceipt {

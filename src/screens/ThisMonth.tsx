@@ -4,6 +4,7 @@ import { openPath } from "@tauri-apps/plugin-opener";
 import {
   listStudents, listReceipts, nextReceiptNo, createReceipt,
   getSettings, subsidiesEnabled, computeFeeBreakdown, getAccbForMonthBulk, markEmailed,
+  listSubsidyProfiles,
 } from "../lib/db";
 import type { Student, Receipt, SettingsMap } from "../types";
 import { saveReceiptPdf } from "../lib/receipt";
@@ -61,11 +62,12 @@ export default function ThisMonth() {
     setLoading(true);
     const monthIdx = MONTHS.indexOf(month) + 1;
     const subsOn = subsidiesEnabled(await getSettings());
-    const [studs, s, allReceipts, accbMap] = await Promise.all([
+    const [studs, s, allReceipts, accbMap, profiles] = await Promise.all([
       listStudents(year, true),
       getSettings(),
       listReceipts({ year }),
       subsOn ? getAccbForMonthBulk(year, monthIdx) : Promise.resolve(new Map<number, number>()),
+      listSubsidyProfiles(true),
     ]);
     setSettings(s);
     // Bucket receipts per-student so the inner loop is O(1) lookup.
@@ -80,7 +82,10 @@ export default function ThisMonth() {
       let amt = parseFloat(s.default_fee || "0") || 0;
       if (subsidiesEnabled(s)) {
         const accb = accbMap.get(stu.id) ?? 0;
-        const fb = computeFeeBreakdown(stu, s, accb);
+        const profile = stu.subsidy_profile_id == null
+          ? null
+          : profiles.find((p) => p.id === stu.subsidy_profile_id) ?? null;
+        const fb = computeFeeBreakdown(stu, s, accb, profile);
         bk = { gross: fb.gross, ccfri: fb.ccfri, accb: fb.accb };
         if (fb.gross > 0) amt = fb.parent_pays;
       }

@@ -4,9 +4,9 @@ import { useNavigate, useSearchParams } from "react-router-dom";
 import { open } from "@tauri-apps/plugin-dialog";
 import { readFile } from "@tauri-apps/plugin-fs";
 import { listStudents, listYears, upsertStudent, deleteStudent, reactivateStudent, hardDeleteStudent, getSettings,
-  listAccbForStudent, upsertAccb, deleteAccb } from "../lib/db";
+  listAccbForStudent, upsertAccb, deleteAccb, listSubsidyProfiles } from "../lib/db";
 import { parseRosterFile } from "../lib/excelImport";
-import type { Student, AccbEntry, SettingsMap } from "../types";
+import type { Student, AccbEntry, SettingsMap, SubsidyProfile } from "../types";
 
 export default function Students() {
   const now = new Date().getFullYear();
@@ -18,6 +18,7 @@ export default function Students() {
   const [editing, setEditing] = useState<Partial<Student> | null>(null);
   const [pendingImport, setPendingImport] = useState<{ path: string; year: number } | null>(null);
   const [settings, setSettings] = useState<SettingsMap>({});
+  const [subsidyProfiles, setSubsidyProfiles] = useState<SubsidyProfile[]>([]);
   const [accbFor, setAccbFor] = useState<{ student: Student; entries: AccbEntry[] } | null>(null);
   const [accbDraft, setAccbDraft] = useState<{ year: number; month: number; amount: string; notes: string }>(
     { year: new Date().getFullYear(), month: new Date().getMonth() + 1, amount: "", notes: "" }
@@ -67,6 +68,7 @@ export default function Students() {
     if (!all.includes(year)) setYear(all[0]);
     setStudents(await listStudents(year, false));
     setSettings(await getSettings());
+    setSubsidyProfiles(await listSubsidyProfiles(true));
   }
   useEffect(() => { refresh();   }, [year]);
 
@@ -416,17 +418,39 @@ export default function Students() {
             <input value={editing.email || ""} onChange={(e) => setEditing({ ...editing, email: e.target.value })} />
           </div>
           {settings.subsidies_enabled === "1" && (
-            <div className="field">
-              <label>Gross Monthly Fee Override ($) <small style={{ color: "var(--muted)" }}>— blank uses daycare default ({settings.gross_monthly_fee || "not set"})</small></label>
-              <input
-                type="number" step="0.01"
-                value={editing.gross_override == null ? "" : String(editing.gross_override)}
-                onChange={(e) => {
-                  const v = e.target.value.trim();
-                  setEditing({ ...editing, gross_override: v === "" ? null : parseFloat(v) });
-                }}
-                placeholder="(use default)" />
-            </div>
+            <>
+              <div className="field">
+                <label>Subsidy Profile</label>
+                <select
+                  value={editing.subsidy_profile_id == null ? "" : String(editing.subsidy_profile_id)}
+                  onChange={(e) => setEditing({
+                    ...editing,
+                    subsidy_profile_id: e.target.value ? parseInt(e.target.value, 10) : null,
+                  })}
+                >
+                  <option value="">Use daycare default / manual gross override</option>
+                  {subsidyProfiles.map((profile) => (
+                    <option key={profile.id} value={profile.id}>
+                      {profile.name} — ${profile.gross_monthly_fee.toFixed(2)} gross / ${profile.ccfri_monthly_reduction.toFixed(2)} CCFRI
+                    </option>
+                  ))}
+                </select>
+                <small style={{ color: "var(--muted)" }}>
+                  Profiles set both gross fee and CCFRI. Leave blank to use the existing daycare default and gross override.
+                </small>
+              </div>
+              <div className="field">
+                <label>Gross Monthly Fee Override ($) <small style={{ color: "var(--muted)" }}>— used only when no profile is selected</small></label>
+                <input
+                  type="number" step="0.01"
+                  value={editing.gross_override == null ? "" : String(editing.gross_override)}
+                  onChange={(e) => {
+                    const v = e.target.value.trim();
+                    setEditing({ ...editing, gross_override: v === "" ? null : parseFloat(v) });
+                  }}
+                  placeholder="(use default)" disabled={editing.subsidy_profile_id != null} />
+              </div>
+            </>
           )}
           {(() => {
             const gradYearNum = parseInt(settings.grad_year || "", 10);
@@ -482,6 +506,7 @@ export default function Students() {
                 email: editing.email || null,
                 year: editing.year || year, active: editing.active ?? 1,
                 gross_override: editing.gross_override ?? null,
+                subsidy_profile_id: editing.subsidy_profile_id ?? null,
                 graduation_year: editing.graduation_year ?? null,
                 graduation_note: editing.graduation_note ?? null,
               });

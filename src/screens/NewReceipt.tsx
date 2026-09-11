@@ -2,9 +2,9 @@ import { showAlert, showConfirm } from "../lib/dialogs";
 import { useEffect, useMemo, useState } from "react";
 import {
   listStudents, listYears, nextReceiptNo, createReceipt, getSettings,
-  computeFeeBreakdown, getAccbForMonth, subsidiesEnabled,
+  computeFeeBreakdown, getAccbForMonth, subsidiesEnabled, listSubsidyProfiles,
 } from "../lib/db";
-import type { Student, SettingsMap, FeeBreakdown, Receipt } from "../types";
+import type { Student, SettingsMap, FeeBreakdown, Receipt, SubsidyProfile } from "../types";
 import { printReceipt, saveReceiptPdf, buildReceiptHtml } from "../lib/receipt";
 import { sendReceiptEmail, parseRecipients } from "../lib/email";
 import { markEmailed } from "../lib/db";
@@ -39,6 +39,7 @@ export default function NewReceipt() {
   const [isCash, setIsCash] = useState<boolean>(false);
   const [cashLabel, setCashLabel] = useState<string>("");
   const [settings, setSettings] = useState<SettingsMap>({});
+  const [subsidyProfiles, setSubsidyProfiles] = useState<SubsidyProfile[]>([]);
   const [accbThisMonth, setAccbThisMonth] = useState<number>(0);
   const [amountTouched, setAmountTouched] = useState(false);
   const [preview, setPreview] = useState<{ html: string; receipt: Receipt; recipients: string[]; settings: SettingsMap; mode: "send" | "view" } | null>(null);
@@ -59,6 +60,7 @@ export default function NewReceipt() {
     setStudents(ss);
     const s = await getSettings();
     setSettings(s);
+    setSubsidyProfiles(await listSubsidyProfiles(true));
     setAmount(s.default_fee || "485");
     setReceiptNo(await nextReceiptNo());
   }
@@ -109,8 +111,11 @@ export default function NewReceipt() {
   const breakdown: FeeBreakdown | null = useMemo(() => {
     if (!subsidiesEnabled(settings)) return null;
     if (!student) return null;
-    return computeFeeBreakdown(student, settings, accbThisMonth);
-  }, [student, settings, accbThisMonth]);
+    const profile = student.subsidy_profile_id == null
+      ? null
+      : subsidyProfiles.find((p) => p.id === student.subsidy_profile_id) ?? null;
+    return computeFeeBreakdown(student, settings, accbThisMonth, profile);
+  }, [student, settings, accbThisMonth, subsidyProfiles]);
 
   // Auto-fill amount with parent_pays unless the user has typed something
   useEffect(() => {

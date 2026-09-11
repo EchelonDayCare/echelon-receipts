@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { Student, Receipt, SettingsMap, AnnualReceipt, AccbEntry, FeeBreakdown, Deposit } from "../types";
+import type { Student, Receipt, SettingsMap, AnnualReceipt, AccbEntry, FeeBreakdown, Deposit, SubsidyProfile } from "../types";
 
 // ---------- Database shim ----------
 // v2.0.0 replaced @tauri-apps/plugin-sql with a Rust-side db_gate module
@@ -326,6 +326,17 @@ async function ensureSchema(d: Database): Promise<void> {
       "Hi,\n\nPlease find attached the monthly fee breakdown for {{student}} for {{month_label}} {{year}}.\n\nThis shows how the BC government subsidies (CCFRI and any Affordable Child Care Benefit) reduced your gross monthly fee to the amount you actually paid. The amount you paid is what appears on your Annual Tax Receipt for the CRA.\n\nIf you have any questions, please reply to this email.\n\nThank you,\nEchelon Daycare Society\n{{contact_email}} | {{contact_phone}}"],
   ] as const) await setting(k, v);
   await addCol("students", "gross_override", "REAL");
+  await addCol("students", "subsidy_profile_id", "INTEGER");
+  if (!(await tableExists("subsidy_profiles"))) {
+    await d.execute(`CREATE TABLE subsidy_profiles (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      name TEXT NOT NULL UNIQUE,
+      gross_monthly_fee REAL NOT NULL DEFAULT 0,
+      ccfri_monthly_reduction REAL NOT NULL DEFAULT 0,
+      active INTEGER NOT NULL DEFAULT 1,
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    )`);
+  }
   await addCol("receipts", "gross_amount", "REAL");
   await addCol("receipts", "ccfri_amount", "REAL");
   await addCol("receipts", "accb_amount", "REAL");
@@ -1771,18 +1782,21 @@ export async function listYears(): Promise<number[]> {
 export async function upsertStudent(s: Partial<Student> & { name: string; year: number }): Promise<{ id: number }> {
   const pid = s.person_id || personIdFor(s.name, s.father_name, s.mother_name);
   const grossOv = s.gross_override === undefined ? null : (s.gross_override == null ? null : roundMoney(Number(s.gross_override)));
+  const subsidyProfileId = s.subsidy_profile_id === undefined
+    ? null
+    : (s.subsidy_profile_id == null ? null : Number(s.subsidy_profile_id));
   const gradYr = s.graduation_year === undefined ? null : (s.graduation_year == null ? null : Number(s.graduation_year));
   const gradNote = s.graduation_note === undefined ? null : (s.graduation_note == null ? null : String(s.graduation_note));
   if (s.id) {
     await execRetry(
-      "UPDATE students SET name=?, father_name=?, mother_name=?, email=?, year=?, active=?, person_id=?, gross_override=?, graduation_year=?, graduation_note=? WHERE id=?",
-      [s.name, s.father_name ?? null, s.mother_name ?? null, s.email ?? null, s.year, s.active ?? 1, pid, grossOv, gradYr, gradNote, s.id]
+      "UPDATE students SET name=?, father_name=?, mother_name=?, email=?, year=?, active=?, person_id=?, gross_override=?, subsidy_profile_id=?, graduation_year=?, graduation_note=? WHERE id=?",
+      [s.name, s.father_name ?? null, s.mother_name ?? null, s.email ?? null, s.year, s.active ?? 1, pid, grossOv, subsidyProfileId, gradYr, gradNote, s.id]
     );
     return { id: s.id };
   }
   const res = await execRetry(
-    "INSERT INTO students(name,father_name,mother_name,email,year,active,person_id,gross_override,graduation_year,graduation_note) VALUES(?,?,?,?,?,1,?,?,?,?)",
-    [s.name, s.father_name ?? null, s.mother_name ?? null, s.email ?? null, s.year, pid, grossOv, gradYr, gradNote]
+    "INSERT INTO students(name,father_name,mother_name,email,year,active,person_id,gross_override,subsidy_profile_id,graduation_year,graduation_note) VALUES(?,?,?,?,?,1,?,?,?,?,?)",
+    [s.name, s.father_name ?? null, s.mother_name ?? null, s.email ?? null, s.year, pid, grossOv, subsidyProfileId, gradYr, gradNote]
   );
   // Tauri SQL plugin returns { lastInsertId, rowsAffected }. Fall back to
   // person_id lookup if the runtime doesn't expose lastInsertId for some reason.
@@ -1799,6 +1813,42 @@ export async function deleteStudent(id: number) {
 }
 export async function reactivateStudent(id: number) {
   await execRetry("UPDATE students SET active=1 WHERE id=?", [id]);
+}
+
+export async function listSubsidyProfiles(activeOnly = false): Promise<SubsidyProfile[]> {
+  const where = activeOnly ? " WHERE active=1" : "";
+  return await (await db()).select<SubsidyProfile[]>(
+    `SELECT * FROM subsidy_profiles${where} ORDER BY name COLLATE NOCASE`
+  );
+}
+
+export async function upsertSubsidyProfile(profile: Partial<SubsidyProfile> & {
+  name: string;
+  gross_monthly_fee: number;
+  ccfri_monthly_reduction: number;
+}): Promise<number> {
+  const name = profile.name.trim();
+  if (!name) throw new Error("Profile name is required.");
+  const gross = roundMoney(Number(profile.gross_monthly_fee));
+  const ccfri = roundMoney(Number(profile.ccfri_monthly_reduction));
+  if (!Number.isFinite(gross) || gross < 0) throw new Error("Gross monthly fee must be non-negative.");
+  if (!Number.isFinite(ccfri) || ccfri < 0) throw new Error("CCFRI reduction must be non-negative.");
+  if (profile.id) {
+    await execRetry(
+      "UPDATE subsidy_profiles SET name=?, gross_monthly_fee=?, ccfri_monthly_reduction=?, active=? WHERE id=?",
+      [name, gross, ccfri, profile.active ?? 1, profile.id]
+    );
+    return profile.id;
+  }
+  const res = await execRetry(
+    "INSERT INTO subsidy_profiles(name,gross_monthly_fee,ccfri_monthly_reduction,active) VALUES(?,?,?,1)",
+    [name, gross, ccfri]
+  );
+  return Number((res as any)?.lastInsertId || 0);
+}
+
+export async function deleteSubsidyProfile(id: number): Promise<void> {
+  await execRetry("UPDATE subsidy_profiles SET active=0 WHERE id=?", [id]);
 }
 
 // Persist an updated email to every student row that shares this person_id
@@ -1956,14 +2006,19 @@ export function subsidiesEnabled(s: SettingsMap): boolean {
   return s.subsidies_enabled === "1";
 }
 export function computeFeeBreakdown(
-  student: Pick<Student, "id" | "gross_override"> | null,
+  student: Pick<Student, "id" | "gross_override" | "subsidy_profile_id"> | null,
   settings: SettingsMap,
-  accbAmount: number = 0
+  accbAmount: number = 0,
+  profile?: Pick<SubsidyProfile, "gross_monthly_fee" | "ccfri_monthly_reduction"> | null,
 ): FeeBreakdown {
   const enabled = subsidiesEnabled(settings);
   const baseGross = parseFloat(settings.gross_monthly_fee || "0") || 0;
-  const gross = student?.gross_override != null ? Number(student.gross_override) : baseGross;
-  const ccfri = enabled ? (parseFloat(settings.ccfri_monthly_reduction || "0") || 0) : 0;
+  const gross = profile
+    ? Number(profile.gross_monthly_fee)
+    : (student?.gross_override != null ? Number(student.gross_override) : baseGross);
+  const ccfri = enabled
+    ? (profile ? Number(profile.ccfri_monthly_reduction) : (parseFloat(settings.ccfri_monthly_reduction || "0") || 0))
+    : 0;
   const accb  = enabled ? Math.max(0, accbAmount) : 0;
   const cappedCcfri = Math.min(ccfri, gross);
   const afterCcfri  = Math.max(0, gross - cappedCcfri);

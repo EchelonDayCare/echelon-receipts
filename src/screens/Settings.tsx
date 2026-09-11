@@ -6,12 +6,15 @@ import { invoke } from "@tauri-apps/api/core";
 import { mkdir, exists, readFile } from "@tauri-apps/plugin-fs";
 import { appDataDir, join } from "@tauri-apps/api/path";
 import { getVersion } from "@tauri-apps/api/app";
-import { getSettings, setSetting, setSettings as setSettingsBulk, checkpointWal } from "../lib/db";
+import {
+  getSettings, setSetting, setSettings as setSettingsBulk, checkpointWal,
+  listSubsidyProfiles, upsertSubsidyProfile, deleteSubsidyProfile,
+} from "../lib/db";
 import { sendTestEmail, SMTP_PRESETS } from "../lib/email";
 import { sendCloudBackup } from "../lib/cloudBackup";
 import { DEFAULT_LOGO_DATA_URL, DEFAULT_SIGNATURE_DATA_URL } from "../lib/defaults";
 import { readErrorLog, errorLogPath, clearErrorLog } from "../lib/errorLog";
-import type { SettingsMap } from "../types";
+import type { SettingsMap, SubsidyProfile } from "../types";
 import HealthCheck from "../components/HealthCheck";
 import NotificationsSettingsSection from "../components/NotificationsSettingsSection";
 import SecuritySettingsSection from "../components/SecuritySettingsSection";
@@ -76,6 +79,10 @@ export default function Settings() {
   const [showOcrHistory, setShowOcrHistory] = useState(false);
   const [ocrHistoryRows, setOcrHistoryRows] = useState<import("../lib/attendanceAiAudit").AttendanceAiEventRow[]>([]);
   const [ocrHistoryLoading, setOcrHistoryLoading] = useState(false);
+  const [subsidyProfiles, setSubsidyProfiles] = useState<SubsidyProfile[]>([]);
+  const [profileDraft, setProfileDraft] = useState<{ id?: number; name: string; gross: string; ccfri: string }>({
+    name: "", gross: "", ccfri: "",
+  });
 
   useEffect(() => {
     (async () => {
@@ -85,9 +92,46 @@ export default function Settings() {
       setHasAzureKey(loaded.azure_ai_key_set === "1");
       setHasWhisperKey(loaded.azure_whisper_key_set === "1");
       setHasBackupPassphrase(loaded.backup_passphrase_set === "1");
+      setSubsidyProfiles(await listSubsidyProfiles());
       try { setAppVersion(await getVersion()); } catch { /* fine */ }
     })();
   }, []);
+
+  async function refreshSubsidyProfiles() {
+    setSubsidyProfiles(await listSubsidyProfiles());
+  }
+
+  function editSubsidyProfile(profile: SubsidyProfile) {
+    setProfileDraft({
+      id: profile.id,
+      name: profile.name,
+      gross: String(profile.gross_monthly_fee),
+      ccfri: String(profile.ccfri_monthly_reduction),
+    });
+  }
+
+  async function saveSubsidyProfile() {
+    const name = profileDraft.name.trim();
+    const gross = Number(profileDraft.gross);
+    const ccfri = Number(profileDraft.ccfri);
+    if (!name) { void showAlert("Profile name is required."); return; }
+    if (!Number.isFinite(gross) || gross < 0 || !Number.isFinite(ccfri) || ccfri < 0) {
+      void showAlert("Gross fee and CCFRI must be non-negative numbers.");
+      return;
+    }
+    try {
+      await upsertSubsidyProfile({
+        id: profileDraft.id,
+        name,
+        gross_monthly_fee: gross,
+        ccfri_monthly_reduction: ccfri,
+      });
+      setProfileDraft({ name: "", gross: "", ccfri: "" });
+      await refreshSubsidyProfiles();
+    } catch (e) {
+      void showAlert("Could not save subsidy profile: " + e);
+    }
+  }
 
   async function save() {
     setSaving(true);
@@ -492,6 +536,57 @@ export default function Settings() {
                   BC&apos;s reduction for &quot;Group Care 30-mo to school age&quot; full-time. Check current
                   rates at <a href="https://www2.gov.bc.ca/gov/content/family-social-supports/caring-for-young-children/childcarebc-programs/fee-reduction-initiative" target="_blank" rel="noreferrer">gov.bc.ca CCFRI</a>.
                 </small>
+              </div>
+            </div>
+
+            <div className="card" style={{ background: "var(--panel, #f8fafc)", margin: "8px 0 16px", padding: 14 }}>
+              <h4 style={{ margin: "0 0 4px" }}>Subsidy profiles</h4>
+              <p className="subtitle" style={{ margin: "0 0 12px", fontSize: 12 }}>
+                Create reusable fee bands such as Under 3 and Over 3. Assign a profile to each student on the Students page.
+                Students without a profile continue using the global values above.
+              </p>
+              {subsidyProfiles.length > 0 && (
+                <table className="data" style={{ marginBottom: 12 }}>
+                  <thead>
+                    <tr><th>Profile</th><th>Gross</th><th>CCFRI</th><th>Parent pays before ACCB</th><th></th></tr>
+                  </thead>
+                  <tbody>
+                    {subsidyProfiles.filter((p) => p.active).map((profile) => (
+                      <tr key={profile.id}>
+                        <td>{profile.name}</td>
+                        <td>${profile.gross_monthly_fee.toFixed(2)}</td>
+                        <td>${profile.ccfri_monthly_reduction.toFixed(2)}</td>
+                        <td>${Math.max(0, profile.gross_monthly_fee - profile.ccfri_monthly_reduction).toFixed(2)}</td>
+                        <td style={{ textAlign: "right", whiteSpace: "nowrap" }}>
+                          <button className="btn ghost" onClick={() => editSubsidyProfile(profile)}>Edit</button>
+                          <button className="btn ghost" style={{ color: "var(--danger)" }} onClick={async () => {
+                            if (!await showConfirm(`Deactivate the "${profile.name}" subsidy profile? Assigned students will fall back to the global values.`)) return;
+                            await deleteSubsidyProfile(profile.id);
+                            await refreshSubsidyProfiles();
+                          }}>Deactivate</button>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              )}
+              <div className="row">
+                <div className="field">
+                  <label>Profile name</label>
+                  <input value={profileDraft.name} placeholder="e.g. Under 3" onChange={(e) => setProfileDraft({ ...profileDraft, name: e.target.value })} />
+                </div>
+                <div className="field">
+                  <label>Gross monthly fee ($)</label>
+                  <input type="number" min="0" step="0.01" value={profileDraft.gross} placeholder="1245" onChange={(e) => setProfileDraft({ ...profileDraft, gross: e.target.value })} />
+                </div>
+                <div className="field">
+                  <label>CCFRI monthly reduction ($)</label>
+                  <input type="number" min="0" step="0.01" value={profileDraft.ccfri} placeholder="900" onChange={(e) => setProfileDraft({ ...profileDraft, ccfri: e.target.value })} />
+                </div>
+              </div>
+              <div style={{ display: "flex", gap: 10 }}>
+                <button className="btn" onClick={saveSubsidyProfile}>{profileDraft.id ? "Update profile" : "Add profile"}</button>
+                {profileDraft.id && <button className="btn secondary" onClick={() => setProfileDraft({ name: "", gross: "", ccfri: "" })}>Cancel edit</button>}
               </div>
             </div>
 

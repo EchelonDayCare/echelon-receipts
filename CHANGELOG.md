@@ -4,6 +4,17 @@ All notable changes shipped as a DMG. Only entries the owner has approved
 for release are listed here — "code-complete, awaiting ship approval" work
 lives in the session plan.md until it ships.
 
+## v3.26.0 — Configurable subsidy profiles
+
+- Added configurable subsidy profiles for different child groups, such as
+  Under 3 and Over 3.
+- Each profile can define its own gross monthly fee and CCFRI reduction.
+- Students can be assigned a profile from the Students editor.
+- New Receipt and This Month use the assigned profile while preserving the
+  existing global settings as fallback values.
+- Historical receipts retain their original fee and subsidy snapshots.
+- Added profile management to Settings, including add, edit, and deactivate.
+
 ## v3.25.1 — New Receipt: Preview button, Cash receipts, safer subsidy warning
 
 - **Preview button** on New Receipt: shows exactly how the PDF/print will
