@@ -4,6 +4,16 @@ All notable changes shipped as a DMG. Only entries the owner has approved
 for release are listed here — "code-complete, awaiting ship approval" work
 lives in the session plan.md until it ships.
 
+## v3.27.0 — Cash receipts are print/email-only
+
+- Cash receipts no longer create Receipt History or Annual Ledger entries.
+- Cash receipts no longer auto-save a PDF or create a receipt email-history
+  entry.
+- Cash mode disables Save & Print, Save & Email, and Save Only.
+- Preview and Print & Email remain available for cash receipts.
+- Fixed subsidy-profile migration recovery when the student profile column
+  already exists.
+
 ## v3.26.0 — Configurable subsidy profiles
 
 - Added configurable subsidy profiles for different child groups, such as

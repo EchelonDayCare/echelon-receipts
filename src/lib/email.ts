@@ -198,6 +198,7 @@ export async function sendReceiptEmail(opts: {
   receipt: Receipt;
   recipients: string[];
   settings: SettingsMap;
+  logCommunication?: boolean;
 }): Promise<void> {
   const { receipt: r, recipients, settings: s } = opts;
   if (recipients.length === 0) throw new Error("No recipient email addresses.");
@@ -238,19 +239,21 @@ export async function sendReceiptEmail(opts: {
     logErr = String(e?.message || e);
     throw e;
   } finally {
-    try {
-      const { logCommunication } = await import("./comms");
-      await logCommunication({
-        kind: "receipt",
-        subject, body,
-        recipient_count: recipients.length,
-        recipients: recipients.join(", "),
-        attachment_names: JSON.stringify([filename]),
-        status: logErr ? "failed" : "sent",
-        error: logErr,
-        related_id: r.id ?? null,
-      });
-    } catch {}
+    if (opts.logCommunication !== false) {
+      try {
+        const { logCommunication } = await import("./comms");
+        await logCommunication({
+          kind: "receipt",
+          subject, body,
+          recipient_count: recipients.length,
+          recipients: recipients.join(", "),
+          attachment_names: JSON.stringify([filename]),
+          status: logErr ? "failed" : "sent",
+          error: logErr,
+          related_id: r.id ?? null,
+        });
+      } catch {}
+    }
   }
 }
 

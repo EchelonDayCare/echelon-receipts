@@ -327,6 +327,7 @@ async function ensureSchema(d: Database): Promise<void> {
   ] as const) await setting(k, v);
   await addCol("students", "gross_override", "REAL");
   await addCol("students", "subsidy_profile_id", "INTEGER");
+  await d.execute("CREATE INDEX IF NOT EXISTS idx_students_subsidy_profile ON students(subsidy_profile_id)");
   if (!(await tableExists("subsidy_profiles"))) {
     await d.execute(`CREATE TABLE subsidy_profiles (
       id INTEGER PRIMARY KEY AUTOINCREMENT,

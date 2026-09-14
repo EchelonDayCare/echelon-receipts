@@ -3,6 +3,11 @@
 -- Existing global gross/CCFRI settings remain the fallback for students
 -- without a profile. Assigning a profile is opt-in and does not rewrite
 -- historical receipts, whose amounts are already snapshotted.
+--
+-- The students column is added by the frontend defensive schema path. Keeping
+-- that ALTER out of this migration is intentional: older builds may already
+-- have added the column before this migration is recorded, and SQLite has no
+-- ALTER TABLE ... ADD COLUMN IF NOT EXISTS form.
 CREATE TABLE IF NOT EXISTS subsidy_profiles (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   name TEXT NOT NULL UNIQUE,
@@ -11,9 +16,3 @@ CREATE TABLE IF NOT EXISTS subsidy_profiles (
   active INTEGER NOT NULL DEFAULT 1,
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
-
-ALTER TABLE students ADD COLUMN subsidy_profile_id INTEGER
-  REFERENCES subsidy_profiles(id) ON DELETE SET NULL;
-
-CREATE INDEX IF NOT EXISTS idx_students_subsidy_profile
-  ON students(subsidy_profile_id);

@@ -42,7 +42,14 @@ export default function NewReceipt() {
   const [subsidyProfiles, setSubsidyProfiles] = useState<SubsidyProfile[]>([]);
   const [accbThisMonth, setAccbThisMonth] = useState<number>(0);
   const [amountTouched, setAmountTouched] = useState(false);
-  const [preview, setPreview] = useState<{ html: string; receipt: Receipt; recipients: string[]; settings: SettingsMap; mode: "send" | "view" } | null>(null);
+  const [preview, setPreview] = useState<{
+    html: string;
+    receipt: Receipt;
+    recipients: string[];
+    settings: SettingsMap;
+    mode: "send" | "view";
+    persisted: boolean;
+  } | null>(null);
   const [sending, setSending] = useState(false);
   const [saving, setSaving] = useState(false);
 
@@ -170,23 +177,16 @@ export default function NewReceipt() {
       if (!proceed) return;
     }
 
+    if (isCash && action !== "print_email") {
+      void showAlert("Cash receipts are print/email-only and are not saved to Receipt History or the Annual Ledger.", { kind: "warning" });
+      return;
+    }
+
     setSaving(true);
     try {
-      const newId = await createReceipt({
-        receipt_no: receiptNo, date, student_id: student.id,
-        student_name_snapshot: student.name,
-        father_name_snapshot: student.father_name,
-        mother_name_snapshot: student.mother_name,
-        description, amount: amt, pending_amount: pen, comments: comments || null,
-        is_refund: isRefund ? 1 : 0,
-        gross_amount: bk ? bk.gross : null,
-        ccfri_amount: bk ? bk.ccfri : null,
-        accb_amount:  bk ? bk.accb : null,
-        cash_receipt_label: cashLabelValue,
-      });
       const settingsLatest = await getSettings();
       const r = {
-        id: newId, receipt_no: receiptNo, date, student_id: student.id,
+        id: 0, receipt_no: receiptNo, date, student_id: student.id,
         student_name_snapshot: student.name,
         father_name_snapshot: student.father_name,
         mother_name_snapshot: student.mother_name,
@@ -202,6 +202,33 @@ export default function NewReceipt() {
         issuer_snapshot_json: null,
         cash_receipt_label: cashLabelValue,
       };
+      if (isCash) {
+        if (action === "print_email") printReceipt(r, settingsLatest);
+        const recipients = parseRecipients(student.email);
+        if (recipients.length === 0) {
+          void showAlert("Cash receipt printed, but no email was sent because this student has no email on file.");
+        } else {
+          const html = buildReceiptHtml(r, settingsLatest);
+          setPreview({ html, receipt: r, recipients, settings: settingsLatest, mode: "send", persisted: false });
+        }
+        setComments(""); setPending(""); setIsRefund(false); setAmountTouched(false);
+        setIsCash(false); setCashLabel("");
+        return;
+      }
+
+      const newId = await createReceipt({
+        receipt_no: receiptNo, date, student_id: student.id,
+        student_name_snapshot: student.name,
+        father_name_snapshot: student.father_name,
+        mother_name_snapshot: student.mother_name,
+        description, amount: amt, pending_amount: pen, comments: comments || null,
+        is_refund: isRefund ? 1 : 0,
+        gross_amount: bk ? bk.gross : null,
+        ccfri_amount: bk ? bk.ccfri : null,
+        accb_amount:  bk ? bk.accb : null,
+        cash_receipt_label: cashLabelValue,
+      });
+      r.id = newId;
       let savedPath: string | null = null;
       try { savedPath = await saveReceiptPdf(r, settingsLatest); }
       catch (e) { console.error(e); void showAlert("Receipt saved, but PDF auto-save failed:\n" + e); }
@@ -217,7 +244,7 @@ export default function NewReceipt() {
         } else {
           // Show preview modal; actual send happens from confirmSendEmail().
           const html = buildReceiptHtml(r, settingsLatest);
-          setPreview({ html, receipt: r, recipients, settings: settingsLatest, mode: "send" });
+          setPreview({ html, receipt: r, recipients, settings: settingsLatest, mode: "send", persisted: true });
         }
         setReceiptNo((n) => n + 1);
         setComments(""); setPending(""); setIsRefund(false); setAmountTouched(false);
@@ -260,15 +287,20 @@ export default function NewReceipt() {
       cash_receipt_label: isCash ? (cashLabel.trim() || null) : null,
     };
     const html = buildReceiptHtml(fake, settings);
-    setPreview({ html, receipt: fake, recipients: [], settings, mode: "view" });
+    setPreview({ html, receipt: fake, recipients: [], settings, mode: "view", persisted: false });
   }
 
   async function confirmSendEmail() {
     if (!preview || sending || preview.mode !== "send") return;
     setSending(true);
     try {
-      await sendReceiptEmail({ receipt: preview.receipt, recipients: preview.recipients, settings: preview.settings });
-      await markEmailed(preview.receipt.id, preview.recipients);
+      await sendReceiptEmail({
+        receipt: preview.receipt,
+        recipients: preview.recipients,
+        settings: preview.settings,
+        logCommunication: preview.persisted,
+      });
+      if (preview.persisted) await markEmailed(preview.receipt.id, preview.recipients);
       const recips = preview.recipients.join(", ");
       setPreview(null);
       void showAlert(`✉️ Sent to ${recips}`);
@@ -308,7 +340,11 @@ export default function NewReceipt() {
         </div>
       )}
       <h1>New Receipt</h1>
-      <p className="subtitle">Creates an entry in Receipt History and opens the macOS print dialog (use "Save as PDF" to keep a copy).</p>
+      <p className="subtitle">
+        {isCash
+          ? "Cash mode is print/email-only and does not save to Receipt History or the Annual Ledger."
+          : 'Creates an entry in Receipt History and opens the macOS print dialog (use "Save as PDF" to keep a copy).'}
+      </p>
 
       <div className="card">
         <div className="row">
@@ -325,7 +361,7 @@ export default function NewReceipt() {
             </label>
             {isCash && (
               <small style={{ color: "var(--muted)" }}>
-                Internal record #{receiptNo} is kept for bookkeeping; parents see "{cashLabel || "EDC…"}" on the receipt.
+                This cash receipt is not saved in the system. Parents see "{cashLabel || "EDC…"}" on the receipt.
               </small>
             )}
           </div>
@@ -436,22 +472,24 @@ export default function NewReceipt() {
           <button className="btn secondary" onClick={onPreview} disabled={saving || sending}>
             Preview
           </button>
-          <button className="btn" onClick={() => onSave("print")} disabled={saving || sending}>
+          <button className="btn" onClick={() => onSave("print")} disabled={isCash || saving || sending}
+            title={isCash ? "Cash receipts are not saved. Use Print & Email or Preview." : ""}>
             {saving ? "Saving…" : "Save & Print"}
           </button>
           <button className="btn" onClick={() => onSave("email")}
-            disabled={saving || sending || !student || parseRecipients(student?.email).length === 0}
-            title={!student ? "Pick a student" : parseRecipients(student.email).length === 0 ? "No email on file for this student — use Save Only, or add an email on the Students tab." : ""}>
+            disabled={isCash || saving || sending || !student || parseRecipients(student?.email).length === 0}
+            title={isCash ? "Cash receipts are not saved. Use Print & Email or Preview." : !student ? "Pick a student" : parseRecipients(student.email).length === 0 ? "No email on file for this student — use Save Only, or add an email on the Students tab." : ""}>
             {saving ? "Saving…" : "Save & Email"}
           </button>
-          <button className="btn secondary" onClick={() => onSave("save")} disabled={saving || sending}>
+          <button className="btn secondary" onClick={() => onSave("save")} disabled={isCash || saving || sending}
+            title={isCash ? "Cash receipts are not saved. Use Print & Email or Preview." : ""}>
             {saving ? "Saving…" : "Save Only"}
           </button>
           {isCash && (
             <button className="btn" onClick={() => onSave("print_email")}
               disabled={saving || sending || !student || parseRecipients(student?.email).length === 0}
-              title={!student ? "Pick a student" : parseRecipients(student.email).length === 0 ? "No email on file for this student — use Save & Print, or add an email on the Students tab." : ""}>
-              {saving ? "Saving…" : "Print & Email"}
+              title={!student ? "Pick a student" : parseRecipients(student.email).length === 0 ? "No email on file for this student — use Preview or add an email on the Students tab." : "Print and email without saving this cash receipt"}>
+              {saving ? "Working…" : "Print & Email"}
             </button>
           )}
           {student && parseRecipients(student.email).length === 0 && (
