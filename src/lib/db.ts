@@ -1737,12 +1737,33 @@ export async function setSetting(key: string, value: string) {
   );
   if (_settingsCache) _settingsCache[key] = value;
 }
-export async function nextReceiptNo(): Promise<number> {
-  const s = await getSettings();
-  return parseInt(s.next_receipt_no || "1001", 10);
+export async function nextReceiptNoForDate(date: string): Promise<number> {
+  const match = /^(\d{4})-(\d{2})-\d{2}$/.exec(date);
+  if (!match) throw new Error(`Invalid receipt date: ${date}`);
+  const calendarYear = Number(match[1]);
+  const month = Number(match[2]);
+  if (month < 1 || month > 12) throw new Error(`Invalid receipt month in date: ${date}`);
+
+  // FY27 means September 1, 2026 through August 31, 2027.
+  const fiscalYearEnding = month >= 9 ? calendarYear + 1 : calendarYear;
+  const fyCode = fiscalYearEnding % 100;
+  const prefix = fyCode * 100000 + month * 1000;
+  const rows = await (await db()).select<{ max_no: number | null }[]>(
+    "SELECT MAX(receipt_no) AS max_no FROM receipts WHERE receipt_no BETWEEN ? AND ?",
+    [prefix + 1, prefix + 999],
+  );
+  const next = (rows[0]?.max_no ?? prefix) + 1;
+  if (next > prefix + 999) {
+    throw new Error(`Receipt sequence is full for FY${String(fyCode).padStart(2, "0")} month ${String(month).padStart(2, "0")}.`);
+  }
+  return next;
 }
-export async function bumpReceiptNo(used: number) {
-  await setSetting("next_receipt_no", String(used + 1));
+export async function receiptNoExists(receiptNo: number): Promise<boolean> {
+  const rows = await (await db()).select<{ id: number }[]>(
+    "SELECT id FROM receipts WHERE receipt_no=? LIMIT 1",
+    [receiptNo],
+  );
+  return rows.length > 0;
 }
 // Atomic-ish: bump first, then return the pre-bump number. If the caller's
 // INSERT crashes between this call and committing the AR, we leak one AR
@@ -1978,10 +1999,6 @@ async function backfillIssuerSnapshot(d: Database): Promise<void> {
 export async function createReceipt(r: Omit<Receipt, "id" | "created_at" | "voided" | "emailed_at" | "emailed_to" | "void_reason" | "voided_at" | "issuer_snapshot_json">): Promise<number> {
   const settings = await getSettings();
   const snap = JSON.stringify(buildIssuerSnapshot(settings));
-  // Bump first so even if INSERT fails we leak a number (a harmless gap)
-  // instead of returning the same number twice on a fast double-click race —
-  // which would crash the second INSERT on the receipt_no UNIQUE constraint.
-  await bumpReceiptNo(r.receipt_no);
   const res = await execRetry(
     `INSERT INTO receipts(receipt_no,date,student_id,student_name_snapshot,
       father_name_snapshot,mother_name_snapshot,description,amount,pending_amount,comments,is_refund,

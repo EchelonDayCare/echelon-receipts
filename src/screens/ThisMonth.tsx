@@ -2,7 +2,7 @@ import { showAlert } from "../lib/dialogs";
 import { useEffect, useMemo, useState } from "react";
 import { openPath } from "@tauri-apps/plugin-opener";
 import {
-  listStudents, listReceipts, nextReceiptNo, createReceipt,
+  listStudents, listReceipts, nextReceiptNoForDate, createReceipt,
   getSettings, subsidiesEnabled, computeFeeBreakdown, getAccbForMonthBulk, markEmailed,
   listSubsidyProfiles,
 } from "../lib/db";
@@ -129,8 +129,8 @@ export default function ThisMonth() {
         throw new Error(`Invalid amount for ${stu.name}: ${r.computedAmount}. Enter a positive dollar amount.`);
       }
       const monthIdx = MONTHS.indexOf(month);
-      const receiptNo = await nextReceiptNo();
       const date = new Date(year, monthIdx, 1).toISOString().slice(0, 10);
+      const receiptNo = await nextReceiptNoForDate(date);
       await createReceipt({
         receipt_no: receiptNo, date, student_id: stu.id,
         student_name_snapshot: stu.name,
@@ -145,7 +145,6 @@ export default function ThisMonth() {
         ccfri_amount: r.breakdown?.ccfri ?? null,
         accb_amount:  r.breakdown?.accb ?? null,
       });
-      // bumpReceiptNo is done inside createReceipt
       await refresh();
     } catch (e: any) {
       setRows(cur => cur.map((r, i) => i === idx ? { ...r, busy: false, lastResult: { kind: "err", text: e?.message || String(e) } } : r));

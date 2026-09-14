@@ -1,7 +1,7 @@
 import { showAlert, showConfirm } from "../lib/dialogs";
 import { useEffect, useMemo, useState } from "react";
 import {
-  listStudents, listYears, nextReceiptNo, createReceipt, getSettings,
+  listStudents, listYears, nextReceiptNoForDate, receiptNoExists, createReceipt, getSettings,
   computeFeeBreakdown, getAccbForMonth, subsidiesEnabled, listSubsidyProfiles,
 } from "../lib/db";
 import type { Student, SettingsMap, FeeBreakdown, Receipt, SubsidyProfile } from "../types";
@@ -13,8 +13,7 @@ import { useUnsavedGuard } from "../lib/useUnsavedGuard";
 
 const MONTHS = ["January","February","March","April","May","June","July","August","September","October","November","December"];
 
-// v3.25.1: cash receipts get an editable "EDCxxx" label shown to parents
-// instead of the internal sequential receipt number. Purely cosmetic.
+// Cash receipts get an editable "EDCxxx" label and are not persisted.
 function genCashLabel(): string {
   const n = Math.floor(100 + Math.random() * 900); // 3 digits, 100-999
   return `EDC${n}`;
@@ -56,6 +55,7 @@ export default function NewReceipt() {
   function onToggleCash(checked: boolean) {
     setIsCash(checked);
     if (checked && !cashLabel.trim()) setCashLabel(genCashLabel());
+    if (!checked) void nextReceiptNoForDate(date).then(setReceiptNo);
   }
 
   async function refresh() {
@@ -69,10 +69,13 @@ export default function NewReceipt() {
     setSettings(s);
     setSubsidyProfiles(await listSubsidyProfiles(true));
     setAmount(s.default_fee || "485");
-    setReceiptNo(await nextReceiptNo());
+    setReceiptNo(await nextReceiptNoForDate(date));
   }
   useEffect(() => { refresh();   }, []);
   useEffect(() => { (async () => setStudents(await listStudents(year)))(); }, [year]);
+  useEffect(() => {
+    if (!isCash) void nextReceiptNoForDate(date).then(setReceiptNo);
+  }, [date, isCash]);
   useEffect(() => {
     if (isRefund) {
       // Refunds don't belong to a billing period; force a clean description.
@@ -179,6 +182,10 @@ export default function NewReceipt() {
 
     if (isCash && action !== "print_email") {
       void showAlert("Cash receipts are print/email-only and are not saved to Receipt History or the Annual Ledger.", { kind: "warning" });
+      return;
+    }
+    if (!isCash && await receiptNoExists(receiptNo)) {
+      void showAlert(`Receipt number ${receiptNo} already exists. Enter a different receipt number before saving.`, { kind: "warning" });
       return;
     }
 

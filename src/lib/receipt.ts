@@ -19,10 +19,8 @@ function safeName(s: string): string {
   return s.replace(/[\\/:*?"<>|']+/g, "").replace(/\s+/g, "_").slice(0, 60);
 }
 
-// v3.25.1: cash receipts show a cosmetic "EDCxxx" label instead of the
-// internal sequential receipt_no. The numeric receipt_no is always still
-// assigned and used for storage/sorting/joins — this only changes what
-// the parent sees on the PDF/email/history row.
+// Cash receipts show an editable "EDCxxx" label and are not persisted.
+// Non-cash receipts use their fiscal-year/month number directly.
 export function receiptDisplayNo(r: Pick<Receipt, "receipt_no" | "cash_receipt_label">): string {
   return (r.cash_receipt_label && r.cash_receipt_label.trim()) || String(r.receipt_no);
 }

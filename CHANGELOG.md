@@ -14,6 +14,15 @@ lives in the session plan.md until it ships.
 - Fixed subsidy-profile migration recovery when the student profile column
   already exists.
 
+## v3.28.0 — Fiscal receipt numbering and duplicate protection
+
+- Non-cash receipt numbers now encode the fiscal year, receipt month, and
+  three-digit sequence, such as `2709001` for FY27 September receipt 001.
+- Receipt numbering uses the Receipt Date, with FY27 running from September 1,
+  2026 through August 31, 2027.
+- Added a pre-save duplicate check for manually edited receipt numbers.
+- Retained the database uniqueness constraint as the final duplicate safeguard.
+
 ## v3.26.0 — Configurable subsidy profiles
 
 - Added configurable subsidy profiles for different child groups, such as

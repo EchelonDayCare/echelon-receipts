@@ -473,7 +473,6 @@ export default function Settings() {
         <SectionHead title="Receipt defaults" sub="Starting values when creating a new receipt." />
         <div className="row">
           <Field s={s} setS={setS} k="default_fee" label="Default Fee ($)" placeholder="485" />
-          <Field s={s} setS={setS} k="next_receipt_no" label="Next Receipt #" placeholder="1001" />
         </div>
         <Field s={s} setS={setS} k="business_number"
           label="Business Number (BN)"
