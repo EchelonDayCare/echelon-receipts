@@ -251,6 +251,9 @@ async function buildEnrollmentLine(fyStart: number): Promise<string> {
 function formatMeetingDate(d: Date): string {
   return d.toLocaleDateString("en-US", { year: "numeric", month: "long", day: "numeric" });
 }
+function meaningfulLines(lines: string[]): string[] {
+  return lines.map((line) => line.trim()).filter(Boolean);
+}
 
 // ---------- .docx generation ----------
 
@@ -287,9 +290,11 @@ export async function generateDocxBlob(m: AgmMinutes): Promise<Blob> {
   // ---- 1. Attendance ----
   children.push(sectionHeading("1. Attendance"));
   children.push(labelLine("Present:"));
-  (m.present.length ? m.present : ["—"]).forEach((n) => children.push(bullet(n)));
+  const present = meaningfulLines(m.present);
+  (present.length ? present : ["—"]).forEach((n) => children.push(bullet(n)));
   children.push(labelLine("Absent:"));
-  (m.absent.length ? m.absent : ["None"]).forEach((n) => children.push(bullet(n)));
+  const absent = meaningfulLines(m.absent);
+  (absent.length ? absent : ["None"]).forEach((n) => children.push(bullet(n)));
   children.push(blank());
 
   // ---- 2. Adoption of Previous Minutes ----
@@ -359,7 +364,7 @@ export async function generateDocxBlob(m: AgmMinutes): Promise<Blob> {
 
   // ---- 7. Future Agenda Items ----
   children.push(sectionHeading("7. Future Agenda Items"));
-  const items = m.futureAgenda.map((x) => x.trim()).filter(Boolean);
+  const items = meaningfulLines(m.futureAgenda);
   if (items.length === 0) {
     children.push(plain("—"));
   } else {

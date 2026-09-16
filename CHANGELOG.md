@@ -4,6 +4,14 @@ All notable changes shipped as a DMG. Only entries the owner has approved
 for release are listed here — "code-complete, awaiting ship approval" work
 lives in the session plan.md until it ships.
 
+## v3.30.0 — AGM Minutes text entry fix
+
+- Fixed Spacebar and Enter appearing not to work while typing in AGM Minutes
+  list fields (Attendance, Chairman's Report bullet sections, Future Agenda
+  Items). Trailing spaces and in-progress blank lines are now preserved
+  while typing; blank entries are still cleanly omitted from the live
+  preview and the exported Word document.
+
 ## v3.29.0 — MCCB funding and fully covered receipts
 
 - Added per-student, per-month Métis Child Care Benefit (MCCB) tracking.

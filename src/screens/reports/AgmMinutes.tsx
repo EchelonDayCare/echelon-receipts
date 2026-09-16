@@ -397,7 +397,7 @@ function FormPane({ minutes, patch, fyStart, aiBusy, aiEnabled, aiRedact, draftF
       const filled: ChairmanBlock[] = [];
       for (const b of minutes.chairmanReport) {
         const isList = Array.isArray(b.body);
-        const isEmpty = isList ? (b.body as string[]).length === 0 : ((b.body as string).trim() === "");
+        const isEmpty = isList ? meaningfulLines(b.body as string[]).length === 0 : ((b.body as string).trim() === "");
         if (!isEmpty) { filled.push(b); continue; }
         try {
           const body = await draftChairmanBlock(b.heading, ctx, isList, signal);
@@ -653,9 +653,9 @@ function PreviewPane({ minutes }: { minutes: AgmMinutes }) {
 
         <PreviewH n={1} t="Attendance" />
         <div><strong>Present:</strong></div>
-        <PreviewBullets items={minutes.present.length ? minutes.present : ["—"]} />
+        <PreviewBullets items={meaningfulLines(minutes.present).length ? meaningfulLines(minutes.present) : ["—"]} />
         <div><strong>Absent:</strong></div>
-        <PreviewBullets items={minutes.absent.length ? minutes.absent : ["None"]} />
+        <PreviewBullets items={meaningfulLines(minutes.absent).length ? meaningfulLines(minutes.absent) : ["None"]} />
 
         <PreviewH n={2} t="Adoption of Previous Minutes" />
         <p style={pStyle}>
@@ -763,5 +763,8 @@ function Grid3({ children }: { children: React.ReactNode }) {
   return <div style={{ display: "grid", gridTemplateColumns: "1.2fr 1fr 1.2fr", gap: 10 }}>{children}</div>;
 }
 function linesFrom(text: string): string[] {
-  return text.split(/\r?\n/).map((s) => s.replace(/\s+$/g, "")).filter((s) => s.length > 0);
+  return text.split(/\r?\n/);
+}
+function meaningfulLines(lines: string[]): string[] {
+  return lines.map((line) => line.trim()).filter(Boolean);
 }
