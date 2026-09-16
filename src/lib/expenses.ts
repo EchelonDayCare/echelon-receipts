@@ -348,10 +348,9 @@ export async function summaryByMonth(from: string, to: string): Promise<Array<{ 
 
 // Revenue basis for P&L. "parent_paid" = only what parents actually paid the
 // daycare (default). "operating" = daycare's operating revenue, which for
-// non-profit BC daycares typically includes ACCB paid to the daycare on
-// behalf of families and the CCFRI amount received from government.
-// CCFRI is netted from receipt.amount already (amount = parent_pays after
-// CCFRI), so operating revenue = parent_pays + ccfri + accb ~= gross_amount.
+// non-profit daycares typically includes funding applied on behalf of
+// families and the CCFRI amount received from government. CCFRI, ACCB, and
+// MCCB are netted from receipt.amount, so operating revenue remains gross.
 export type RevenueBasis = "parent_paid" | "operating";
 
 // Whitelist so `basis` can never be user-controlled SQL, even if a future
@@ -362,7 +361,7 @@ function revenueExpr(basis: RevenueBasis): string {
 
 export async function revenueSummary(from: string, to: string, basis: RevenueBasis = "parent_paid"): Promise<{ total: number; count: number }> {
   const d = await db();
-  // parent_paid = what parents actually paid. operating = gross fee (parent + CCFRI + ACCB).
+  // parent_paid = what parents actually paid. operating = gross fee after all funding.
   const expr = revenueExpr(basis);
   const rows = await d.select<Array<{ total: number; count: number }>>(
     `SELECT COALESCE(SUM(CASE WHEN is_refund=1 THEN -(${expr}) ELSE (${expr}) END),0) AS total,

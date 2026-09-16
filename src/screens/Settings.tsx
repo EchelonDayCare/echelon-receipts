@@ -497,9 +497,9 @@ export default function Settings() {
         </div>
 
         <hr style={{ border: 0, borderTop: "1px solid var(--border)", margin: "20px 0" }} />
-        <h3 style={{ margin: "0 0 4px" }}>BC Subsidies (CCFRI &amp; ACCB)</h3>
+        <h3 style={{ margin: "0 0 4px" }}>Fee Reductions &amp; Benefits (CCFRI, ACCB &amp; MCCB)</h3>
         <p className="subtitle" style={{ marginBottom: 14 }}>
-          Track the BC Child Care Fee Reduction Initiative and Affordable Child Care Benefit on every receipt
+          Track CCFRI, the Affordable Child Care Benefit, and the Métis Child Care Benefit on every receipt
           so parents only claim what they actually paid out-of-pocket on their tax return.
           {" "}Toggle off to revert to a flat-amount workflow — data is preserved.
         </p>
@@ -509,7 +509,7 @@ export default function Settings() {
             <input type="checkbox" checked={s.subsidies_enabled === "1"}
               onChange={(e) => setS({ ...s, subsidies_enabled: e.target.checked ? "1" : "0" })}
               style={{ marginRight: 6, verticalAlign: "middle" }} />
-            Enable BC subsidy breakdown on receipts
+            Enable fee-reduction and benefit breakdown on receipts
           </label>
         </div>
 
@@ -547,7 +547,7 @@ export default function Settings() {
               {subsidyProfiles.length > 0 && (
                 <table className="data" style={{ marginBottom: 12 }}>
                   <thead>
-                    <tr><th>Profile</th><th>Gross</th><th>CCFRI</th><th>Parent pays before ACCB</th><th></th></tr>
+                    <tr><th>Profile</th><th>Gross</th><th>CCFRI</th><th>Parent pays before ACCB/MCCB</th><th></th></tr>
                   </thead>
                   <tbody>
                     {subsidyProfiles.filter((p) => p.active).map((profile) => (
@@ -599,7 +599,7 @@ export default function Settings() {
               <textarea rows={7} value={s.subsidy_stmt_body || ""}
                 onChange={(e) => setS({ ...s, subsidy_stmt_body: e.target.value })} />
               <small style={{ color: "var(--muted)" }}>
-                Tokens: {"{{student}} {{month_label}} {{year}} {{gross}} {{ccfri}} {{accb}} {{parent_paid}} {{daycare_name}} {{contact_email}} {{contact_phone}}"}
+                Tokens: {"{{student}} {{month_label}} {{year}} {{gross}} {{ccfri}} {{accb}} {{mccb}} {{parent_paid}} {{daycare_name}} {{contact_email}} {{contact_phone}}"}
               </small>
             </div>
           </>

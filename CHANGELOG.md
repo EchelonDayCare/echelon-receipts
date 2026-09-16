@@ -4,6 +4,22 @@ All notable changes shipped as a DMG. Only entries the owner has approved
 for release are listed here — "code-complete, awaiting ship approval" work
 lives in the session plan.md until it ships.
 
+## v3.29.0 — MCCB funding and fully covered receipts
+
+- Added per-student, per-month Métis Child Care Benefit (MCCB) tracking.
+- Applies MCCB after CCFRI and ACCB when calculating the parent-paid amount.
+- Shows MCCB on receipts, monthly fee statements, reconciliation reports,
+  exports, board reporting, and financial summaries.
+- Allows a $0.00 receipt only when recorded fee reductions and benefits fully
+  cover a positive fee; the receipt clearly records that no parent payment was
+  received.
+- Validates MCCB entries against the $750 monthly program maximum and the fee
+  remaining after CCFRI and ACCB.
+- Improved deletion warnings to identify any related receipts, annual receipts,
+  ACCB/MCCB ledger entries, or attendance records that would be removed.
+- Updated the default fee-statement email without overwriting customized
+  templates, and made parent-facing tax wording neutral.
+
 ## v3.27.0 — Cash receipts are print/email-only
 
 - Cash receipts no longer create Receipt History or Annual Ledger entries.

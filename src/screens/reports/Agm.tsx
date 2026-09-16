@@ -14,6 +14,7 @@ interface YearRow {
   gross: number;
   ccfri: number;
   accb: number;
+  mccb: number;
   paid: number;
   refunds: number;
   // v3.24.4 (#10): true when this row's roster count was reconstructed
@@ -164,11 +165,12 @@ function BoardPackage() {
       }
       const [studentAgg, receiptAgg] = await Promise.all([
         reconstructRoster(d, rosterYear, dateTo),
-        d.select<{ receipts: number; gross: number; ccfri: number; accb: number; paid: number; refunds: number }[]>(
+        d.select<{ receipts: number; gross: number; ccfri: number; accb: number; mccb: number; paid: number; refunds: number }[]>(
           `SELECT COUNT(*) AS receipts,
                   COALESCE(SUM(CASE WHEN is_refund=1 THEN -COALESCE(gross_amount, amount) ELSE COALESCE(gross_amount, amount) END),0) AS gross,
                   COALESCE(SUM(CASE WHEN is_refund=1 THEN -COALESCE(ccfri_amount,0) ELSE COALESCE(ccfri_amount,0) END),0) AS ccfri,
                   COALESCE(SUM(CASE WHEN is_refund=1 THEN -COALESCE(accb_amount,0) ELSE COALESCE(accb_amount,0) END),0) AS accb,
+                  COALESCE(SUM(CASE WHEN is_refund=1 THEN -COALESCE(mccb_amount,0) ELSE COALESCE(mccb_amount,0) END),0) AS mccb,
                   COALESCE(SUM(CASE WHEN is_refund=1 THEN -amount ELSE amount END),0) AS paid,
                   COALESCE(SUM(CASE WHEN is_refund=1 THEN amount ELSE 0 END),0) AS refunds
              FROM receipts
@@ -176,7 +178,7 @@ function BoardPackage() {
           [dateFrom, dateTo]
         ),
       ]);
-      const ra = receiptAgg[0] || { receipts: 0, gross: 0, ccfri: 0, accb: 0, paid: 0, refunds: 0 };
+      const ra = receiptAgg[0] || { receipts: 0, gross: 0, ccfri: 0, accb: 0, mccb: 0, paid: 0, refunds: 0 };
       out.push({
         label,
         active: studentAgg.active,
@@ -191,9 +193,9 @@ function BoardPackage() {
   useEffect(() => { load();   }, [mode]);
 
   function exportCsv() {
-    const lines = ["Year,Active Students,Total Enrolled,Receipts,Gross Fees,CCFRI,ACCB,Parent Paid,Refunds"];
+    const lines = ["Year,Active Students,Total Enrolled,Receipts,Gross Fees,CCFRI,ACCB,MCCB,Parent Paid,Refunds"];
     rows.forEach((r) => {
-      lines.push([r.label, r.active, r.total, r.receipts, fmt(r.gross), fmt(r.ccfri), fmt(r.accb), fmt(r.paid), fmt(r.refunds)]
+      lines.push([r.label, r.active, r.total, r.receipts, fmt(r.gross), fmt(r.ccfri), fmt(r.accb), fmt(r.mccb), fmt(r.paid), fmt(r.refunds)]
         .map((v) => `"${String(v).replace(/"/g, '""')}"`).join(","));
     });
     const blob = new Blob([lines.join("\n")], { type: "text/csv" });
@@ -207,8 +209,8 @@ function BoardPackage() {
   const today = new Date().toLocaleDateString(undefined, { year: "numeric", month: "long", day: "numeric" });
 
   const grandTotal = rows.reduce((a, r) => ({
-    gross: a.gross + r.gross, ccfri: a.ccfri + r.ccfri, accb: a.accb + r.accb, paid: a.paid + r.paid,
-  }), { gross: 0, ccfri: 0, accb: 0, paid: 0 });
+    gross: a.gross + r.gross, ccfri: a.ccfri + r.ccfri, accb: a.accb + r.accb, mccb: a.mccb + r.mccb, paid: a.paid + r.paid,
+  }), { gross: 0, ccfri: 0, accb: 0, mccb: 0, paid: 0 });
 
   return (
     <div style={{ padding: 24, maxWidth: 1100 }}>
@@ -276,6 +278,7 @@ function BoardPackage() {
               <th style={{ textAlign: "right", padding: 6, border: "1px solid var(--border)" }}>Gross Fees</th>
               <th style={{ textAlign: "right", padding: 6, border: "1px solid var(--border)" }}>CCFRI</th>
               <th style={{ textAlign: "right", padding: 6, border: "1px solid var(--border)" }}>ACCB</th>
+              <th style={{ textAlign: "right", padding: 6, border: "1px solid var(--border)" }}>MCCB</th>
               <th style={{ textAlign: "right", padding: 6, border: "1px solid var(--border)" }}>Parent Paid</th>
               <th style={{ textAlign: "right", padding: 6, border: "1px solid var(--border)" }}>Refunds</th>
             </tr>
@@ -288,6 +291,7 @@ function BoardPackage() {
                 <td style={{ padding: 6, border: "1px solid var(--border)", textAlign: "right" }}>${fmt(r.gross)}</td>
                 <td style={{ padding: 6, border: "1px solid var(--border)", textAlign: "right" }}>${fmt(r.ccfri)}</td>
                 <td style={{ padding: 6, border: "1px solid var(--border)", textAlign: "right" }}>${fmt(r.accb)}</td>
+                <td style={{ padding: 6, border: "1px solid var(--border)", textAlign: "right" }}>${fmt(r.mccb)}</td>
                 <td style={{ padding: 6, border: "1px solid var(--border)", textAlign: "right" }}>${fmt(r.paid)}</td>
                 <td style={{ padding: 6, border: "1px solid var(--border)", textAlign: "right" }}>${fmt(r.refunds)}</td>
               </tr>
@@ -300,6 +304,7 @@ function BoardPackage() {
               <td style={{ padding: 6, border: "1px solid var(--border)", textAlign: "right" }}>${fmt(grandTotal.gross)}</td>
               <td style={{ padding: 6, border: "1px solid var(--border)", textAlign: "right" }}>${fmt(grandTotal.ccfri)}</td>
               <td style={{ padding: 6, border: "1px solid var(--border)", textAlign: "right" }}>${fmt(grandTotal.accb)}</td>
+              <td style={{ padding: 6, border: "1px solid var(--border)", textAlign: "right" }}>${fmt(grandTotal.mccb)}</td>
               <td style={{ padding: 6, border: "1px solid var(--border)", textAlign: "right" }}>${fmt(grandTotal.paid)}</td>
               <td style={{ padding: 6, border: "1px solid var(--border)" }}></td>
             </tr>

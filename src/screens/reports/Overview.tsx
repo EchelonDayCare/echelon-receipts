@@ -14,7 +14,7 @@ const REPORTS: ReportCard[] = [
   { to: "/reports/aging", title: "Aging (A/R)", category: "Financial", icon: "⏳",
     desc: "Outstanding balances by student, aged 0-30 / 31-60 / 60+ days. Used for follow-up on unpaid fees." },
   { to: "/reports/subsidy", title: "Subsidy Reconciliation", category: "Financial", icon: "🏛️",
-    desc: "CCFRI + ACCB claimed by month. Match against BC Ministry statements at year-end." },
+    desc: "CCFRI, ACCB, and MCCB funding by month for year-end reconciliation." },
   { to: "/reports/enrollment", title: "Enrollment Roster", category: "Compliance", icon: "📋",
     desc: "Printable roster of active students with parent contacts. Kept on-site per BC Child Care Licensing Regulation §57." },
   { to: "/reports/attendance", title: "Attendance Analytics", category: "Compliance", icon: "📅",

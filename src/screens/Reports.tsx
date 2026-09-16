@@ -84,8 +84,9 @@ export default function Reports() {
     gross: a.gross + r.gross_total,
     ccfri: a.ccfri + r.ccfri_total,
     accb:  a.accb  + r.accb_total,
+    mccb:  a.mccb  + r.mccb_total,
     paid:  a.paid  + r.parent_paid_total,
-  }), { gross: 0, ccfri: 0, accb: 0, paid: 0 });
+  }), { gross: 0, ccfri: 0, accb: 0, mccb: 0, paid: 0 });
 
   const quarterMonths = mode === "fiscal_sep_aug"
     ? fiscalQuarterMonths(year, quarter).map((qm) => qm.month)
@@ -93,7 +94,7 @@ export default function Reports() {
   const quarterLabel = mode === "fiscal_sep_aug" ? FISCAL_QUARTER_LABEL[quarter] : CAL_QUARTER_LABEL[quarter];
 
   function exportCsv() {
-    const header = ["receipt_no","date","student","description","amount_paid","signed_amount","pending","gross","ccfri","accb","comments","voided","refund"];
+    const header = ["receipt_no","date","student","description","amount_paid","signed_amount","pending","gross","ccfri","accb","mccb","comments","voided","refund"];
     const lines = [header.join(",")].concat(
       all.map((r) => [
         r.receipt_no, r.date,
@@ -105,6 +106,7 @@ export default function Reports() {
         (r.gross_amount ?? 0).toFixed(2),
         (r.ccfri_amount ?? 0).toFixed(2),
         (r.accb_amount  ?? 0).toFixed(2),
+        (r.mccb_amount  ?? 0).toFixed(2),
         `"${(r.comments || "").replace(/"/g, '""')}"`, r.voided, r.is_refund,
       ].join(","))
     );
@@ -115,11 +117,11 @@ export default function Reports() {
     URL.revokeObjectURL(url);
   }
   function exportSubsidyCsv() {
-    const header = ["year","month","receipt_count","gross_total","ccfri_total","accb_total","parent_paid_total"];
+    const header = ["year","month","receipt_count","gross_total","ccfri_total","accb_total","mccb_total","parent_paid_total"];
     const lines = [header.join(",")].concat(
       subsidyOrdered.map((r) => [r.year, r.month, r.receipt_count,
         r.gross_total.toFixed(2), r.ccfri_total.toFixed(2),
-        r.accb_total.toFixed(2), r.parent_paid_total.toFixed(2)].join(","))
+        r.accb_total.toFixed(2), r.mccb_total.toFixed(2), r.parent_paid_total.toFixed(2)].join(","))
     );
     const blob = new Blob([lines.join("\n")], { type: "text/csv" });
     const url = URL.createObjectURL(blob);
@@ -146,19 +148,19 @@ export default function Reports() {
     csv.push(`# Generated ${new Date().toISOString().slice(0, 10)}`);
     csv.push("");
     csv.push("## Monthly summary");
-    csv.push("year,month,receipt_count,gross_total,ccfri_total,accb_total,parent_paid_total");
+    csv.push("year,month,receipt_count,gross_total,ccfri_total,accb_total,mccb_total,parent_paid_total");
     for (const r of monthRows) {
       csv.push([r.year, r.month, r.receipt_count,
         r.gross_total.toFixed(2), r.ccfri_total.toFixed(2),
-        r.accb_total.toFixed(2), r.parent_paid_total.toFixed(2)].join(","));
+        r.accb_total.toFixed(2), r.mccb_total.toFixed(2), r.parent_paid_total.toFixed(2)].join(","));
     }
     const tot = monthRows.reduce((a, r) => ({
-      g: a.g + r.gross_total, c: a.c + r.ccfri_total, ac: a.ac + r.accb_total, p: a.p + r.parent_paid_total, n: a.n + r.receipt_count,
-    }), { g: 0, c: 0, ac: 0, p: 0, n: 0 });
-    csv.push(["QUARTER TOTAL", "", tot.n, tot.g.toFixed(2), tot.c.toFixed(2), tot.ac.toFixed(2), tot.p.toFixed(2)].join(","));
+      g: a.g + r.gross_total, c: a.c + r.ccfri_total, ac: a.ac + r.accb_total, mc: a.mc + r.mccb_total, p: a.p + r.parent_paid_total, n: a.n + r.receipt_count,
+    }), { g: 0, c: 0, ac: 0, mc: 0, p: 0, n: 0 });
+    csv.push(["QUARTER TOTAL", "", tot.n, tot.g.toFixed(2), tot.c.toFixed(2), tot.ac.toFixed(2), tot.mc.toFixed(2), tot.p.toFixed(2)].join(","));
     csv.push("");
     csv.push("## Per-receipt detail");
-    csv.push("receipt_no,date,student,description,gross,ccfri_applied,accb_applied,parent_paid,refund,voided");
+    csv.push("receipt_no,date,student,description,gross,ccfri_applied,accb_applied,mccb_applied,parent_paid,refund,voided");
     for (const r of qReceipts) {
       csv.push([
         r.receipt_no, r.date,
@@ -167,6 +169,7 @@ export default function Reports() {
         (r.gross_amount ?? 0).toFixed(2),
         (r.ccfri_amount ?? 0).toFixed(2),
         (r.accb_amount  ?? 0).toFixed(2),
+        (r.mccb_amount  ?? 0).toFixed(2),
         (r.is_refund ? -r.amount : r.amount).toFixed(2),
         r.is_refund, r.voided,
       ].join(","));
@@ -236,7 +239,7 @@ export default function Reports() {
         <>
           <h3 style={{ marginTop: 24 }}>BC Subsidy Reconciliation ({yearLabel})</h3>
           <p className="subtitle" style={{ marginTop: -6 }}>
-            Cross-check against your monthly CCFRI claim and ACCB deposits from the Province of BC.
+            Track CCFRI reductions plus ACCB and MCCB funding against your program records.
           </p>
           <div style={{ marginBottom: 8, display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
             <button className="btn secondary" onClick={exportSubsidyCsv} disabled={subsidy.length === 0}>
@@ -262,6 +265,7 @@ export default function Reports() {
                 <th style={{ textAlign: "right" }}>Gross</th>
                 <th style={{ textAlign: "right" }}>CCFRI claimed</th>
                 <th style={{ textAlign: "right" }}>ACCB claimed</th>
+                <th style={{ textAlign: "right" }}>MCCB applied</th>
                 <th style={{ textAlign: "right" }}>Parent paid</th>
               </tr></thead>
               <tbody>
@@ -272,6 +276,7 @@ export default function Reports() {
                     <td style={{ textAlign: "right" }}>${r.gross_total.toFixed(2)}</td>
                     <td style={{ textAlign: "right", color: "#15803d" }}>${r.ccfri_total.toFixed(2)}</td>
                     <td style={{ textAlign: "right", color: "#15803d" }}>${r.accb_total.toFixed(2)}</td>
+                    <td style={{ textAlign: "right", color: "#15803d" }}>${r.mccb_total.toFixed(2)}</td>
                     <td style={{ textAlign: "right", fontWeight: 600 }}>${r.parent_paid_total.toFixed(2)}</td>
                   </tr>
                 ))}
@@ -281,6 +286,7 @@ export default function Reports() {
                   <td style={{ textAlign: "right" }}>${subTot.gross.toFixed(2)}</td>
                   <td style={{ textAlign: "right", color: "#15803d" }}>${subTot.ccfri.toFixed(2)}</td>
                   <td style={{ textAlign: "right", color: "#15803d" }}>${subTot.accb.toFixed(2)}</td>
+                  <td style={{ textAlign: "right", color: "#15803d" }}>${subTot.mccb.toFixed(2)}</td>
                   <td style={{ textAlign: "right" }}>${subTot.paid.toFixed(2)}</td>
                 </tr>
               </tbody>

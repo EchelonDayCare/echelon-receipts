@@ -4,9 +4,10 @@ import { useNavigate, useSearchParams } from "react-router-dom";
 import { open } from "@tauri-apps/plugin-dialog";
 import { readFile } from "@tauri-apps/plugin-fs";
 import { listStudents, listYears, upsertStudent, deleteStudent, reactivateStudent, hardDeleteStudent, getSettings,
-  listAccbForStudent, upsertAccb, deleteAccb, listSubsidyProfiles } from "../lib/db";
+  listAccbForStudent, upsertAccb, deleteAccb, listMccbForStudent, upsertMccb, deleteMccb, listSubsidyProfiles,
+  MCCB_MAX_MONTHLY_AMOUNT } from "../lib/db";
 import { parseRosterFile } from "../lib/excelImport";
-import type { Student, AccbEntry, SettingsMap, SubsidyProfile } from "../types";
+import type { Student, AccbEntry, MccbEntry, SettingsMap, SubsidyProfile } from "../types";
 
 export default function Students() {
   const now = new Date().getFullYear();
@@ -21,6 +22,10 @@ export default function Students() {
   const [subsidyProfiles, setSubsidyProfiles] = useState<SubsidyProfile[]>([]);
   const [accbFor, setAccbFor] = useState<{ student: Student; entries: AccbEntry[] } | null>(null);
   const [accbDraft, setAccbDraft] = useState<{ year: number; month: number; amount: string; notes: string }>(
+    { year: new Date().getFullYear(), month: new Date().getMonth() + 1, amount: "", notes: "" }
+  );
+  const [mccbFor, setMccbFor] = useState<{ student: Student; entries: MccbEntry[] } | null>(null);
+  const [mccbDraft, setMccbDraft] = useState<{ year: number; month: number; amount: string; notes: string }>(
     { year: new Date().getFullYear(), month: new Date().getMonth() + 1, amount: "", notes: "" }
   );
 
@@ -94,19 +99,48 @@ export default function Students() {
     setAccbDraft({ ...accbDraft, amount: "", notes: "" });
     refreshAccb();
   }
+  async function openMccb(s: Student) {
+    const entries = await listMccbForStudent(s.id);
+    setMccbFor({ student: s, entries });
+    setMccbDraft({ year: new Date().getFullYear(), month: new Date().getMonth() + 1, amount: "", notes: "" });
+  }
+  async function refreshMccb() {
+    if (!mccbFor) return;
+    setMccbFor({ ...mccbFor, entries: await listMccbForStudent(mccbFor.student.id) });
+  }
+  async function saveMccbRow() {
+    if (!mccbFor) return;
+    const amt = parseFloat(mccbDraft.amount);
+    if (!Number.isFinite(amt) || amt < 0) { void showAlert("Enter a non-negative amount (0 clears the month)."); return; }
+    try {
+      if (amt === 0) {
+        const existing = mccbFor.entries.find((e) => e.year === mccbDraft.year && e.month === mccbDraft.month);
+        if (existing) await deleteMccb(existing.id);
+      } else {
+        await upsertMccb(mccbFor.student.id, mccbDraft.year, mccbDraft.month, amt, mccbDraft.notes || null);
+      }
+    } catch (e) {
+      void showAlert("MCCB entry was not saved: " + ((e as Error)?.message || String(e)));
+      return;
+    }
+    setMccbDraft({ ...mccbDraft, amount: "", notes: "" });
+    refreshMccb();
+  }
 
   async function onHardDelete(s: Student) {
     try {
       const probe = await hardDeleteStudent(s.id, false);
-      if (!probe.deleted && probe.receiptCount > 0) {
+      if (!probe.deleted) {
+        const affected = [
+          probe.receiptCount > 0 && `  • ${probe.receiptCount} receipt${probe.receiptCount === 1 ? "" : "s"}`,
+          probe.annualReceiptCount > 0 && `  • ${probe.annualReceiptCount} annual (CRA) receipt${probe.annualReceiptCount === 1 ? "" : "s"} for this family`,
+          probe.accbCount > 0 && `  • ${probe.accbCount} ACCB ledger entr${probe.accbCount === 1 ? "y" : "ies"}`,
+          probe.mccbCount > 0 && `  • ${probe.mccbCount} MCCB ledger entr${probe.mccbCount === 1 ? "y" : "ies"}`,
+          probe.attendanceCount > 0 && `  • ${probe.attendanceCount} attendance record${probe.attendanceCount === 1 ? "" : "s"}`,
+        ].filter(Boolean).join("\n");
         const ok = await showConfirm(
           `⚠️  Permanently delete ${s.name}?\n\n` +
-          `This student has ${probe.receiptCount} receipt${probe.receiptCount === 1 ? "" : "s"} on file. ` +
-          `Deleting will also remove:\n` +
-          `  • All ${probe.receiptCount} receipt${probe.receiptCount === 1 ? "" : "s"}\n` +
-          `  • Any annual (CRA) receipts for this family\n` +
-          `  • Any ACCB ledger entries\n` +
-          `  • Any attendance records\n\n` +
+          `Deleting will remove:\n${affected}\n\n` +
           `⚠  CRA requires you to keep child-care receipts for 6 years after the tax year they were issued. Only proceed if you have already exported this family's records for backup, or the receipts were entered in error.\n\n` +
           `This CANNOT be undone. Use "Inactivate" instead if the student is real.\n\n` +
           `Continue?`,
@@ -122,7 +156,7 @@ export default function Students() {
         refresh();
         return;
       }
-      const ok = await showConfirm(`Permanently delete ${s.name}?\n\nNo receipts on file, so nothing else is affected.`);
+      const ok = await showConfirm(`Permanently delete ${s.name}?\n\nNo linked records will be removed.`);
       if (!ok) return;
       await hardDeleteStudent(s.id, true);
       refresh();
@@ -269,7 +303,7 @@ export default function Students() {
     refresh();
     const parts: string[] = [];
     parts.push(`Removed ${deleted} duplicate${deleted === 1 ? "" : "s"}`);
-    if (skipped > 0) parts.push(`${skipped} skipped (have receipts)`);
+    if (skipped > 0) parts.push(`${skipped} skipped (have linked records)`);
     void showAlert(parts.join(", ") + ".");
   }
 
@@ -357,7 +391,10 @@ export default function Students() {
                 <td style={{ textAlign: "right" }}>
                   <button className="btn ghost" onClick={() => setEditing(s)}>Edit</button>
                   {settings.subsidies_enabled === "1" && (
-                    <button className="btn ghost" onClick={() => openAccb(s)}>ACCB…</button>
+                    <>
+                      <button className="btn ghost" onClick={() => openAccb(s)}>ACCB…</button>
+                      <button className="btn ghost" onClick={() => openMccb(s)}>MCCB…</button>
+                    </>
                   )}
                   {s.active === 1 && (
                     <button className="btn ghost" style={{ color: "var(--danger)" }}
@@ -694,6 +731,82 @@ export default function Students() {
             )}
             <div style={{ display: "flex", gap: 10, marginTop: 14 }}>
               <button className="btn secondary" onClick={() => setAccbFor(null)}>Close</button>
+            </div>
+          </div>
+        </div>
+      )}
+      {mccbFor && (
+        <div
+          onClick={(e) => { if (e.target === e.currentTarget) setMccbFor(null); }}
+          style={{
+            position: "fixed", inset: 0, background: "rgba(0,0,0,0.45)",
+            display: "flex", alignItems: "flex-start", justifyContent: "center",
+            paddingTop: 60, zIndex: 1000,
+          }}
+        >
+          <div className="card" style={{ width: "min(680px, 94vw)", maxHeight: "85vh", overflow: "auto", margin: 0 }}>
+            <h3 style={{ marginTop: 0 }}>MCCB Ledger — {mccbFor.student.name}</h3>
+            <p style={{ color: "var(--muted)", fontSize: 13, marginTop: -4 }}>
+              Enter the approved Métis Child Care Benefit amount applied to this family&apos;s fee for the month. It is deducted after CCFRI and ACCB when calculating the parent&apos;s out-of-pocket amount, up to $${MCCB_MAX_MONTHLY_AMOUNT.toFixed(2)} and never more than the remaining fee.
+            </p>
+
+            <div className="row">
+                    <div className="field" style={{ maxWidth: 110 }}>
+                      <label>Year</label>
+                      <input type="number" value={mccbDraft.year}
+                        onChange={(e) => setMccbDraft({ ...mccbDraft, year: parseInt(e.target.value, 10) || now })} />
+                    </div>
+                    <div className="field" style={{ maxWidth: 110 }}>
+                      <label>Month</label>
+                      <select value={mccbDraft.month} onChange={(e) => setMccbDraft({ ...mccbDraft, month: parseInt(e.target.value, 10) })}>
+                        {[1,2,3,4,5,6,7,8,9,10,11,12].map((m) => <option key={m} value={m}>{m}</option>)}
+                      </select>
+                    </div>
+                    <div className="field" style={{ maxWidth: 140 }}>
+                      <label>Amount ($)</label>
+                      <input type="number" min="0" max={MCCB_MAX_MONTHLY_AMOUNT} step="0.01" value={mccbDraft.amount}
+                        onChange={(e) => setMccbDraft({ ...mccbDraft, amount: e.target.value })} />
+                    </div>
+                    <div className="field">
+                      <label>Notes</label>
+                      <input value={mccbDraft.notes}
+                        onChange={(e) => setMccbDraft({ ...mccbDraft, notes: e.target.value })} />
+                    </div>
+            </div>
+            <div style={{ display: "flex", gap: 10, marginBottom: 14 }}>
+                    <button className="btn" onClick={saveMccbRow}>Add / Update</button>
+                    <span style={{ color: "var(--muted)", fontSize: 12, alignSelf: "center" }}>
+                      Tip: setting amount to 0 deletes that month&apos;s entry.
+                    </span>
+            </div>
+
+            {mccbFor.entries.length === 0 ? (
+                    <div className="empty">No MCCB entries yet.</div>
+            ) : (
+                    <table className="data">
+                      <thead>
+                        <tr><th>Year</th><th>Month</th><th>Amount</th><th>Notes</th><th></th></tr>
+                      </thead>
+                      <tbody>
+                        {mccbFor.entries.map((e) => (
+                          <tr key={e.id}>
+                            <td>{e.year}</td>
+                            <td>{e.month}</td>
+                            <td>${e.amount.toFixed(2)}</td>
+                            <td>{e.notes || "—"}</td>
+                            <td style={{ textAlign: "right" }}>
+                              <button className="btn ghost" style={{ color: "var(--danger)" }}
+                                onClick={async () => { if (await showConfirm("Delete this MCCB entry?")) { await deleteMccb(e.id); refreshMccb(); } }}>
+                                Delete
+                              </button>
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+            )}
+            <div style={{ display: "flex", gap: 10, marginTop: 14 }}>
+              <button className="btn secondary" onClick={() => setMccbFor(null)}>Close</button>
             </div>
           </div>
         </div>

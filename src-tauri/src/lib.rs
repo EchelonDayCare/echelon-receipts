@@ -56,6 +56,8 @@ pub fn embedded_migrations() -> Vec<(i64, &'static str, &'static str)> {
         (20, "students_audit", include_str!("../migrations/020_students_audit.sql")),
         (21, "cash_receipt_label", include_str!("../migrations/021_cash_receipt_label.sql")),
         (22, "subsidy_profiles", include_str!("../migrations/022_subsidy_profiles.sql")),
+        (23, "mccb", include_str!("../migrations/023_mccb.sql")),
+        (24, "mccb_template", include_str!("../migrations/024_mccb_template.sql")),
     ]
 }
 

@@ -1,5 +1,5 @@
 // Monthly Subsidy Statement: companion PDF to the regular receipt that breaks
-// down gross fee, CCFRI reduction, ACCB subsidy, and what the parent actually
+// down gross fee, CCFRI reduction, ACCB and MCCB funding, and what the parent actually
 // paid. Required for BC licensing audits and answers the common parent question
 // "why does my receipt say $X when full-time daycare costs more?"
 import type { Receipt, SettingsMap } from "../types";
@@ -27,6 +27,7 @@ export function buildSubsidyStatementHtml(r: Receipt, s: SettingsMap): string {
   const gross = r.gross_amount ?? 0;
   const ccfri = r.ccfri_amount ?? 0;
   const accb  = r.accb_amount ?? 0;
+  const mccb  = r.mccb_amount ?? 0;
   const paid  = r.amount;
   return `<!doctype html><html><head><meta charset="utf-8"><title>Subsidy Statement ${h(r.receipt_no)}</title>
 <style>
@@ -76,15 +77,14 @@ export function buildSubsidyStatementHtml(r: Receipt, s: SettingsMap): string {
       <tr><td>Gross monthly fee</td><td class="r">$${fmtAmount(gross)}</td></tr>
       ${ccfri > 0 ? `<tr class="line"><td>Less: BC Child Care Fee Reduction Initiative (CCFRI)</td><td class="r minus">−$${fmtAmount(ccfri)}</td></tr>` : ""}
       ${accb  > 0 ? `<tr class="line"><td>Less: Affordable Child Care Benefit (ACCB)</td><td class="r minus">−$${fmtAmount(accb)}</td></tr>`  : ""}
+      ${mccb  > 0 ? `<tr class="line"><td>Less: Métis Child Care Benefit (MCCB)</td><td class="r minus">−$${fmtAmount(mccb)}</td></tr>`  : ""}
       <tr class="tot"><td>Amount paid by parent (out-of-pocket)</td><td class="r">$${fmtAmount(paid)}</td></tr>
     </tbody>
   </table>
 
   <div class="note">
-    <b>About this statement:</b> The amount you paid is the only portion that appears on your CRA Annual Tax Receipt
-    (used for Form T778, Child Care Expenses Deduction). The CCFRI and ACCB amounts above are paid by the
-    Province of British Columbia directly to ${h(s.daycare_name || "Echelon Daycare Society")} on your behalf and cannot
-    be claimed as a personal child-care expense.
+    <b>About this statement:</b> This statement records the monthly fee, funding applied to that fee, and the amount
+    paid by the parent. Consult a qualified tax professional or CRA guidance when preparing a personal tax return.
   </div>
 
   <div class="footer">
@@ -141,6 +141,7 @@ export function renderSubsidyEmailTemplate(tpl: string, r: Receipt, s: SettingsM
     gross: fmtAmount(r.gross_amount ?? 0),
     ccfri: fmtAmount(r.ccfri_amount ?? 0),
     accb:  fmtAmount(r.accb_amount  ?? 0),
+    mccb:  fmtAmount(r.mccb_amount  ?? 0),
     parent_paid: fmtAmount(r.amount),
     daycare_name: s.daycare_name || "",
     contact_email: s.contact_email || "",

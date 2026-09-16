@@ -20,10 +20,10 @@
 //     pointing at a deleted student).
 //
 // FK reality check (why "students" pulls in more than the roster):
-// `receipts.student_id`, `accb_entries.student_id`, and
+// `receipts.student_id`, `accb_entries.student_id`, `mccb_entries.student_id`, and
 // `child_attendance.student_id` all reference `students(id)` with no
 // ON DELETE CASCADE, so SQLite (foreign_keys=ON) refuses to delete a
-// student that still has receipts/attendance/ACCB rows. Selecting
+// student that still has receipts/attendance/funding rows. Selecting
 // "Students" therefore always cascades into Receipts & Billing and
 // Attendance for consistency — the UI must say so up front.
 import { invoke } from "@tauri-apps/api/core";
@@ -38,7 +38,7 @@ export type CleanupCategory =
 
 export const CLEANUP_CATEGORY_LABELS: Record<CleanupCategory, string> = {
   students: "Students / roster",
-  receipts: "Receipts, Annual Tax Receipts, ACCB entries & Bank Deposits",
+  receipts: "Receipts, Annual Tax Receipts, ACCB/MCCB entries & Bank Deposits",
   attendance: "Attendance records",
   waitlist: "Waitlist applications",
   expenses: "Expenses, recurring bills & imports",
@@ -47,7 +47,7 @@ export const CLEANUP_CATEGORY_LABELS: Record<CleanupCategory, string> = {
 // Selecting "students" always cascades into these — shown to the user
 // as a note, and enforced regardless of whether they're separately checked.
 export const CLEANUP_CASCADE_NOTE =
-  "Deleting Students also deletes their Receipts, Annual Tax Receipts, ACCB entries, Bank Deposits, and Attendance records — a student can't be removed while those still reference it.";
+  "Deleting Students also deletes their Receipts, Annual Tax Receipts, ACCB/MCCB entries, Bank Deposits, and Attendance records — a student can't be removed while those still reference it.";
 
 // Resources that actually delete/blank rows a user can select via a
 // category. "Repair" steps (recalc totals, null dangling refs, reset
@@ -59,6 +59,7 @@ type ResourceKey =
   | "del_deposits"
   | "del_attendance"
   | "del_accb"
+  | "del_mccb"
   | "del_annual"
   | "del_receipts"
   | "del_students"
@@ -131,6 +132,11 @@ function resolveResource(
       return scope.month
         ? { table: "accb_entries", clause: "year = ? AND month = ?", params: [scope.year, scope.month] }
         : { table: "accb_entries", clause: "year = ?", params: [scope.year] };
+    case "del_mccb":
+      if (!scope) return { table: "mccb_entries", clause: "1=1", params: [] };
+      return scope.month
+        ? { table: "mccb_entries", clause: "year = ? AND month = ?", params: [scope.year, scope.month] }
+        : { table: "mccb_entries", clause: "year = ?", params: [scope.year] };
     case "del_annual":
       if (!scope) return { table: "annual_receipts", clause: "1=1", params: [] };
       // Annual receipts document a full calendar year; a partial-year
@@ -190,6 +196,7 @@ const RESOURCE_ORDER: ResourceKey[] = [
   "del_deposits",
   "del_attendance",
   "del_accb",
+  "del_mccb",
   "del_annual",
   "del_receipts",
   "del_students",
@@ -200,18 +207,19 @@ const RESOURCE_ORDER: ResourceKey[] = [
 
 const CATEGORY_RESOURCES: Record<CleanupCategory, ResourceKey[]> = {
   // Full cascade — a student row can't survive with receipts/attendance/
-  // ACCB rows still pointing at it under foreign_keys=ON.
+  // ACCB/MCCB rows still pointing at it under foreign_keys=ON.
   students: [
     "clear_deposit_links",
     "del_deposits",
     "del_attendance",
     "del_accb",
+    "del_mccb",
     "del_annual",
     "del_receipts",
     "del_students",
   ],
   // Billing only — leaves the roster and attendance untouched.
-  receipts: ["clear_deposit_links", "del_deposits", "del_accb", "del_annual", "del_receipts"],
+  receipts: ["clear_deposit_links", "del_deposits", "del_accb", "del_mccb", "del_annual", "del_receipts"],
   attendance: ["del_attendance"],
   waitlist: ["del_waitlist"],
   expenses: ["del_expenses", "del_recurring_expenses"],
@@ -294,6 +302,7 @@ export async function getAvailableYears(): Promise<number[]> {
     "SELECT DISTINCT CAST(substr(deposit_date,1,4) AS INTEGER) AS y FROM deposits WHERE deposit_date IS NOT NULL",
     "SELECT DISTINCT calendar_year AS y FROM annual_receipts",
     "SELECT DISTINCT year AS y FROM accb_entries",
+    "SELECT DISTINCT year AS y FROM mccb_entries",
     "SELECT DISTINCT CAST(substr(created_at,1,4) AS INTEGER) AS y FROM waitlist_entries WHERE created_at IS NOT NULL",
   ];
   const years = new Set<number>();

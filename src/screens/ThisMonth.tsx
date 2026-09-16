@@ -3,7 +3,7 @@ import { useEffect, useMemo, useState } from "react";
 import { openPath } from "@tauri-apps/plugin-opener";
 import {
   listStudents, listReceipts, nextReceiptNoForDate, createReceipt,
-  getSettings, subsidiesEnabled, computeFeeBreakdown, getAccbForMonthBulk, markEmailed,
+  getSettings, subsidiesEnabled, computeFeeBreakdown, getAccbForMonthBulk, getMccbForMonthBulk, markEmailed,
   listSubsidyProfiles,
 } from "../lib/db";
 import type { Student, Receipt, SettingsMap } from "../types";
@@ -21,7 +21,7 @@ interface RowState {
   receipt: Receipt | null;       // existing non-voided receipt for this fee month, if any
   parentEmails: string[];
   computedAmount: number;        // what we'd charge if we generated now
-  breakdown: { gross: number; ccfri: number; accb: number } | null;
+  breakdown: { gross: number; ccfri: number; accb: number; mccb: number } | null;
   busy: boolean;
   lastResult: { kind: "ok" | "err"; text: string } | null;
 }
@@ -62,11 +62,12 @@ export default function ThisMonth() {
     setLoading(true);
     const monthIdx = MONTHS.indexOf(month) + 1;
     const subsOn = subsidiesEnabled(await getSettings());
-    const [studs, s, allReceipts, accbMap, profiles] = await Promise.all([
+    const [studs, s, allReceipts, accbMap, mccbMap, profiles] = await Promise.all([
       listStudents(year, true),
       getSettings(),
       listReceipts({ year }),
       subsOn ? getAccbForMonthBulk(year, monthIdx) : Promise.resolve(new Map<number, number>()),
+      subsOn ? getMccbForMonthBulk(year, monthIdx) : Promise.resolve(new Map<number, number>()),
       listSubsidyProfiles(true),
     ]);
     setSettings(s);
@@ -82,11 +83,12 @@ export default function ThisMonth() {
       let amt = parseFloat(s.default_fee || "0") || 0;
       if (subsidiesEnabled(s)) {
         const accb = accbMap.get(stu.id) ?? 0;
+        const mccb = mccbMap.get(stu.id) ?? 0;
         const profile = stu.subsidy_profile_id == null
           ? null
           : profiles.find((p) => p.id === stu.subsidy_profile_id) ?? null;
-        const fb = computeFeeBreakdown(stu, s, accb, profile);
-        bk = { gross: fb.gross, ccfri: fb.ccfri, accb: fb.accb };
+        const fb = computeFeeBreakdown(stu, s, accb, mccb, profile);
+        bk = { gross: fb.gross, ccfri: fb.ccfri, accb: fb.accb, mccb: fb.mccb };
         if (fb.gross > 0) amt = fb.parent_pays;
       }
       next.push({
@@ -122,11 +124,12 @@ export default function ThisMonth() {
     setRows(cur => cur.map((r, i) => i === idx ? { ...r, busy: true, lastResult: null } : r));
     try {
       const r = rows[idx]; const stu = r.student;
-      // Guard: non-refund receipts must be finite and > 0. A stray keystroke
-      // (empty input, "-100", NaN) would otherwise slip a negative or zero
-      // tuition through createReceipt and understate monthly/annual revenue.
-      if (!Number.isFinite(r.computedAmount) || r.computedAmount <= 0) {
-        throw new Error(`Invalid amount for ${stu.name}: ${r.computedAmount}. Enter a positive dollar amount.`);
+      const fullyCovered = Boolean(
+        r.breakdown && r.breakdown.gross > 0 && r.computedAmount === 0 &&
+        (r.breakdown.ccfri > 0 || r.breakdown.accb > 0 || r.breakdown.mccb > 0),
+      );
+      if (!Number.isFinite(r.computedAmount) || (r.computedAmount <= 0 && !fullyCovered)) {
+        throw new Error(`Invalid amount for ${stu.name}: ${r.computedAmount}. Enter a positive dollar amount or record the funding that fully covers the fee.`);
       }
       const monthIdx = MONTHS.indexOf(month);
       const date = new Date(year, monthIdx, 1).toISOString().slice(0, 10);
@@ -144,6 +147,7 @@ export default function ThisMonth() {
         gross_amount: r.breakdown?.gross ?? null,
         ccfri_amount: r.breakdown?.ccfri ?? null,
         accb_amount:  r.breakdown?.accb ?? null,
+        mccb_amount:  r.breakdown?.mccb ?? null,
       });
       await refresh();
     } catch (e: any) {
@@ -279,7 +283,7 @@ export default function ThisMonth() {
                             if (i !== idx) return row;
                             // If the user overrode the amount away from the auto-computed
                             // breakdown, drop the breakdown snapshot so the printed receipt
-                            // doesn't show gross/CCFRI/ACCB totals that don't add up to the
+                            // doesn't show gross/CCFRI/ACCB/MCCB totals that don't add up to the
                             // amount actually charged.
                             const drift = row.breakdown && Math.abs(newAmt - row.computedAmount) > 0.01
                               ? null

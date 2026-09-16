@@ -32,7 +32,8 @@ export interface YearContext {
   grossRevenue: number;              // sum of receipts.amount minus refunds
   ccfriTotal: number;
   accbTotal: number;
-  parentPaidTotal: number;           // gross - ccfri - accb
+  mccbTotal: number;
+  parentPaidTotal: number;           // gross - ccfri - accb - mccb
   // Expenses
   expensesTotal: number;
   topExpenseCategories: Array<{ category: string; amount: number }>;
@@ -88,14 +89,15 @@ export async function gatherYearContext(fyStart: number, opts: GatherOpts = {}):
   // migration 005 have gross_amount = NULL and their `amount` was the full fee
   // before we split out subsidies. Parent-paid uses `amount` (already net of
   // subsidies for post-migration rows).
-  const rev = await safeSelectOne<{ gross: number; ccfri: number; accb: number; parent_paid: number }>(
+  const rev = await safeSelectOne<{ gross: number; ccfri: number; accb: number; mccb: number; parent_paid: number }>(
     `SELECT
         COALESCE(SUM(CASE WHEN is_refund=1 THEN -COALESCE(gross_amount, amount) ELSE COALESCE(gross_amount, amount) END), 0) AS gross,
         COALESCE(SUM(CASE WHEN is_refund=1 THEN -COALESCE(ccfri_amount,0) ELSE COALESCE(ccfri_amount,0) END), 0) AS ccfri,
         COALESCE(SUM(CASE WHEN is_refund=1 THEN -COALESCE(accb_amount,0) ELSE COALESCE(accb_amount,0) END), 0) AS accb,
+        COALESCE(SUM(CASE WHEN is_refund=1 THEN -COALESCE(mccb_amount,0) ELSE COALESCE(mccb_amount,0) END), 0) AS mccb,
         COALESCE(SUM(CASE WHEN is_refund=1 THEN -amount ELSE amount END), 0) AS parent_paid
       FROM receipts WHERE voided=0 AND date>=? AND date<=?`,
-    [start, end], { gross: 0, ccfri: 0, accb: 0, parent_paid: 0 }
+    [start, end], { gross: 0, ccfri: 0, accb: 0, mccb: 0, parent_paid: 0 }
   );
 
   const exp = await safeSelectOne<{ total: number }>(
@@ -184,6 +186,7 @@ export async function gatherYearContext(fyStart: number, opts: GatherOpts = {}):
     grossRevenue: rev.gross || 0,
     ccfriTotal: rev.ccfri || 0,
     accbTotal: rev.accb || 0,
+    mccbTotal: rev.mccb || 0,
     parentPaidTotal: rev.parent_paid || 0,
     expensesTotal: exp.total || 0,
     topExpenseCategories: topCats,
@@ -355,6 +358,7 @@ function financialFacts(c: YearContext): string {
   lines.push(`Gross revenue: ${fmtMoney(c.grossRevenue)}`);
   if (c.ccfriTotal) lines.push(`CCFRI subsidy total: ${fmtMoney(c.ccfriTotal)}`);
   if (c.accbTotal) lines.push(`ACCB subsidy total: ${fmtMoney(c.accbTotal)}`);
+  if (c.mccbTotal) lines.push(`MCCB benefit total: ${fmtMoney(c.mccbTotal)}`);
   lines.push(`Parent-paid portion: ${fmtMoney(c.parentPaidTotal)}`);
   lines.push(`Total expenses: ${fmtMoney(c.expensesTotal)}`);
   if (c.topExpenseCategories.length) {

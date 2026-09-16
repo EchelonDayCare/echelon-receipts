@@ -141,7 +141,7 @@ export default function ExpenseReports() {
         </div>
         <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
           <select value={basis} onChange={(e) => setBasis(e.target.value as RevenueBasis)}
-            title="Parent-paid = cash from families only.  Operating = includes CCFRI and ACCB reimbursements paid to the daycare.">
+            title="Parent-paid = cash from families only. Operating = includes CCFRI, ACCB, and MCCB funding applied to fees.">
             <option value="parent_paid">Revenue: parent-paid</option>
             <option value="operating">Revenue: operating (incl. subsidies)</option>
           </select>
@@ -290,7 +290,7 @@ export default function ExpenseReports() {
         )}
 
         <div style={{ marginTop: 24, fontSize: 11, color: "var(--muted)", textAlign: "center" }}>
-          Prepared for internal review and board reporting. Revenue basis: <strong>{basis === "operating" ? "operating (parent-paid + CCFRI + ACCB)" : "parent-paid only"}</strong>; net of refunds; voided receipts excluded.
+          Prepared for internal review and board reporting. Revenue basis: <strong>{basis === "operating" ? "operating (parent-paid + CCFRI + ACCB + MCCB)" : "parent-paid only"}</strong>; net of refunds; voided receipts excluded.
         </div>
       </div>
     </div>

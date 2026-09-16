@@ -48,7 +48,7 @@ export default function Subsidy() {
 
   const displayRows = orderedMonths.map(({ year: y, month: m }) => {
     const key = `${y}-${String(m).padStart(2, "0")}`;
-    return byMonth.get(key) || { year: y, month: m, receipt_count: 0, gross_total: 0, ccfri_total: 0, accb_total: 0, parent_paid_total: 0 };
+    return byMonth.get(key) || { year: y, month: m, receipt_count: 0, gross_total: 0, ccfri_total: 0, accb_total: 0, mccb_total: 0, parent_paid_total: 0 };
   });
 
   const totals = displayRows.reduce((a, r) => ({
@@ -56,8 +56,9 @@ export default function Subsidy() {
     gross:   a.gross   + r.gross_total,
     ccfri:   a.ccfri   + r.ccfri_total,
     accb:    a.accb    + r.accb_total,
+    mccb:    a.mccb    + r.mccb_total,
     paid:    a.paid    + r.parent_paid_total,
-  }), { receipts: 0, gross: 0, ccfri: 0, accb: 0, paid: 0 });
+  }), { receipts: 0, gross: 0, ccfri: 0, accb: 0, mccb: 0, paid: 0 });
 
   const yearLabel = mode === "fiscal_sep_aug" ? fiscalYearLabel(year) : String(year);
   const fileSuffix = mode === "fiscal_sep_aug"
@@ -65,13 +66,13 @@ export default function Subsidy() {
     : String(year);
 
   function exportCsv() {
-    const lines = ["Month,Receipts,Gross,CCFRI,ACCB,Parent Paid"];
+    const lines = ["Month,Receipts,Gross,CCFRI,ACCB,MCCB,Parent Paid"];
     displayRows.forEach((r) => {
       lines.push([`${r.year}-${String(r.month).padStart(2, "0")} (${MONTH_NAMES[r.month]})`,
-        r.receipt_count, fmt(r.gross_total), fmt(r.ccfri_total), fmt(r.accb_total), fmt(r.parent_paid_total)]
+        r.receipt_count, fmt(r.gross_total), fmt(r.ccfri_total), fmt(r.accb_total), fmt(r.mccb_total), fmt(r.parent_paid_total)]
         .map((v) => `"${String(v).replace(/"/g, '""')}"`).join(","));
     });
-    lines.push(["Totals", totals.receipts, fmt(totals.gross), fmt(totals.ccfri), fmt(totals.accb), fmt(totals.paid)]
+    lines.push(["Totals", totals.receipts, fmt(totals.gross), fmt(totals.ccfri), fmt(totals.accb), fmt(totals.mccb), fmt(totals.paid)]
       .map((v) => `"${String(v)}"`).join(","));
     const blob = new Blob([lines.join("\n")], { type: "text/csv" });
     const url = URL.createObjectURL(blob);
@@ -89,8 +90,7 @@ export default function Subsidy() {
         <div>
           <h1 style={{ marginTop: 0, marginBottom: 6 }}>Subsidy Reconciliation</h1>
           <p style={{ color: "var(--muted)", margin: 0 }}>
-            Gross fees, CCFRI reduction, ACCB benefit and parent-paid amounts month by month.
-            Compare against BC Ministry of Education & Child Care CCFRI/ACCB statements.
+            Gross fees, CCFRI reduction, ACCB/MCCB funding, and parent-paid amounts month by month.
           </p>
         </div>
         <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
@@ -121,6 +121,7 @@ export default function Subsidy() {
               <th style={{ textAlign: "right", padding: 6, border: "1px solid var(--border)" }}>Gross Fees</th>
               <th style={{ textAlign: "right", padding: 6, border: "1px solid var(--border)" }}>CCFRI</th>
               <th style={{ textAlign: "right", padding: 6, border: "1px solid var(--border)" }}>ACCB</th>
+              <th style={{ textAlign: "right", padding: 6, border: "1px solid var(--border)" }}>MCCB</th>
               <th style={{ textAlign: "right", padding: 6, border: "1px solid var(--border)" }}>Parent Paid</th>
             </tr>
           </thead>
@@ -132,6 +133,7 @@ export default function Subsidy() {
                 <td style={{ padding: 6, border: "1px solid var(--border)", textAlign: "right" }}>${fmt(r.gross_total)}</td>
                 <td style={{ padding: 6, border: "1px solid var(--border)", textAlign: "right" }}>${fmt(r.ccfri_total)}</td>
                 <td style={{ padding: 6, border: "1px solid var(--border)", textAlign: "right" }}>${fmt(r.accb_total)}</td>
+                <td style={{ padding: 6, border: "1px solid var(--border)", textAlign: "right" }}>${fmt(r.mccb_total)}</td>
                 <td style={{ padding: 6, border: "1px solid var(--border)", textAlign: "right" }}>${fmt(r.parent_paid_total)}</td>
               </tr>
             ))}
@@ -143,14 +145,15 @@ export default function Subsidy() {
               <td style={{ padding: 6, border: "1px solid var(--border)", textAlign: "right" }}>${fmt(totals.gross)}</td>
               <td style={{ padding: 6, border: "1px solid var(--border)", textAlign: "right" }}>${fmt(totals.ccfri)}</td>
               <td style={{ padding: 6, border: "1px solid var(--border)", textAlign: "right" }}>${fmt(totals.accb)}</td>
+              <td style={{ padding: 6, border: "1px solid var(--border)", textAlign: "right" }}>${fmt(totals.mccb)}</td>
               <td style={{ padding: 6, border: "1px solid var(--border)", textAlign: "right" }}>${fmt(totals.paid)}</td>
             </tr>
           </tfoot>
         </table>
 
         <div style={{ marginTop: 16, fontSize: 11, color: "var(--muted)", borderTop: "1px solid var(--border)", paddingTop: 8 }}>
-          CCFRI = Child Care Fee Reduction Initiative (posted daycare deduction). ACCB = Affordable Child Care Benefit (paid directly to daycare per eligible child).
-          Parent Paid = amount the family actually paid (Gross − CCFRI − ACCB).
+          CCFRI = Child Care Fee Reduction Initiative. ACCB = Affordable Child Care Benefit. MCCB = Métis Child Care Benefit.
+          Parent Paid = amount the family actually paid (Gross − CCFRI − ACCB − MCCB).
         </div>
       </div>
 

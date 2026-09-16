@@ -316,15 +316,23 @@ async function ensureSchema(d: Database): Promise<void> {
     await d.execute("CREATE INDEX IF NOT EXISTS idx_annual_person_year ON annual_receipts(person_id, calendar_year)");
   }
 
-  // Migration 005 — CCFRI + ACCB
+  // Migration 005 + 023 — CCFRI + ACCB + MCCB
   for (const [k, v] of [
     ["subsidies_enabled", "0"],
     ["gross_monthly_fee", ""],
     ["ccfri_monthly_reduction", ""],
     ["subsidy_stmt_subject", "Monthly Fee Breakdown - {{student}} - {{month_label}} {{year}}"],
     ["subsidy_stmt_body",
-      "Hi,\n\nPlease find attached the monthly fee breakdown for {{student}} for {{month_label}} {{year}}.\n\nThis shows how the BC government subsidies (CCFRI and any Affordable Child Care Benefit) reduced your gross monthly fee to the amount you actually paid. The amount you paid is what appears on your Annual Tax Receipt for the CRA.\n\nIf you have any questions, please reply to this email.\n\nThank you,\nEchelon Daycare Society\n{{contact_email}} | {{contact_phone}}"],
+      "Hi,\n\nPlease find attached the monthly fee breakdown for {{student}} for {{month_label}} {{year}}.\n\nThis shows how CCFRI, Affordable Child Care Benefit (ACCB), and any Métis Child Care Benefit (MCCB) funding reduced the gross monthly fee to the amount paid by the parent. The statement records the parent-paid portion for this period.\n\nIf you have any questions, please reply to this email.\n\nThank you,\nEchelon Daycare Society\n{{contact_email}} | {{contact_phone}}"],
   ] as const) await setting(k, v);
+  await d.execute(
+    `UPDATE settings SET value=?
+     WHERE key='subsidy_stmt_body' AND value=?`,
+    [
+      "Hi,\n\nPlease find attached the monthly fee breakdown for {{student}} for {{month_label}} {{year}}.\n\nThis shows how CCFRI, Affordable Child Care Benefit (ACCB), and any Métis Child Care Benefit (MCCB) funding reduced the gross monthly fee to the amount paid by the parent. The statement records the parent-paid portion for this period.\n\nIf you have any questions, please reply to this email.\n\nThank you,\nEchelon Daycare Society\n{{contact_email}} | {{contact_phone}}",
+      "Hi,\n\nPlease find attached the monthly fee breakdown for {{student}} for {{month_label}} {{year}}.\n\nThis shows how the BC government subsidies (CCFRI and any Affordable Child Care Benefit) reduced your gross monthly fee to the amount you actually paid. The amount you paid is what appears on your Annual Tax Receipt for the CRA.\n\nIf you have any questions, please reply to this email.\n\nThank you,\nEchelon Daycare Society\n{{contact_email}} | {{contact_phone}}",
+    ],
+  );
   await addCol("students", "gross_override", "REAL");
   await addCol("students", "subsidy_profile_id", "INTEGER");
   await d.execute("CREATE INDEX IF NOT EXISTS idx_students_subsidy_profile ON students(subsidy_profile_id)");
@@ -341,6 +349,7 @@ async function ensureSchema(d: Database): Promise<void> {
   await addCol("receipts", "gross_amount", "REAL");
   await addCol("receipts", "ccfri_amount", "REAL");
   await addCol("receipts", "accb_amount", "REAL");
+  await addCol("receipts", "mccb_amount", "REAL");
   if (!(await tableExists("accb_entries"))) {
     console.warn("[ensureSchema] creating accb_entries");
     await d.execute(`CREATE TABLE accb_entries (
@@ -356,6 +365,22 @@ async function ensureSchema(d: Database): Promise<void> {
     )`);
     await d.execute("CREATE INDEX IF NOT EXISTS idx_accb_student ON accb_entries(student_id)");
     await d.execute("CREATE INDEX IF NOT EXISTS idx_accb_period ON accb_entries(year, month)");
+  }
+  if (!(await tableExists("mccb_entries"))) {
+    console.warn("[ensureSchema] creating mccb_entries");
+    await d.execute(`CREATE TABLE mccb_entries (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      student_id INTEGER NOT NULL,
+      year INTEGER NOT NULL,
+      month INTEGER NOT NULL,
+      amount REAL NOT NULL,
+      notes TEXT,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      UNIQUE(student_id, year, month),
+      FOREIGN KEY (student_id) REFERENCES students(id)
+    )`);
+    await d.execute("CREATE INDEX IF NOT EXISTS idx_mccb_student ON mccb_entries(student_id)");
+    await d.execute("CREATE INDEX IF NOT EXISTS idx_mccb_period ON mccb_entries(year, month)");
   }
 
   // Migration 006 — void audit
@@ -1718,6 +1743,15 @@ export async function getAccbForMonthBulk(year: number, month: number): Promise<
   rows.forEach((r) => m.set(r.student_id, r.amount));
   return m;
 }
+export async function getMccbForMonthBulk(year: number, month: number): Promise<Map<number, number>> {
+  const rows = await (await db()).select<{ student_id: number; amount: number }[]>(
+    "SELECT student_id, amount FROM mccb_entries WHERE year=? AND month=?",
+    [year, month]
+  );
+  const m = new Map<number, number>();
+  rows.forEach((r) => m.set(r.student_id, r.amount));
+  return m;
+}
 
 export async function getSettings(): Promise<SettingsMap> {
   if (_settingsCache) return _settingsCache;
@@ -1885,36 +1919,55 @@ export async function updateStudentEmailByPerson(personId: string, email: string
 }
 
 // Hard-delete a student and everything attached to them. Two-step by design:
-//   1) Called with force=false → returns receiptCount without deleting.
-//   2) Called with force=true  → wipes accb_entries, child_attendance,
+//   1) Called with force=false → returns related-data counts without deleting.
+//   2) Called with force=true  → wipes ACCB/MCCB entries, child_attendance,
 //      annual_receipts, receipts, then the student row itself.
 // This is destructive and CRA-relevant; UI must confirm loudly before force=true.
 export async function hardDeleteStudent(
   id: number,
   force = false
-): Promise<{ deleted: boolean; receiptCount: number }> {
+): Promise<{
+  deleted: boolean;
+  receiptCount: number;
+  annualReceiptCount: number;
+  accbCount: number;
+  mccbCount: number;
+  attendanceCount: number;
+}> {
   const d = await db();
-  const rc = await d.select<{ n: number }[]>(
-    "SELECT COUNT(*) AS n FROM receipts WHERE student_id=?",
-    [id]
+  const pidRow = await d.select<{ person_id: string | null }[]>(
+    "SELECT person_id FROM students WHERE id=?",
+    [id],
   );
-  const receiptCount = rc[0]?.n ?? 0;
-  if (receiptCount > 0 && !force) {
-    return { deleted: false, receiptCount };
+  const personId = pidRow[0]?.person_id || null;
+  const [receipts, accb, mccb, attendance, annual] = await Promise.all([
+    d.select<{ n: number }[]>("SELECT COUNT(*) AS n FROM receipts WHERE student_id=?", [id]),
+    d.select<{ n: number }[]>("SELECT COUNT(*) AS n FROM accb_entries WHERE student_id=?", [id]),
+    d.select<{ n: number }[]>("SELECT COUNT(*) AS n FROM mccb_entries WHERE student_id=?", [id]),
+    d.select<{ n: number }[]>("SELECT COUNT(*) AS n FROM child_attendance WHERE student_id=?", [id]),
+    personId
+      ? d.select<{ n: number }[]>("SELECT COUNT(*) AS n FROM annual_receipts WHERE person_id=?", [personId])
+      : Promise.resolve([{ n: 0 }]),
+  ]);
+  const related = {
+    receiptCount: receipts[0]?.n ?? 0,
+    annualReceiptCount: annual[0]?.n ?? 0,
+    accbCount: accb[0]?.n ?? 0,
+    mccbCount: mccb[0]?.n ?? 0,
+    attendanceCount: attendance[0]?.n ?? 0,
+  };
+  if (Object.values(related).some((count) => count > 0) && !force) {
+    return { deleted: false, ...related };
   }
   await serializeWrite(async () => {
     // Collect person_id first so we can also drop any annual receipts pinned
     // to this student. Annual receipts key off person_id, not student_id.
     const d = await db();
-    const pidRow = await d.select<{ person_id: string | null }[]>(
-      "SELECT person_id FROM students WHERE id=?",
-      [id]
-    );
-    const personId = pidRow[0]?.person_id || null;
     // Use raw execute here — the outer serializeWrite already provides the
     // serialization guarantee, and re-entering serializeWrite (via execRetry)
     // from inside itself deadlocks the write-tail Promise chain.
     await d.execute("DELETE FROM accb_entries WHERE student_id=?", [id]);
+    await d.execute("DELETE FROM mccb_entries WHERE student_id=?", [id]);
     await d.execute("DELETE FROM child_attendance WHERE student_id=?", [id]);
     await d.execute("DELETE FROM receipts WHERE student_id=?", [id]);
     if (personId) {
@@ -1922,7 +1975,7 @@ export async function hardDeleteStudent(
     }
     await d.execute("DELETE FROM students WHERE id=?", [id]);
   });
-  return { deleted: true, receiptCount };
+  return { deleted: true, ...related };
 }
 // One-time backfill: any student without a person_id gets one computed from current names.
 // Memoised — only the first call per process does any work.
@@ -2002,8 +2055,8 @@ export async function createReceipt(r: Omit<Receipt, "id" | "created_at" | "void
   const res = await execRetry(
     `INSERT INTO receipts(receipt_no,date,student_id,student_name_snapshot,
       father_name_snapshot,mother_name_snapshot,description,amount,pending_amount,comments,is_refund,
-      gross_amount,ccfri_amount,accb_amount,issuer_snapshot_json,cash_receipt_label)
-     VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+      gross_amount,ccfri_amount,accb_amount,mccb_amount,issuer_snapshot_json,cash_receipt_label)
+     VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
     [
       r.receipt_no, r.date, r.student_id, r.student_name_snapshot,
       r.father_name_snapshot, r.mother_name_snapshot,
@@ -2012,6 +2065,7 @@ export async function createReceipt(r: Omit<Receipt, "id" | "created_at" | "void
       r.gross_amount == null ? null : roundMoney(r.gross_amount),
       r.ccfri_amount == null ? null : roundMoney(r.ccfri_amount),
       r.accb_amount  == null ? null : roundMoney(r.accb_amount),
+      r.mccb_amount  == null ? null : roundMoney(r.mccb_amount),
       snap,
       r.cash_receipt_label || null,
     ]
@@ -2019,7 +2073,8 @@ export async function createReceipt(r: Omit<Receipt, "id" | "created_at" | "void
   return Number(res.lastInsertId);
 }
 
-// ---------- BC Subsidies (CCFRI + ACCB) ----------
+// ---------- Fee reductions and benefits (CCFRI + ACCB + MCCB) ----------
+export const MCCB_MAX_MONTHLY_AMOUNT = 750;
 export function subsidiesEnabled(s: SettingsMap): boolean {
   return s.subsidies_enabled === "1";
 }
@@ -2027,6 +2082,7 @@ export function computeFeeBreakdown(
   student: Pick<Student, "id" | "gross_override" | "subsidy_profile_id"> | null,
   settings: SettingsMap,
   accbAmount: number = 0,
+  mccbAmount: number = 0,
   profile?: Pick<SubsidyProfile, "gross_monthly_fee" | "ccfri_monthly_reduction"> | null,
 ): FeeBreakdown {
   const enabled = subsidiesEnabled(settings);
@@ -2038,11 +2094,14 @@ export function computeFeeBreakdown(
     ? (profile ? Number(profile.ccfri_monthly_reduction) : (parseFloat(settings.ccfri_monthly_reduction || "0") || 0))
     : 0;
   const accb  = enabled ? Math.max(0, accbAmount) : 0;
+  const mccb  = enabled ? Math.max(0, mccbAmount) : 0;
   const cappedCcfri = Math.min(ccfri, gross);
   const afterCcfri  = Math.max(0, gross - cappedCcfri);
   const cappedAccb  = Math.min(accb, afterCcfri);
-  const parent_pays = Math.max(0, afterCcfri - cappedAccb);
-  return { gross, ccfri: cappedCcfri, accb: cappedAccb, parent_pays, enabled };
+  const afterAccb = Math.max(0, afterCcfri - cappedAccb);
+  const cappedMccb = Math.min(mccb, afterAccb);
+  const parent_pays = Math.max(0, afterAccb - cappedMccb);
+  return { gross, ccfri: cappedCcfri, accb: cappedAccb, mccb: cappedMccb, parent_pays, enabled };
 }
 
 export async function getAccbForMonth(studentId: number, year: number, month: number): Promise<number> {
@@ -2077,6 +2136,58 @@ export async function upsertAccb(studentId: number, year: number, month: number,
 export async function deleteAccb(id: number) {
   await execRetry("DELETE FROM accb_entries WHERE id=?", [id]);
 }
+export async function getMccbForMonth(studentId: number, year: number, month: number): Promise<number> {
+  const rows = await (await db()).select<{ amount: number }[]>(
+    "SELECT amount FROM mccb_entries WHERE student_id=? AND year=? AND month=?",
+    [studentId, year, month]
+  );
+  return rows[0]?.amount ?? 0;
+}
+export async function listMccbForStudent(studentId: number): Promise<import("../types").MccbEntry[]> {
+  return await (await db()).select<import("../types").MccbEntry[]>(
+    "SELECT * FROM mccb_entries WHERE student_id=? ORDER BY year DESC, month DESC",
+    [studentId]
+  );
+}
+export async function upsertMccb(studentId: number, year: number, month: number, amount: number, notes: string | null) {
+  if (!Number.isFinite(amount) || amount < 0) {
+    throw new Error("MCCB amount must be a non-negative number.");
+  }
+  if (!amount || amount <= 0) {
+    await execRetry("DELETE FROM mccb_entries WHERE student_id=? AND year=? AND month=?", [studentId, year, month]);
+    return;
+  }
+  const appliedAmount = roundMoney(amount);
+  if (appliedAmount > MCCB_MAX_MONTHLY_AMOUNT) {
+    throw new Error(`MCCB amount cannot exceed $${MCCB_MAX_MONTHLY_AMOUNT.toFixed(2)} per child per month.`);
+  }
+  const [students, settings, accb, profiles] = await Promise.all([
+    (await db()).select<Student[]>("SELECT * FROM students WHERE id=?", [studentId]),
+    getSettings(),
+    getAccbForMonth(studentId, year, month),
+    listSubsidyProfiles(true),
+  ]);
+  const student = students[0];
+  if (!student) throw new Error("Student not found.");
+  if (!subsidiesEnabled(settings)) throw new Error("Enable fee-reduction and benefit tracking before recording MCCB.");
+  const profile = student.subsidy_profile_id == null
+    ? null
+    : profiles.find((p) => p.id === student.subsidy_profile_id) ?? null;
+  const available = computeFeeBreakdown(student, settings, accb, 0, profile).parent_pays;
+  if (appliedAmount > available + 0.01) {
+    throw new Error(`MCCB amount exceeds the remaining fee after CCFRI and ACCB ($${available.toFixed(2)}).`);
+  }
+  await execRetry(
+    `INSERT INTO mccb_entries(student_id,year,month,amount,notes)
+     VALUES(?,?,?,?,?)
+     ON CONFLICT(student_id,year,month)
+     DO UPDATE SET amount=excluded.amount, notes=excluded.notes`,
+    [studentId, year, month, appliedAmount, notes]
+  );
+}
+export async function deleteMccb(id: number) {
+  await execRetry("DELETE FROM mccb_entries WHERE id=?", [id]);
+}
 
 // Subsidy reconciliation: totals collected per calendar month.
 export interface SubsidyMonthRow {
@@ -2086,6 +2197,7 @@ export interface SubsidyMonthRow {
   gross_total: number;
   ccfri_total: number;
   accb_total: number;
+  mccb_total: number;
   parent_paid_total: number;
 }
 export async function subsidyReconciliation(year?: number, fiscalYear?: number): Promise<SubsidyMonthRow[]> {
@@ -2103,6 +2215,7 @@ export async function subsidyReconciliation(year?: number, fiscalYear?: number):
             COALESCE(SUM(CASE WHEN is_refund=1 THEN -gross_amount ELSE gross_amount END),0) AS gross_total,
             COALESCE(SUM(CASE WHEN is_refund=1 THEN -ccfri_amount ELSE ccfri_amount END),0) AS ccfri_total,
             COALESCE(SUM(CASE WHEN is_refund=1 THEN -accb_amount ELSE accb_amount END),0) AS accb_total,
+            COALESCE(SUM(CASE WHEN is_refund=1 THEN -mccb_amount ELSE mccb_amount END),0) AS mccb_total,
             COALESCE(SUM(CASE WHEN is_refund=1 THEN -amount ELSE amount END),0) AS parent_paid_total
      FROM receipts ${where}
      GROUP BY y, m ORDER BY y DESC, m DESC`,
@@ -2115,6 +2228,7 @@ export async function subsidyReconciliation(year?: number, fiscalYear?: number):
     gross_total: r.gross_total,
     ccfri_total: r.ccfri_total,
     accb_total: r.accb_total,
+    mccb_total: r.mccb_total,
     parent_paid_total: r.parent_paid_total,
   }));
 }

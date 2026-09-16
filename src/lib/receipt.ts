@@ -33,16 +33,21 @@ export function buildReceiptHtml(r: Receipt, settings: SettingsMap): string {
   const sig = sanitizeImageDataUrl(s.signature_data_url) || DEFAULT_SIGNATURE_DATA_URL;
   const hasBreakdown =
     r.gross_amount != null && r.gross_amount > 0 &&
-    ((r.ccfri_amount ?? 0) > 0 || (r.accb_amount ?? 0) > 0);
+    ((r.ccfri_amount ?? 0) > 0 || (r.accb_amount ?? 0) > 0 || (r.mccb_amount ?? 0) > 0);
+  const fullySubsidyCovered =
+    hasBreakdown && r.amount === 0 &&
+    Math.abs((r.gross_amount ?? 0) - (r.ccfri_amount ?? 0) - (r.accb_amount ?? 0) - (r.mccb_amount ?? 0)) < 0.01;
   const breakdownRows = hasBreakdown ? `
   <table class="bk">
     <tbody>
       <tr><td>Gross monthly fee</td><td class="r">$${fmtAmount(r.gross_amount!)}</td></tr>
       ${(r.ccfri_amount ?? 0) > 0 ? `<tr><td>BC CCFRI reduction</td><td class="r minus">−$${fmtAmount(r.ccfri_amount!)}</td></tr>` : ""}
       ${(r.accb_amount  ?? 0) > 0 ? `<tr><td>ACCB subsidy</td><td class="r minus">−$${fmtAmount(r.accb_amount!)}</td></tr>`  : ""}
+      ${(r.mccb_amount  ?? 0) > 0 ? `<tr><td>MCCB benefit</td><td class="r minus">−$${fmtAmount(r.mccb_amount!)}</td></tr>`  : ""}
       <tr class="bktot"><td>Amount paid by parent</td><td class="r">$${fmtAmount(r.amount)}</td></tr>
     </tbody>
-  </table>` : "";
+  </table>
+  ${fullySubsidyCovered ? `<p class="coverage">Fees for this period were fully covered by CCFRI, ACCB, and/or MCCB. No payment was received from the parent.</p>` : ""}` : "";
 
   return `<!doctype html><html><head><meta charset="utf-8"><title>Receipt ${receiptDisplayNo(r)}</title>
 <style>
@@ -69,6 +74,7 @@ export function buildReceiptHtml(r: Receipt, settings: SettingsMap): string {
   table.bk td.r { text-align: right; }
   table.bk td.minus { color: #15803d; }
   table.bk tr.bktot td { border-top: 1px solid #999; font-weight: 700; padding-top: 5px; }
+  .coverage { margin: 8px 0 0 auto; width: 60%; font-size: 11px; font-style: italic; color: #333; }
   .comments { margin: 18px 0 6px; font-size: 14px; }
   .comments .lbl { display: inline-block; min-width: 100px; }
   .pending { font-style: italic; }

@@ -35,6 +35,7 @@ export interface Receipt {
   gross_amount: number | null;
   ccfri_amount: number | null;
   accb_amount: number | null;
+  mccb_amount: number | null;
   void_reason: string | null;
   voided_at: string | null;
   issuer_snapshot_json: string | null;
@@ -66,11 +67,13 @@ export interface AccbEntry {
   notes: string | null;
   created_at: string;
 }
+export type MccbEntry = AccbEntry;
 
 export interface FeeBreakdown {
   gross: number;
   ccfri: number;
   accb: number;
+  mccb: number;
   parent_pays: number;
   enabled: boolean;
 }

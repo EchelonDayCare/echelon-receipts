@@ -2,7 +2,7 @@ import { showAlert, showConfirm } from "../lib/dialogs";
 import { useEffect, useMemo, useState } from "react";
 import {
   listStudents, listYears, nextReceiptNoForDate, receiptNoExists, createReceipt, getSettings,
-  computeFeeBreakdown, getAccbForMonth, subsidiesEnabled, listSubsidyProfiles,
+  computeFeeBreakdown, getAccbForMonth, getMccbForMonth, subsidiesEnabled, listSubsidyProfiles,
 } from "../lib/db";
 import type { Student, SettingsMap, FeeBreakdown, Receipt, SubsidyProfile } from "../types";
 import { printReceipt, saveReceiptPdf, buildReceiptHtml } from "../lib/receipt";
@@ -40,6 +40,7 @@ export default function NewReceipt() {
   const [settings, setSettings] = useState<SettingsMap>({});
   const [subsidyProfiles, setSubsidyProfiles] = useState<SubsidyProfile[]>([]);
   const [accbThisMonth, setAccbThisMonth] = useState<number>(0);
+  const [mccbThisMonth, setMccbThisMonth] = useState<number>(0);
   const [amountTouched, setAmountTouched] = useState(false);
   const [preview, setPreview] = useState<{
     html: string;
@@ -108,13 +109,17 @@ export default function NewReceipt() {
   }, [studentId, comments, amountTouched, descTouched, isRefund, isCash, pending]);
   const blocker = useUnsavedGuard(isDirty && !saving);
 
-  // ACCB lookup whenever student / fee month / fee year changes
+  // ACCB and MCCB lookups whenever student / fee month / fee year changes
   useEffect(() => {
     (async () => {
-      if (!student) { setAccbThisMonth(0); return; }
+      if (!student) { setAccbThisMonth(0); setMccbThisMonth(0); return; }
       const monthIdx = MONTHS.indexOf(month) + 1;
-      const v = await getAccbForMonth(student.id, feeYear, monthIdx);
-      setAccbThisMonth(v);
+      const [accb, mccb] = await Promise.all([
+        getAccbForMonth(student.id, feeYear, monthIdx),
+        getMccbForMonth(student.id, feeYear, monthIdx),
+      ]);
+      setAccbThisMonth(accb);
+      setMccbThisMonth(mccb);
     })();
   }, [student, month, feeYear]);
 
@@ -124,8 +129,8 @@ export default function NewReceipt() {
     const profile = student.subsidy_profile_id == null
       ? null
       : subsidyProfiles.find((p) => p.id === student.subsidy_profile_id) ?? null;
-    return computeFeeBreakdown(student, settings, accbThisMonth, profile);
-  }, [student, settings, accbThisMonth, subsidyProfiles]);
+    return computeFeeBreakdown(student, settings, accbThisMonth, mccbThisMonth, profile);
+  }, [student, settings, accbThisMonth, mccbThisMonth, subsidyProfiles]);
 
   // Auto-fill amount with parent_pays unless the user has typed something
   useEffect(() => {
@@ -146,13 +151,16 @@ export default function NewReceipt() {
       void showAlert("Enter a cash receipt label (e.g. EDC482), or untick Cash payment.");
       return;
     }
+    const bk = (breakdown && !isRefund) ? breakdown : null;
+    const fullySubsidyCovered = Boolean(
+      bk && bk.gross > 0 && bk.parent_pays === 0 && (bk.ccfri > 0 || bk.accb > 0 || bk.mccb > 0),
+    );
     const amt = parseFloat(amount); if (!(amt >= 0)) { void showAlert("Invalid amount."); return; }
-    if (!isRefund && amt <= 0) {
-      void showAlert("Amount must be greater than zero. If this is a refund or credit, tick the Refund checkbox first.", { kind: "warning" });
+    if (!isRefund && amt <= 0 && !fullySubsidyCovered) {
+      void showAlert("Amount must be greater than zero unless CCFRI, ACCB, and/or MCCB fully covers the fee. Check the funding breakdown or enter the parent payment amount.", { kind: "warning" });
       return;
     }
     const pen = parseFloat(pending || "0") || 0;
-    const bk = (breakdown && !isRefund) ? breakdown : null;
     const cashLabelValue = isCash ? cashLabel.trim() : null;
 
     // Refund receipts appear on the parent's CRA tax summary and reduce
@@ -173,7 +181,7 @@ export default function NewReceipt() {
     if (bk && Math.abs(amt - bk.parent_pays) > 0.01) {
       const proceed = await showConfirm(
         `Amount ($${amt.toFixed(2)}) does not match the subsidy breakdown (parent pays $${bk.parent_pays.toFixed(2)}).\n\n` +
-        `When subsidies are enabled, the receipt amount is expected to equal gross − CCFRI − ACCB.\n\n` +
+        `When subsidies are enabled, the receipt amount is expected to equal gross − CCFRI − ACCB − MCCB.\n\n` +
         `If this is intentional (e.g. subsidy not yet on file, or a manual correction), you can proceed anyway — otherwise cancel and issue a Refund receipt, or fix the amount/subsidy figures first.`,
         { title: "Amount doesn't match subsidy breakdown", okLabel: "Proceed anyway", cancelLabel: "Cancel", kind: "warning" }
       );
@@ -204,6 +212,7 @@ export default function NewReceipt() {
         gross_amount: bk ? bk.gross : null,
         ccfri_amount: bk ? bk.ccfri : null,
         accb_amount:  bk ? bk.accb : null,
+        mccb_amount:  bk ? bk.mccb : null,
         void_reason: null,
         voided_at: null,
         issuer_snapshot_json: null,
@@ -233,6 +242,7 @@ export default function NewReceipt() {
         gross_amount: bk ? bk.gross : null,
         ccfri_amount: bk ? bk.ccfri : null,
         accb_amount:  bk ? bk.accb : null,
+        mccb_amount:  bk ? bk.mccb : null,
         cash_receipt_label: cashLabelValue,
       });
       r.id = newId;
@@ -290,6 +300,7 @@ export default function NewReceipt() {
       gross_amount: bk ? bk.gross : null,
       ccfri_amount: bk ? bk.ccfri : null,
       accb_amount:  bk ? bk.accb : null,
+      mccb_amount:  bk ? bk.mccb : null,
       void_reason: null, voided_at: null, issuer_snapshot_json: null,
       cash_receipt_label: isCash ? (cashLabel.trim() || null) : null,
     };
@@ -435,15 +446,18 @@ export default function NewReceipt() {
                 {breakdown.accb > 0 && (
                   <tr><td>ACCB subsidy ({month} {feeYear})</td><td style={{ textAlign: "right", color: "#15803d" }}>−${breakdown.accb.toFixed(2)}</td></tr>
                 )}
+                {breakdown.mccb > 0 && (
+                  <tr><td>MCCB benefit ({month} {feeYear})</td><td style={{ textAlign: "right", color: "#15803d" }}>−${breakdown.mccb.toFixed(2)}</td></tr>
+                )}
                 <tr style={{ borderTop: "1px solid #bfdbfe", fontWeight: 700 }}>
                   <td style={{ paddingTop: 4 }}>Parent pays out-of-pocket</td>
                   <td style={{ textAlign: "right", paddingTop: 4 }}>${breakdown.parent_pays.toFixed(2)}</td>
                 </tr>
               </tbody>
             </table>
-            {breakdown.accb === 0 && student && (
+            {breakdown.accb === 0 && breakdown.mccb === 0 && student && (
               <div style={{ fontSize: 11, color: "#64748b", marginTop: 6 }}>
-                No ACCB on file for {month} {feeYear}. Add it on the Students page → ACCB… if this family qualifies.
+                No ACCB or MCCB funding is on file for {month} {feeYear}. Add it on the Students page if this family qualifies.
               </div>
             )}
           </div>
