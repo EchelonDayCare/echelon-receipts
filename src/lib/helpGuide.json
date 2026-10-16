@@ -1,0 +1,335 @@
+[
+  {
+    "id": "home",
+    "title": "Home and finding features",
+    "routes": ["/"],
+    "keywords": ["home", "dashboard", "features", "help", "modules", "navigation"],
+    "summary": "Home opens the app's modules. The Ask Echelon button stays at the bottom-left of unlocked screens so you can get help without leaving your work.",
+    "steps": ["Choose a module on Home, then use its sidebar to select a task.", "Choose Ask Echelon at the bottom-left for help with the current screen, screenshot questions, or follow-up questions.", "Switch the help panel to Browse help (Works offline) to search instructions without sending anything to Azure.", "Use the Home configuration gear for settings and the lock control when stepping away."],
+    "cautions": ["Some modules require configuration or an optional feature to be enabled.", "The companion explains tasks and opens screens; it never changes records for you."]
+  },
+  {
+    "id": "today",
+    "title": "Today",
+    "routes": ["/students/today"],
+    "keywords": ["today", "daily", "receipt", "payment", "balance"],
+    "summary": "The Students → Today screen is the daily workspace for issuing receipts and reviewing the selected day's activity.",
+    "steps": ["Open Students → Today to review the current day.", "Use Students → New Receipt to record a saved payment and create its receipt."],
+    "cautions": ["A printed cash receipt is not saved to Receipt History or the Annual Ledger.", "Only saved receipts become part of the app's receipt records."]
+  },
+  {
+    "id": "monthly-view",
+    "title": "This Month",
+    "routes": ["/students/month"],
+    "keywords": ["month", "monthly", "fees", "batch", "receipt"],
+    "summary": "Students → This Month provides a monthly view and month-oriented receipt workflow.",
+    "steps": ["Open Students → This Month.", "Choose the relevant month and review the displayed student amounts before proceeding."],
+    "cautions": ["Review the selected month and calculated amounts; this view does not replace receipt-history or accounting verification."]
+  },
+  {
+    "id": "new-receipt",
+    "title": "New Receipt",
+    "routes": ["/students/new"],
+    "keywords": ["new receipt", "payment", "print", "email", "cash", "CCFRI", "ACCB", "MCCB", "receipt number", "fiscal numbering", "duplicate"],
+    "summary": "Create a receipt under Students → New Receipt by choosing a student, receipt details, amount, payment method, and date.",
+    "steps": ["Open Students → New Receipt and select a student.", "Check the Receipt Date, description, amount, payment method, and any pending amount before saving.", "For non-cash payments, use Save & Print, Save & Email, or Save Only. Preview does not save a receipt.", "Non-cash numbers are based on Receipt Date: fiscal-year code, calendar month, and three-digit sequence. For example, 2709001 is FY27, September, receipt 001; FY27 runs September 2026 through August 2027.", "For Cash payment, use Preview or Print & Email instead of the disabled save actions."],
+    "cautions": ["Cash mode is print/email-only: it creates no Receipt History or Annual Ledger entry, no auto-saved PDF, and no receipt email-history entry.", "Manually edited non-cash receipt numbers must be unique; changing the date can change the suggested number.", "A later receipt does not automatically clear an earlier receipt's pending amount.", "When subsidy tracking is enabled, the parent amount is the gross fee less applied CCFRI, ACCB, and MCCB. A zero-parent-payment receipt requires a positive fee fully covered by recorded reductions and benefits.", "Email requires configured mail settings and a usable recipient address."]
+  },
+  {
+    "id": "attendance",
+    "title": "Attendance",
+    "routes": ["/students/attendance"],
+    "keywords": ["attendance", "open day", "closed", "sign in", "sign out", "sheet"],
+    "summary": "Students → Attendance records monthly child attendance and provides attendance-sheet and sign-in/sign-out print workflows.",
+    "steps": ["Open Students → Attendance and select the year and month.", "Click a day cell to cycle Present, Absent, and blank.", "Use Upload Sheet to import a scan and review the extracted grid before saving.", "Use Centre Calendar to mark a day open or closed."],
+    "cautions": ["Review OCR/imported attendance before saving.", "Monthly sign-in sheets skip weekends and configured statutory holidays."]
+  },
+  {
+    "id": "receipt-history",
+    "title": "Receipt History",
+    "routes": ["/students/history"],
+    "keywords": ["history", "receipt", "void", "email", "print", "archive"],
+    "summary": "Students → Receipt History lets you find, open, print, email, and void saved receipts.",
+    "steps": ["Open Students → Receipt History.", "Find and open the receipt to review its details.", "Use Print or Email for the available receipt actions."],
+    "cautions": ["Voiding records a void status and reason; it does not erase the need to retain accurate financial records.", "Printed cash receipts do not appear here because they are not saved."]
+  },
+  {
+    "id": "students",
+    "title": "Student Roster",
+    "routes": ["/students/roster", "/students"],
+    "keywords": ["student", "roster", "add", "edit", "contact", "MCCB", "ACCB"],
+    "summary": "Students → Roster is where student profiles and related subsidy information are managed.",
+    "steps": ["Open Students → Roster.", "Choose Add Student or open an existing student to edit.", "Enter profile and contact details, then save.", "Use the student row's related actions for attendance, ACCB, or MCCB records when available."],
+    "cautions": ["Student hard deletion can remove associated records and requires careful confirmation.", "MCCB is limited to $750 per child per month and cannot exceed the remaining fee after CCFRI and ACCB."]
+  },
+  {
+    "id": "annual-receipts",
+    "title": "Annual Tax Receipts",
+    "routes": ["/students/annual"],
+    "keywords": ["annual", "tax", "CRA", "calendar year", "subsidy receipt"],
+    "summary": "Students → Annual Tax Receipts generates per-student annual receipt PDFs and, when applicable, subsidy-related receipts.",
+    "steps": ["Open Students → Annual Tax Receipts.", "Select the calendar year and choose the student's receipt.", "Enable Monthly Breakdown if you want the month-by-month table."],
+    "cautions": ["Annual tax receipts use calendar years, not the September–August fiscal year.", "Verify tax documents and eligibility with an appropriate professional; the app does not provide tax advice."]
+  },
+  {
+    "id": "deposits",
+    "title": "Bank Deposits",
+    "routes": ["/students/deposits"],
+    "keywords": ["deposit", "bank", "cheque", "cash", "slip"],
+    "summary": "Students → Bank Deposits groups selected receipts into a printable bank-deposit slip.",
+    "steps": ["Open Students → Bank Deposits and choose New Deposit.", "Select the receipts to include and enter the requested bank details.", "Save, then print the deposit slip."],
+    "cautions": ["A deposit slip is a supporting printout; confirm the actual deposit with your bank records."]
+  },
+  {
+    "id": "aging",
+    "title": "Aging (A/R)",
+    "routes": ["/reports/aging", "/students/aging"],
+    "keywords": ["aging", "A/R", "outstanding", "pending", "settle", "family balance"],
+    "summary": "Aging (A/R) groups saved pending balances by family and age. Settle clears a student's currently outstanding receipts; it is not a payment-entry action.",
+    "steps": ["Open Reports → Aging (A/R), or Students → Aging.", "Review the As of date, family, outstanding amount, receipt count, and aging buckets. Check payment/source records before deciding a balance should be cleared.", "Choose Settle on the intended family's row.", "Read the confirmation carefully. Choose Yes, mark settled only if ALL that student's currently outstanding receipt balances should be cleared; otherwise choose Cancel.", "Return to Monthly Revenue and refresh or reopen the report to see the updated pending list."],
+    "cautions": ["Settle clears every currently pending non-void receipt for that student, not just one visible amount or one receipt; the displayed As of date does not limit that settlement.", "It does not create a payment, receipt, bank deposit, or additional revenue. Do not settle a genuine unpaid balance merely to hide it.", "Settlement sets the saved pending amount to zero and records a settlement time. Past aging views may therefore lose the former outstanding amount; do not rely on claims that historical aging remains accurate.", "The AI companion cannot settle balances. You must review and confirm the action yourself."]
+  },
+  {
+    "id": "staff-hours",
+    "title": "Staff Hours",
+    "routes": ["/staff/hours"],
+    "keywords": ["staff", "hours", "timesheet", "quick add", "payroll", "OCR", "ambiguous column", "map staff", "unresolved", "confidence", "import"],
+    "summary": "Staff → Hours records staff members and their working hours.",
+    "steps": ["Open Staff → Hours and select the year and month.", "Use + Add staff to create a staff profile if needed.", "Upload the sign-in sheet, or choose Import from Downloads for the newest matching scan, and wait for the review preview.", "Review the extracted in/out times, staff names, confidence warnings, manual edits, and hour flags, then import the intended rows.", "If a staff column cannot be identified reliably, verify the source sheet and add missing hours manually rather than importing under an uncertain name.", "For a single day instead, use Quick add hours, select the staff member and date, enter the times, and review the target month before adding."],
+    "cautions": ["Unresolved staff rows are skipped during import. Review warning and import counts rather than assuming all scanned rows were saved.", "Recognizing a staff name does not prove the extracted times are correct. Verify payroll totals against source records.", "Staff Hours must be enabled under Configuration → Staff."]
+  },
+  {
+    "id": "staff-schedule",
+    "title": "Staff Schedule",
+    "routes": ["/staff/schedule"],
+    "keywords": ["schedule", "shift", "staff", "publish", "delete shifts"],
+    "summary": "Staff → Schedule is used to build, edit, and publish staff shifts.",
+    "steps": ["Open Staff → Schedule and select the week.", "Choose a cell to add or edit a shift.", "Review the week's assignments and use Publish Week when ready."],
+    "cautions": ["Published weeks lock changes.", "The AI text panel can delete shifts; confirm the target staff member and week before accepting a bulk-delete action."]
+  },
+  {
+    "id": "staff-credentials",
+    "title": "Staff Credentials",
+    "routes": ["/staff/credentials", "/reports/credentials"],
+    "keywords": ["staff", "credentials", "expiry", "certificate", "compliance"],
+    "summary": "Staff Credentials tracks staff certificates and expiry dates; a compliance view is also available under Reports.",
+    "steps": ["Open Staff → Credentials.", "Select a staff member and enter or update credential details and expiry dates.", "Use Reports → Staff Credentials to review compliance."],
+    "cautions": ["Confirm renewal requirements and dates with the issuing authority; the report is a tracking aid."]
+  },
+  {
+    "id": "staff-meetings",
+    "title": "Meeting Notes",
+    "routes": ["/staff/meetings"],
+    "keywords": ["meeting", "notes", "actions", "attendees", "AI"],
+    "summary": "Staff → Meeting Notes stores meeting details, notes, attendees, and action items.",
+    "steps": ["Open Staff → Meeting Notes and choose New Meeting.", "Enter the date, title, agenda, attendees, notes, and actions.", "Review any AI-generated draft or amendment before saving."],
+    "cautions": ["AI drafting can be inaccurate; review every generated or amended note before keeping it."]
+  },
+  {
+    "id": "reports-overview",
+    "title": "Reports Overview",
+    "routes": ["/reports/overview"],
+    "keywords": ["reports", "overview", "dashboard", "compliance"],
+    "summary": "Reports → Overview provides a starting point for the app's reporting and compliance screens.",
+    "steps": ["Open Reports → Overview.", "Choose a report from the Reports navigation for the subject and period you need."],
+    "cautions": ["Report definitions and periods differ; check each report's displayed filters before comparing totals."]
+  },
+  {
+    "id": "monthly-reports",
+    "title": "Monthly Revenue",
+    "routes": ["/reports/monthly", "/students/reports"],
+    "keywords": ["monthly revenue", "pending", "outstanding fees", "outstanding items", "receipt totals", "fiscal year", "CSV", "clear balance"],
+    "summary": "Reports → Monthly Revenue summarizes saved receipt activity and supports period selection and exports.",
+    "steps": ["Open Reports → Monthly Revenue, or Students → Reports.", "Use Mode to select Fiscal (Sep–Aug) or Calendar (Jan–Dec), and the year arrows to choose the reporting year.", "Review Receipts, Total Collected, Outstanding Items, and the monthly totals. Export CSV downloads the report.", "The outstanding list at the bottom contains non-void saved receipts in the selected year with a pending amount greater than zero. A number there is a saved unpaid amount, not necessarily a new or duplicate charge.", "If a balance was already paid or was entered incorrectly, first verify the source receipts. To clear an entire student's currently outstanding balances, open Aging (A/R), choose Settle for that family, and review the confirmation."],
+    "cautions": ["A later payment receipt does not automatically clear an earlier saved pending amount. Pending balances are not automatically netted against later receipts.", "The quarter selector applies to the quarterly reconciliation subsection, not the full-year totals or outstanding list.", "Settle affects all currently outstanding receipts for a student, not only the year or quarter shown here. It records no new payment or revenue.", "Only saved receipts are included; cash print-only receipts are not recorded in the ledger."]
+  },
+  {
+    "id": "subsidy-reconciliation",
+    "title": "Subsidy Reconciliation",
+    "routes": ["/reports/subsidy"],
+    "keywords": ["subsidy", "CCFRI", "ACCB", "MCCB", "reconciliation"],
+    "summary": "Reports → Subsidy Reconciliation summarizes CCFRI, ACCB, MCCB, and parent-paid amounts from recorded receipts.",
+    "steps": ["Open Reports → Subsidy Reconciliation.", "Select a calendar or fiscal period and review the monthly breakdown.", "Compare the figures with program statements and source records."],
+    "cautions": ["The report reflects amounts applied to saved receipts and is not an approval, eligibility decision, or government reconciliation."]
+  },
+  {
+    "id": "agm-package",
+    "title": "AGM / Board Package",
+    "routes": ["/reports/agm"],
+    "keywords": ["AGM", "board", "minutes", "fiscal year", "draft"],
+    "summary": "Reports → AGM / Board Package supports preparing annual meeting materials and minutes.",
+    "steps": ["Open Reports → AGM / Board Package.", "Choose Board Package (numbers) for the annual figures, or AGM Minutes (document) to edit the meeting document.", "Choose the relevant year or period, then fill in the meeting details and document sections.", "In list fields such as Attendance and Future Agenda Items, enter one item per line. Spacebar and Enter work normally while editing; blank lines are omitted from the preview and export.", "Review the full draft, source figures, and AI-generated text before saving or exporting. Save edits before switching tabs."],
+    "cautions": ["AI-generated or carried-forward text requires human review; confirm minutes and financial figures before circulation.", "Older roster counts may use today's live roster rather than a fiscal-year-end snapshot; read report warnings."]
+  },
+  {
+    "id": "enrollment-report",
+    "title": "Enrollment Roster",
+    "routes": ["/reports/enrollment"],
+    "keywords": ["enrollment", "roster", "students", "report"],
+    "summary": "Reports → Enrollment Roster provides a report view of student enrollment.",
+    "steps": ["Open Reports → Enrollment Roster.", "Choose the available year or filters and review the roster."],
+    "cautions": ["Check the report's selected date/year when comparing enrollment counts."]
+  },
+  {
+    "id": "attendance-report",
+    "title": "Attendance Analytics",
+    "routes": ["/reports/attendance"],
+    "keywords": ["attendance", "analytics", "absence", "report"],
+    "summary": "Reports → Attendance Analytics summarizes recorded child attendance.",
+    "steps": ["Open Reports → Attendance Analytics.", "Select the available period and review the displayed attendance summary."],
+    "cautions": ["Analytics are only as complete as the attendance data entered and reviewed in Students → Attendance."]
+  },
+  {
+    "id": "drill-log",
+    "title": "Drill Log",
+    "routes": ["/reports/drills"],
+    "keywords": ["drill", "fire drill", "emergency", "log", "report"],
+    "summary": "Reports → Drill Log is where drill records can be reviewed and maintained.",
+    "steps": ["Open Reports → Drill Log.", "Use the available controls to record or review a drill and its details."],
+    "cautions": ["Follow applicable licensing and emergency-planning requirements; the log is a recordkeeping tool."]
+  },
+  {
+    "id": "expenses",
+    "title": "Expenses",
+    "routes": ["/expenses/dashboard", "/expenses/list"],
+    "keywords": ["expense", "expenses", "vendor", "category", "dashboard"],
+    "summary": "The Expenses module provides an expense dashboard and a list for reviewing recorded expenses.",
+    "steps": ["Open Expenses → Dashboard for a summary.", "Open Expenses → All Expenses to search or review individual entries.", "Use Add Expense to enter a new transaction."],
+    "cautions": ["Verify entries against invoices, receipts, and bank statements; the app is not an accounting or tax authority."]
+  },
+  {
+    "id": "expense-entry",
+    "title": "Add Expense",
+    "routes": ["/expenses/new"],
+    "keywords": ["add expense", "edit expense", "transaction", "receipt"],
+    "summary": "Expenses → Add Expense records or edits an expense entry.",
+    "steps": ["Open Expenses → Add Expense.", "Enter the date, amount, category, payee, and supporting details.", "Review and save the entry."],
+    "cautions": ["Check the source document and date before saving; this guide cannot determine tax deductibility."]
+  },
+  {
+    "id": "recurring-expenses",
+    "title": "Recurring Bills",
+    "routes": ["/expenses/recurring"],
+    "keywords": ["recurring", "bill", "monthly expense", "schedule"],
+    "summary": "Expenses → Recurring Bills manages recurring expense definitions.",
+    "steps": ["Open Expenses → Recurring Bills.", "Create or edit the recurring bill details and schedule.", "Review generated expense entries rather than assuming a bill was paid automatically."],
+    "cautions": ["A recurring schedule is not proof that a payment occurred; verify actual transactions."]
+  },
+  {
+    "id": "expense-import",
+    "title": "Import Statement",
+    "routes": ["/expenses/import"],
+    "keywords": ["bank statement", "import", "AI", "expense", "CSV"],
+    "summary": "Expenses → Import Statement uses an AI-assisted flow to extract transactions from a statement.",
+    "steps": ["Open Expenses → Import Statement.", "Choose the statement file and run the import.", "Review and correct every extracted transaction before importing it."],
+    "cautions": ["Statement images or documents can contain sensitive financial information; share only files you are authorized to process.", "AI extraction can omit, duplicate, or misread entries; verify against the original statement."]
+  },
+  {
+    "id": "expense-reports",
+    "title": "Expense Reports",
+    "routes": ["/expenses/reports"],
+    "keywords": ["expense report", "P&L", "profit", "loss", "export"],
+    "summary": "Expenses → Expense Reports summarizes expense data for review.",
+    "steps": ["Open Expenses → Expense Reports.", "Select the reporting period and review the categories and totals.", "Export or print using the available controls."],
+    "cautions": ["The app's report is an operational summary, not a substitute for reviewed financial statements or tax advice."]
+  },
+  {
+    "id": "communications",
+    "title": "Communications",
+    "routes": ["/communications/compose", "/communications/templates", "/communications/history", "/communications/directory", "/communications/scheduled"],
+    "keywords": ["communications", "group email", "template", "directory", "scheduled"],
+    "summary": "Communications provides group email composition, templates, message history, a contact directory, and scheduled messages.",
+    "steps": ["Open Communications and select Compose, Templates, History, Directory, or Scheduled.", "Review recipient selection and message content before sending or scheduling.", "Use History to review sent messages."],
+    "cautions": ["Check recipients and message content carefully before sending; email may disclose personal information."]
+  },
+  {
+    "id": "configuration",
+    "title": "Configuration",
+    "routes": ["/config/identity", "/config/email", "/config/folders", "/config/staff", "/config/holidays", "/config/notifications", "/config/waitlist", "/config/about"],
+    "keywords": ["settings", "configuration", "identity", "email", "Azure AI", "backup", "security"],
+    "summary": "Configuration contains Identity, Receipts & Email, Folders, Staff, Backups, Security, Stat Holidays, Notifications, Waitlist, and About settings.",
+    "steps": ["Open Configuration from the app navigation.", "Choose the relevant section.", "The Ask Echelon enable toggle and Azure AI Foundry key are under Configuration → Staff; enter or update the key there and save.", "Review changes before saving."],
+    "cautions": ["Ask Echelon is disabled when its setting is switched off.", "The Azure AI key is stored in the OS keychain; never share it in a question, screenshot, or message."]
+  },
+  {
+    "id": "ask-echelon",
+    "title": "Ask Echelon",
+    "routes": ["/ask"],
+    "keywords": ["Ask Echelon", "help", "question", "screenshot", "data"],
+    "summary": "The bottom-left Ask Echelon panel provides help, screenshots, and conversation. The full Ask Echelon page remains available for data questions, result tables, charts, CSV exports, and saved reports.",
+    "steps": ["Choose Ask Echelon at the bottom-left. Type in your own words, or choose a suggested question, review it, and choose Send question. Follow-up questions stay in the same conversation.", "Open Privacy & options beside Helping with to review or disable the screen and selected-date context. Optional totals are off by default and include only saved receipt totals or an active-roster count on supported screens.", "Choose Add screenshot or paste up to two PNG/JPEG screenshots, no larger than 4 MB each. Review or remove them, then confirm permission before sending. You can send just a screenshot; the app will ask for an explanation automatically.", "To crop, choose Crop or the screenshot preview, drag across the area you want to keep, and choose Use selected area. Fine-tune with the keyboard offers precise coordinates if needed. Only the retained area is sent.", "Choose Browse help (Works offline) to search the bundled instructions. Use the Show filter to narrow the topics. Open buttons go directly to the relevant screen.", "Answers offer Copy answer, an Open button for the relevant screen, Related instructions, and About this answer for sources and any saved totals.", "Choose Data questions & saved reports for the existing data-query page. New chat asks before clearing the conversation and screenshots. Stop cancels waiting for an answer without clearing earlier conversation."],
+    "cautions": ["Your question and up to five recent exchanges are sent to Azure when you ask. Typed text and screenshot pixels are not automatically redacted. Never include keys, PINs, recovery codes, or information you may not share.", "The help companion cannot make changes, run arbitrary queries, or inspect individual records. The separate data-question page has its own read-only query and redaction behavior.", "Screenshot observations are not verified database facts. Old images are not resent in follow-ups; reattach an image to inspect it again.", "Chat and image drafts are in memory only and clear on app lock; Azure retention follows your service configuration. Stop ignores a late response but cannot recall a request already sent.", "Automatic snapshots never include names or contacts. They are unavailable on unrelated screens, and do not verify individual accounts or historical balances."]
+  },
+  {
+    "id": "waitlist",
+    "title": "Waitlist",
+    "routes": ["/waitlist", "/waitlist/list", "/waitlist/enrolled", "/waitlist/archived", "/waitlist/settings"],
+    "keywords": ["waitlist", "application", "enrollment", "applicant"],
+    "summary": "The Waitlist area and its Configuration section support reviewing and managing waitlist-related information and setup.",
+    "steps": ["Open Waitlist from the app navigation to review its available views.", "Use Configuration → Waitlist for waitlist settings or connection setup."],
+    "cautions": ["Confirm contact and enrollment details with the source application before acting on an applicant."]
+  },
+  {
+    "id": "vault",
+    "title": "Vault",
+    "routes": ["/vault"],
+    "keywords": ["vault", "documents", "library", "files"],
+    "summary": "Vault is the app's document library.",
+    "steps": ["Open Vault from the app navigation.", "Use the library controls to browse and manage available documents."],
+    "cautions": ["Confirm that documents are stored in the intended location and avoid sharing sensitive files unintentionally."]
+  },
+  {
+    "id": "organizer",
+    "title": "Organizer",
+    "routes": ["/organizer", "/organizer/calendar", "/organizer/notes"],
+    "keywords": ["organizer", "calendar", "notes", "events"],
+    "summary": "Organizer provides a dashboard, calendar, and notes workspace.",
+    "steps": ["Open Organizer from the app navigation.", "Choose the calendar or notes view and use its available controls to manage entries."],
+    "cautions": ["Review AI-assisted event details before saving or sharing."]
+  },
+  {
+    "id": "graduation",
+    "title": "Graduation Day",
+    "routes": ["/graduation"],
+    "keywords": ["graduation", "class reel", "slides", "video", "photos"],
+    "summary": "Graduation Day is a multi-step workflow for year-end class and child videos, slides, name cards, and slide-image export.",
+    "steps": ["Open Graduation Day, select the graduation year, and choose Choose folder.", "Mark graduating students and enter the teacher notes that should appear in their slides.", "Choose Set up folders (or Re-check / update folders). Add group photos and each child's photos to the generated folders; review the folder instructions in the app.", "Choose Run preflight to check inputs. Use Slides only, Per-child only, Reel only, Class reel, or Render everything for the output you need.", "In Class reel settings, select included children, arrange their order, and review the estimated duration.", "After building the deck, use Export slides as PNG or JPEG for slide images. Check the outputs before emailing reels to parents."],
+    "cautions": ["Confirm photo permissions and recipients before exporting or emailing child images.", "Slide-image export requires LibreOffice. Export/render jobs may take time; use the displayed progress and cancellation controls.", "Class reel and Reel only are different outputs: the former assembles included children's segments, while the latter renders the group-photo reel."]
+  },
+  {
+    "id": "website",
+    "title": "Website",
+    "routes": ["/website", "/website/assets", "/website/gallery", "/website/gallery-photos", "/website/gallery-videos", "/website/tour-videos", "/website/preview", "/website/history", "/website/publish", "/website/settings"],
+    "keywords": ["website", "publish", "preview", "gallery", "GitHub", "SEO"],
+    "summary": "Website provides content editing, assets, preview, version history, publishing, and GitHub connection settings.",
+    "steps": ["Open Website and choose the page or configuration section to edit.", "Review the preview and version history before publishing.", "Use Publish only after checking the final site content."],
+    "cautions": ["Publishing changes the public website; verify content, images, and links before publishing.", "Check permissions before publishing identifiable photos or personal information."]
+  },
+  {
+    "id": "backups",
+    "title": "Backup and restore",
+    "routes": ["/config/backups"],
+    "keywords": ["backup", "restore", "cloud", "email", "encryption", "passphrase", "local copy"],
+    "summary": "Configuration → Backups manages encrypted email backups, a local safety copy, and restoring a backup file.",
+    "steps": ["Open Configuration → Backups. Confirm the backup email recipient and mail configuration.", "Under Backup encryption, enter and confirm a passphrase and choose Set passphrase. Store it safely outside the app.", "Choose Back up to email now for an immediate emailed backup, or Back up to this computer for a local copy.", "For a restore, choose Restore from backup file…, select the correct backup, and provide its original passphrase if encrypted. Review the replacement warning before confirming; the app restarts to apply a staged restore."],
+    "cautions": ["Restoring replaces this computer's data. A safety copy is created first, but confirm the file and intended records before proceeding.", "Changing the current passphrase does not change existing encrypted backups: older files still require their original passphrase.", "The AI companion cannot create or restore backups and must never be given your passphrase."]
+  },
+  {
+    "id": "security",
+    "title": "PIN, lock and recovery",
+    "routes": ["/config/security"],
+    "keywords": ["security", "PIN", "lock", "unlock", "recovery code", "auto lock"],
+    "summary": "Configuration → Security manages PIN protection, locking, and recovery-code actions.",
+    "steps": ["Open Configuration → Security to review the current protection state.", "Use the available PIN setup or Change PIN… action as appropriate.", "Use Create recovery code… if offered, and store the resulting code securely outside the app.", "Use Lock now or the Home lock control before leaving the computer. Unlock normally with your PIN or supported recovery flow."],
+    "cautions": ["Never paste a PIN, recovery code, Azure key, or backup passphrase into AI help or attach a screenshot showing one.", "A recovery code can unlock protected data. Regenerating it invalidates the previous code; keep the current one safe.", "Locking unmounts the help companion and clears its in-memory chat and screenshot drafts."]
+  },
+  {
+    "id": "notifications",
+    "title": "Notifications",
+    "routes": ["/notifications"],
+    "keywords": ["notifications", "alerts", "history", "system"],
+    "summary": "Notifications displays the app's notification history and system notices.",
+    "steps": ["Open Notifications from the app navigation.", "Review the category and details of the notice and follow its linked section when available."],
+    "cautions": ["A notice is informational; verify the underlying state in the related screen."]
+  }
+]

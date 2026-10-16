@@ -4,6 +4,7 @@ import { getSettings } from "../lib/db";
 import { h } from "../lib/html";
 import { printHtmlDocument } from "../lib/print";
 import { todayLocalIso } from "../lib/localDate";
+import { useHelpContext } from "../hooks/useHelpContext";
 
 function todayIso() { return todayLocalIso(); }
 
@@ -13,6 +14,7 @@ export default function AgingReportScreen() {
   const [daycareName, setDaycareName] = useState<string>("");
   const [settlingId, setSettlingId] = useState<number | null>(null);
   const [confirmSettle, setConfirmSettle] = useState<{ studentId: number; name: string; total: number } | null>(null);
+  useHelpContext("Aging (A/R)", { as_of: asOf });
 
   async function refresh() {
     setRep(await computeAging(asOf));

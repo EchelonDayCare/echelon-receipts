@@ -3,6 +3,7 @@
 // the paper doesn't capture it either. See /reports/attendance for the
 // analytics view (centre-wide + per-child).
 import { useEffect, useMemo, useState } from "react";
+import { useHelpContext } from "../hooks/useHelpContext";
 import { useSearchParams } from "react-router-dom";
 import { open } from "@tauri-apps/plugin-dialog";
 import { readFile } from "@tauri-apps/plugin-fs";
@@ -59,6 +60,7 @@ export default function MonthlyAttendance() {
   })();
   const [year, setYear] = useState(start.year);
   const [month, setMonthState] = useState(start.month);
+  useHelpContext("Monthly Attendance", { year: String(year), month: String(month) });
   const [cells, setCells] = useState<MonthCell[]>([]);
   const [calendar, setCalendar] = useState<CalendarDay[]>([]);
   const [daycareName, setDaycareName] = useState("");

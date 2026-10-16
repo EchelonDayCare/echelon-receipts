@@ -11,6 +11,7 @@ import {
 } from "../lib/askEchelon";
 import { getSettings, setSettings } from "../lib/db";
 import type { SettingsMap } from "../types";
+import { openHelp } from "../lib/helpCompanion";
 
 const EXAMPLE_QUESTIONS = [
   "How many kids attended more than 15 days last month?",
@@ -192,8 +193,11 @@ export default function AskEchelon() {
               <span style={{ fontSize: 28 }}>🤖</span> Ask Echelon
             </h1>
             <p style={{ margin: "6px 0 0", color: "#475569", fontSize: 14 }}>
-              Ask anything about your daycare — attendance, revenue, staff, credentials, expenses.
+              Ask data questions about your daycare — attendance, revenue, staff, credentials, expenses.
             </p>
+            <button type="button" className="btn secondary" style={{ marginTop: 12 }} onClick={() => openHelp(question.trim() || undefined)}>
+              Help, screenshots & follow-up questions
+            </button>
           </div>
           <label style={{ display: "flex", gap: 8, alignItems: "center", cursor: "pointer", fontSize: 12, color: "#475569", background: "rgba(255,255,255,.7)", padding: "6px 10px", borderRadius: 999, border: "1px solid rgba(255,255,255,.9)" }}>
             <input

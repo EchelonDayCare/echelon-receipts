@@ -4,6 +4,19 @@ All notable changes shipped as a DMG. Only entries the owner has approved
 for release are listed here — "code-complete, awaiting ship approval" work
 lives in the session plan.md until it ships.
 
+## v3.31.0 — Ask Echelon contextual help
+
+- Added Ask Echelon on every unlocked screen, with screen-specific suggestions,
+  follow-up questions, readable answers, copy, and direct navigation.
+- Added a searchable offline feature guide with topic filters.
+- Added screenshot questions with preview, drag-to-crop, precise keyboard
+  controls, and explicit permission before sending images to Azure.
+- Added optional, fixed read-only receipt totals and roster counts on supported
+  screens; sharing choices and answer evidence remain visible.
+- Added confirmed chat clearing and Stop without losing the current draft.
+- Preserved the existing data-question page, charts, CSV exports, and saved reports.
+- Help cannot edit records or take actions; no screenshots are captured automatically.
+
 ## v3.30.0 — AGM Minutes text entry fix
 
 - Fixed Spacebar and Enter appearing not to work while typing in AGM Minutes

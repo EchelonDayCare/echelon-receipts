@@ -4,6 +4,7 @@ mod email;
 mod errlog;
 mod azure_ai;
 mod ask_echelon;
+mod help_companion;
 mod consensus;
 mod consensus_v2;
 mod inbox;
@@ -160,6 +161,7 @@ pub fn run() {
             azure_ai::extract_visa_statement,
             azure_ai::extract_credential,
             ask_echelon::ask_echelon,
+            help_companion::ask_help_companion,
             consensus::extract_timesheet_consensus,
             consensus_v2::extract_timesheet_grid,
             consensus_v2::revalidate_row,

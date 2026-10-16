@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { useHelpContext } from "../hooks/useHelpContext";
 import { listReceipts, monthlyTotals, subsidyReconciliation, getSettings,
   type SubsidyMonthRow } from "../lib/db";
 import type { Receipt, SettingsMap } from "../types";
@@ -23,6 +24,9 @@ export default function Reports() {
   const [subsidy, setSubsidy] = useState<SubsidyMonthRow[]>([]);
   const [quarter, setQuarter] = useState<Quarter>(fiscalQuarterOfMonth(now.getMonth() + 1));
   const [modeLoaded, setModeLoaded] = useState(false);
+  useHelpContext("Monthly Revenue", modeLoaded ? {
+    year: String(year), year_mode: mode, quarter: String(quarter),
+  } : {});
 
   useEffect(() => {
     (async () => {

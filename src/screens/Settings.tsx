@@ -830,8 +830,20 @@ export default function Settings() {
 
         {/* Azure AI key lives outside the staff toggle — it also powers
             the Student attendance sheet OCR and the Visa statement import. */}
+        <div className="field">
+          <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            <input type="checkbox" checked={s.ask_echelon_enabled !== "0"}
+              onChange={(event) => setS({ ...s, ask_echelon_enabled: event.target.checked ? "1" : "0" })} />
+            Ask Echelon AI help and data questions
+          </label>
+          <small style={{ color: "var(--muted)" }}>
+            Uses the Azure AI key below. Questions and recent conversation are sent to Azure only when you ask.
+            Screenshots require separate confirmation; read-only aggregate totals are optional.
+            The offline feature guide stays available when AI is off.
+          </small>
+        </div>
         <div className="field" style={{ marginBottom: 14 }}>
-          <label>Azure AI Foundry key<HelpTip text="Required for AI features: staff sign-in sheet OCR, student attendance sheet OCR, and Visa/credit-card statement import. Stored in the macOS keychain — never in the database or any backup email." /></label>
+          <label>Azure AI Foundry key<HelpTip text="Required for Ask Echelon, screenshot help, staff sign-in sheet OCR, student attendance sheet OCR, and Visa/credit-card statement import. Stored in the OS keychain, never in the database or backups." /></label>
           <input
             type="password"
             placeholder={hasAzureKey ? "•••••••• (stored in OS keychain) — enter a new key to replace" : "Paste your Azure AI Foundry key"}

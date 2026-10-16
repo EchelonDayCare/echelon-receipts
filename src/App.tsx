@@ -67,6 +67,7 @@ import LockButton from "./components/LockButton";
 import WebsiteButton from "./components/WebsiteButton";
 import DataCleanupButton from "./components/DataCleanupButton";
 import SettingsFab from "./components/SettingsFab";
+import HelpCompanion from "./components/HelpCompanion";
 import AlertDot from "./components/AlertDot";
 import { HomeAlertsProvider, useHomeAlerts } from "./hooks/useHomeAlerts";
 import { startScheduler, stopScheduler, runScanSoon } from "./lib/notifications/scheduler";
@@ -652,6 +653,7 @@ export default function App() {
       <HashRouter>
         <HomeAlertsProvider>
           <PromptHost />
+          <HelpCompanion />
           <Routes>
             <Route path="/*" element={<Shell logo={logo} name={name} staffEnabled={staffEnabled} />} />
           </Routes>

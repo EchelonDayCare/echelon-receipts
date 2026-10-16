@@ -11,6 +11,58 @@ Built with **Tauri + React + TypeScript + SQLite**.
 - **Students** — per-year roster; import from Excel (`Student Name, Father's Name, Mother's Name, Email ID`); add/edit/inactivate manually.
 - **Reports** — monthly totals, outstanding balances, CSV export.
 - **Settings** — daycare name/address/email/phone, logo & signature images, default fee, next receipt #.
+- **Ask Echelon help** — a global side panel with contextual AI guidance, screenshot questions,
+  follow-up conversation, and a searchable offline feature guide. Existing data questions,
+  charts, CSV exports and saved reports remain on the Ask Echelon page.
+
+## Help with this screen
+
+Choose **Ask Echelon** at the bottom-left of any unlocked screen. Ask a question or switch
+to **Browse help** to search instructions without an Azure connection. Suggested questions
+match the current screen and fill in the question box for you to review before sending.
+Guidance includes important side effects, such as what clearing an outstanding balance does.
+AI suggestions cannot settle balances, edit records, send messages, or run other actions.
+Navigation buttons open only screens listed in the bundled guide.
+
+AI help uses the existing Azure AI key under **Configuration → Staff**. Enable
+**Ask Echelon AI help and data questions**, add the key if needed, then **Save Settings**.
+The Azure deployment must support image input for screenshot questions; a failed image
+request is reported rather than silently falling back to text.
+
+Before asking, expand **Privacy & options** beside **Helping with** to review the current screen and any
+explicitly supported date/year filters. The app never captures your screen, reads form fields,
+or attaches student names automatically. Questions and up to five recent exchanges go to Azure;
+text you type is not automatically redacted. Aggregate data access is **off by default** and uses
+fixed, read-only queries rather than model-generated SQL. Automatic snapshots are limited to
+saved receipt totals on receipt/report screens and active-student counts on the roster; use the
+existing Data questions page for other records. When enabled, the answer shows the
+exact totals and scope under **About this answer**. Totals are not a verification of a particular
+student's account, screenshot, or historical balance.
+
+Attach or paste up to two PNG/JPEG screenshots (4 MB each). Preview, crop, or remove them
+before confirming the upload. To crop, drag over the area you want to keep and choose
+**Use selected area**. **Fine-tune with the keyboard** keeps precise coordinates available
+without requiring them for normal use. Screenshot pixels are **not** automatically redacted. Cropped
+images are re-encoded, resized to at most 1600 pixels on the longest side, and only the retained
+area is sent. Images are attached to that question only; reattach an image to inspect it again.
+Chat and screenshot drafts are held in memory, not saved as local chat files; Azure processing
+and retention follow your service configuration. **New chat** asks before clearing the conversation
+and draft images. Locking the app clears them as well. **Stop** ignores a late answer without
+losing your previous conversation or current question, but cannot recall an Azure request already sent.
+
+Answers use readable headings, lists and emphasis, with **Copy answer**, direct **Open** navigation,
+and related help instructions. Model-provided links and images are never interactive.
+Use the follow-up suggestions or type your own question to continue. A screenshot can be sent
+without typing a question: after image consent, **Send question** asks for an explanation automatically.
+Ctrl/Command+Enter sends; Enter on its own adds a new line.
+
+### Maintaining the feature guide
+
+`src/lib/helpGuide.json` is the single bundled source for offline help and the Rust AI prompt.
+Keep instructions, limitations, button labels and concrete navigation routes aligned with code
+when changing a feature. The backend reports the compiled app version alongside each answer.
+The guide tests check unique topic IDs and static navigation destinations; Rust tests check
+request bounds, image validation, read-only evidence, privacy defaults and response topic filtering.
 
 ## How receipts look
 

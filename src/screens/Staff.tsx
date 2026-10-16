@@ -1,5 +1,6 @@
 import { showAlert, showConfirm, showPrompt } from "../lib/dialogs";
 import { useEffect, useMemo, useState } from "react";
+import { useHelpContext } from "../hooks/useHelpContext";
 import { open } from "@tauri-apps/plugin-dialog";
 import { readFile } from "@tauri-apps/plugin-fs";
 import { invoke } from "@tauri-apps/api/core";
@@ -52,6 +53,7 @@ export default function StaffScreen() {
   const [staff, setStaff] = useState<Staff[]>([]);
   const [year, setYear] = useState(today.getFullYear());
   const [month, setMonth] = useState(today.getMonth() + 1);
+  useHelpContext("Staff Hours", { year: String(year), month: String(month) });
   const [rows, setRows] = useState<HourRow[]>([]);
   const [editing, setEditing] = useState<Partial<Staff> | null>(null);
   const [ocrBusy, setOcrBusy] = useState(false);

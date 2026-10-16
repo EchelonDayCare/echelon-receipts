@@ -8,6 +8,7 @@ import { listStudents, listYears, upsertStudent, deleteStudent, reactivateStuden
   MCCB_MAX_MONTHLY_AMOUNT } from "../lib/db";
 import { parseRosterFile } from "../lib/excelImport";
 import type { Student, AccbEntry, MccbEntry, SettingsMap, SubsidyProfile } from "../types";
+import { useHelpContext } from "../hooks/useHelpContext";
 
 export default function Students() {
   const now = new Date().getFullYear();
@@ -15,6 +16,7 @@ export default function Students() {
   const [searchParams, setSearchParams] = useSearchParams();
   const [years, setYears] = useState<number[]>([now]);
   const [year, setYear] = useState<number>(now);
+  useHelpContext("Student Roster", { year: String(year) });
   const [students, setStudents] = useState<Student[]>([]);
   const [editing, setEditing] = useState<Partial<Student> | null>(null);
   const [pendingImport, setPendingImport] = useState<{ path: string; year: number } | null>(null);
