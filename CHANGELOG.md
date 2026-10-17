@@ -4,6 +4,27 @@ All notable changes shipped as a DMG. Only entries the owner has approved
 for release are listed here — "code-complete, awaiting ship approval" work
 lives in the session plan.md until it ships.
 
+## v3.32.0 — Finance reconciliation and AGM rewording
+
+- Added Reword with AI for existing AGM narratives, with whole-document and
+  per-section actions, explicit text-sharing consent, cancellation and Undo AI.
+  Rewording preserves list structure and rejects changed numeric tokens.
+- Added opt-in cash-basis accounting with an explicit cutover preview and
+  mandatory safety backup; installation does not activate accounting.
+- Added shared bank/card statement intake, retained originals, matching
+  suggestions, partial/deposit-batch matching and transfer/card repayment
+  handling without duplicate income or expenses.
+- Statement-created purchases appear in Expenses. Corrections and import
+  reversals preserve source evidence and journal history.
+- Added policy-backed funding remittances, restricted-fund releases and
+  repayments, plus documented outstanding payments/deposits in transit.
+- Added ledger-backed P&L, trial balance, cash movement and versioned exports
+  with provisional warnings, period controls and superseded-report status.
+- Added financial cleanup guards and validated encrypted restore/recovery.
+- Accounting remains subject to owner/accountant approval of opening balances,
+  funding policies and a reconciled real period. Native Mac acceptance remains
+  required; automated and synthetic checks do not certify the accounts.
+
 ## v3.31.0 — Ask Echelon contextual help
 
 - Added Ask Echelon on every unlocked screen, with screen-specific suggestions,

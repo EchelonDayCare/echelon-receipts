@@ -275,8 +275,8 @@ export default function Home() {
         <button className="home-tile expenses" style={{ position: "relative" }} onClick={() => nav(tileRoute("expenses", "/expenses/dashboard"))}>
           {tileDot("expenses")}
           <div className="home-tile-icon">💵</div>
-          <h2>Expenses</h2>
-          <p>Track spending, recurring bills, WCB/CRA remittance, P&L reports</p>
+          <h2>Finance</h2>
+          <p>Income, expenses, bank statements, reconciliation and accounting reports</p>
         </button>
 
         <button className="home-tile reports" style={{ position: "relative" }} onClick={() => nav(tileRoute("reports", "/reports/overview"))}>

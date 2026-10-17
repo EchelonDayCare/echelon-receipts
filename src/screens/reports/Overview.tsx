@@ -25,8 +25,8 @@ const REPORTS: ReportCard[] = [
     desc: "Fire, earthquake and lockdown drill history. BC CCLR requires monthly fire drills." },
   { to: "/reports/agm", title: "AGM / Board Package", category: "Governance", icon: "🏛",
     desc: "Multi-year enrollment trends, revenue by year, subsidies received. For the Society's Annual General Meeting." },
-  { to: "/expenses/reports", title: "Expense Reports (P&L)", category: "Financial", icon: "💵",
-    desc: "Revenue vs Expenses — monthly, quarterly and yearly. P&L summary with category breakdown." },
+  { to: "/expenses/accounting", title: "Accounting Reports", category: "Financial", icon: "💵",
+    desc: "Cash-basis ledger P&L, trial balance, reconciliation status and journal drill-down." },
 ];
 
 const CATEGORY_ORDER: ReportCard["category"][] = ["Financial", "Compliance", "Governance"];

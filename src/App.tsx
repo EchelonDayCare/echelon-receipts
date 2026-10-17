@@ -32,6 +32,7 @@ const ExpenseList = lazy(() => import("./screens/expenses/ExpenseList"));
 const ExpenseRecurring = lazy(() => import("./screens/expenses/Recurring"));
 const ExpenseReports = lazy(() => import("./screens/expenses/Reports"));
 const ExpenseImport = lazy(() => import("./screens/expenses/ImportStatement"));
+const Finance = lazy(() => import("./screens/expenses/Finance"));
 const AskEchelon = lazy(() => import("./screens/AskEchelon"));
 const WaitlistOverview = lazy(() => import("./screens/waitlist/Overview"));
 const WaitlistList = lazy(() => import("./screens/waitlist/List"));
@@ -68,6 +69,7 @@ import WebsiteButton from "./components/WebsiteButton";
 import DataCleanupButton from "./components/DataCleanupButton";
 import SettingsFab from "./components/SettingsFab";
 import HelpCompanion from "./components/HelpCompanion";
+import AccountingScopeNotice from "./components/AccountingScopeNotice";
 import AlertDot from "./components/AlertDot";
 import { HomeAlertsProvider, useHomeAlerts } from "./hooks/useHomeAlerts";
 import { startScheduler, stopScheduler, runScanSoon } from "./lib/notifications/scheduler";
@@ -237,6 +239,8 @@ function Shell({ logo, name, staffEnabled }: { logo: string; name: string; staff
           ]}
         />
         <main className="content">
+          {(path.startsWith("/reports") || path.startsWith("/students/reports") ||
+            ["/expenses/dashboard", "/expenses/reports", "/expenses/import", "/expenses/list"].includes(path)) && <AccountingScopeNotice />}
           <Suspense fallback={<div style={{ padding: 24, color: "var(--muted)" }}>Loading…</div>}>
             <Routes>
               <Route path="/notifications" element={<NotificationsHistory />} />
@@ -386,7 +390,7 @@ function Shell({ logo, name, staffEnabled }: { logo: string; name: string; staff
   } else if (path.startsWith("/expenses")) {
     sidebar = (
       <ModuleSidebar
-        title="Expenses"
+        title="Finance"
         accent="#047857"
         logo={logo}
         name={name}
@@ -395,8 +399,11 @@ function Shell({ logo, name, staffEnabled }: { logo: string; name: string; staff
           { to: "/expenses/new", label: "Add Expense" },
           { to: "/expenses/list", label: "All Expenses" },
           { to: "/expenses/recurring", label: "Recurring Bills" },
-          { to: "/expenses/import", label: "Import Statement (AI)" },
-          { to: "/expenses/reports", label: "Expense Reports (P&L)" },
+          { to: "/expenses/import", label: "Credit Card Import (AI)" },
+          { to: "/expenses/banking", label: "Banking & Reconciliation" },
+          { to: "/expenses/income", label: "Income & Adjustments" },
+          { to: "/expenses/accounting", label: "Accounting Reports" },
+          { to: "/expenses/reports", label: "Legacy Receipt/Expense Reports" },
         ]}
       />
     );
@@ -520,6 +527,9 @@ function Shell({ logo, name, staffEnabled }: { logo: string; name: string; staff
           <Route path="/expenses/list" element={<ExpenseList />} />
           <Route path="/expenses/recurring" element={<ExpenseRecurring />} />
           <Route path="/expenses/import" element={<ExpenseImport />} />
+          <Route path="/expenses/banking" element={<Finance />} />
+          <Route path="/expenses/income" element={<Finance />} />
+          <Route path="/expenses/accounting" element={<Finance />} />
           <Route path="/expenses/reports" element={<ExpenseReports />} />
 
           {/* Ask Echelon (natural-language query) */}

@@ -416,6 +416,7 @@ async fn generate_sql(
         • Add LIMIT 500 unless the question is a single-row aggregate (COUNT/SUM/AVG).\n\
         • The 'voided' flag on receipts means the receipt is cancelled — exclude WHERE voided=0 for revenue.\n\
         • Refunds are receipts with is_refund=1; their amount is stored positive but nets negative in revenue.\n\
+        • Accounting: if finance_config has a row, full cash-basis P&L comes ONLY from finance_entries joined to finance_accounts. Debit expense accounts adds expense; credit expense accounts subtracts it. Credit income accounts adds income; debit income accounts subtracts it. Amounts are integer CAD cents; divide by 100 for dollars. Include reversal entries, not just originals. Never add receipts or expenses to ledger totals again. Receipt gross/subsidy amounts describe fee allocations, not confirmed government cash. Bank/card movements and transfers are not automatically income/expense. Accounting reports may be provisional; direct users to Finance > Accounting Reports to verify warnings, date coverage and unresolved funding. Do not claim final accounts from a raw SQL sum.\n\
         • SCOPE: only answer questions about the schema below. If the question is unrelated (general knowledge, world facts, jokes, unrelated apps), return the literal SQL `SELECT 1 WHERE 0` — the caller will detect it and refuse politely. NEVER invent tables or hardcode literal answers to non-data questions.\n";
     let user = format!(
         "SCHEMA:\n{}\n\nQUESTION:\n{}\n\nReturn one SQLite SELECT statement:",

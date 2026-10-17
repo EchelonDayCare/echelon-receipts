@@ -38,6 +38,8 @@ use crate::security::Mdk;
 
 #[derive(Debug, thiserror::Error)]
 pub enum DbError {
+    #[error("{0}")]
+    InvalidOperation(String),
     #[error("db is locked (no active connection)")]
     Locked,
 
@@ -293,6 +295,7 @@ impl DbGate {
     ) -> Result<(Vec<String>, Vec<Map<String, Value>>), DbError> {
         let guard = self.inner.lock().await;
         let conn = guard.as_ref().ok_or(DbError::Locked)?;
+        let _finance_guard = crate::finance::SqlGuard::new(conn)?;
         let mut stmt = conn.prepare_cached(sql)?;
         let col_names: Vec<String> =
             stmt.column_names().iter().map(|s| s.to_string()).collect();
@@ -322,6 +325,7 @@ impl DbGate {
     ) -> Result<ExecuteResult, DbError> {
         let guard = self.inner.lock().await;
         let conn = guard.as_ref().ok_or(DbError::Locked)?;
+        let _finance_guard = crate::finance::SqlGuard::new(conn)?;
         if args.is_empty() && has_multiple_statements(sql) {
             conn.execute_batch(sql)?;
             return Ok(ExecuteResult {

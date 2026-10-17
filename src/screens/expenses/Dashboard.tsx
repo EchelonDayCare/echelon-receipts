@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
+import { finance, money, type Snapshot, type FinanceReport } from "../../lib/finance";
 import {
   summaryByCategory, listExpenses, listRecurring, nextDueForPeriod,
   CATEGORY_LABEL, type Expense, type RecurringExpense,
@@ -26,6 +27,8 @@ export default function ExpensesDashboard() {
   const [totals, setTotals] = useState<Array<{ category: string; total: number; count: number }>>([]);
   const [recent, setRecent] = useState<Expense[]>([]);
   const [dueRecurring, setDueRecurring] = useState<Array<{ r: RecurringExpense; date: string }>>([]);
+  const [ledger, setLedger] = useState<FinanceReport | null>(null);
+  const [ledgerError, setLedgerError] = useState("");
 
   const { from, to, label } = monthBounds(ym);
 
@@ -46,6 +49,22 @@ export default function ExpensesDashboard() {
   }
 
   useEffect(() => { reload();   }, [ym]);
+  useEffect(() => {
+    let active = true;
+    setLedger(null); setLedgerError("");
+    void (async () => {
+      try {
+        const snapshot = await finance<Snapshot>("snapshot");
+        if (!snapshot.config.length) return;
+        if (from < snapshot.config[0].start_date) throw new Error("This month precedes the accounting cutover. Operational records are historical reference only.");
+        const result = await finance<FinanceReport>("report", { from, to });
+        if (active) setLedger(result);
+      } catch (e) {
+        if (active) setLedgerError(String(e));
+      }
+    })();
+    return () => { active = false; };
+  }, [from, to]);
 
   const monthTotal = totals.reduce((a, r) => a + r.total, 0);
 
@@ -53,19 +72,28 @@ export default function ExpensesDashboard() {
     <div style={{ padding: 24, maxWidth: 1200 }}>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
         <div>
-          <h1 style={{ marginTop: 0, marginBottom: 6 }}>Expenses — {label}</h1>
-          <p style={{ color: "var(--muted)", margin: 0 }}>Track daycare spending, recurring bills and generate expense reports.</p>
+          <h1 style={{ marginTop: 0, marginBottom: 6 }}>Finance — {label}</h1>
+          <p style={{ color: "var(--muted)", margin: 0 }}>Operational purchase records below. Accounting reports include bank income and journal adjustments.</p>
         </div>
         <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
           <input type="month" value={ym} onChange={(e) => setYm(e.target.value)} />
-          <Link to="/expenses/import" className="btn secondary">📄 Import Statement</Link>
+          <Link to="/expenses/banking" className="btn secondary">Bank statements</Link>
+          <Link to="/expenses/accounting" className="btn secondary">Accounting reports</Link>
           <Link to="/expenses/new" className="btn">+ Add Expense</Link>
         </div>
       </div>
 
+      {ledgerError && <p role="alert">{ledgerError}</p>}
+      {ledger && <section className="card" style={{ marginBottom: 20 }}>
+        <h2>Cash-basis accounting · {ledger.provisional ? "Provisional" : "Reviewed controls complete"}</h2>
+        <p>Income: <strong>{money(ledger.months.reduce((n, m) => n + m.income_cents, 0))}</strong> · Expenses: <strong>{money(ledger.months.reduce((n, m) => n + m.expense_cents, 0))}</strong> · Net: <strong>{money(ledger.months.reduce((n, m) => n + m.income_cents - m.expense_cents, 0))}</strong></p>
+        {ledger.warnings.length > 0 && <p>{ledger.warnings.join(" ")}</p>}
+        <Link to="/expenses/accounting">Open accounting report and journal</Link>
+      </section>}
+      <h2>Operational purchases</h2>
       <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 12, marginBottom: 20 }}>
         <div style={card()}>
-          <div style={cardLabel()}>This Month</div>
+          <div style={cardLabel()}>Recorded purchases this month</div>
           <div style={cardValue()}>${fmt(monthTotal)}</div>
           <div style={{ color: "var(--muted)", fontSize: 12 }}>{totals.reduce((a, r) => a + r.count, 0)} entries</div>
         </div>

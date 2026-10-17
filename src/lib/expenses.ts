@@ -1,4 +1,5 @@
 import { db, execRetry, roundMoney } from "./db";
+import { finance } from "./finance";
 
 export const EXPENSE_CATEGORIES: Array<{ value: string; label: string; hint?: string }> = [
   { value: "rent_lease",        label: "Rent / Lease" },
@@ -94,7 +95,7 @@ export async function listExpenses(opts: {
   batchId?: string;
 } = {}): Promise<Expense[]> {
   const d = await db();
-  const where: string[] = [];
+  const where: string[] = ["NOT EXISTS(SELECT 1 FROM finance_expense_voids v WHERE v.expense_id=expenses.id)"];
   const params: any[] = [];
   if (opts.from) { where.push("date >= ?"); params.push(opts.from); }
   if (opts.to)   { where.push("date <= ?"); params.push(opts.to); }
@@ -139,8 +140,8 @@ export async function saveExpense(e: Partial<Expense> & { id?: number }): Promis
   return res.lastInsertId;
 }
 
-export async function deleteExpense(id: number): Promise<void> {
-  await execRetry("DELETE FROM expenses WHERE id=?", [id]);
+export async function deleteExpense(id: number, reason: string): Promise<void> {
+  await finance("void_expense", { id, reason });
 }
 
 export async function listRecurring(activeOnly = false): Promise<RecurringExpense[]> {
@@ -330,6 +331,7 @@ export async function summaryByCategory(from: string, to: string): Promise<Array
   return d.select<Array<{ category: string; total: number; count: number }>>(
     `SELECT category, SUM(amount) AS total, COUNT(*) AS count
      FROM expenses WHERE date >= ? AND date <= ?
+       AND NOT EXISTS(SELECT 1 FROM finance_expense_voids v WHERE v.expense_id=expenses.id)
      GROUP BY category ORDER BY total DESC`,
     [from, to]
   );
@@ -341,6 +343,7 @@ export async function summaryByMonth(from: string, to: string): Promise<Array<{ 
   return d.select<Array<{ ym: string; total: number; count: number }>>(
     `SELECT substr(date,1,7) AS ym, SUM(amount) AS total, COUNT(*) AS count
      FROM expenses WHERE date >= ? AND date <= ?
+       AND NOT EXISTS(SELECT 1 FROM finance_expense_voids v WHERE v.expense_id=expenses.id)
      GROUP BY ym ORDER BY ym`,
     [from, to]
   );
@@ -385,10 +388,10 @@ export async function revenueByMonth(from: string, to: string, basis: RevenueBas
 }
 
 // ---------- Import batches ----------
-// Rolling back an import: delete every expense tagged with the same batch id.
-export async function deleteImportBatch(batchId: string): Promise<number> {
-  const res = await execRetry("DELETE FROM expenses WHERE import_batch_id=?", [batchId]);
-  return res.rowsAffected;
+// Activated accounting reverses entries and archives sources instead of deleting them.
+export async function deleteImportBatch(batchId: string, reason = ""): Promise<number> {
+  const result = await finance<{ count: number }>("undo_import", { batch_id: batchId, reason });
+  return result.count;
 }
 
 export async function listImportBatches(limit = 20): Promise<Array<{ batch_id: string; count: number; total: number; first_date: string; last_date: string; imported_at: string }>> {
@@ -396,7 +399,7 @@ export async function listImportBatches(limit = 20): Promise<Array<{ batch_id: s
   return d.select(
     `SELECT import_batch_id AS batch_id, COUNT(*) AS count, SUM(amount) AS total,
             MIN(date) AS first_date, MAX(date) AS last_date, MAX(created_at) AS imported_at
-     FROM expenses WHERE import_batch_id IS NOT NULL
+     FROM expenses WHERE import_batch_id IS NOT NULL AND amount<>0
      GROUP BY import_batch_id
      ORDER BY imported_at DESC
      LIMIT ${Number(limit) | 0}`

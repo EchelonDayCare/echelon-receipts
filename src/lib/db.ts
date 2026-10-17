@@ -153,6 +153,7 @@ export async function db(): Promise<Database> {
       _schemaPromise = (async () => {
         try {
           await ensureSchema(_db!);
+          await invoke("finance", { request: { op: "init" } });
           _schemaChecked = true;
         } catch (e) {
           console.error("[ensureSchema] failed:", e);

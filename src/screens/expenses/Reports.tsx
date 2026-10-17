@@ -136,8 +136,8 @@ export default function ExpenseReports() {
     <div style={{ padding: 24, maxWidth: 1200 }}>
       <div className="no-print" style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
         <div>
-          <h1 style={{ marginTop: 0, marginBottom: 6 }}>Expense Reports</h1>
-          <p style={{ color: "var(--muted)", margin: 0 }}>Revenue vs Expenses — monthly, quarterly and yearly views.</p>
+          <h1 style={{ marginTop: 0, marginBottom: 6 }}>Legacy Receipt &amp; Expense Reports</h1>
+          <p style={{ color: "var(--muted)", margin: 0 }}>Operational receipt scope, not the complete accounting P&amp;L. Use Accounting Reports for ledger totals.</p>
         </div>
         <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
           <select value={basis} onChange={(e) => setBasis(e.target.value as RevenueBasis)}

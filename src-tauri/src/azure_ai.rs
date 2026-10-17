@@ -1004,6 +1004,29 @@ pub struct ExtractVisaArgs {
     pub mime_type: String,
 }
 
+#[tauri::command]
+pub async fn extract_bank_statement(args: ExtractVisaArgs) -> Result<serde_json::Value, String> {
+    let schema = json!({
+        "type":"object",
+        "properties":{
+            "date_from":{"type":["string","null"],"description":"Account activity period start YYYY-MM-DD"},
+            "date_to":{"type":["string","null"],"description":"Account activity period end YYYY-MM-DD"},
+            "opening_cents":{"type":["integer","null"],"description":"Explicit period opening balance in CAD cents. Null if not printed. Do not infer from transactions."},
+            "closing_cents":{"type":["integer","null"],"description":"Explicit period closing balance in CAD cents. Never use a website current balance from a different date. Null if absent."},
+            "lines":{"type":"array","items":{"type":"object","properties":{
+                "date":{"type":"string","description":"YYYY-MM-DD posted transaction date"},
+                "description":{"type":"string","description":"Exact bank transaction description including cheque reference"},
+                "cents":{"type":"integer","description":"Signed CAD cents: deposits positive, withdrawals negative. Read column position, not wording."},
+                "bank_id":{"type":["string","null"],"description":"Bank-provided unique transaction ID only; null if absent"}
+            },"required":["date","description","cents","bank_id"],"additionalProperties":false}}
+        },
+        "required":["date_from","date_to","opening_cents","closing_cents","lines"],"additionalProperties":false
+    });
+    let key = crate::secrets::get_secret("azure_ai_key")?;
+    let raw = call_mistral_doc_ai(&key, &args.file_b64, &args.mime_type, schema, "BankStatement").await?;
+    serde_json::from_str(&raw).map_err(|e| format!("Bank extraction returned invalid JSON: {e}"))
+}
+
 #[derive(Serialize, Deserialize, Clone)]
 pub struct ExtractedVisaTxn {
     pub date: String,

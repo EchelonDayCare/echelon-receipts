@@ -341,26 +341,12 @@ export default function Settings() {
         passphrase = entered.trim();
       } else if (isPlainSqlite) {
         void showAlert(
-          "This file is a plain SQLite database. It will be restored as-is. " +
+          "This file is a plain SQLite database. It will be validated and encrypted for this installation. " +
           "For future backups, set a backup passphrase in this tab so backups are encrypted.",
           { kind: "warning" }
         );
       } else {
-        // Almost certainly a v2.2.x raw SQLCipher file that used to be
-        // silently accepted by the old .enc-suffix heuristic. Refuse
-        // early with actionable guidance — the stage_restore side would
-        // otherwise fail with an opaque "header mismatch" error.
-        void showAlert(
-          "This file is not a recognised backup format.\n\n" +
-          "• Plain SQLite backups start with \"SQLite format 3\".\n" +
-          "• Encrypted Echelon backups start with \"EDCBK1\".\n\n" +
-          "If this is an older backup made before v2.2.7, it may be an " +
-          "encrypted-in-place SQLCipher copy that cannot be restored " +
-          "directly. Please make a fresh backup from your current " +
-          "installation before proceeding.",
-          { kind: "error" }
-        );
-        return;
+        if (!await showConfirm("This may be an encrypted local safety copy. It can only be restored with this installation's current encryption key. Echelon will validate its database and accounting records before accepting it. Attempt validation?")) return;
       }
       const ok = await showConfirm(
         `⚠️  This will REPLACE your current database with:\n\n${picked}\n\n` +
@@ -1038,7 +1024,7 @@ export default function Settings() {
             />
             <strong>AGM Minutes AI drafting</strong>&nbsp;
             <span style={{ color: "var(--muted)", fontWeight: 400 }}>
-              — When on, per-section ✨ buttons and "Draft with AI" appear in the AGM Minutes editor. Every prompt + response is logged to <code>agm_ai_events</code> for board audit. Requires the Azure key above.
+              — Enables "Draft with AI" for data-based drafting and "Reword with AI" for improving existing text. Rewording sends the selected text, including any names you entered, after confirmation. Every prompt + response is logged to <code>agm_ai_events</code> for board audit. Requires the Azure key above.
             </span>
           </label>
         </div>
@@ -1052,7 +1038,7 @@ export default function Settings() {
               />
               <strong>Redact staff names in AI prompts</strong>&nbsp;
               <span style={{ color: "var(--muted)", fontWeight: 400 }}>
-                — Replaces individual staff names with <code>Staff #1</code>, <code>Staff #2</code>, etc. before sending prompts to Azure. Roles, credential types and expiry dates still travel. Default on.
+                — For data-based drafting only: replaces staff names with <code>Staff #1</code>, <code>Staff #2</code>, etc. Roles, credential types and expiry dates still travel. Does not redact text you submit for rewording. Default on.
               </span>
             </label>
           </div>

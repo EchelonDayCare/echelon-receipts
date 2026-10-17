@@ -5,7 +5,7 @@ import {
   findDuplicateIds, findDuplicatePartners, deleteExpense,
   type Expense,
 } from "../../lib/expenses";
-import { showConfirm } from "../../lib/dialogs";
+import { showConfirm, showPrompt } from "../../lib/dialogs";
 import { isAiTextConfigured } from "../../lib/voice";
 import { getSettings } from "../../lib/db";
 import ExpenseAiTextPanel from "./ExpenseAiTextPanel";
@@ -168,10 +168,17 @@ export default function ExpenseList() {
 function DupReviewModal({ target, partners, onClose, onDeleted }: {
   target: Expense; partners: Expense[]; onClose: () => void; onDeleted: () => void | Promise<void>;
 }) {
+  const [error, setError] = useState("");
+  const [busy, setBusy] = useState(false);
   async function del(id: number) {
-    if (!(await showConfirm(`Delete expense #${id}? This cannot be undone.`))) return;
-    await deleteExpense(id);
-    await onDeleted();
+    if (!(await showConfirm(`Remove expense #${id}? Accounting-enabled records are voided with a retained reversal. Unmatch and reopen first if needed.`))) return;
+    const reason = await showPrompt("Reason for removing this possible duplicate:");
+    if (reason == null) return;
+    if (!reason.trim()) { setError("A correction reason is required."); return; }
+    setBusy(true); setError("");
+    try { await deleteExpense(id, reason.trim()); await onDeleted(); }
+    catch (e) { setError(String(e)); }
+    finally { setBusy(false); }
   }
   const card = (r: Expense, label: string): React.ReactElement => (
     <div key={r.id} style={{ border: "1px solid var(--border, #e5e7eb)", borderRadius: 8, padding: 12, background: "#fff", flex: 1 }}>
@@ -184,7 +191,7 @@ function DupReviewModal({ target, partners, onClose, onDeleted }: {
       {r.recurring_id ? <div style={{ marginTop: 6, fontSize: 11, color: "#7c3aed" }}>↻ Posted from recurring template</div> : null}
       <div style={{ marginTop: 10, display: "flex", gap: 6 }}>
         <Link to={`/expenses/edit/${r.id}`} className="btn secondary" style={{ fontSize: 12 }}>Edit</Link>
-        <button className="btn" onClick={() => del(r.id)} style={{ fontSize: 12, background: "#dc2626", color: "#fff" }}>Delete this</button>
+        <button className="btn" disabled={busy} onClick={() => void del(r.id)} style={{ fontSize: 12, background: "#dc2626", color: "#fff" }}>Remove this</button>
       </div>
     </div>
   );
@@ -198,6 +205,7 @@ function DupReviewModal({ target, partners, onClose, onDeleted }: {
         <p style={{ color: "var(--muted)", marginTop: 0 }}>
           These expenses look like the same charge (same vendor, similar amount, within 3 days). Delete the copy you don't want, or close if they're actually different bills.
         </p>
+        {error && <p role="alert">{error}</p>}
         <div style={{ display: "flex", gap: 12, flexWrap: "wrap" }}>
           {card(target, "This expense")}
           {partners.map((p, i) => card(p, partners.length > 1 ? `Match ${i + 1}` : "Matches"))}

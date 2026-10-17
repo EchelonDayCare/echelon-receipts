@@ -3,6 +3,7 @@ use tauri::Manager;
 mod email;
 mod errlog;
 mod azure_ai;
+mod finance;
 mod ask_echelon;
 mod help_companion;
 mod consensus;
@@ -157,8 +158,10 @@ pub fn run() {
             restore::restart_app,
             restore::backup_before_data_cleanup,
             azure_ai::extract_attendance,
+            finance::finance,
             azure_ai::extract_month_attendance,
             azure_ai::extract_visa_statement,
+            azure_ai::extract_bank_statement,
             azure_ai::extract_credential,
             ask_echelon::ask_echelon,
             help_companion::ask_help_companion,

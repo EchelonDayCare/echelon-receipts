@@ -352,6 +352,11 @@ export async function runDataCleanup(
   const willTouchWaitlist = needed.has("del_waitlist");
 
   return serializeWrite(async () => {
+    const d = await db();
+    const accounting = await d.select<{ n: number }[]>("SELECT COUNT(*) AS n FROM finance_config");
+    if (accounting[0].n && safeCategories.some((c) => ["students", "receipts", "expenses"].includes(c))) {
+      throw new Error("Accounting is active. Financial cleanup and roster cascade deletion are blocked to preserve source documents, funding and deposit evidence. Void/correct financial records through their original workflows; archive students instead. No records were deleted.");
+    }
     // Mandatory, non-skippable safety copy of the still-encrypted live DB.
     // Runs INSIDE the same serialized-write slot as the delete (not
     // before it) so no other queued write (waitlist auto-sync, recurring
@@ -369,7 +374,6 @@ export async function runDataCleanup(
     }
     const backupPath = await invoke<string>("backup_before_data_cleanup");
 
-    const d = await db();
     await d.execute("BEGIN IMMEDIATE");
     const deletedRows: Partial<Record<ResourceKey, number>> = {};
     try {

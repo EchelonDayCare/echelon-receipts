@@ -17,6 +17,7 @@ import {
   gatherYearContext, draftEntireMinutes,
   draftFinancialReport, draftStaffingChallenges, draftFacilitiesMaintenance,
   draftChairmanBlock, isChairmanHeadingGrounded,
+  rewordMinutes, minutesRewordSections,
 } from "../../lib/aiDraft";
 
 const RECENT_FY_SPAN = 6;   // show current FY + 5 back in the year picker
@@ -32,6 +33,7 @@ export default function AgmMinutesEditor({ onDirtyChange }: { onDirtyChange?: (d
   const [aiHistory, setAiHistory] = useState<AgmMinutes[]>([]);
   const [aiEnabled, setAiEnabled] = useState(false);
   const [aiRedact, setAiRedact] = useState(true);
+  const [aiStatus, setAiStatus] = useState("");
 
   // Refs used to make in-flight AI work safe against year switches, unmounts and cancellations.
   const initialRef = useRef<AgmMinutes | null>(null);   // snapshot from buildInitialDraft — used to detect user edits
@@ -88,6 +90,7 @@ export default function AgmMinutesEditor({ onDirtyChange }: { onDirtyChange?: (d
     if (aiAbortRef.current) { aiAbortRef.current.abort(); aiAbortRef.current = null; }
     aiEpochRef.current++;
     setAiBusy(null);
+    setAiStatus("");
     setAiHistory([]);
     (async () => {
       const m = await buildInitialDraft(fyStart);
@@ -107,6 +110,7 @@ export default function AgmMinutesEditor({ onDirtyChange }: { onDirtyChange?: (d
   }, [fyStart]);
 
   function patch(partial: Partial<AgmMinutes>) {
+    setAiStatus("");
     // Functional setState avoids stale-closure bugs when AI callbacks resolve
     // interleaved with rapid user typing.
     setMinutes((prev) => (prev ? { ...prev, ...partial } : prev));
@@ -132,7 +136,7 @@ export default function AgmMinutesEditor({ onDirtyChange }: { onDirtyChange?: (d
     setBusy(true);
     try {
       const m = await buildInitialDraft(fyStart, { forceFresh: true });
-      setMinutes(m); setDirty(false); setAiHistory([]);
+      setMinutes(m); setDirty(false); setAiHistory([]); setAiStatus("");
     } finally { setBusy(false); }
   }
 
@@ -206,6 +210,34 @@ export default function AgmMinutesEditor({ onDirtyChange }: { onDirtyChange?: (d
   }
   function onCancelAi() {
     if (aiAbortRef.current) aiAbortRef.current.abort();
+    aiEpochRef.current++;
+    setAiBusy(null);
+    setAiStatus("AI cancelled. No pending rewrite will be applied.");
+  }
+
+  async function onReword(sectionId?: string) {
+    if (!minutes) return;
+    if (!await showConfirm(
+      "Reword your existing text with AI?\n\n" +
+      "This sends the selected narrative text to Azure, including any names or sensitive details you typed. " +
+      "The staff-name redaction setting applies to data-based drafting, not this text. " +
+      "Meeting details, attendance names and headings will not be changed. " +
+      "AI is instructed to improve wording without adding facts. Review the result before saving; Undo AI restores the original."
+    )) return;
+    const { epoch, fy, signal } = beginAi();
+    setAiBusy(`reword:${sectionId ?? "all"}`); setAiStatus("");
+    try {
+      const next = await rewordMinutes(minutes, signal, sectionId);
+      if (!aiStillValid(epoch, fy)) return;
+      pushHistory(minutes);
+      setMinutes(next); setDirty(true);
+      setAiStatus("Wording updated. Review the meaning and facts before saving, or use Undo AI to restore your original text.");
+    } catch (e: unknown) {
+      if (signal.aborted) return;
+      await showAlert("AI reword failed: " + (e instanceof Error ? e.message : String(e)), { kind: "error" });
+    } finally {
+      if (aiStillValid(epoch, fy)) setAiBusy(null);
+    }
   }
 
   // Bounded stack of pre-AI snapshots. Every AI action pushes the current
@@ -248,6 +280,7 @@ export default function AgmMinutesEditor({ onDirtyChange }: { onDirtyChange?: (d
   }
 
   function onUndoAi() {
+    setAiStatus("Original text restored. Save the draft to keep this change.");
     setAiHistory((prev) => {
       if (prev.length === 0) return prev;
       const restored = prev[prev.length - 1];
@@ -328,13 +361,18 @@ export default function AgmMinutesEditor({ onDirtyChange }: { onDirtyChange?: (d
               {aiBusy === "all" ? "✨ Drafting…" : "✨ Draft with AI"}
             </button>
           )}
+          {aiEnabled && <button className="btn secondary" onClick={() => void onReword()}
+            disabled={busy || !!aiBusy || !minutes || minutesRewordSections(minutes).length === 0}
+            title="Improve existing narrative text without drafting new content.">
+            {aiBusy === "reword:all" ? "Rewording…" : "Reword with AI"}
+          </button>}
           {aiBusy && (
-            <button className="btn ghost" onClick={onCancelAi} title="Cancel the in-progress AI draft.">
+            <button className="btn ghost" onClick={onCancelAi} title="Cancel the in-progress AI request.">
               ✕ Cancel AI
             </button>
           )}
           {aiHistory.length > 0 && !aiBusy && (
-            <button className="btn ghost" onClick={onUndoAi} title="Restore the text before the last AI draft.">
+            <button className="btn ghost" onClick={onUndoAi} disabled={busy} title="Restore the text before the last AI change.">
               ↶ Undo AI ({aiHistory.length})
             </button>
           )}
@@ -342,18 +380,23 @@ export default function AgmMinutesEditor({ onDirtyChange }: { onDirtyChange?: (d
             📄 Generate
           </button>
         </div>
+        {aiStatus && <p role="status">{aiStatus}</p>}
+        {aiBusy?.startsWith("reword:") && <p role="status">Rewording your text… Your original remains unchanged until the rewrite is complete.</p>}
       </div>
 
       {!minutes ? (
         <div style={{ padding: 40, textAlign: "center", color: "var(--muted)" }}>Loading…</div>
       ) : (
         <div style={{ display: "grid", gridTemplateColumns: "minmax(0, 1fr) minmax(0, 1fr)", gap: 20 }}>
+          <fieldset disabled={busy || !!aiBusy} style={{ border: 0, padding: 0, margin: 0, minWidth: 0 }}>
           <FormPane minutes={minutes} patch={patch}
                     fyStart={fyStart}
                     aiBusy={aiBusy}
                     aiEnabled={aiEnabled}
                     aiRedact={aiRedact}
-                    draftField={draftField} />
+                    draftField={draftField}
+                    reword={(id) => void onReword(id)} />
+          </fieldset>
           <PreviewPane minutes={minutes} />
         </div>
       )}
@@ -372,10 +415,15 @@ interface FormProps {
   aiBusy: string | null;
   aiEnabled: boolean;
   aiRedact: boolean;
+  reword: (id: string) => void;
   draftField: (id: string, fetcher: (signal: AbortSignal) => Promise<string>, assign: (text: string) => void) => Promise<void>;
 }
 
-function FormPane({ minutes, patch, fyStart, aiBusy, aiEnabled, aiRedact, draftField }: FormProps) {
+function FormPane({ minutes, patch, fyStart, aiBusy, aiEnabled, aiRedact, draftField, reword }: FormProps) {
+  function rewordButton(id: string, text: string | string[]) {
+    return aiEnabled ? <button className="btn ghost" disabled={!!aiBusy || !(Array.isArray(text) ? text.some((s) => s.trim()) : text.trim())}
+      onClick={() => reword(id)} title="Improve only this text; preserve its meaning and facts.">Reword with AI</button> : null;
+  }
   async function aiFin() {
     await draftField("fin",
       async (signal) => draftFinancialReport(await gatherYearContext(fyStart, { redact: aiRedact }), signal),
@@ -484,6 +532,7 @@ function FormPane({ minutes, patch, fyStart, aiBusy, aiEnabled, aiRedact, draftF
         </p>
         {minutes.chairmanReport.map((b, idx) => (
           <ChairmanEditor key={idx} block={b}
+            rewordAction={rewordButton(`chairman:${idx}`, b.body)}
             aiEnabled={aiEnabled}
             grounded={isChairmanHeadingGrounded(b.heading)}
             onChange={(next) => {
@@ -516,6 +565,7 @@ function FormPane({ minutes, patch, fyStart, aiBusy, aiEnabled, aiRedact, draftF
         <Field label="Body">
           <textarea rows={4} value={minutes.financialReportBody}
                     onChange={(e) => patch({ financialReportBody: e.target.value })} />
+          {rewordButton("financialReportBody", minutes.financialReportBody)}
         </Field>
       </Panel>
 
@@ -524,6 +574,7 @@ function FormPane({ minutes, patch, fyStart, aiBusy, aiEnabled, aiRedact, draftF
         <Field label="Staffing Challenges">
           <textarea rows={3} value={minutes.staffingChallenges}
                     onChange={(e) => patch({ staffingChallenges: e.target.value })} />
+          {rewordButton("staffingChallenges", minutes.staffingChallenges)}
           {aiEnabled && (
             <button className="btn ghost" style={{ fontSize: 12, alignSelf: "flex-start", marginTop: 4 }}
                     disabled={!!aiBusy} onClick={aiStaffing}>
@@ -534,6 +585,7 @@ function FormPane({ minutes, patch, fyStart, aiBusy, aiEnabled, aiRedact, draftF
         <Field label="Facilities Maintenance">
           <textarea rows={3} value={minutes.facilitiesMaintenance}
                     onChange={(e) => patch({ facilitiesMaintenance: e.target.value })} />
+          {rewordButton("facilitiesMaintenance", minutes.facilitiesMaintenance)}
           {aiEnabled && (
             <button className="btn ghost" style={{ fontSize: 12, alignSelf: "flex-start", marginTop: 4 }}
                     disabled={!!aiBusy} onClick={aiFacilities}>
@@ -548,6 +600,7 @@ function FormPane({ minutes, patch, fyStart, aiBusy, aiEnabled, aiRedact, draftF
         <Field label="Description">
           <textarea rows={3} value={minutes.boardElections}
                     onChange={(e) => patch({ boardElections: e.target.value })} />
+          {rewordButton("boardElections", minutes.boardElections)}
         </Field>
       </Panel>
 
@@ -556,6 +609,7 @@ function FormPane({ minutes, patch, fyStart, aiBusy, aiEnabled, aiRedact, draftF
         <Field label="One item per line">
           <textarea rows={5} value={minutes.futureAgenda.join("\n")}
                     onChange={(e) => patch({ futureAgenda: linesFrom(e.target.value) })} />
+          {rewordButton("futureAgenda", minutes.futureAgenda)}
         </Field>
       </Panel>
 
@@ -570,7 +624,8 @@ function FormPane({ minutes, patch, fyStart, aiBusy, aiEnabled, aiRedact, draftF
   );
 }
 
-function ChairmanEditor({ block, onChange, onRemove, aiEnabled, grounded }: {
+function ChairmanEditor({ block, onChange, onRemove, aiEnabled, grounded, rewordAction }: {
+  rewordAction?: React.ReactNode;
   block: ChairmanBlock;
   onChange: (next: ChairmanBlock) => void;
   onRemove: () => void;
@@ -614,6 +669,7 @@ function ChairmanEditor({ block, onChange, onRemove, aiEnabled, grounded }: {
                   body: isList ? linesFrom(e.target.value) : e.target.value,
                 })}
                 placeholder={isList ? "One bullet per line" : "Paragraph text"} />
+      {rewordAction}
     </div>
   );
 }

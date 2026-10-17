@@ -2,7 +2,9 @@ import { useState, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
 import { open } from "@tauri-apps/plugin-dialog";
 import { readFile } from "@tauri-apps/plugin-fs";
-import { showConfirm } from "../../lib/dialogs";
+import { showConfirm, showPrompt } from "../../lib/dialogs";
+import { finance, type Snapshot } from "../../lib/finance";
+import Finance from "./Finance";
 import { getSettings, db, serializeWrite, roundMoney } from "../../lib/db";
 import {
   extractVisaStatement, guessCategory, PAYMENT_SENTINEL,
@@ -72,6 +74,20 @@ interface Row extends ExtractedVisaTxn {
 }
 
 export default function ImportStatement() {
+  const [enabled, setEnabled] = useState<boolean | null>(null);
+  const [error, setError] = useState("");
+  useEffect(() => {
+    let active = true;
+    void finance<Snapshot>("snapshot").then((s) => { if (active) setEnabled(s.config.length > 0); })
+      .catch((e) => { if (active) setError(String(e)); });
+    return () => { active = false; };
+  }, []);
+  if (error) return <p role="alert">Cannot check accounting state: {error}</p>;
+  if (enabled == null) return <p role="status">Loading statement workflow…</p>;
+  return enabled ? <Finance /> : <LegacyImportStatement />;
+}
+
+function LegacyImportStatement() {
   const nav = useNavigate();
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
@@ -268,11 +284,26 @@ export default function ImportStatement() {
   }
 
   async function onUndoBatch(batchId: string, label: string) {
-    if (!(await showConfirm(`Delete all ${label} expenses that came in with batch ${batchId.slice(0, 8)}? This cannot be undone.`, { kind: "warning" }))) return;
+    let accountingEnabled = false;
+    let reason = "";
+    try {
+      const accounting = await finance<Snapshot>("snapshot");
+      accountingEnabled = accounting.config.length > 0;
+      if (accountingEnabled) {
+        const answer = await showPrompt("Reason for reversing this import? All purchases in the batch must be unmatched and in an open accounting period. Original records and journals remain archived; reversal entries cancel their amounts.");
+        if (answer == null) return;
+        if (!answer.trim()) { setErr("A reversal reason is required."); return; }
+        reason = answer.trim();
+      }
+    } catch (e) {
+      setErr(`Cannot check accounting safeguards: ${String(e)}`);
+      return;
+    }
+    if (!(await showConfirm(`${accountingEnabled ? "Reverse" : "Delete"} all ${label} expenses from batch ${batchId.slice(0, 8)}? ${accountingEnabled ? "Accounting history and original source records will be retained." : "This cannot be undone."}`, { kind: "warning" }))) return;
     setBusy(true);
     try {
-      const removed = await deleteImportBatch(batchId);
-      setStatus(`Removed ${removed} expense${removed === 1 ? "" : "s"} from batch ${batchId.slice(0, 8)}.`);
+      const removed = await deleteImportBatch(batchId, reason);
+      setStatus(`${accountingEnabled ? "Reversed" : "Removed"} ${removed} expense${removed === 1 ? "" : "s"} from batch ${batchId.slice(0, 8)}.`);
       if (lastBatchId === batchId) setLastBatchId(null);
       // Clear the imported flag on rows so the same file could be re-imported cleanly.
       setRows((prev) => prev.map((r) => ({ ...r, imported: false })));
@@ -292,6 +323,7 @@ export default function ImportStatement() {
           <p style={{ color: "var(--muted)", margin: "6px 0 0" }}>
             Upload a Visa / credit-card PDF statement. Azure Mistral Document AI reads it and itemises every transaction so you can review and categorise before saving to Expenses.
           </p>
+          <p>Purchase import only. To retain payments and reconcile the complete card statement, use <button className="btn secondary" onClick={() => nav("/expenses/banking")}>Bank statements & reconciliation</button>. Match imported purchases there as existing journals; do not create them twice.</p>
         </div>
         <div style={{ display: "flex", gap: 8 }}>
           <button className="btn" onClick={onPick} disabled={busy}>{busy ? "Working…" : "📄 Pick Statement"}</button>

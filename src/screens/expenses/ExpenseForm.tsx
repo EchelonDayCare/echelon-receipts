@@ -4,7 +4,7 @@ import {
   EXPENSE_CATEGORIES, PAYMENT_METHODS,
   saveExpense, getExpense, deleteExpense,
 } from "../../lib/expenses";
-import { showConfirm } from "../../lib/dialogs";
+import { showConfirm, showPrompt } from "../../lib/dialogs";
 import { isAiTextConfigured } from "../../lib/voice";
 import { getSettings } from "../../lib/db";
 import ExpenseAiTextPanel from "./ExpenseAiTextPanel";
@@ -87,9 +87,14 @@ export default function ExpenseForm() {
 
   async function onDelete() {
     if (!editing || !id) return;
-    if (!(await showConfirm("Delete this expense? This cannot be undone.", { kind: "warning" }))) return;
-    await deleteExpense(Number(id));
-    nav("/expenses/list");
+    if (!(await showConfirm("Remove this expense? With accounting enabled, this voids the source and posts a reversal while retaining history. Matched/closed records must be unmatched/reopened first.", { kind: "warning" }))) return;
+    const reason = await showPrompt("Reason for removing / voiding this expense:");
+    if (reason == null) return;
+    if (!reason.trim()) { setErr("A correction reason is required."); return; }
+    setBusy(true);
+    try { await deleteExpense(Number(id), reason.trim()); setSaved(true); nav("/expenses/list"); }
+    catch (e) { setErr(String(e)); }
+    finally { setBusy(false); }
   }
 
   return (
@@ -132,6 +137,7 @@ export default function ExpenseForm() {
         </label>
         <label>Category
           <select value={category} onChange={(e) => setCategory(e.target.value)} style={inputStyle}>
+            {!EXPENSE_CATEGORIES.some((c) => c.value === category) && <option value={category}>{category} (accounting category)</option>}
             {EXPENSE_CATEGORIES.map((c) => <option key={c.value} value={c.value}>{c.label}</option>)}
           </select>
         </label>
