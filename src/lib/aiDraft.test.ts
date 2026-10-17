@@ -45,6 +45,46 @@ describe("AGM rewording", () => {
     expect(parseRewordedSections('[{"id":"one","text":["We completed 2 visits.",""]}]', original))
       .toEqual([{ id: "one", text: ["We completed 2 visits.", ""] }]);
   });
+  it("accepts omitted formatting-only blank list items and restores their positions", () => {
+    const original = [{ id: "one", text: ["", "we done 2 visits", " ", "paint walls", ""] }];
+    expect(parseRewordedSections('[{"id":"one","text":["We completed 2 visits.","Paint the walls."]}]', original))
+      .toEqual([{ id: "one", text: ["", "We completed 2 visits.", " ", "Paint the walls.", ""] }]);
+  });
+  it("protects ranges, amounts and spelled quantities before rewriting and restores them exactly", async () => {
+    const original = "major repairs in next 2-3 years. all three taps needs replacing. budget $1,200.50";
+    const fetch = vi.fn().mockImplementation(async (_url, options) => {
+      const selected = JSON.parse(JSON.parse(options.body).messages[1].content);
+      expect(selected[0].text).not.toContain("2-3");
+      expect(selected[0].text).not.toContain("three");
+      return new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify([{
+        id: "facilitiesMaintenance",
+        text: "Major repairs are expected in the next __AGM_FACT_0__ years. All __AGM_FACT_1__ taps need replacing. The budget is $__AGM_FACT_2__.",
+      }]) } }] }));
+    });
+    vi.stubGlobal("fetch", fetch);
+    const next = await rewordMinutes({ ...minutes, facilitiesMaintenance: original }, undefined, "facilitiesMaintenance");
+    expect(next.facilitiesMaintenance).toBe("Major repairs are expected in the next 2-3 years. All three taps need replacing. The budget is $1,200.50.");
+  });
+  it.each([
+    "Repairs take __AGM_FACT_0__ years.", // Missing a quantity.
+    "Repairs take AGM_FACT_0 years, with __AGM_FACT_1__ taps.", // Corrupted token.
+    "Repairs take __AGM_FACT_0__ years, with __AGM_FACT_1__ taps and 4 shelves.", // Added quantity.
+  ])("rejects changed protected quantities without applying partial text: %s", async (text) => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      choices: [{ message: { content: JSON.stringify([{ id: "facilitiesMaintenance", text }]) } }],
+    }))));
+    await expect(rewordMinutes({ ...minutes, facilitiesMaintenance: "repairs in 2-3 years, three taps" },
+      undefined, "facilitiesMaintenance")).rejects.toThrow();
+  });
+  it("keeps literal placeholder-like user text distinct from generated protection tokens", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockImplementation(async (_url, options) => {
+      const selected = JSON.parse(JSON.parse(options.body).messages[1].content);
+      return new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify(selected) } }] }));
+    }));
+    const original = "reference __AGM_FACT_0__ and 3 visits";
+    const next = await rewordMinutes({ ...minutes, boardElections: original }, undefined, "boardElections");
+    expect(next.boardElections).toBe(original);
+  });
   it.each([
     "not JSON", "[]", '[{"id":"wrong","text":"Repairs cost $1,200.50."}]',
     '[{"id":"financialReportBody","text":"Repairs cost $1,500.50."}]',

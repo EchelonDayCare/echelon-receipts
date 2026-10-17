@@ -4,6 +4,15 @@ All notable changes shipped as a DMG. Only entries the owner has approved
 for release are listed here — "code-complete, awaiting ship approval" work
 lives in the session plan.md until it ships.
 
+## v3.32.1 — AGM rewording validation fix
+
+- Protect numeric ranges, dates, amounts and written quantities before AI
+  rewording, then restore their exact original text. This avoids rejecting
+  rewrites solely because the model reformatted a number.
+- Ignore formatting-only blank list items during response validation and
+  restore their original positions, while still rejecting missing content.
+- Retain original text on invalid responses; Undo AI remains available.
+
 ## v3.32.0 — Finance reconciliation and AGM rewording
 
 - Added Reword with AI for existing AGM narratives, with whole-document and
