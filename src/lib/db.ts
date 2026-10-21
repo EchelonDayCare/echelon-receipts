@@ -250,22 +250,24 @@ async function ensureSchema(d: Database): Promise<void> {
     active INTEGER NOT NULL DEFAULT 1,
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
   )`);
-  await d.execute(`CREATE TABLE IF NOT EXISTS receipts (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    receipt_no INTEGER NOT NULL UNIQUE,
-    date TEXT NOT NULL,
-    student_id INTEGER NOT NULL,
-    student_name_snapshot TEXT NOT NULL,
-    father_name_snapshot TEXT,
-    mother_name_snapshot TEXT,
-    description TEXT NOT NULL,
-    amount REAL NOT NULL,
-    pending_amount REAL NOT NULL DEFAULT 0,
-    comments TEXT,
-    voided INTEGER NOT NULL DEFAULT 0,
-    created_at TEXT NOT NULL DEFAULT (datetime('now')),
-    FOREIGN KEY (student_id) REFERENCES students(id)
-  )`);
+  if (!(await tableExists("receipts"))) {
+    await d.execute(`CREATE TABLE receipts (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      receipt_no INTEGER NOT NULL UNIQUE,
+      date TEXT NOT NULL,
+      student_id INTEGER NOT NULL,
+      student_name_snapshot TEXT NOT NULL,
+      father_name_snapshot TEXT,
+      mother_name_snapshot TEXT,
+      description TEXT NOT NULL,
+      amount REAL NOT NULL,
+      pending_amount REAL NOT NULL DEFAULT 0,
+      comments TEXT,
+      voided INTEGER NOT NULL DEFAULT 0,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      FOREIGN KEY (student_id) REFERENCES students(id)
+    )`);
+  }
 
   // Migration 002 — pdf_folder
   await setting("pdf_folder", "");

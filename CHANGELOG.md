@@ -4,6 +4,13 @@ All notable changes shipped as a DMG. Only entries the owner has approved
 for release are listed here — "code-complete, awaiting ship approval" work
 lives in the session plan.md until it ships.
 
+## v3.32.2 — Fix startup with accounting enabled
+
+- Avoid running a protected `CREATE TABLE IF NOT EXISTS receipts` statement
+  during startup when the receipts table already exists. This lets schema
+  checks complete for databases with accounting enabled without modifying
+  existing receipt data.
+
 ## v3.32.1 — AGM rewording validation fix
 
 - Protect numeric ranges, dates, amounts and written quantities before AI
